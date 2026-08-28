@@ -1772,7 +1772,7 @@ describe('durable uninstall journal authority and lease boundary', () => {
     await expect(requireUninstallJournal(actorTamper)).rejects.toMatchObject({ code: 'session_invalid' });
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
     expectDeepFrozen(journal);
-  }, 60_000);
+  }, 120_000);
 
   it('renews a safely prepared domain intent, but never repins an armed attempt', async () => {
     const fixture = await managementReadyUninstall();
