@@ -33,7 +33,7 @@ const PUBLIC_HOSTNAME = LIVE_INSTALLER_HOSTNAME;
 const OAUTH_CLIENT_ID = LIVE_INSTALLER_OAUTH_CLIENT_ID;
 const EXPECTED_ESBUILD_VERSION = '0.28.1';
 const EXPECTED_VALIBOT_VERSION = '1.4.2';
-const EXPECTED_WRANGLER_VERSION = '4.123.0';
+const EXPECTED_WRANGLER_VERSION = '4.125.0';
 const RELEASE_BUCKET_BINDING = 'GATEWAY_RELEASE_BUCKET';
 const HOSTED_ANALYTICS_BINDING = 'HOSTED_INSTALLER_ANALYTICS';
 const HOSTED_ANALYTICS_DATASET = 'ankka_installer_funnel_v1';
@@ -588,7 +588,7 @@ async function loadToolchainProvenance() {
     readToolJson('node_modules/esbuild/package.json', REPOSITORY_ROOT),
     readToolJson(`${esbuildPlatformRoot}/package.json`, REPOSITORY_ROOT),
     readToolJson('node_modules/valibot/package.json', REPOSITORY_ROOT),
-    readToolJson('node_modules/wrangler/package.json'),
+    readToolJson('node_modules/wrangler/package.json', REPOSITORY_ROOT),
   ]);
   if (
     esbuildRuntimeVersion !== EXPECTED_ESBUILD_VERSION ||
@@ -613,7 +613,7 @@ async function loadToolchainProvenance() {
     lock.packages['node_modules/esbuild']?.version !== EXPECTED_ESBUILD_VERSION ||
     lock.packages[esbuildPlatformRoot]?.version !== EXPECTED_ESBUILD_VERSION ||
     lock.packages['node_modules/valibot']?.version !== EXPECTED_VALIBOT_VERSION ||
-    lock.packages['apps/installer/node_modules/wrangler']?.version !== EXPECTED_WRANGLER_VERSION
+    lock.packages['node_modules/wrangler']?.version !== EXPECTED_WRANGLER_VERSION
   ) fail();
   const [
     packageLock,
@@ -638,10 +638,10 @@ async function loadToolchainProvenance() {
       fileEvidence(`${esbuildPlatformRoot}/package.json`, MAX_TOOL_FILE_BYTES, REPOSITORY_ROOT),
       fileEvidence('node_modules/valibot/package.json', MAX_TOOL_FILE_BYTES, REPOSITORY_ROOT),
       fileEvidence('node_modules/valibot/dist/index.mjs', MAX_TOOL_FILE_BYTES, REPOSITORY_ROOT),
-      fileEvidence('node_modules/wrangler/package.json'),
-      fileEvidence('node_modules/wrangler/bin/wrangler.js'),
-      fileEvidence('node_modules/wrangler/wrangler-dist/cli.js'),
-      fileEvidence('node_modules/wrangler/config-schema.json'),
+      fileEvidence('node_modules/wrangler/package.json', MAX_TOOL_FILE_BYTES, REPOSITORY_ROOT),
+      fileEvidence('node_modules/wrangler/bin/wrangler.js', MAX_TOOL_FILE_BYTES, REPOSITORY_ROOT),
+      fileEvidence('node_modules/wrangler/wrangler-dist/cli.js', MAX_TOOL_FILE_BYTES, REPOSITORY_ROOT),
+      fileEvidence('node_modules/wrangler/config-schema.json', MAX_TOOL_FILE_BYTES, REPOSITORY_ROOT),
     ]);
   return Object.freeze({
     bundler: Object.freeze({
@@ -842,7 +842,7 @@ function generatedRecord(pin, publication, files, buildProvenance, isolatedTarge
 }
 
 async function assertWranglerSchemaContract() {
-  const schema = await readToolJson('node_modules/wrangler/config-schema.json');
+  const schema = await readToolJson('node_modules/wrangler/config-schema.json', REPOSITORY_ROOT);
   const raw = schema?.definitions?.RawConfig?.properties;
   const analytics = raw?.analytics_engine_datasets?.items;
   const r2 = raw?.r2_buckets?.items;
