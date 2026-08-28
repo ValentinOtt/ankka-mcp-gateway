@@ -24,12 +24,12 @@
     "runtime": {
       "name": "node",
       "version": "22.23.2",
-      "onFail": "error"
+      "onFail": "warn"
     },
     "packageManager": {
       "name": "npm",
       "version": "10.9.8",
-      "onFail": "error"
+      "onFail": "warn"
     }
   },
   "scripts": {
@@ -37,8 +37,9 @@
     "build:admin": "npm run build --workspace @ankka/gateway-admin",
     "canary:fixture:serve": "node fixtures/synthetic-mcp/server.mjs --host 127.0.0.1 --port 9610",
     "canary:fixture:test": "node --test test/synthetic-mcp.test.mjs",
-    "check": "npm run check:toolchain && npm run lint && npm run typecheck && npm run test && npm run build && npm run check:boundary && npm run check:history",
+    "check": "npm run check:toolchain && npm run lint && npm run typecheck && npm run build && npm run test:core && npm run test:apps && npm run check:boundary && npm run check:history",
     "check:boundary": "node scripts/check-public-boundary.mjs",
+    "check:fast": "npm run lint && npm run typecheck && npm run typecheck --workspace @ankka/gateway-installer && npm run check:boundary && npm run build:admin && npm run test --workspace @ankka/gateway-admin && npm run test:core",
     "check:history": "node scripts/check-public-history.mjs --allow-retired-product-name-through 4ba4c065aa67a761287bd74fc56f4911f7e558b3",
     "check:toolchain": "node scripts/check-toolchain.mjs",
     "canary:preflight": "node src/cli.ts canary preflight",
