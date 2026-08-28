@@ -46,6 +46,20 @@ they are explicitly documented as non-secret.
 - Run `npm run check:fast` while developing. The full `npm run check` release
   gate runs in continuous integration on every pull request and must pass
   before merge.
+- The toolchain is pinned by `.nvmrc`, `packageManager`, and `devEngines`.
+  Local drift warns; `check:toolchain` enforces the exact versions in
+  continuous integration and at the head of the full gate.
+- `main` accepts only pull requests with a passing `check` status. Work on a
+  branch; merge with rebase or squash (`gh land` opens the pull request and
+  auto-merges when checks pass).
+- A working clone may carry the intentionally private `private-history`
+  remote, private local branches, and private tags. Never push private refs
+  to `origin`. The public-history check audits the publishable surface only:
+  `HEAD`, `origin` refs, and tags.
+- Bumping wrangler moves reviewed toolchain pins: restate the version,
+  lockfile path, and tool-file locations in
+  `apps/installer/scripts/generate-reviewed-canary.mjs` and its test, and
+  keep the esbuild pin aligned with wrangler's bundled esbuild.
 - Never commit `.env`, `.dev.vars`, Cloudflare account/resource IDs, API tokens,
   Terraform state, private keys, or generated deployment output.
 - Production deployment credentials, signing keys, and CI authority remain
