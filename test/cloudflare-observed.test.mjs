@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readCloudflareObservedState, ObservedStateError } from '../src/cloudflare-observed.mjs';
-import { buildGatewayDesiredState, buildGatewayPlan } from '../src/plan.mjs';
+import { readCloudflareObservedState, ObservedStateError } from '../src/cloudflare-observed.ts';
+import { buildGatewayDesiredState, buildGatewayPlan } from '../src/plan.ts';
 import {
   beginReceiptAction,
   commitReceiptAction,
   createInstallationReceipt,
   ownershipMarker,
-} from '../src/receipt.mjs';
+} from '../src/receipt.ts';
 
 function config() {
   return {
@@ -476,11 +476,11 @@ test('pending native Portal recovery is independent of the explicit Portal app',
 });
 
 test('never adopts a singleton markerless Portal app from pending create intent', async () => {
-  for (const shape of ['base_only', 'full']) {
+  for (const portalConfiguration of ['base_only', 'full']) {
     const data = await fixture();
     const application = data.byKind.portal_access_application;
     data.portalApp.id = 'unowned_portal_app_b';
-    if (shape === 'base_only') delete data.portalApp.oauth_configuration;
+    if (portalConfiguration === 'base_only') delete data.portalApp.oauth_configuration;
     data.policies[data.portalApp.id] = [];
     data.cloudflare.listAccessApps = async () => [data.serverApp, data.portalApp];
     data.cloudflare.getAccessApp = async (id) =>
@@ -495,10 +495,10 @@ test('never adopts a singleton markerless Portal app from pending create intent'
     });
     const candidate = observed.resources.find(({ kind }) =>
       kind === 'portal_access_application');
-    assert.deepEqual(candidate.owner, {}, shape);
+    assert.deepEqual(candidate.owner, {}, portalConfiguration);
     const plan = await buildGatewayPlan(config(), observed, { release: 'test', access });
     assert.equal(plan.changes.find(({ kind }) =>
-      kind === 'portal_access_application').action, 'conflict', shape);
+      kind === 'portal_access_application').action, 'conflict', portalConfiguration);
   }
 });
 
@@ -628,13 +628,13 @@ test('recovers a pending source policy reflected inline by its exact receipt-own
 });
 
 test('rejects foreign, duplicate, and malformed inline source policies', async () => {
-  for (const inlineShape of ['foreign', 'duplicate', 'malformed']) {
+  for (const inlinePolicyState of ['foreign', 'duplicate', 'malformed']) {
     const data = await fixture();
     const policy = data.policies[data.serverApp.id][0];
     const exact = { id: policy.id, name: policy.name };
-    data.serverApp.policies = inlineShape === 'foreign'
+    data.serverApp.policies = inlinePolicyState === 'foreign'
       ? [exact, { id: 'policy_foreign_inline', name: 'foreign' }]
-      : inlineShape === 'duplicate'
+      : inlinePolicyState === 'duplicate'
         ? [exact, { ...exact }]
         : [{ name: policy.name }];
 
@@ -645,9 +645,9 @@ test('rejects foreign, duplicate, and malformed inline source policies', async (
 
     assert.ok(observed.diagnostics.some((diagnostic) =>
       diagnostic.code === 'unexpected_access_policy'
-        && diagnostic.kind === 'source_access_policy'), inlineShape);
+        && diagnostic.kind === 'source_access_policy'), inlinePolicyState);
     assert.equal(plan.changes.find((change) =>
-      change.kind === 'source_access_policy').action, 'conflict', inlineShape);
+      change.kind === 'source_access_policy').action, 'conflict', inlinePolicyState);
   }
 });
 
@@ -689,11 +689,11 @@ test('accepts an exact separately-created Portal policy reflected inline by the 
 });
 
 test('rejects foreign and duplicate inline Portal policies against the authoritative policy list', async () => {
-  for (const inlineShape of ['foreign', 'duplicate']) {
+  for (const inlinePolicyState of ['foreign', 'duplicate']) {
     const data = await fixture();
     const policy = data.policies[data.portalApp.id][0];
     const exact = { id: policy.id, name: policy.name };
-    data.portalApp.policies = inlineShape === 'foreign'
+    data.portalApp.policies = inlinePolicyState === 'foreign'
       ? [exact, { id: 'policy_foreign_inline', name: 'foreign' }]
       : [exact, { ...exact }];
 
@@ -704,9 +704,9 @@ test('rejects foreign and duplicate inline Portal policies against the authorita
 
     assert.ok(observed.diagnostics.some((diagnostic) =>
       diagnostic.code === 'unexpected_access_policy'
-        && diagnostic.kind === 'portal_access_policy'), inlineShape);
+        && diagnostic.kind === 'portal_access_policy'), inlinePolicyState);
     assert.equal(plan.changes.find((change) =>
-      change.kind === 'portal_access_policy').action, 'conflict', inlineShape);
+      change.kind === 'portal_access_policy').action, 'conflict', inlinePolicyState);
   }
 });
 

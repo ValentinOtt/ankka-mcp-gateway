@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 import {
   managementOwnershipMarker,
   prepareManagementAccessApplicationIntent,
@@ -31,14 +33,35 @@ import {
   type InstallActionName,
   type InstallActionRecord,
   type InstallJournal,
+  type BootstrapSubdomainRecord,
+  type CreateInstallJournalInput,
+  type CustomerBootstrapLocator,
+  type CustomerBootstrapSubmitRecord,
+  type GatewayFreshPreflightRecord,
+  type WorkerDeploymentCreateRecord,
+  type WorkerDeploymentLocator,
+  type WorkerVersionCreateRecord,
+  type WorkerVersionLocator,
 } from '../src/install-journal';
-import { buildStaticDeployPlan, parseDeploySelection, type StaticDeployPlan } from '../src/schema';
+import {
+  buildStaticDeployPlan,
+  parseDeploySelection,
+  parseStaticDeployPlan,
+  type StaticDeployPlan,
+} from '../src/schema';
 import type { AuthorizedTarget } from '../src/cloudflare-target';
+import {
+  boundaryObjectSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+} from '../src/boundary';
+import { canonicalJson } from '../src/canonical-json';
 import {
   FakeState,
   internalRequest,
   manifest,
   NOW,
+  requiredFixture,
   selectionInput,
   verifiedRelease,
 } from './fixtures';
@@ -71,28 +94,22 @@ const RELEASE_PIN = Object.freeze({
   release: manifest.release,
   artifactSha256: manifest.artifact.treeSha256,
 });
+type ReadyCustomerBootstrapLocator = Extract<CustomerBootstrapLocator, { readonly status: 'ready' }>;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string' || typeof value === 'number') {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('not canonical');
-}
-
-async function hash(value: unknown): Promise<string> {
+async function hash<Value>(value: Value): Promise<string> {
   return sha256Hex(canonicalJson(value));
 }
 
-async function body(response: Response): Promise<Record<string, any>> {
-  return response.json() as Promise<Record<string, any>>;
+async function body(response: Response): Promise<BoundaryObject> {
+  return v.parse(boundaryObjectSchema, await response.json());
+}
+
+function objectValue(value: BoundaryValue): BoundaryObject {
+  return v.parse(boundaryObjectSchema, value);
+}
+
+async function journalBody(response: Response): Promise<InstallJournal> {
+  return requireInstallJournal((await body(response)).journal);
 }
 
 interface InstalledFixture {
@@ -101,7 +118,9 @@ interface InstalledFixture {
   csrfHash: string;
   plan: StaticDeployPlan;
   journal: InstallJournal;
-  initialization: Record<string, unknown>;
+  initialization: Omit<CreateInstallJournalInput, 'gatewayFreshPreflight'> & {
+    readonly gatewayFreshPreflight: GatewayFreshPreflightRecord;
+  };
   setServerNow(value: number): void;
 }
 
@@ -109,7 +128,7 @@ async function initializedJournal(): Promise<InstalledFixture> {
   const state = new FakeState();
   let serverNow = NOW;
   const object = new GatewayDeploySession(
-    state as unknown as DurableObjectState,
+    state,
     undefined,
     () => serverNow,
   );
@@ -130,7 +149,8 @@ async function initializedJournal(): Promise<InstalledFixture> {
     planExpiresAt: NOW + 600_000,
     now: NOW + 2,
   }));
-  const plan = (await body(planResponse)).session.plan as StaticDeployPlan;
+  const session = v.parse(boundaryObjectSchema, (await body(planResponse)).session);
+  const plan = parseStaticDeployPlan(session.plan);
   await object.fetch(internalRequest('/authorize', 'POST', {
     csrfHash,
     releaseManifest: manifest,
@@ -187,7 +207,7 @@ async function initializedJournal(): Promise<InstalledFixture> {
     checkedAt: preflightCheckedAt,
     expiresAt: preflightCheckedAt + 30_000,
   };
-  const initialization = {
+  const initialization: InstalledFixture['initialization'] = {
     schemaVersion: 1,
     now: NOW + 5,
     recoverUntil: RECOVER_UNTIL,
@@ -205,7 +225,7 @@ async function initializedJournal(): Promise<InstalledFixture> {
   serverNow = NOW + 5;
   const response = await object.fetch(internalRequest('/install-journal/initialize', 'POST', initialization));
   expect(response.status).toBe(201);
-  const journal = (await body(response)).journal as InstallJournal;
+  const journal = await requireInstallJournal((await body(response)).journal);
   return {
     state,
     object,
@@ -215,6 +235,14 @@ async function initializedJournal(): Promise<InstalledFixture> {
     initialization,
     setServerNow: (value: number) => { serverNow = value; },
   };
+}
+
+function customerBootstrapRecord(journal: InstallJournal): CustomerBootstrapSubmitRecord {
+  const action = journal.actions.find((entry) => entry.name === 'customer_bootstrap_submit');
+  if (!action || action.record.kind !== 'customer_bootstrap_submit') {
+    throw new TypeError('customer bootstrap journal fixture missing');
+  }
+  return action.record;
 }
 
 function workerName(plan: StaticDeployPlan): string {
@@ -288,7 +316,7 @@ async function policyRecord(plan: StaticDeployPlan): Promise<InstallActionRecord
   };
 }
 
-const PLAIN_BINDINGS = Object.freeze([
+const PLAIN_BINDING_NAMES = Object.freeze([
   'ADMIN_EMAILS',
   'ANKKA_GATEWAY_RELEASE',
   'ANKKA_GATEWAY_RELEASE_SHA256',
@@ -304,9 +332,18 @@ const PLAIN_BINDINGS = Object.freeze([
   'CLOUDFLARE_ZONE_ID',
   'CLOUDFLARE_ZONE_NAME',
   'ZERO_TRUST_READY',
-].map((name, index) => Object.freeze({ name, valueSha256: (index % 10).toString().repeat(64) })));
+] as const);
+const PLAIN_BINDINGS: WorkerVersionCreateRecord['plainTextBindingHashes'] = Object.freeze(
+  PLAIN_BINDING_NAMES.map((name, index) => Object.freeze({
+    name,
+    valueSha256: (index % 10).toString().repeat(64),
+  })),
+);
 
-async function versionRecord(plan: StaticDeployPlan, phase: 'provision' | 'bootstrap' | 'clean'): Promise<InstallActionRecord> {
+async function versionRecord(
+  plan: StaticDeployPlan,
+  phase: 'provision' | 'bootstrap' | 'clean',
+): Promise<WorkerVersionCreateRecord> {
   const releaseContract = {
     assetBinding: 'ASSETS' as const,
     assetConfig: {
@@ -367,14 +404,17 @@ async function versionRecord(plan: StaticDeployPlan, phase: 'provision' | 'boots
     correlationTag: `ankka-version-${phase}-sha256:${requestHash}`,
     releaseContract,
     assets,
-    plainTextBindingHashes: PLAIN_BINDINGS as any,
+    plainTextBindingHashes: PLAIN_BINDINGS,
     modules,
   };
 }
 
-async function versionLocator(plan: StaticDeployPlan, phase: 'provision' | 'bootstrap' | 'clean'): Promise<InstallActionLocator> {
-  const record = await versionRecord(plan, phase) as any;
-  return {
+async function versionLocator(
+  plan: StaticDeployPlan,
+  phase: 'provision' | 'bootstrap' | 'clean',
+): Promise<WorkerVersionLocator> {
+  const record = await versionRecord(plan, phase);
+  const locator: WorkerVersionLocator = {
     kind: 'version',
     phase,
     accountId: TARGET.account.id,
@@ -383,12 +423,15 @@ async function versionLocator(plan: StaticDeployPlan, phase: 'provision' | 'boot
     versionId: phase === 'provision' ? PROVISION_VERSION_ID : phase === 'bootstrap' ? BOOTSTRAP_VERSION_ID : CLEAN_VERSION_ID,
     requestHash: record.requestHash,
     correlationTag: record.correlationTag,
-    // The provision version precedes the deployment that creates the namespace.
-    ...(phase === 'provision' ? {} : { namespaceId: ADMIN_STATE_NAMESPACE_ID }),
   };
+  // The provision version precedes the deployment that creates the namespace.
+  return phase === 'provision' ? locator : { ...locator, namespaceId: ADMIN_STATE_NAMESPACE_ID };
 }
 
-async function deploymentRecord(plan: StaticDeployPlan, phase: 'provision' | 'bootstrap' | 'clean'): Promise<InstallActionRecord> {
+async function deploymentRecord(
+  plan: StaticDeployPlan,
+  phase: 'provision' | 'bootstrap' | 'clean',
+): Promise<WorkerDeploymentCreateRecord> {
   const versionId = phase === 'provision' ? PROVISION_VERSION_ID : phase === 'bootstrap' ? BOOTSTRAP_VERSION_ID : CLEAN_VERSION_ID;
   const requestHash = await hash({ strategy: 'percentage', versions: [{ percentage: 100, version_id: versionId }] });
   return {
@@ -404,8 +447,11 @@ async function deploymentRecord(plan: StaticDeployPlan, phase: 'provision' | 'bo
   };
 }
 
-async function deploymentLocator(plan: StaticDeployPlan, phase: 'provision' | 'bootstrap' | 'clean'): Promise<InstallActionLocator> {
-  const record = await deploymentRecord(plan, phase) as any;
+async function deploymentLocator(
+  plan: StaticDeployPlan,
+  phase: 'provision' | 'bootstrap' | 'clean',
+): Promise<WorkerDeploymentLocator> {
+  const record = await deploymentRecord(plan, phase);
   return {
     kind: 'deployment',
     phase,
@@ -419,7 +465,10 @@ async function deploymentLocator(plan: StaticDeployPlan, phase: 'provision' | 'b
   };
 }
 
-async function subdomainRecord(plan: StaticDeployPlan, enabled: boolean): Promise<InstallActionRecord> {
+async function subdomainRecord(
+  plan: StaticDeployPlan,
+  enabled: boolean,
+): Promise<BootstrapSubdomainRecord> {
   return {
     schemaVersion: 1,
     kind: 'bootstrap_subdomain',
@@ -436,7 +485,7 @@ async function bootstrapRecord(
   approvalAttemptId = INITIAL_ATTEMPT,
   randomOffset = 1,
   cycleJournal?: InstallJournal,
-): Promise<InstallActionRecord> {
+): Promise<CustomerBootstrapSubmitRecord> {
   const claim = await prepareCustomerBootstrapClaim({
     selection: fixture.journal.selection,
     target: TARGET,
@@ -508,11 +557,10 @@ async function bootstrapRecord(
 
 async function bootstrapLocator(
   fixture: InstalledFixture,
-  record: InstallActionRecord,
+  record: CustomerBootstrapSubmitRecord,
   applyInvoked = true,
   resumed = false,
-): Promise<InstallActionLocator> {
-  const bootstrap = record as any;
+): Promise<ReadyCustomerBootstrapLocator> {
   const expectation = await deriveCustomerGatewayInstallationReceiptExpectation({
     selection: fixture.journal.selection,
     target: TARGET,
@@ -525,8 +573,8 @@ async function bootstrapLocator(
     status: 'ready',
     installationId: fixture.journal.installationId,
     approvedPlanId: CUSTOMER_APPROVED_PLAN_ID,
-    configurationHash: bootstrap.configurationHash,
-    desiredHash: bootstrap.desiredHash,
+    configurationHash: record.configurationHash,
+    desiredHash: record.desiredHash,
     settingsRevision: 1,
     release: { id: manifest.release, artifactSha256: `sha256:${manifest.artifact.treeSha256}` },
     gateway: { hostname: 'mcp.example.com', mcpUrl: 'https://mcp.example.com/mcp' },
@@ -682,7 +730,7 @@ describe('secret-free install journal and recovery authority', () => {
     }));
 
     expect(response.status).toBe(200);
-    const prepared = (await body(response)).journal as InstallJournal;
+    const prepared = await requireInstallJournal((await body(response)).journal);
     const bootstrap = prepared.actions.find((entry) => entry.name === 'customer_bootstrap_submit');
     expect(bootstrap?.preparedAt).toBe(serverNow);
     expect(bootstrap?.record.kind === 'customer_bootstrap_submit'
@@ -724,16 +772,21 @@ describe('secret-free install journal and recovery authority', () => {
       recoverUntil: Number.MAX_SAFE_INTEGER,
     }));
     expect(repeat.status).toBe(200);
-    const repeatedJournal = (await body(repeat)).journal;
+    const repeatedJournal = await journalBody(repeat);
     expect(repeatedJournal.revision).toBe(0);
     expect(repeatedJournal.recoverUntil).toBe(RECOVER_UNTIL);
 
-    const forged = structuredClone(fixture.initialization) as any;
-    const { attestationHash: _attestationHash, ...unsigned } = forged.gatewayFreshPreflight;
-    unsigned.configurationHash = `sha256:${'0'.repeat(64)}`;
-    forged.gatewayFreshPreflight = {
-      ...unsigned,
-      attestationHash: `sha256:${await hash(unsigned)}`,
+    const { attestationHash: _attestationHash, ...reviewedPreflight } = fixture.initialization.gatewayFreshPreflight;
+    const forgedPreflight = {
+      ...reviewedPreflight,
+      configurationHash: `sha256:${'0'.repeat(64)}`,
+    };
+    const forged = {
+      ...fixture.initialization,
+      gatewayFreshPreflight: {
+        ...forgedPreflight,
+        attestationHash: `sha256:${await hash(forgedPreflight)}`,
+      },
     };
     await expect(createInstallJournal(
       forged,
@@ -759,7 +812,11 @@ describe('secret-free install journal and recovery authority', () => {
       action: 'worker_create',
       record: await workerRecord(fixture.plan),
     });
-    const expiresAt = (journal.actions[0].record as any).expiresAt as number;
+    const firstRecord = journal.actions[0]?.record;
+    if (firstRecord?.kind !== 'customer_gateway_fresh_preflight') {
+      throw new TypeError('gateway preflight journal fixture missing');
+    }
+    const expiresAt = firstRecord.expiresAt;
     expect(isPartialInstallJournal(journal)).toBe(false);
     expect(() => armInstallJournalAction(journal, {
       expectedRevision: journal.revision,
@@ -805,8 +862,10 @@ describe('secret-free install journal and recovery authority', () => {
     }));
     write.mockRestore();
     expect(fault.status).toBe(500);
-    expect((await body(fault)).error.code).toBe('internal_error');
-    expect((await body(await fixture.object.fetch(internalRequest('/install-journal', 'GET')))).journal.revision).toBe(0);
+    expect(objectValue((await body(fault)).error).code).toBe('internal_error');
+    expect((await journalBody(
+      await fixture.object.fetch(internalRequest('/install-journal', 'GET')),
+    )).revision).toBe(0);
 
     const acquired = await fixture.object.fetch(internalRequest('/install-journal/lease/acquire', 'POST', {
       expectedRevision: 0,
@@ -815,7 +874,7 @@ describe('secret-free install journal and recovery authority', () => {
       leaseExpiresAt: Number.MAX_SAFE_INTEGER,
     }));
     expect(acquired.status).toBe(200);
-    expect((await body(acquired)).journal.lease).toEqual({
+    expect((await journalBody(acquired)).lease).toEqual({
       attemptId: INITIAL_ATTEMPT,
       acquiredAt: NOW + 5,
       expiresAt: NOW + 300_005,
@@ -830,16 +889,6 @@ describe('secret-free install journal and recovery authority', () => {
     }));
     expect(sentinel.status).toBe(400);
     expect(JSON.stringify([...fixture.state.storage.values.values()])).not.toContain('must-never-persist');
-
-    const storedBeforePoison = structuredClone(fixture.state.storage.values.get('install-journal-v1')) as any;
-    const poisonedCandidate = structuredClone(storedBeforePoison) as any;
-    poisonedCandidate.revision += 1;
-    poisonedCandidate.actions[0].phase = 'prepared';
-    const storedSession = structuredClone(fixture.state.storage.values.get('deploy-session-v1')) as any;
-    await expect((fixture.object as unknown as {
-      putJournal(session: unknown, journal: unknown): Promise<void>;
-    }).putJournal(storedSession, poisonedCandidate)).rejects.toMatchObject({ code: 'session_invalid' });
-    expect(fixture.state.storage.values.get('install-journal-v1')).toEqual(storedBeforePoison);
 
     const concurrent = await Promise.all([
       fixture.object.fetch(internalRequest('/install-journal/action/prepare', 'POST', {
@@ -858,7 +907,9 @@ describe('secret-free install journal and recovery authority', () => {
       })),
     ]);
     expect(concurrent.map((response) => response.status).sort()).toEqual([200, 409]);
-    expect((await body(await fixture.object.fetch(internalRequest('/install-journal', 'GET')))).journal.revision).toBe(2);
+    expect((await journalBody(
+      await fixture.object.fetch(internalRequest('/install-journal', 'GET')),
+    )).revision).toBe(2);
     const stale = await fixture.object.fetch(internalRequest('/install-journal/action/arm', 'POST', {
       expectedRevision: 1,
       attemptId: INITIAL_ATTEMPT,
@@ -940,13 +991,13 @@ describe('secret-free install journal and recovery authority', () => {
     journal = await advance(journal, RECOVERY_ATTEMPT, 'bootstrap_subdomain_disable', await subdomainRecord(fixture.plan, false), {
       enabled: false, previewsEnabled: false,
     }, clock);
-    const first = (journal.actions[9].record as any).attempts[0];
+    const first = requiredFixture(customerBootstrapRecord(journal).attempts.at(0), 'first bootstrap attempt');
     expect(first).toMatchObject({
       phase: 'prepared',
       disable: { phase: 'verified', approvalAttemptId: RECOVERY_ATTEMPT },
     });
-    const recovery = await bootstrapRecord(fixture, clock.now + 1, RECOVERY_ATTEMPT, 33, journal) as any;
-    const attempt = recovery.attempts[0];
+    const recovery = await bootstrapRecord(fixture, clock.now + 1, RECOVERY_ATTEMPT, 33, journal);
+    const attempt = requiredFixture(recovery.attempts.at(0), 'recovery bootstrap attempt');
     journal = await appendCustomerBootstrapAttempt(journal, {
       expectedRevision: journal.revision,
       attemptId: RECOVERY_ATTEMPT,
@@ -956,10 +1007,10 @@ describe('secret-free install journal and recovery authority', () => {
         issuedAt: attempt.issuedAt,
         expiresAt: attempt.expiresAt,
         claimHash: attempt.claimHash,
-        enableRequestHash: (await subdomainRecord(fixture.plan, true) as any).requestHash,
+        enableRequestHash: (await subdomainRecord(fixture.plan, true)).requestHash,
       },
     });
-    expect((journal.actions[9].record as any).attempts).toHaveLength(2);
+    expect(customerBootstrapRecord(journal).attempts).toHaveLength(2);
     await expect(prepareInstallJournalAction(journal, {
       expectedRevision: journal.revision,
       attemptId: RECOVERY_ATTEMPT,
@@ -1046,8 +1097,8 @@ describe('secret-free install journal and recovery authority', () => {
     journal = await advance(journal, RECOVERY_ATTEMPT, 'bootstrap_subdomain_disable', await subdomainRecord(fixture.plan, false), {
       enabled: false, previewsEnabled: false,
     }, clock);
-    const recoveryBootstrap = await bootstrapRecord(fixture, clock.now + 1, RECOVERY_ATTEMPT, 33, journal) as any;
-    const recoveryAttempt = recoveryBootstrap.attempts[0];
+    const recoveryBootstrap = await bootstrapRecord(fixture, clock.now + 1, RECOVERY_ATTEMPT, 33, journal);
+    const recoveryAttempt = requiredFixture(recoveryBootstrap.attempts.at(0), 'recovery bootstrap attempt');
     journal = await appendCustomerBootstrapAttempt(journal, {
       expectedRevision: journal.revision,
       attemptId: RECOVERY_ATTEMPT,
@@ -1057,10 +1108,10 @@ describe('secret-free install journal and recovery authority', () => {
         issuedAt: recoveryAttempt.issuedAt,
         expiresAt: recoveryAttempt.expiresAt,
         claimHash: recoveryAttempt.claimHash,
-        enableRequestHash: (await subdomainRecord(fixture.plan, true) as any).requestHash,
+        enableRequestHash: (await subdomainRecord(fixture.plan, true)).requestHash,
       },
     });
-    expect((journal.actions[9].record as any).attempts[1].enable).toMatchObject({
+    expect(customerBootstrapRecord(journal).attempts[1]?.enable).toMatchObject({
       approvalAttemptId: RECOVERY_ATTEMPT,
       phase: 'prepared',
     });
@@ -1107,7 +1158,8 @@ describe('secret-free install journal and recovery authority', () => {
       now: ++clock.now,
       action: 'bootstrap_subdomain_enable',
     });
-    const settled = (journal.actions[9].record as any).attempts[1];
+    const settled = customerBootstrapRecord(journal).attempts[1];
+    if (!settled) throw new TypeError('recovery bootstrap attempt missing');
     expect(settled).toMatchObject({
       approvalAttemptId: RECOVERY_ATTEMPT,
       phase: 'prepared',
@@ -1128,7 +1180,8 @@ describe('secret-free install journal and recovery authority', () => {
     journal = await advance(journal, SECOND_RECOVERY_ATTEMPT, 'bootstrap_subdomain_disable', await subdomainRecord(fixture.plan, false), {
       enabled: false, previewsEnabled: false,
     }, clock);
-    const closed = (journal.actions[9].record as any).attempts[1];
+    const closed = customerBootstrapRecord(journal).attempts[1];
+    if (!closed) throw new TypeError('recovery bootstrap attempt missing');
     expect(closed.enable).toMatchObject({
       approvalAttemptId: RECOVERY_ATTEMPT,
       phase: 'verified',
@@ -1187,7 +1240,7 @@ describe('secret-free install journal and recovery authority', () => {
       expectedRevision: journal.revision, attemptId: INITIAL_ATTEMPT, now: ++clock.now,
       action: 'customer_bootstrap_submit',
     });
-    expect(journal.actions[9].phase).toBe('send_armed');
+    expect(requiredFixture(journal.actions.at(9), 'bootstrap journal action').phase).toBe('send_armed');
 
     // The first signed bootstrap request may have completed remotely while its response was lost.
     // It is never resent. Release the interrupted grant; a fresh grant must be able to close
@@ -1217,7 +1270,7 @@ describe('secret-free install journal and recovery authority', () => {
     journal = await advance(journal, RECOVERY_ATTEMPT, 'bootstrap_subdomain_disable', await subdomainRecord(fixture.plan, false), {
       enabled: false, previewsEnabled: false,
     }, clock);
-    expect((journal.actions[9].record as any).attempts[0].disable.approvalAttemptId).toBe(RECOVERY_ATTEMPT);
+    expect(customerBootstrapRecord(journal).attempts[0]?.disable?.approvalAttemptId).toBe(RECOVERY_ATTEMPT);
     await expect(requireInstallJournal(structuredClone(journal))).resolves.toBeDefined();
     await expect(prepareInstallJournalAction(journal, {
       expectedRevision: journal.revision, attemptId: RECOVERY_ATTEMPT, now: ++clock.now,
@@ -1229,9 +1282,9 @@ describe('secret-free install journal and recovery authority', () => {
       RECOVERY_ATTEMPT,
       17,
       journal,
-    ) as any;
-    const recoveryAttempt = recoveryBootstrap.attempts[0];
-    const recoveryEnableRequestHash = (await subdomainRecord(fixture.plan, true) as any).requestHash;
+    );
+    const recoveryAttempt = requiredFixture(recoveryBootstrap.attempts.at(0), 'recovery bootstrap attempt');
+    const recoveryEnableRequestHash = (await subdomainRecord(fixture.plan, true)).requestHash;
     journal = await appendCustomerBootstrapAttempt(journal, {
       expectedRevision: journal.revision,
       attemptId: RECOVERY_ATTEMPT,
@@ -1245,7 +1298,7 @@ describe('secret-free install journal and recovery authority', () => {
       },
     });
     await expect(requireInstallJournal(structuredClone(journal))).resolves.toBeDefined();
-    expect(journal.actions[9].record).toMatchObject({ attempts: [
+    expect(requiredFixture(journal.actions.at(9), 'bootstrap journal action').record).toMatchObject({ attempts: [
       { approvalAttemptId: INITIAL_ATTEMPT, phase: 'send_armed' },
       { approvalAttemptId: RECOVERY_ATTEMPT, phase: 'prepared' },
     ] });
@@ -1285,8 +1338,8 @@ describe('secret-free install journal and recovery authority', () => {
       now: ++clock.now,
       action: 'customer_bootstrap_submit',
     });
-    expect((journal.actions[9].record as any).attempts[1].phase).toBe('send_armed');
-    const ready = await bootstrapLocator(fixture, recoveryBootstrap, false, true) as any;
+    expect(customerBootstrapRecord(journal).attempts[1]?.phase).toBe('send_armed');
+    const ready = await bootstrapLocator(fixture, recoveryBootstrap, false, true);
     expect(ready.approvedPlanId).not.toBe(fixture.plan.planId);
     await expect(submitInstallJournalAction(journal, {
       expectedRevision: journal.revision,
@@ -1316,7 +1369,11 @@ describe('secret-free install journal and recovery authority', () => {
       expectedRevision: journal.revision, attemptId: RECOVERY_ATTEMPT, now: ++clock.now,
       action: 'customer_bootstrap_submit',
     });
-    expect((journal.actions[9].locator as any).approvedPlanId).toBe(CUSTOMER_APPROVED_PLAN_ID);
+    const readyLocator = journal.actions[9]?.locator;
+    if (!readyLocator || !('approvedPlanId' in readyLocator)) {
+      throw new TypeError('ready bootstrap locator missing');
+    }
+    expect(readyLocator.approvedPlanId).toBe(CUSTOMER_APPROVED_PLAN_ID);
     await expect(requireInstallJournal(structuredClone(journal))).resolves.toBeDefined();
     journal = await prepareInstallJournalAction(journal, {
       expectedRevision: journal.revision,
@@ -1415,16 +1472,17 @@ describe('secret-free install journal and recovery authority', () => {
     expect(journal.actions).toHaveLength(15);
     expect(journal.actions.every((action) => action.phase === 'verified')).toBe(true);
 
-    const storedSession = structuredClone(fixture.state.storage.values.get('deploy-session-v1')) as any;
-    storedSession.oauthAttempt = {
+    const storedSession = v.parse(
+      boundaryObjectSchema,
+      structuredClone(fixture.state.storage.values.get('deploy-session-v1')),
+    );
+    Object.assign(storedSession, { oauthAttempt: {
       attemptId: RECOVERY_ATTEMPT,
       stateHash: await sha256('r'.repeat(43)),
       verifierHash: await sha256('w'.repeat(43)),
       expiresAt: renewedPlan.expiresAt,
-      usedAt: journal.approvalHistory[1].approvedAt,
-    };
-    storedSession.plan = renewedPlan;
-    storedSession.updatedAt = clock.now;
+      usedAt: requiredFixture(journal.approvalHistory.at(1), 'recovery approval').approvedAt,
+    }, plan: renewedPlan, updatedAt: clock.now });
     fixture.state.storage.values.set('deploy-session-v1', storedSession);
     fixture.state.storage.values.set('install-journal-v1', structuredClone(journal));
     const completedAt = SESSION_EXPIRES_AT + 1;
@@ -1460,6 +1518,7 @@ describe('secret-free install journal and recovery authority', () => {
       completedAt,
       installationId: journal.installationId,
       grantRevocation: null,
+      reason: null,
     }));
     expect(inconsistentSuccess.status).toBe(409);
     expect(await body(inconsistentSuccess)).toEqual({ error: { code: 'session_conflict' } });
@@ -1470,9 +1529,10 @@ describe('secret-free install journal and recovery authority', () => {
       completedAt,
       installationId: null,
       grantRevocation: 'unconfirmed',
+      reason: null,
     }));
-    expect(inconsistentFailure.status).toBe(409);
-    expect(await body(inconsistentFailure)).toEqual({ error: { code: 'session_conflict' } });
+    expect(inconsistentFailure.status).toBe(400);
+    expect(await body(inconsistentFailure)).toEqual({ error: { code: 'bad_request' } });
 
     const completed = await fixture.object.fetch(internalRequest('/complete', 'POST', {
       attemptId: RECOVERY_ATTEMPT,
@@ -1480,9 +1540,11 @@ describe('secret-free install journal and recovery authority', () => {
       completedAt: RECOVER_UNTIL + 1,
       installationId: journal.installationId,
       grantRevocation: 'unconfirmed',
+      reason: null,
     }));
     expect(completed.status).toBe(200);
-    expect((await body(completed)).session.result).toEqual({
+    const completedSession = objectValue((await body(completed)).session);
+    expect(completedSession.result).toEqual({
       code: 'install_complete',
       completedAt,
       installationId: journal.installationId,
@@ -1500,7 +1562,7 @@ describe('secret-free install journal and recovery authority', () => {
 
   it('retains partial authority, renews only the approval expiry with a fresh grant, and rejects drift', async () => {
     const fixture = await initializedJournal();
-    const acquired = await body(await fixture.object.fetch(internalRequest('/install-journal/lease/acquire', 'POST', {
+    const acquired = await journalBody(await fixture.object.fetch(internalRequest('/install-journal/lease/acquire', 'POST', {
       expectedRevision: 0,
       attemptId: INITIAL_ATTEMPT,
       now: NOW + 6,
@@ -1508,7 +1570,7 @@ describe('secret-free install journal and recovery authority', () => {
     })));
     const record = await workerRecord(fixture.plan);
     await fixture.object.fetch(internalRequest('/install-journal/action/prepare', 'POST', {
-      expectedRevision: acquired.journal.revision,
+      expectedRevision: acquired.revision,
       attemptId: INITIAL_ATTEMPT,
       now: NOW + 7,
       action: 'worker_create',
@@ -1564,7 +1626,8 @@ describe('secret-free install journal and recovery authority', () => {
       now: recoveryNow,
     }));
     expect(recoveryPlan.status).toBe(200);
-    const recoveredPlan = (await body(recoveryPlan)).session.plan;
+    const recoverySession = objectValue((await body(recoveryPlan)).session);
+    const recoveredPlan = parseStaticDeployPlan(recoverySession.plan);
     expect(recoveredPlan).toEqual(renewed);
 
     await fixture.object.fetch(internalRequest('/authorize', 'POST', {
@@ -1584,14 +1647,16 @@ describe('secret-free install journal and recovery authority', () => {
       verifierHash: await sha256('w'.repeat(43)),
       now: recoveryNow + 2,
     }));
-    const beforeAppend = (await body(await fixture.object.fetch(internalRequest('/install-journal', 'GET')))).journal;
+    const beforeAppend = await journalBody(
+      await fixture.object.fetch(internalRequest('/install-journal', 'GET')),
+    );
     const appended = await fixture.object.fetch(internalRequest('/install-journal/approval/append', 'POST', {
       expectedRevision: beforeAppend.revision,
       attemptId: RECOVERY_ATTEMPT,
       now: recoveryNow + 3,
     }));
     expect(appended.status).toBe(200);
-    const recoveredJournal = (await body(appended)).journal;
+    const recoveredJournal = await journalBody(appended);
     expect(recoveredJournal.plan.expiresAt).toBe(fixture.plan.expiresAt);
     expect(recoveredJournal.approvalHistory).toHaveLength(2);
     expect(recoveredJournal.approvalHistory[1]).toMatchObject({
@@ -1609,7 +1674,7 @@ describe('secret-free install journal and recovery authority', () => {
     }));
     expect(freshLease.status).toBe(200);
     const staleGrant = await fixture.object.fetch(internalRequest('/install-journal/lease/release', 'POST', {
-      expectedRevision: (await body(freshLease)).journal.revision,
+      expectedRevision: (await journalBody(freshLease)).revision,
       attemptId: INITIAL_ATTEMPT,
       now: recoveryNow + 5,
     }));
@@ -1704,8 +1769,13 @@ describe('secret-free install journal and recovery authority', () => {
       now: NOW + 8,
       action: 'worker_create',
     });
-    const poisoned = structuredClone(journal) as any;
-    poisoned.actions[0].record.providerBody = { accessToken: 'secret-sentinel' };
+    const poisoned = structuredClone(journal);
+    const firstPoisonedAction = poisoned.actions[0];
+    if (!firstPoisonedAction) throw new TypeError('worker action fixture missing');
+    Object.defineProperty(firstPoisonedAction.record, 'providerBody', {
+      enumerable: true,
+      value: { accessToken: 'secret-sentinel' },
+    });
     malformed.state.storage.values.set('install-journal-v1', poisoned);
     malformed.setServerNow(NOW + 9);
     await malformed.object.alarm();

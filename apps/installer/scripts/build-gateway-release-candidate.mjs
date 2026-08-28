@@ -19,11 +19,12 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants as FS_CONSTANTS } from 'node:fs';
-import { lstat, mkdir, open, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import * as v from 'valibot';
 
 import {
   APPROVED_CLOUDFLARE_CONTRACT,
@@ -40,6 +41,7 @@ const MAX_FILES = 10_000;
 const RELEASE_PATTERN = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/u;
+const STRING_SCHEMA = v.string();
 const RELEASE_TOOL_PATHS = Object.freeze([
   'apps/installer/scripts/build-gateway-release-candidate.mjs',
   'apps/installer/scripts/sign-gateway-release.mjs',
@@ -118,7 +120,7 @@ function assertNormalizedText(bytes, contentType) {
 }
 
 function isPlainString(value) {
-  return typeof value === 'string' && value.length > 0 && !value.includes('\0');
+  return v.is(STRING_SCHEMA, value) && value.length > 0 && !value.includes('\0');
 }
 
 async function git(sourceRoot, args) {
@@ -270,8 +272,8 @@ async function assertExactPayloadRoot(sourceRoot) {
 
 export async function buildReleaseCandidate({ sourceDirectory, sourceCommit, release }) {
   if (!isPlainString(sourceDirectory)) fail('invalid_input');
-  if (typeof release !== 'string' || !RELEASE_PATTERN.test(release)) fail('invalid_release');
-  if (typeof sourceCommit !== 'string' || !COMMIT_PATTERN.test(sourceCommit)) fail('invalid_source_commit');
+  if (!v.is(STRING_SCHEMA, release) || !RELEASE_PATTERN.test(release)) fail('invalid_release');
+  if (!v.is(STRING_SCHEMA, sourceCommit) || !COMMIT_PATTERN.test(sourceCommit)) fail('invalid_source_commit');
   let sourceRoot;
   try {
     sourceRoot = await realpath(path.resolve(sourceDirectory));
@@ -416,8 +418,8 @@ function parseCliArguments(argv) {
     }
     values[flag] = argv[index + 1];
   }
-  if (typeof values['--source'] !== 'string' || typeof values['--source-commit'] !== 'string' ||
-      typeof values['--release'] !== 'string') fail('invalid_arguments');
+  if (!v.is(STRING_SCHEMA, values['--source']) || !v.is(STRING_SCHEMA, values['--source-commit']) ||
+      !v.is(STRING_SCHEMA, values['--release'])) fail('invalid_arguments');
   return {
     help: false,
     sourceDirectory: values['--source'],

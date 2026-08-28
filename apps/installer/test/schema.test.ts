@@ -7,19 +7,20 @@ import {
   parseReleaseManifest,
   parseStaticDeployPlan,
 } from '../src/schema';
-import { manifest, NOW, selectionInput } from './fixtures';
+import { manifest, NOW, requiredFixture, selectionInput } from './fixtures';
 
 describe('strict deployment contracts', () => {
   it('canonicalizes admin and portal audiences while preserving explicit roles', () => {
     const selection = parseDeploySelection(selectionInput);
+    const firstSource = requiredFixture(selection.firstSource ?? undefined, 'first source');
     expect(selection.basics.adminEmail).toBe('owner@example.com');
     expect(selection.basics.additionalAdminEmails).toEqual(['admin@example.com']);
-    expect(selection.firstSource!.portalUserEmails).toEqual([
+    expect(firstSource.portalUserEmails).toEqual([
       'admin@example.com',
       'member@example.com',
       'owner@example.com',
     ]);
-    expect(selection.firstSource!.enabledTools).toEqual(['company_prepare', 'company_search']);
+    expect(firstSource.enabledTools).toEqual(['company_prepare', 'company_search']);
   });
 
   it('rejects unknown fields, out-of-zone hostnames, and credential-like source URLs', () => {
@@ -94,7 +95,7 @@ describe('strict deployment contracts', () => {
     expect(plan.managementOwnershipMarker).toMatch(/^acg-[a-f0-9]{24}$/u);
     expect(plan.managementResources.find(({ kind }) => kind === 'management_access_application')?.name)
       .toBe(`Example Gateway management [${plan.managementOwnershipMarker}]`);
-    expect(plan.gatewayConfiguration.firstSource!.enabledTools).toEqual([
+    expect(requiredFixture(plan.gatewayConfiguration.firstSource ?? undefined, 'first source').enabledTools).toEqual([
       'company_prepare',
       'company_search',
     ]);
@@ -184,10 +185,12 @@ describe('strict deployment contracts', () => {
   });
 
   it('matches the client tool-name contract and repeats its public-host source guard', () => {
-    expect(parseDeploySelection({
+    const selection = parseDeploySelection({
       ...selectionInput,
       firstSource: { ...selectionInput.firstSource, enabledTools: ['tools/search:v1'] },
-    }).firstSource!.enabledTools).toEqual(['tools/search:v1']);
+    });
+    expect(requiredFixture(selection.firstSource ?? undefined, 'first source').enabledTools)
+      .toEqual(['tools/search:v1']);
     expect(() => parseDeploySelection({
       ...selectionInput,
       firstSource: { ...selectionInput.firstSource, url: 'https://source.internal/mcp' },

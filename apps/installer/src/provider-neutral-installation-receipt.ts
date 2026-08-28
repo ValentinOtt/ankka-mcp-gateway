@@ -1,3 +1,8 @@
+import * as v from 'valibot';
+
+import { canonicalJson } from './canonical-json';
+import { sha256Hex } from './crypto';
+import { deepFreezePlainData, isPlainDataTree } from './plain-data';
 import type { GatewayResourceKind } from './schema';
 
 const HASH = /^sha256:[0-9a-f]{64}$/u;
@@ -21,14 +26,123 @@ const PORTAL_RESOURCE_ORDER = Object.freeze([
   'portal_access_policy',
   'dns_record',
 ] as const satisfies readonly GatewayResourceKind[]);
+const POLICY_RESOURCE_KINDS = ['source_access_policy', 'portal_access_policy'] as const;
+const NON_POLICY_RESOURCE_KINDS = [
+  'mcp_server',
+  'source_access_application',
+  'portal',
+  'portal_access_application',
+  'dns_record',
+] as const;
 
 type ReceiptResourceKind = GatewayResourceKind;
 
-function canonicalResourceOrder(resources: readonly unknown[]): readonly GatewayResourceKind[] | null {
-  const kinds = resources.map((resource) => isRecord(resource) ? resource.kind : null);
-  return [RESOURCE_ORDER, PORTAL_RESOURCE_ORDER].find((candidate) => (
-    candidate.length === kinds.length && candidate.every((kind, index) => kind === kinds[index])
-  )) ?? null;
+function validHostname(value: string): boolean {
+  if (
+    value.length > 253 || value !== value.toLowerCase() || value.includes(':') ||
+    /^(?:\d+\.)+\d+$/u.test(value)
+  ) return false;
+  const labels = value.split('.');
+  return labels.length >= 2 && labels.every((label) => HOST_LABEL.test(label));
+}
+
+const hashSchema = v.pipe(v.string(), v.regex(HASH));
+const installationIdSchema = v.pipe(v.string(), v.regex(INSTALLATION_ID));
+const releaseSchema = v.pipe(v.string(), v.regex(RELEASE));
+const resourceKeySchema = v.pipe(v.string(), v.regex(RESOURCE_KEY));
+const safeOpaqueIdSchema = v.pipe(v.string(), v.regex(SAFE_OPAQUE_ID));
+const hostnameSchema = v.pipe(v.string(), v.check(validHostname));
+const safeNonnegativeIntegerSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
+const identityCountSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(1), v.maxValue(10_000));
+const policyResourceKindSchema = v.picklist(POLICY_RESOURCE_KINDS);
+const nonPolicyResourceKindSchema = v.picklist(NON_POLICY_RESOURCE_KINDS);
+export const installationReceiptTargetSchema = v.strictObject({
+  accountId: safeOpaqueIdSchema,
+  zoneId: safeOpaqueIdSchema,
+  zoneName: hostnameSchema,
+  hostname: hostnameSchema,
+});
+export const installationReceiptAccessPolicySchema = v.strictObject({
+  identityType: v.literal('email'),
+  identityCount: identityCountSchema,
+  identitiesHash: hashSchema,
+});
+const nonPolicyExpectationResourceSchema = v.strictObject({
+  kind: nonPolicyResourceKindSchema,
+  key: resourceKeySchema,
+  desiredHash: hashSchema,
+  marker: v.string(),
+});
+const policyExpectationResourceSchema = v.strictObject({
+  kind: policyResourceKindSchema,
+  key: resourceKeySchema,
+  desiredHash: hashSchema,
+  marker: v.string(),
+  identityHash: hashSchema,
+});
+const expectationResourceSchema = v.union([
+  nonPolicyExpectationResourceSchema,
+  policyExpectationResourceSchema,
+]);
+const expectationSchema = v.strictObject({
+  installationId: installationIdSchema,
+  release: releaseSchema,
+  desiredHash: hashSchema,
+  target: installationReceiptTargetSchema,
+  accessPolicy: installationReceiptAccessPolicySchema,
+  resources: v.array(expectationResourceSchema),
+});
+const nonPolicyReceiptResourceSchema = v.strictObject({
+  kind: nonPolicyResourceKindSchema,
+  key: resourceKeySchema,
+  provider: v.strictObject({ id: safeOpaqueIdSchema }),
+  desiredHash: hashSchema,
+  marker: v.string(),
+});
+const policyReceiptResourceSchema = v.strictObject({
+  kind: policyResourceKindSchema,
+  key: resourceKeySchema,
+  provider: v.strictObject({ id: safeOpaqueIdSchema, parentId: safeOpaqueIdSchema }),
+  desiredHash: hashSchema,
+  marker: v.string(),
+  identityHash: hashSchema,
+});
+const receiptResourceSchema = v.union([
+  nonPolicyReceiptResourceSchema,
+  policyReceiptResourceSchema,
+]);
+export const readyInstallationReceiptSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  manager: v.literal('ankka-mcp-gateway'),
+  installationId: installationIdSchema,
+  state: v.literal('ready'),
+  revision: safeNonnegativeIntegerSchema,
+  release: releaseSchema,
+  target: installationReceiptTargetSchema,
+  accessPolicy: installationReceiptAccessPolicySchema,
+  desiredHash: hashSchema,
+  resources: v.array(receiptResourceSchema),
+  pending: v.null(),
+  checksum: hashSchema,
+});
+
+type ParsedExpectationResource = v.InferOutput<typeof expectationResourceSchema>;
+type ParsedReceiptResource = v.InferOutput<typeof receiptResourceSchema>;
+type ParsedTarget = v.InferOutput<typeof installationReceiptTargetSchema>;
+type ParsedAccessPolicy = v.InferOutput<typeof installationReceiptAccessPolicySchema>;
+
+interface ReceiptProviderDraft {
+  id: string;
+  parentId?: string;
+}
+
+interface ReceiptResourceDraft {
+  kind: ReceiptResourceKind;
+  key: string;
+  provider: ReceiptProviderDraft;
+  desiredHash: string;
+  marker: string;
+  identityHash?: string;
 }
 
 export interface InstallationReceiptTarget {
@@ -37,6 +151,7 @@ export interface InstallationReceiptTarget {
   readonly zoneName: string;
   readonly hostname: string;
 }
+
 export interface InstallationReceiptAccessPolicy {
   readonly identityType: 'email';
   readonly identityCount: number;
@@ -49,6 +164,14 @@ export interface InstallationReceiptResourceExpectation {
   readonly desiredHash: string;
   readonly marker: string;
   readonly identityHash?: string;
+}
+
+interface InstallationReceiptResourceExpectationDraft {
+  kind: ReceiptResourceKind;
+  key: string;
+  desiredHash: string;
+  marker: string;
+  identityHash?: string;
 }
 
 export interface ReadyInstallationReceiptExpectation {
@@ -72,10 +195,7 @@ export interface InstallationReceiptResource {
   readonly identityHash?: string;
 }
 
-/**
- * Exact, checksum-protected public ownership evidence. It is deliberately
- * credential-free and safe to retain in the private install journal.
- */
+/** Exact, checksum-protected public ownership evidence retained in the private install journal. */
 export interface ReadyInstallationReceipt {
   readonly schemaVersion: 1;
   readonly manager: 'ankka-mcp-gateway';
@@ -91,172 +211,126 @@ export interface ReadyInstallationReceipt {
   readonly checksum: string;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  try {
-    if (Object.getPrototypeOf(value) !== Object.prototype) return false;
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    return Object.values(descriptors).every((descriptor) => (
-      descriptor.enumerable === true && 'value' in descriptor
-    ));
-  } catch {
-    return false;
-  }
+/**
+ * Derive the exact expectation needed to authenticate a candidate ready receipt.
+ * The returned values are not trusted until {@link parseReadyInstallationReceipt}
+ * verifies the receipt checksum and semantic resource graph.
+ */
+export function readyInstallationReceiptExpectationFromCandidate<Input>(
+  input: Input,
+): ReadyInstallationReceiptExpectation | null {
+  if (!isPlainDataTree(input)) return null;
+  const result = v.safeParse(readyInstallationReceiptSchema, input);
+  if (!result.success) return null;
+  const receipt = result.output;
+  const resources: InstallationReceiptResourceExpectation[] = receipt.resources.map((resource) => {
+    const expectation: InstallationReceiptResourceExpectationDraft = {
+      kind: resource.kind,
+      key: resource.key,
+      desiredHash: resource.desiredHash,
+      marker: resource.marker,
+    };
+    if ('identityHash' in resource) expectation.identityHash = resource.identityHash;
+    return expectation;
+  });
+  return deepFreezePlainData({
+    installationId: receipt.installationId,
+    release: receipt.release,
+    desiredHash: receipt.desiredHash,
+    target: receipt.target,
+    accessPolicy: receipt.accessPolicy,
+    resources,
+  });
 }
 
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort(compareText);
-  const keys = [...expected].sort(compareText);
-  return actual.length === keys.length && actual.every((key, index) => key === keys[index]);
+function canonicalResourceOrder(
+  resources: readonly { readonly kind: ReceiptResourceKind }[],
+): readonly GatewayResourceKind[] | null {
+  return [RESOURCE_ORDER, PORTAL_RESOURCE_ORDER].find((candidate) => (
+    candidate.length === resources.length &&
+    candidate.every((kind, index) => kind === resources[index]?.kind)
+  )) ?? null;
 }
 
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
-    return JSON.stringify(value);
-  }
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .sort(compareText)
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
-      .join(',')}}`;
-  }
-  throw new TypeError('canonical_json_invalid');
-}
-
-async function sha256(value: string): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(value),
-  ));
-  return `sha256:${[...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
-}
-
-function hostname(value: unknown): value is string {
-  if (
-    typeof value !== 'string' || value.length > 253 || value !== value.toLowerCase() ||
-    value.includes(':') || /^(?:\d+\.)+\d+$/u.test(value)
-  ) return false;
-  const labels = value.split('.');
-  return labels.length >= 2 && labels.every((label) => HOST_LABEL.test(label));
-}
-
-function sameTarget(value: unknown, expected: InstallationReceiptTarget): value is InstallationReceiptTarget {
-  return isRecord(value) && exactKeys(value, ['accountId', 'zoneId', 'zoneName', 'hostname']) &&
-    typeof value.accountId === 'string' && SAFE_OPAQUE_ID.test(value.accountId) &&
-    typeof value.zoneId === 'string' && SAFE_OPAQUE_ID.test(value.zoneId) &&
-    hostname(value.zoneName) && hostname(value.hostname) &&
-    (value.hostname === value.zoneName || value.hostname.endsWith(`.${value.zoneName}`)) &&
+function sameTarget(value: ParsedTarget, expected: ParsedTarget): boolean {
+  return (value.hostname === value.zoneName || value.hostname.endsWith(`.${value.zoneName}`)) &&
     value.accountId === expected.accountId && value.zoneId === expected.zoneId &&
     value.zoneName === expected.zoneName && value.hostname === expected.hostname;
 }
 
-function sameAccessPolicy(
-  value: unknown,
-  expected: InstallationReceiptAccessPolicy,
-): value is InstallationReceiptAccessPolicy {
-  return isRecord(value) && exactKeys(value, ['identityType', 'identityCount', 'identitiesHash']) &&
-    value.identityType === 'email' && Number.isSafeInteger(value.identityCount) &&
-    (value.identityCount as number) >= 1 && (value.identityCount as number) <= 10_000 &&
-    typeof value.identitiesHash === 'string' && HASH.test(value.identitiesHash) &&
-    value.identityCount === expected.identityCount && value.identitiesHash === expected.identitiesHash;
+function sameAccessPolicy(value: ParsedAccessPolicy, expected: ParsedAccessPolicy): boolean {
+  return value.identityCount === expected.identityCount && value.identitiesHash === expected.identitiesHash;
 }
 
-function parseProvider(
-  value: unknown,
-  policy: boolean,
-): { readonly id: string; readonly parentId?: string } | null {
-  if (!isRecord(value) || !exactKeys(value, policy ? ['id', 'parentId'] : ['id'])) return null;
-  if (typeof value.id !== 'string' || !SAFE_OPAQUE_ID.test(value.id)) return null;
-  if (policy && (typeof value.parentId !== 'string' || !SAFE_OPAQUE_ID.test(value.parentId))) return null;
-  return Object.freeze({ id: value.id, ...(policy ? { parentId: value.parentId as string } : {}) });
+function policyResource(kind: ReceiptResourceKind): boolean {
+  return kind === 'source_access_policy' || kind === 'portal_access_policy';
 }
 
 function parseResource(
-  value: unknown,
-  expected: InstallationReceiptResourceExpectation,
+  value: ParsedReceiptResource,
+  expected: ParsedExpectationResource,
   installationId: string,
 ): InstallationReceiptResource | null {
-  const policy = expected.kind === 'source_access_policy' || expected.kind === 'portal_access_policy';
-  const expectedKeys = policy
-    ? ['kind', 'key', 'provider', 'desiredHash', 'marker', 'identityHash']
-    : ['kind', 'key', 'provider', 'desiredHash', 'marker'];
-  if (!isRecord(value) || !exactKeys(value, expectedKeys)) return null;
-  const provider = parseProvider(value.provider, policy);
+  const policy = policyResource(expected.kind);
   if (
-    !provider || value.kind !== expected.kind || value.key !== expected.key ||
-    typeof value.key !== 'string' || !RESOURCE_KEY.test(value.key) ||
-    value.desiredHash !== expected.desiredHash || typeof value.desiredHash !== 'string' || !HASH.test(value.desiredHash) ||
-    value.marker !== expected.marker || value.marker !== `acg:v1:${installationId}:${value.key}` ||
-    (policy && (value.identityHash !== expected.identityHash || typeof value.identityHash !== 'string' || !HASH.test(value.identityHash)))
+    value.kind !== expected.kind || value.key !== expected.key ||
+    value.desiredHash !== expected.desiredHash || value.marker !== expected.marker ||
+    value.marker !== `acg:v1:${installationId}:${value.key}`
   ) return null;
-  return Object.freeze({
+
+  const actualParentId = 'parentId' in value.provider ? value.provider.parentId : undefined;
+  const actualIdentityHash = 'identityHash' in value ? value.identityHash : undefined;
+  const expectedIdentityHash = 'identityHash' in expected ? expected.identityHash : undefined;
+  if (policy && (actualParentId === undefined || actualIdentityHash !== expectedIdentityHash)) return null;
+  if (!policy && (actualParentId !== undefined || actualIdentityHash !== undefined)) return null;
+
+  const provider: ReceiptProviderDraft = { id: value.provider.id };
+  const resource: ReceiptResourceDraft = {
     kind: expected.kind,
     key: expected.key,
     provider,
     desiredHash: expected.desiredHash,
     marker: expected.marker,
-    ...(policy ? { identityHash: expected.identityHash as string } : {}),
-  });
+  };
+  if (policy) {
+    if (actualParentId === undefined || expectedIdentityHash === undefined) return null;
+    provider.parentId = actualParentId;
+    resource.identityHash = expectedIdentityHash;
+  }
+  Object.freeze(provider);
+  return Object.freeze(resource);
 }
 
-function exactExpectation(value: unknown): value is ReadyInstallationReceiptExpectation {
-  if (!isRecord(value) || !exactKeys(value, [
-    'installationId', 'release', 'desiredHash', 'target', 'accessPolicy', 'resources',
-  ])) return false;
-  if (
-    typeof value.installationId !== 'string' || !INSTALLATION_ID.test(value.installationId) ||
-    typeof value.release !== 'string' || !RELEASE.test(value.release) ||
-    typeof value.desiredHash !== 'string' || !HASH.test(value.desiredHash) ||
-    !isRecord(value.target) || !isRecord(value.accessPolicy) || !Array.isArray(value.resources)
-  ) return false;
-  const resourceOrder = canonicalResourceOrder(value.resources);
-  if (!resourceOrder) return false;
-  return value.resources.every((resource, index) => {
-    if (!isRecord(resource)) return false;
-    const policy = resourceOrder[index] === 'source_access_policy' || resourceOrder[index] === 'portal_access_policy';
-    return exactKeys(resource, policy
-      ? ['kind', 'key', 'desiredHash', 'marker', 'identityHash']
-      : ['kind', 'key', 'desiredHash', 'marker']) &&
-      resource.kind === resourceOrder[index] && typeof resource.key === 'string' && RESOURCE_KEY.test(resource.key) &&
-      typeof resource.desiredHash === 'string' && HASH.test(resource.desiredHash) &&
-      resource.marker === `acg:v1:${value.installationId}:${resource.key}` &&
-      (!policy || (typeof resource.identityHash === 'string' && HASH.test(resource.identityHash)));
-  });
-}
-
-/**
- * Parse the public receipt only when it is the exact ready/root receipt for the
- * reviewed seven-resource graph. Self-consistent but unbound receipts fail.
- */
-export async function parseReadyInstallationReceipt(
-  value: unknown,
-  expected: ReadyInstallationReceiptExpectation,
+/** Parse only the exact ready receipt bound to the reviewed customer resource graph. */
+export async function parseReadyInstallationReceipt<Input>(
+  input: Input,
+  expectedInput: ReadyInstallationReceiptExpectation,
 ): Promise<ReadyInstallationReceipt | null> {
-  if (!exactExpectation(expected) || !isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'manager', 'installationId', 'state', 'revision', 'release',
-    'target', 'accessPolicy', 'desiredHash', 'resources', 'pending', 'checksum',
-  ])) return null;
+  const expectedResult = v.safeParse(expectationSchema, expectedInput);
+  const receiptResult = v.safeParse(readyInstallationReceiptSchema, input);
+  if (!expectedResult.success || !receiptResult.success) return null;
+  const expected = expectedResult.output;
+  const receipt = receiptResult.output;
+  const expectedOrder = canonicalResourceOrder(expected.resources);
+  if (!expectedOrder || !expected.resources.every((resource) => (
+    resource.marker === `acg:v1:${expected.installationId}:${resource.key}`
+  ))) return null;
   if (
-    value.schemaVersion !== 1 || value.manager !== 'ankka-mcp-gateway' ||
-    value.installationId !== expected.installationId || value.state !== 'ready' ||
-    !Number.isSafeInteger(value.revision) || (value.revision as number) < 0 ||
-    value.release !== expected.release || value.desiredHash !== expected.desiredHash ||
-    value.pending !== null || typeof value.checksum !== 'string' || !HASH.test(value.checksum) ||
-    !sameTarget(value.target, expected.target) || !sameAccessPolicy(value.accessPolicy, expected.accessPolicy) ||
-    !Array.isArray(value.resources) || value.resources.length !== expected.resources.length
+    receipt.installationId !== expected.installationId || receipt.release !== expected.release ||
+    receipt.desiredHash !== expected.desiredHash || !sameTarget(receipt.target, expected.target) ||
+    !sameAccessPolicy(receipt.accessPolicy, expected.accessPolicy) ||
+    receipt.resources.length !== expected.resources.length ||
+    !canonicalResourceOrder(receipt.resources)
   ) return null;
 
   const resources: InstallationReceiptResource[] = [];
   for (let index = 0; index < expected.resources.length; index += 1) {
-    const parsed = parseResource(value.resources[index], expected.resources[index], expected.installationId);
-    if (!parsed) return null;
-    resources.push(parsed);
+    const rawResource = receipt.resources[index];
+    const expectedResource = expected.resources[index];
+    if (rawResource === undefined || expectedResource === undefined) return null;
+    const resource = parseResource(rawResource, expectedResource, expected.installationId);
+    if (!resource) return null;
+    resources.push(resource);
   }
 
   const providerLocators = new Set<string>();
@@ -283,28 +357,28 @@ export async function parseReadyInstallationReceipt(
     manager: 'ankka-mcp-gateway',
     installationId: expected.installationId,
     state: 'ready',
-    revision: value.revision,
+    revision: receipt.revision,
     release: expected.release,
-    target: value.target,
-    accessPolicy: value.accessPolicy,
+    target: receipt.target,
+    accessPolicy: receipt.accessPolicy,
     desiredHash: expected.desiredHash,
-    resources: value.resources,
+    resources: receipt.resources,
     pending: null,
   };
   let checksum: string;
   try {
-    checksum = await sha256(canonicalJson(unsigned));
+    checksum = `sha256:${await sha256Hex(canonicalJson(unsigned))}`;
   } catch {
     return null;
   }
-  if (checksum !== value.checksum) return null;
+  if (checksum !== receipt.checksum) return null;
 
   return Object.freeze({
     schemaVersion: 1,
     manager: 'ankka-mcp-gateway',
     installationId: expected.installationId,
     state: 'ready',
-    revision: value.revision as number,
+    revision: receipt.revision,
     release: expected.release,
     target: Object.freeze({ ...expected.target }),
     accessPolicy: Object.freeze({ ...expected.accessPolicy }),

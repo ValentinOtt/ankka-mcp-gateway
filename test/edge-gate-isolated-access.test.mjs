@@ -35,11 +35,15 @@ function sink() {
 }
 
 function providerBody(result, resultInfo) {
-  return new Response(JSON.stringify({
+  const body = {
     result,
-    ...(resultInfo ? { result_info: resultInfo } : {}),
     success: true,
-  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  if (resultInfo) body.result_info = resultInfo;
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 function providerHarness() {

@@ -1,5 +1,13 @@
-import { GatewayDeploySession } from '../src/durable/gateway-deploy-session';
-import type { GatewayDeployEnv } from '../src/env';
+import {
+  GatewayDeploySession,
+  type GatewayDeploySessionState,
+  type GatewayDeploySessionTransaction,
+} from '../src/durable/gateway-deploy-session';
+import type {
+  GatewayDeployEnv,
+  GatewayDeploySessionNamespace,
+  GatewayDeploySessionStub,
+} from '../src/env';
 import type {
   ReleaseBundleProvider,
   VerifiedRelease,
@@ -134,20 +142,26 @@ export const releaseProvider: ReleaseBundleProvider = {
   loadVerifiedReleaseBundle: async () => verifiedReleaseBundle,
 };
 
-export class FakeStorage {
+export class FakeStorage implements GatewayDeploySessionTransaction {
   readonly values = new Map<string, unknown>();
   alarmAt: number | null = null;
 
   async get<T>(key: string): Promise<T | undefined> {
+    // SAFETY: This in-memory fake mirrors Cloudflare's generic storage get:
+    // callers own T, while every inserted value is preserved by structured clone.
     return structuredClone(this.values.get(key)) as T | undefined;
   }
 
-  async put(key: string, value: unknown): Promise<void> {
+  async put<Value>(key: string, value: Value): Promise<void> {
     this.values.set(key, structuredClone(value));
   }
 
-  async transaction<T>(closure: (transaction: DurableObjectTransaction) => Promise<T>): Promise<T> {
-    return closure(this as unknown as DurableObjectTransaction);
+  async transaction<T>(closure: (transaction: GatewayDeploySessionTransaction) => Promise<T>): Promise<T> {
+    return closure(this);
+  }
+
+  async delete(key: string): Promise<boolean> {
+    return this.values.delete(key);
   }
 
   async deleteAll(): Promise<void> {
@@ -163,30 +177,43 @@ export class FakeStorage {
   }
 }
 
-export class FakeState {
+export class FakeState implements GatewayDeploySessionState {
   readonly storage = new FakeStorage();
 }
 
-export class FakeDeploySessionNamespace {
+class FakeDurableObjectId implements DurableObjectId {
+  constructor(readonly name: string) {}
+
+  toString(): string {
+    return this.name;
+  }
+
+  equals(other: DurableObjectId): boolean {
+    return other.toString() === this.name;
+  }
+}
+
+export class FakeDeploySessionNamespace implements GatewayDeploySessionNamespace {
   readonly states = new Map<string, FakeState>();
   readonly objects = new Map<string, GatewayDeploySession>();
 
   constructor(private readonly now: () => number = Date.now) {}
 
   idFromName(name: string): DurableObjectId {
-    return { name, toString: () => name } as unknown as DurableObjectId;
+    return new FakeDurableObjectId(name);
   }
 
-  get(id: DurableObjectId): DurableObjectStub {
-    const name = (id as unknown as { name: string }).name;
+  get(id: DurableObjectId): GatewayDeploySessionStub {
+    const name = id.name;
+    if (!name) throw new Error('test Durable Object ID has no name');
     let object = this.objects.get(name);
     if (!object) {
       const state = new FakeState();
-      object = new GatewayDeploySession(state as unknown as DurableObjectState, undefined, this.now);
+      object = new GatewayDeploySession(state, undefined, this.now);
       this.states.set(name, state);
       this.objects.set(name, object);
     }
-    return { fetch: (request: Request) => object.fetch(request) } as unknown as DurableObjectStub;
+    return { fetch: (request: Request) => object.fetch(request) };
   }
 
   serialized(): string {
@@ -196,7 +223,7 @@ export class FakeDeploySessionNamespace {
 
 export function env(namespace = new FakeDeploySessionNamespace()): GatewayDeployEnv {
   return {
-    GATEWAY_DEPLOY_SESSION: namespace as unknown as DurableObjectNamespace,
+    GATEWAY_DEPLOY_SESSION: namespace,
     CLOUDFLARE_OAUTH_CLIENT_ID: CLIENT_ID,
     CLOUDFLARE_OAUTH_CLIENT_SECRET: CLIENT_SECRET,
     DEPLOY_SESSION_ENCRYPTION_KEY: ENCRYPTION_KEY,
@@ -204,16 +231,24 @@ export function env(namespace = new FakeDeploySessionNamespace()): GatewayDeploy
   };
 }
 
-export function internalRequest(path: string, method: string, body?: unknown): Request {
-  return new Request(`https://internal.invalid${path}`, {
-    method,
-    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+export function internalRequest<Body>(path: string, method: string, body?: Body): Request {
+  const input = body === undefined
+    ? { method }
+    : {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      };
+  return new Request(`https://internal.invalid${path}`, input);
+}
+
+export function requiredFixture<Value>(value: Value | undefined, name: string): Value {
+  if (value === undefined) throw new TypeError(`missing fixture ${name}`);
+  return value;
 }
 
 export function cookiePair(setCookie: string, name: string): string {
   const match = setCookie.match(new RegExp(`(?:^|,\\s*)(${name}=[^;]+)`));
   if (!match) throw new Error(`missing cookie ${name}`);
-  return match[1];
+  return requiredFixture(match.at(1), `cookie ${name}`);
 }

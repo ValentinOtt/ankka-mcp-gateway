@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 import { REQUIRED_OAUTH_SCOPES } from '../src/constants';
 import { DeployError } from '../src/errors';
 import type { VerifiedReleaseBundle, VerifiedReleasePayloadBlob } from '../src/release';
@@ -13,8 +15,8 @@ import {
   APPROVED_INSTALLER_HTML_ROUTES,
   buildSignedInstallerAssetResponse,
   createSignedInstallerAssetIndex,
-  type SignedInstallerAssetIndex,
 } from '../src/signed-installer-assets';
+import { requiredFixture } from './fixtures';
 
 const encoder = new TextEncoder();
 
@@ -34,7 +36,7 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 async function sha256(value: Uint8Array | string): Promise<string> {
-  const bytes = typeof value === 'string' ? encoder.encode(value) : value;
+  const bytes = v.is(v.string(), value) ? encoder.encode(value) : value;
   const owned = new Uint8Array(bytes.byteLength);
   owned.set(bytes);
   return bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', owned)));
@@ -150,11 +152,11 @@ async function fixture(installerOverrides?: readonly SourceFile[]): Promise<Fixt
   };
 }
 
-function replacePayload(bundle: VerifiedReleaseBundle, payload: readonly unknown[]): VerifiedReleaseBundle {
-  return { ...bundle, payload } as unknown as VerifiedReleaseBundle;
+function replacePayload<Payload>(bundle: VerifiedReleaseBundle, payload: Payload) {
+  return { ...bundle, payload };
 }
 
-async function expectInvalid(bundle: VerifiedReleaseBundle): Promise<void> {
+async function expectInvalid<Input>(bundle: Input): Promise<void> {
   await expect(createSignedInstallerAssetIndex(bundle)).rejects.toMatchObject({
     code: 'release_invalid',
     status: 503,
@@ -210,7 +212,8 @@ describe('signed installer SPA asset boundary', () => {
   it('serves exact hashed assets immutably with pinned MIME, size, digest, and HEAD behavior', async () => {
     const input = await fixture();
     const index = await createSignedInstallerAssetIndex(input.bundle);
-    const scriptMetadata = index.assets.find((entry) => entry.path.endsWith('.js'))!;
+    const scriptMetadata = index.assets.find((entry) => entry.path.endsWith('.js'));
+    if (!scriptMetadata) throw new TypeError('signed script fixture');
     const requestUrl = `https://deploy.ankka.ai${scriptMetadata.path}`;
 
     const response = buildSignedInstallerAssetResponse(index, new Request(requestUrl));
@@ -262,9 +265,11 @@ describe('signed installer SPA asset boundary', () => {
     const input = await fixture();
     const payload = input.bundle.payload;
     const installerScriptIndex = payload.findIndex((entry) => entry.path.endsWith('.js') && entry.path.includes('/installer/'));
-    const script = payload[installerScriptIndex];
+    if (installerScriptIndex < 0) throw new TypeError('installer script fixture');
+    const script = requiredFixture(payload.at(installerScriptIndex), 'installer script');
     const tampered = new Uint8Array(await script.bytes.arrayBuffer());
-    tampered[0] ^= 0xff;
+    const firstByte = requiredFixture(tampered.at(0), 'installer script byte');
+    tampered[0] = firstByte ^ 0xff;
 
     await expectInvalid(replacePayload(input.bundle, [
       ...payload.slice(0, installerScriptIndex),
@@ -281,7 +286,8 @@ describe('signed installer SPA asset boundary', () => {
       { ...script, bytes: new Blob([await script.bytes.arrayBuffer()], { type: 'text/plain' }) },
       ...payload.slice(installerScriptIndex + 1),
     ]));
-    await expectInvalid(replacePayload(input.bundle, [payload[0], payload[0], ...payload.slice(2)]));
+    const firstPayload = requiredFixture(payload.at(0), 'first payload');
+    await expectInvalid(replacePayload(input.bundle, [firstPayload, firstPayload, ...payload.slice(2)]));
     await expectInvalid(replacePayload(input.bundle, payload.slice(1)));
   });
 
@@ -349,7 +355,7 @@ describe('signed installer SPA asset boundary', () => {
       artifactSha256: 'a'.repeat(64),
       htmlRoutes: APPROVED_INSTALLER_HTML_ROUTES,
       assets: Object.freeze([]),
-    }) as SignedInstallerAssetIndex;
+    });
     expect(() => buildSignedInstallerAssetResponse(
       forged,
       new Request('https://deploy.ankka.ai/'),
@@ -358,14 +364,14 @@ describe('signed installer SPA asset boundary', () => {
 
   it('rejects unknown bundle fields, provenance changes, and aggregate tree mismatches', async () => {
     const input = await fixture();
-    await expectInvalid({ ...input.bundle, provider: 'r2' } as unknown as VerifiedReleaseBundle);
-    await expectInvalid({ ...input.bundle, verification: 'checksum' } as unknown as VerifiedReleaseBundle);
+    await expectInvalid({ ...input.bundle, provider: 'r2' });
+    await expectInvalid({ ...input.bundle, verification: 'checksum' });
     await expectInvalid({ ...input.bundle, keyId: '../key' });
     await expectInvalid({ ...input.bundle, publicKey: 'not-a-key' });
     await expectInvalid({
       ...input.bundle,
       envelope: { ...input.bundle.envelope, channel: 'canary' },
-    } as unknown as VerifiedReleaseBundle);
+    });
     await expectInvalid({
       ...input.bundle,
       envelope: {
@@ -374,10 +380,12 @@ describe('signed installer SPA asset boundary', () => {
         schemaVersion: 1,
         signature: input.bundle.envelope.signature,
       },
-    } as unknown as VerifiedReleaseBundle);
+    });
 
-    const raw = JSON.parse(canonicalJson(input.manifest)) as Record<string, unknown>;
-    (raw.artifact as Record<string, unknown>).treeSha256 = 'f'.repeat(64);
-    await expectInvalid({ ...input.bundle, manifest: raw } as unknown as VerifiedReleaseBundle);
+    const aggregateMismatch = {
+      ...input.manifest,
+      artifact: { ...input.manifest.artifact, treeSha256: 'f'.repeat(64) },
+    };
+    await expectInvalid({ ...input.bundle, manifest: aggregateMismatch });
   });
 });

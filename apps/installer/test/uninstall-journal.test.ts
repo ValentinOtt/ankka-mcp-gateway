@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as v from 'valibot';
 
 import {
   managementAccessApplicationName,
@@ -16,6 +17,7 @@ import {
   type HostedUninstallManagementDeleteArm,
   type HostedUninstallManagementDeleteIntent,
   type HostedUninstallManagementDeletePrerequisites,
+  type HostedUninstallManagementPreflightResult,
 } from '../src/cloudflare-uninstall-management';
 import type { AuthorizedTarget } from '../src/cloudflare-target';
 import {
@@ -38,6 +40,7 @@ import {
 import { sha256, sha256Hex } from '../src/crypto';
 import { OAUTH_COOKIE, PUBLIC_ORIGIN, REQUIRED_OAUTH_SCOPES, SESSION_COOKIE } from '../src/constants';
 import { GatewayDeploySession } from '../src/durable/gateway-deploy-session';
+import type { GatewayDeploySessionNamespace, GatewayDeploySessionStub } from '../src/env';
 import { DeployError } from '../src/errors';
 import { createGatewayDeployWorker } from '../src/index';
 import type { FetchTransport } from '../src/oauth';
@@ -55,6 +58,8 @@ import {
   type InstallActionName,
   type InstallActionRecord,
   type InstallJournal,
+  type WorkerVersionCreateRecord,
+  type WorkerVersionLocator,
 } from '../src/install-journal';
 import { buildStaticDeployPlan, parseDeploySelection } from '../src/schema';
 import {
@@ -89,17 +94,29 @@ import {
   verifyCustomerGatewayWorkersDev,
   verifyCustomerGatewayRemoveRequest,
   verifyUninstallJournalAction,
+  type CustomerGatewayRemoveActionRecord,
+  type CustomerGatewayRemoveRequestAttempt,
+  type ManagementDeleteActionRecord,
+  type UninstallJournalAction,
   type UninstallJournal,
+  type UninstallWorkersDevMutation,
 } from '../src/uninstall-journal';
-import { buildStaticUninstallPlan, type StaticUninstallPlan } from '../src/uninstall-plan';
+import {
+  buildStaticUninstallPlan,
+  parseStaticUninstallPlan,
+  type StaticUninstallPlan,
+} from '../src/uninstall-plan';
 import type { VerifiedGatewayWorkerReleaseSet } from '../src/release-direct-upload-adapter';
 import { APPROVED_CLOUDFLARE_RELEASE_CONTRACT } from '../src/release-manifest';
+import { canonicalJson } from '../src/canonical-json';
+import { boundaryObjectSchema, type BoundaryObject } from '../src/boundary';
 import {
   FakeState,
   env,
   internalRequest,
   manifest,
   NOW,
+  requiredFixture,
   releaseProvider,
   selectionInput,
   verifiedRelease,
@@ -128,6 +145,47 @@ const RECOVERY_ATTEMPT_TWO = `att_${'s'.repeat(32)}`;
 const RECOVERY_ATTEMPT_THREE = `att_${'t'.repeat(32)}`;
 const UNINSTALL_CYCLE_ID = `uninstall-${'6'.repeat(24)}`;
 const CERTIFICATE_ID = '9fdf92c8-64c2-4a3d-b1af-e15304961145';
+const NO_COMPATIBILITY_FLAGS: readonly [] = Object.freeze([]);
+
+async function parseResponseObject(response: Response): Promise<BoundaryObject> {
+  return v.parse(boundaryObjectSchema, await response.json());
+}
+
+function requireResponseObject(parent: BoundaryObject, property: string): BoundaryObject {
+  return v.parse(boundaryObjectSchema, parent[property]);
+}
+
+function requireResponseString(parent: BoundaryObject, property: string): string {
+  return v.parse(v.string(), parent[property]);
+}
+
+class ForwardingDurableObjectId implements DurableObjectId {
+  constructor(readonly name: string) {}
+
+  toString(): string {
+    return this.name;
+  }
+
+  equals(other: DurableObjectId): boolean {
+    return other.toString() === this.name;
+  }
+}
+
+class ForwardingDeploySessionNamespace implements GatewayDeploySessionNamespace {
+  constructor(
+    private readonly sessionId: string,
+    private readonly stub: GatewayDeploySessionStub,
+  ) {}
+
+  idFromName(name: string): DurableObjectId {
+    return new ForwardingDurableObjectId(name);
+  }
+
+  get(id: DurableObjectId): GatewayDeploySessionStub {
+    if (id.name !== this.sessionId) throw new Error('wrong session');
+    return this.stub;
+  }
+}
 
 const selection = parseDeploySelection(selectionInput);
 const installPlan = await buildStaticDeployPlan(selection, manifest, NOW + 600_000);
@@ -140,29 +198,23 @@ const target: AuthorizedTarget = Object.freeze({
   zone: Object.freeze({ id: ZONE_ID, name: selection.basics.zoneName, status: 'active' }),
 });
 
-function canonical(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string' || typeof value === 'number') {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`;
-  }
-  throw new TypeError('fixture');
+async function hash<Value>(value: Value): Promise<string> {
+  return sha256Hex(canonicalJson(value));
 }
 
-async function hash(value: unknown): Promise<string> {
-  return sha256Hex(canonical(value));
-}
-
-const PLAIN_BINDINGS = Object.freeze([
+const PLAIN_BINDING_NAMES = Object.freeze([
   'ADMIN_EMAILS', 'ANKKA_GATEWAY_RELEASE', 'ANKKA_GATEWAY_RELEASE_SHA256',
   'ANKKA_MANAGEMENT_HOSTNAME', 'ANKKA_UPDATE_CHANNEL', 'ANKKA_UPDATE_KEY_ID', 'ANKKA_UPDATE_PUBLIC_KEY',
   'ANKKA_WORKERS_SUBDOMAIN', 'ANKKA_WORKER_NAME', 'CF_ACCESS_AUD',
   'CF_ACCESS_ISSUER', 'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_ZONE_ID', 'CLOUDFLARE_ZONE_NAME',
   'ZERO_TRUST_READY',
-].map((name, index) => Object.freeze({ name, valueSha256: String(index % 10).repeat(64) })));
+] as const);
+const PLAIN_BINDINGS: WorkerVersionCreateRecord['plainTextBindingHashes'] = Object.freeze(
+  PLAIN_BINDING_NAMES.map((name, index) => Object.freeze({
+    name,
+    valueSha256: String(index % 10).repeat(64),
+  })),
+);
 
 async function installRecord(action: InstallActionName, phase?: 'provision' | 'bootstrap' | 'clean'): Promise<InstallActionRecord> {
   if (action === 'worker_create') {
@@ -226,9 +278,12 @@ async function installRecord(action: InstallActionName, phase?: 'provision' | 'b
       compatibilityDate: releaseContract.compatibilityDate, compatibilityFlags: [], exports: releaseContract.exports,
       mainModule: releaseContract.mainModule, modules, phase, workerId: WORKER_ID, workerName,
     });
-    return { schemaVersion: 1, kind: 'worker_version_create', phase, accountId: ACCOUNT_ID, workerName,
+    const record: WorkerVersionCreateRecord = {
+      schemaVersion: 1, kind: 'worker_version_create', phase, accountId: ACCOUNT_ID, workerName,
       workerId: WORKER_ID, requestHash, correlationTag: `ankka-version-${phase}-sha256:${requestHash}`,
-      releaseContract, assets, plainTextBindingHashes: PLAIN_BINDINGS as never, modules };
+      releaseContract, assets, plainTextBindingHashes: PLAIN_BINDINGS, modules,
+    };
+    return record;
   }
   if (action.endsWith('_worker_deployment_create') && phase) {
     const versionId = phase === 'provision' ? PROVISION_VERSION_ID : phase === 'bootstrap' ? BOOTSTRAP_VERSION_ID : CLEAN_VERSION_ID;
@@ -249,15 +304,19 @@ async function installLocator(action: InstallActionName, phase?: 'provision' | '
     return { enabled: action === 'bootstrap_subdomain_enable', previewsEnabled: false };
   }
   if (action.endsWith('_worker_version_create') && phase) {
-    const record = await installRecord(action, phase) as Extract<InstallActionRecord, { kind: 'worker_version_create' }>;
-    return { kind: 'version', phase, accountId: ACCOUNT_ID, workerName, workerId: WORKER_ID,
+    const record = await installRecord(action, phase);
+    if (record.kind !== 'worker_version_create') throw new TypeError('version record fixture');
+    const locator: WorkerVersionLocator = {
+      kind: 'version', phase, accountId: ACCOUNT_ID, workerName, workerId: WORKER_ID,
       versionId: phase === 'provision' ? PROVISION_VERSION_ID : phase === 'bootstrap' ? BOOTSTRAP_VERSION_ID : CLEAN_VERSION_ID,
       requestHash: record.requestHash, correlationTag: record.correlationTag,
-      // The provision version precedes the deployment that creates the namespace.
-      ...(phase === 'provision' ? {} : { namespaceId: NAMESPACE_ID }) };
+    };
+    // The provision version precedes the deployment that creates the namespace.
+    return phase === 'provision' ? locator : { ...locator, namespaceId: NAMESPACE_ID };
   }
   if (action.endsWith('_worker_deployment_create') && phase) {
-    const record = await installRecord(action, phase) as Extract<InstallActionRecord, { kind: 'worker_deployment_create' }>;
+    const record = await installRecord(action, phase);
+    if (record.kind !== 'worker_deployment_create') throw new TypeError('deployment record fixture');
     return { kind: 'deployment', phase, accountId: ACCOUNT_ID, workerName, workerId: WORKER_ID,
       versionId: record.versionId,
       deploymentId: phase === 'provision' ? PROVISION_DEPLOYMENT_ID : phase === 'bootstrap' ? BOOTSTRAP_DEPLOYMENT_ID : CLEAN_DEPLOYMENT_ID,
@@ -370,7 +429,7 @@ async function preflight(
   uninstallPlan: StaticUninstallPlan,
   attemptId: string,
   checkedAt: number,
-): Promise<Record<string, unknown>> {
+): Promise<HostedUninstallManagementPreflightResult> {
   const final = installJournal.actions[installJournal.actions.length - 1]?.locator;
   if (!final || !('status' in final) || final.status !== 'converged') throw new TypeError('final fixture');
   const semantic = {
@@ -398,6 +457,7 @@ async function preflight(
 }
 
 function uninstallManagementContext(journal: UninstallJournal): HostedUninstallManagementContext {
+  const activeApproval = requiredFixture(journal.approvalHistory.at(-1), 'active uninstall approval');
   return Object.freeze({
     schemaVersion: 1,
     installJournal: journal.installJournal,
@@ -406,7 +466,7 @@ function uninstallManagementContext(journal: UninstallJournal): HostedUninstallM
       uninstallPlan: approval.plan,
       authorizedTarget: approval.authorizedTarget,
     }))),
-    activeAttemptId: journal.approvalHistory[journal.approvalHistory.length - 1].attemptId,
+    activeAttemptId: activeApproval.attemptId,
   });
 }
 
@@ -420,6 +480,39 @@ function verifiedManagementAbsence(
     throw new TypeError(`missing ${action}`);
   }
   return journalAction.locator;
+}
+
+function customerRemoveAction(journal: UninstallJournal): UninstallJournalAction {
+  const action = journal.actions.find((entry) => entry.name === 'customer_gateway_remove');
+  if (!action || !('kind' in action.record) || action.record.kind !== 'customer_gateway_remove') {
+    throw new TypeError('customer removal journal fixture missing');
+  }
+  return action;
+}
+
+function customerRemoveRecord(journal: UninstallJournal): CustomerGatewayRemoveActionRecord {
+  const record = customerRemoveAction(journal).record;
+  if (!('kind' in record) || record.kind !== 'customer_gateway_remove') {
+    throw new TypeError('customer removal journal fixture missing');
+  }
+  return record;
+}
+
+function firstCustomerRemoveAttempt(journal: UninstallJournal): CustomerGatewayRemoveRequestAttempt {
+  const attempt = customerRemoveRecord(journal).attempts[0];
+  if (!attempt) throw new TypeError('customer removal attempt fixture missing');
+  return attempt;
+}
+
+function managementDeleteRecord(
+  journal: UninstallJournal,
+  actionName: HostedUninstallManagementDeleteAction,
+): ManagementDeleteActionRecord {
+  const action = journal.actions.find((entry) => entry.name === actionName);
+  if (!action || !('kind' in action.record) || action.record.kind !== 'uninstall_management_delete') {
+    throw new TypeError(`management delete journal fixture missing: ${actionName}`);
+  }
+  return action.record;
 }
 
 function managementPrerequisites(
@@ -447,8 +540,8 @@ async function managementAbsence(
   journal: UninstallJournal,
   intent: HostedUninstallManagementDeleteIntent,
 ) {
-  const approval = journal.approvalHistory[journal.approvalHistory.length - 1];
-  const final = journal.installJournal.actions[journal.installJournal.actions.length - 1].locator;
+  const approval = requiredFixture(journal.approvalHistory.at(-1), 'active uninstall approval');
+  const final = requiredFixture(journal.installJournal.actions.at(-1), 'install final action').locator;
   if (!final || !('status' in final) || final.status !== 'converged') throw new TypeError('install final');
   const semantic = {
     schemaVersion: 1 as const,
@@ -473,8 +566,8 @@ async function managementStillPresent(
   intent: HostedUninstallManagementDeleteIntent,
   arm: HostedUninstallManagementDeleteArm,
 ) {
-  const approval = journal.approvalHistory[journal.approvalHistory.length - 1];
-  const final = journal.installJournal.actions[journal.installJournal.actions.length - 1].locator;
+  const approval = requiredFixture(journal.approvalHistory.at(-1), 'active uninstall approval');
+  const final = requiredFixture(journal.installJournal.actions.at(-1), 'install final action').locator;
   if (!final || !('status' in final) || final.status !== 'converged') throw new TypeError('install final');
   const providerOwnership = intent.kind === 'management_custom_domain_delete'
     ? Object.freeze({ kind: 'management_custom_domain' as const, domainId: DOMAIN_ID,
@@ -538,7 +631,7 @@ async function beginManagementDelete(
   readonly arm: HostedUninstallManagementDeleteArm;
   readonly prerequisites: HostedUninstallManagementDeletePrerequisites;
 }> {
-  const attemptId = journal.approvalHistory[journal.approvalHistory.length - 1].attemptId;
+  const attemptId = requiredFixture(journal.approvalHistory.at(-1), 'active uninstall approval').attemptId;
   const prerequisites = managementPrerequisites(journal, action);
   const intent = await prepareHostedUninstallManagementDeleteIntent(
     uninstallManagementContext(journal),
@@ -606,11 +699,13 @@ async function initializedUninstall(): Promise<UninstallFixture> {
   return { installJournal, uninstallPlan, journal, now };
 }
 
-function expectDeepFrozen(value: unknown, seen = new Set<object>()): void {
-  if (value === null || typeof value !== 'object' || seen.has(value)) return;
+const deepFrozenContainerSchema = v.union([v.array(v.unknown()), v.object({})]);
+
+function expectDeepFrozen<Value>(value: Value, seen = new Set<object>()): void {
+  if (!v.is(deepFrozenContainerSchema, value) || seen.has(value)) return;
   seen.add(value);
   expect(Object.isFrozen(value)).toBe(true);
-  for (const child of Object.values(value as Record<string, unknown>)) expectDeepFrozen(child, seen);
+  for (const child of Object.values(value)) expectDeepFrozen(child, seen);
 }
 
 async function bytesHash(bytes: Uint8Array): Promise<string> {
@@ -626,7 +721,7 @@ async function uninstallReleaseSet(): Promise<VerifiedGatewayWorkerReleaseSet> {
     primary: Object.freeze({
       verification: 'ed25519', release: manifest.release, artifactSha256: manifest.artifact.treeSha256,
       worker: Object.freeze({
-        mainModule: 'index.js', compatibilityDate: '2026-08-08', compatibilityFlags: Object.freeze([] as []),
+        mainModule: 'index.js', compatibilityDate: '2026-08-08', compatibilityFlags: NO_COMPATIBILITY_FLAGS,
         modules: Object.freeze([Object.freeze({ name: 'index.js', contentType: 'application/javascript+module',
           sha256: await bytesHash(primaryBytes), bytes: primaryBytes })]),
         assets: Object.freeze({ binding: 'ASSETS', notFoundHandling: 'single-page-application',
@@ -1081,7 +1176,7 @@ async function rotateUninstallApproval(
   clock: { now: number },
   expiresAt: number,
 ): Promise<{ readonly journal: UninstallJournal; readonly plan: StaticUninstallPlan }> {
-  const activeAttemptId = journal.approvalHistory[journal.approvalHistory.length - 1].attemptId;
+  const activeAttemptId = requiredFixture(journal.approvalHistory.at(-1), 'active uninstall approval').attemptId;
   if (journal.lease) {
     journal = releaseUninstallJournalLease(journal, {
       expectedRevision: journal.revision,
@@ -1176,7 +1271,7 @@ describe('durable uninstall journal authority and lease boundary', () => {
       now: fixture.now + 4,
       action: 'cleanup_worker_version_create',
     });
-    expect(journal.actions[1].phase).toBe('send_armed');
+    expect(requiredFixture(journal.actions.at(1), 'cleanup action').phase).toBe('send_armed');
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
     await expect(armUninstallJournalAction(journal, {
       expectedRevision: journal.revision,
@@ -1203,7 +1298,7 @@ describe('durable uninstall journal authority and lease boundary', () => {
       action: 'cleanup_worker_version_create',
       value: submission,
     });
-    expect(journal.actions[1].phase).toBe('submitted');
+    expect(requiredFixture(journal.actions.at(1), 'cleanup action').phase).toBe('submitted');
     journal = await verifyUninstallJournalAction(journal, {
       expectedRevision: journal.revision,
       attemptId: UNINSTALL_ATTEMPT_ID,
@@ -1211,23 +1306,32 @@ describe('durable uninstall journal authority and lease boundary', () => {
       action: 'cleanup_worker_version_create',
       value: submission,
     });
-    expect(journal.actions[1].phase).toBe('verified');
+    expect(requiredFixture(journal.actions.at(1), 'cleanup action').phase).toBe('verified');
 
     for (const phase of ['send_armed', 'submitted', 'verified'] as const) {
-      const stale = structuredClone(journal) as any;
-      const preflight = stale.actions[0].record;
-      const action = stale.actions[1];
+      const stale = structuredClone(journal);
+      const preflight = requiredFixture(stale.actions.at(0), 'uninstall preflight action').record;
+      const action = requiredFixture(stale.actions.at(1), 'cleanup action');
+      if (!('expiresAt' in preflight)) {
+        throw new TypeError('uninstall action fixture missing');
+      }
       const submitted = phase !== 'send_armed';
-      action.phase = phase;
-      action.sendArmedAt = preflight.expiresAt;
-      action.submittedAt = submitted ? preflight.expiresAt + 1 : null;
-      action.verifiedAt = phase === 'verified' ? preflight.expiresAt + 2 : null;
-      action.locator = submitted ? structuredClone(journal.actions[1].locator) : null;
-      stale.updatedAt = phase === 'verified'
+      Object.defineProperties(action, {
+        phase: { value: phase },
+        sendArmedAt: { value: preflight.expiresAt },
+        submittedAt: { value: submitted ? preflight.expiresAt + 1 : null },
+        verifiedAt: { value: phase === 'verified' ? preflight.expiresAt + 2 : null },
+        locator: {
+          value: submitted
+            ? structuredClone(requiredFixture(journal.actions.at(1), 'cleanup action').locator)
+            : null,
+        },
+      });
+      Object.defineProperty(stale, 'updatedAt', { value: phase === 'verified'
         ? preflight.expiresAt + 2
         : submitted
           ? preflight.expiresAt + 1
-          : preflight.expiresAt;
+          : preflight.expiresAt });
       await expect(requireUninstallJournal(stale)).rejects.toMatchObject({ code: 'session_invalid' });
     }
 
@@ -1289,8 +1393,11 @@ describe('durable uninstall journal authority and lease boundary', () => {
     });
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
 
-    const actionOrderRewind = structuredClone(journal) as any;
-    actionOrderRewind.actions[2].preparedAt = actionOrderRewind.actions[1].preparedAt;
+    const actionOrderRewind = structuredClone(journal);
+    const secondAction = actionOrderRewind.actions[1];
+    const thirdAction = actionOrderRewind.actions[2];
+    if (!secondAction || !thirdAction) throw new TypeError('uninstall action fixture missing');
+    Object.defineProperty(thirdAction, 'preparedAt', { value: secondAction.preparedAt });
     await expect(requireUninstallJournal(actionOrderRewind)).rejects.toMatchObject({
       code: 'session_invalid',
     });
@@ -1503,8 +1610,8 @@ describe('durable uninstall journal authority and lease boundary', () => {
     journal = rotatedDomain.journal;
     clock.now = originExpiresAt;
     const stillDomain = await managementStillPresent(journal, started.intent, started.arm);
-    const tamperedDomain = structuredClone(stillDomain) as Record<string, unknown>;
-    tamperedDomain.providerOwnershipSha256 = '0'.repeat(64);
+    const tamperedDomain = structuredClone(stillDomain);
+    Object.defineProperty(tamperedDomain, 'providerOwnershipSha256', { value: '0'.repeat(64) });
     await expect(recordUninstallManagementDeleteRecovery(journal, {
       expectedRevision: journal.revision,
       attemptId: RECOVERY_ATTEMPT_ID,
@@ -1655,12 +1762,17 @@ describe('durable uninstall journal authority and lease boundary', () => {
         ? record.attempts.map((attempt) => attempt.phase)
         : []).toEqual(['not_applied', 'verified']);
     }
-    const actorTamper = structuredClone(journal) as any;
-    actorTamper.actions[5].record.attempts[1].verifiedByAttemptId = RECOVERY_ATTEMPT_TWO;
+    const actorTamper = structuredClone(journal);
+    const verifiedAttempt = managementDeleteRecord(
+      actorTamper,
+      'management_admin_policy_delete',
+    ).attempts[1];
+    if (!verifiedAttempt) throw new TypeError('management delete attempt missing');
+    Object.defineProperty(verifiedAttempt, 'verifiedByAttemptId', { value: RECOVERY_ATTEMPT_THREE });
     await expect(requireUninstallJournal(actorTamper)).rejects.toMatchObject({ code: 'session_invalid' });
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
     expectDeepFrozen(journal);
-  }, 30_000);
+  }, 120_000);
 
   it('renews a safely prepared domain intent, but never repins an armed attempt', async () => {
     const fixture = await managementReadyUninstall();
@@ -1734,7 +1846,7 @@ describe('durable uninstall journal authority and lease boundary', () => {
       record: { schemaVersion: 1, kind: 'uninstall_management_delete', prerequisites: prerequisitesB, intent: intentB },
     })).rejects.toMatchObject({ code: 'session_conflict' });
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
-  });
+  }, 20_000);
 
   it('builds an exact no-residue bundle and converges to one deterministic full tombstone across lease renewal', async () => {
     const fixture = await managementDeletesVerified();
@@ -2001,8 +2113,8 @@ describe('durable uninstall journal authority and lease boundary', () => {
       ...evidenceSemantic,
       evidenceSha256: await hash(evidenceSemantic),
     });
-    const approval = journal.approvalHistory[journal.approvalHistory.length - 1];
-    const installFinal = journal.installJournal.actions[journal.installJournal.actions.length - 1].locator;
+    const approval = requiredFixture(journal.approvalHistory.at(-1), 'active uninstall approval');
+    const installFinal = requiredFixture(journal.installJournal.actions.at(-1), 'install final action').locator;
     if (!installFinal || !('status' in installFinal) || installFinal.status !== 'converged') {
       throw new TypeError('install final');
     }
@@ -2067,10 +2179,10 @@ describe('durable uninstall journal authority and lease boundary', () => {
         result: mismatchedPrerequisites,
       },
     })).rejects.toMatchObject({ code: 'bad_request' });
-    const alternateNamespaceSnapshots = Object.freeze([
+    const alternateNamespaceSnapshots: typeof namespaceSnapshots = Object.freeze([
       Object.freeze({ ...namespaceSnapshots[0], snapshotSha256: 'b'.repeat(64) }),
       Object.freeze({ ...namespaceSnapshots[1], snapshotSha256: 'b'.repeat(64) }),
-    ]) as typeof namespaceSnapshots;
+    ]);
     const alternateNoResidue = await noResidueWithEvidence({
       ...evidenceSemantic,
       namespaceSnapshots: alternateNamespaceSnapshots,
@@ -2127,8 +2239,12 @@ describe('durable uninstall journal authority and lease boundary', () => {
       verifiedByAttemptId: RECOVERY_ATTEMPT_ID,
     });
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
-    const proofSwap = structuredClone(journal) as any;
-    proofSwap.actions[12].locator = structuredClone(alternateNoResidue);
+    const proofSwap = structuredClone(journal);
+    const noResidueProof = proofSwap.actions[12];
+    if (!noResidueProof) throw new TypeError('no-residue proof fixture missing');
+    Object.defineProperty(noResidueProof, 'locator', {
+      value: structuredClone(alternateNoResidue),
+    });
     await expect(requireUninstallJournal(proofSwap)).rejects.toMatchObject({ code: 'session_invalid' });
 
     const convergence = await prepareUninstallFinalConvergenceRecordAndLocator(journal);
@@ -2167,16 +2283,23 @@ describe('durable uninstall journal authority and lease boundary', () => {
       value: convergence.locator,
     });
     expect(isCompleteUninstallJournal(journal)).toBe(true);
-    expect(journal.actions[13].locator).toEqual(convergence.locator);
-    expect(JSON.stringify(journal.actions[13].locator)).not.toMatch(
+    const finalAction = requiredFixture(journal.actions.at(13), 'uninstall final action');
+    expect(finalAction.locator).toEqual(convergence.locator);
+    expect(JSON.stringify(finalAction.locator)).not.toMatch(
       /cloudflareAccessToken|clientSecret|"authorization"/iu,
     );
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
 
-    const tampered = structuredClone(journal) as any;
-    tampered.actions[13].locator.management.customDomainAbsence.evidenceSha256 = 'f'.repeat(64);
+    const tampered = structuredClone(journal);
+    const finalLocator = tampered.actions[13]?.locator;
+    if (!finalLocator || !('management' in finalLocator)) {
+      throw new TypeError('uninstall convergence fixture missing');
+    }
+    Object.defineProperty(finalLocator.management.customDomainAbsence, 'evidenceSha256', {
+      value: 'f'.repeat(64),
+    });
     await expect(requireUninstallJournal(tampered)).rejects.toMatchObject({ code: 'session_invalid' });
-  }, 30_000);
+  }, 60_000);
 
   it('terminally records an armed enable observed false and requires a fresh customer cycle', async () => {
     const fixture = await cleanupReadyUninstall();
@@ -2241,12 +2364,18 @@ describe('durable uninstall journal authority and lease boundary', () => {
       : []).toEqual(['not_applied', 'prepared']);
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
 
-    const cycleRewind = structuredClone(journal) as any;
-    const persistedAttempts = cycleRewind.actions[3].record.attempts;
-    const rewoundPreparedAt = persistedAttempts[0].enable.verifiedAt - 1;
-    persistedAttempts[1].preparedAt = rewoundPreparedAt;
-    persistedAttempts[1].enable.preparedAt = rewoundPreparedAt;
-    cycleRewind.actions[3].preparedAt = rewoundPreparedAt;
+    const cycleRewind = structuredClone(journal);
+    const persistedAttempts = customerRemoveRecord(cycleRewind).attempts;
+    const firstAttempt = persistedAttempts[0];
+    const secondAttempt = persistedAttempts[1];
+    const customerAction = cycleRewind.actions.find((entry) => entry.name === 'customer_gateway_remove');
+    if (!firstAttempt?.enable.verifiedAt || !secondAttempt || !customerAction) {
+      throw new TypeError('customer removal cycle fixture missing');
+    }
+    const rewoundPreparedAt = firstAttempt.enable.verifiedAt - 1;
+    Object.defineProperty(secondAttempt, 'preparedAt', { value: rewoundPreparedAt });
+    Object.defineProperty(secondAttempt.enable, 'preparedAt', { value: rewoundPreparedAt });
+    Object.defineProperty(customerAction, 'preparedAt', { value: rewoundPreparedAt });
     await expect(requireUninstallJournal(cycleRewind)).rejects.toMatchObject({ code: 'session_invalid' });
   });
 
@@ -2300,7 +2429,8 @@ describe('durable uninstall journal authority and lease boundary', () => {
     const action = journal.actions.find((entry) => entry.name === 'customer_gateway_remove');
     expect(action).toMatchObject({ phase: 'verified' });
     expect(action && 'kind' in action.record && action.record.kind === 'customer_gateway_remove'
-      ? action.record.attempts[0].disableAttempts.map((entry) => [entry.approvalAttemptId, entry.phase])
+      ? requiredFixture(action.record.attempts.at(0), 'customer remove attempt').disableAttempts
+        .map((entry) => [entry.approvalAttemptId, entry.phase])
       : []).toEqual([
       [UNINSTALL_ATTEMPT_ID, 'not_applied'],
       [RECOVERY_ATTEMPT_ID, 'verified'],
@@ -2363,9 +2493,9 @@ describe('durable uninstall journal authority and lease boundary', () => {
       now: ++clock.now,
       enabled: true,
     });
-    const customer = journal.actions[3];
+    const customer = journal.actions.at(3);
     expect(customer && 'kind' in customer.record && customer.record.kind === 'customer_gateway_remove'
-      ? customer.record.attempts[0].enable
+      ? requiredFixture(customer.record.attempts.at(0), 'customer remove attempt').enable
       : null).toMatchObject({
       phase: 'verified',
       approvalAttemptId: UNINSTALL_ATTEMPT_ID,
@@ -2380,9 +2510,12 @@ describe('durable uninstall journal authority and lease boundary', () => {
       now: ++clock.now,
     });
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
-    const authorityRewind = structuredClone(journal) as any;
-    authorityRewind.actions[3].record.attempts[0].disableAttempts[0].approvalAttemptId =
-      RECOVERY_ATTEMPT_ID;
+    const authorityRewind = structuredClone(journal);
+    const authorityRewindDisable = firstCustomerRemoveAttempt(authorityRewind).disableAttempts[0];
+    if (!authorityRewindDisable) throw new TypeError('workers.dev disable fixture missing');
+    Object.defineProperty(authorityRewindDisable, 'approvalAttemptId', {
+      value: RECOVERY_ATTEMPT_ID,
+    });
     await expect(requireUninstallJournal(authorityRewind)).rejects.toMatchObject({
       code: 'session_invalid',
     });
@@ -2428,10 +2561,13 @@ describe('durable uninstall journal authority and lease boundary', () => {
       now: ++clock.now,
       enabled: false,
     });
-    const customer = journal.actions[3];
+    const customer = journal.actions.at(3);
     expect(customer).toMatchObject({ phase: 'verified' });
     expect(customer && 'kind' in customer.record && customer.record.kind === 'customer_gateway_remove'
-      ? customer.record.attempts[0].disableAttempts[0]
+      ? requiredFixture(
+          requiredFixture(customer.record.attempts.at(0), 'customer remove attempt').disableAttempts.at(0),
+          'workers.dev disable attempt',
+        )
       : null).toMatchObject({
       phase: 'verified',
       approvalAttemptId: UNINSTALL_ATTEMPT_ID,
@@ -2440,9 +2576,15 @@ describe('durable uninstall journal authority and lease boundary', () => {
     });
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
 
-    const requestOrderRewind = structuredClone(journal) as any;
-    const persistedAttempt = requestOrderRewind.actions[3].record.attempts[0];
-    persistedAttempt.disableAttempts[0].preparedAt = persistedAttempt.sendArmedAt - 1;
+    const requestOrderRewind = structuredClone(journal);
+    const persistedAttempt = firstCustomerRemoveAttempt(requestOrderRewind);
+    const persistedDisable = persistedAttempt.disableAttempts[0];
+    if (!persistedDisable || persistedAttempt.sendArmedAt === null) {
+      throw new TypeError('workers.dev disable ordering fixture missing');
+    }
+    Object.defineProperty(persistedDisable, 'preparedAt', {
+      value: persistedAttempt.sendArmedAt - 1,
+    });
     await expect(requireUninstallJournal(requestOrderRewind)).rejects.toMatchObject({
       code: 'session_invalid',
     });
@@ -2461,19 +2603,32 @@ describe('durable uninstall journal authority and lease boundary', () => {
     });
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
 
-    const mutations: Array<(value: any) => void> = [
-      (value) => { value.actions[3].record.attempts[0].submittedByAttemptId = null; },
-      (value) => { value.actions[3].record.attempts[0].verifiedByAttemptId = null; },
-      (value) => { value.actions[3].record.attempts[0].submittedByAttemptId = RECOVERY_ATTEMPT_TWO; },
-      (value) => { value.actions[3].record.attempts[0].verifiedByAttemptId = UNINSTALL_ATTEMPT_ID; },
+    const mutations: Array<(value: UninstallJournal) => void> = [
+      (value) => Object.defineProperty(firstCustomerRemoveAttempt(value), 'submittedByAttemptId', {
+        value: null,
+      }),
+      (value) => Object.defineProperty(firstCustomerRemoveAttempt(value), 'verifiedByAttemptId', {
+        value: null,
+      }),
+      (value) => Object.defineProperty(firstCustomerRemoveAttempt(value), 'submittedByAttemptId', {
+        value: RECOVERY_ATTEMPT_TWO,
+      }),
+      (value) => Object.defineProperty(firstCustomerRemoveAttempt(value), 'verifiedByAttemptId', {
+        value: UNINSTALL_ATTEMPT_ID,
+      }),
       (value) => {
         const approval = value.approvalHistory[1];
-        value.actions[3].record.attempts[0].submittedAt = approval.recordedAt - 1;
-        value.actions[3].submittedAt = approval.recordedAt - 1;
+        if (!approval) throw new TypeError('recovery approval fixture missing');
+        Object.defineProperty(firstCustomerRemoveAttempt(value), 'submittedAt', {
+          value: approval.recordedAt - 1,
+        });
+        Object.defineProperty(customerRemoveAction(value), 'submittedAt', {
+          value: approval.recordedAt - 1,
+        });
       },
     ];
     for (const mutate of mutations) {
-      const candidate = structuredClone(journal) as any;
+      const candidate = structuredClone(journal);
       mutate(candidate);
       await expect(requireUninstallJournal(candidate)).rejects.toMatchObject({ code: 'session_invalid' });
     }
@@ -2525,11 +2680,15 @@ describe('durable uninstall journal authority and lease boundary', () => {
       : []).toEqual([[RECOVERY_ATTEMPT_ID, replacement.semantic.requestId]]);
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
 
-    const originRewind = structuredClone(journal) as any;
-    const persisted = originRewind.actions[3].record.attempts[0];
-    persisted.approvalAttemptId = UNINSTALL_ATTEMPT_ID;
-    persisted.semantic = structuredClone(first.semantic);
-    persisted.enable.approvalAttemptId = UNINSTALL_ATTEMPT_ID;
+    const originRewind = structuredClone(journal);
+    const persisted = firstCustomerRemoveAttempt(originRewind);
+    Object.defineProperties(persisted, {
+      approvalAttemptId: { value: UNINSTALL_ATTEMPT_ID },
+      semantic: { value: structuredClone(first.semantic) },
+    });
+    Object.defineProperty(persisted.enable, 'approvalAttemptId', {
+      value: UNINSTALL_ATTEMPT_ID,
+    });
     await expect(requireUninstallJournal(originRewind)).rejects.toMatchObject({ code: 'session_invalid' });
 
     journal = await armCustomerGatewayWorkersDev(journal, {
@@ -2563,11 +2722,11 @@ describe('durable uninstall journal authority and lease boundary', () => {
       now: ++clock.now,
     })).rejects.toMatchObject({ code: 'session_conflict' });
 
-    const prematureDisable = structuredClone(journal) as any;
-    const persistedAction = prematureDisable.actions[3];
-    const persistedAttempt = persistedAction.record.attempts[0];
+    const prematureDisable = structuredClone(journal);
+    const persistedAction = customerRemoveAction(prematureDisable);
+    const persistedAttempt = firstCustomerRemoveAttempt(prematureDisable);
     const preparedAt = ++clock.now;
-    persistedAttempt.disableAttempts.push({
+    const unexpectedDisable: UninstallWorkersDevMutation = {
       schemaVersion: 1,
       kind: 'uninstall_workers_dev',
       approvalAttemptId: RECOVERY_ATTEMPT_ID,
@@ -2585,10 +2744,15 @@ describe('durable uninstall journal authority and lease boundary', () => {
       submittedByAttemptId: null,
       verifiedAt: null,
       verifiedByAttemptId: null,
+    };
+    Object.defineProperty(persistedAttempt, 'disableAttempts', {
+      value: [...persistedAttempt.disableAttempts, unexpectedDisable],
     });
-    persistedAction.phase = 'send_armed';
-    persistedAction.sendArmedAt = persistedAttempt.enable.sendArmedAt;
-    prematureDisable.updatedAt = preparedAt;
+    Object.defineProperties(persistedAction, {
+      phase: { value: 'send_armed' },
+      sendArmedAt: { value: persistedAttempt.enable.sendArmedAt },
+    });
+    Object.defineProperty(prematureDisable, 'updatedAt', { value: preparedAt });
     await expect(requireUninstallJournal(prematureDisable)).rejects.toMatchObject({
       code: 'session_invalid',
     });
@@ -2618,15 +2782,19 @@ describe('durable uninstall journal authority and lease boundary', () => {
       attemptId: RECOVERY_ATTEMPT_ID,
       now: ++clock.now,
     });
-    const action = journal.actions[3];
+    const action = journal.actions.at(3);
     expect(action && 'kind' in action.record && action.record.kind === 'customer_gateway_remove'
-      ? action.record.attempts[0].disableAttempts.map((entry) => [entry.approvalAttemptId, entry.phase])
+      ? requiredFixture(action.record.attempts.at(0), 'customer remove attempt').disableAttempts
+        .map((entry) => [entry.approvalAttemptId, entry.phase])
       : []).toEqual([[RECOVERY_ATTEMPT_ID, 'prepared']]);
     await expect(requireUninstallJournal(structuredClone(journal))).resolves.toEqual(journal);
 
-    const originRewind = structuredClone(journal) as any;
-    originRewind.actions[3].record.attempts[0].disableAttempts[0].approvalAttemptId =
-      UNINSTALL_ATTEMPT_ID;
+    const originRewind = structuredClone(journal);
+    const originRewindDisable = firstCustomerRemoveAttempt(originRewind).disableAttempts[0];
+    if (!originRewindDisable) throw new TypeError('workers.dev disable fixture missing');
+    Object.defineProperty(originRewindDisable, 'approvalAttemptId', {
+      value: UNINSTALL_ATTEMPT_ID,
+    });
     await expect(requireUninstallJournal(originRewind)).rejects.toMatchObject({ code: 'session_invalid' });
 
     journal = await armCustomerGatewayWorkersDev(journal, {
@@ -2645,23 +2813,31 @@ describe('durable uninstall journal authority and lease boundary', () => {
   it('rejects a customer request armed at signed expiry in every downstream phase', async () => {
     const { journal } = await customerRequestVerifiedAcrossGrant();
     for (const requestPhase of ['send_armed', 'submitted', 'verified'] as const) {
-      const candidate = structuredClone(journal) as any;
-      const action = candidate.actions[3];
-      const attempt = action.record.attempts[0];
+      const candidate = structuredClone(journal);
+      const action = customerRemoveAction(candidate);
+      const attempt = firstCustomerRemoveAttempt(candidate);
       const expiry = attempt.semantic.expiresAt * 1_000;
       const submitted = requestPhase !== 'send_armed';
-      attempt.requestPhase = requestPhase;
-      attempt.sendArmedAt = expiry;
-      attempt.submittedAt = submitted ? expiry + 1 : null;
-      attempt.submittedByAttemptId = submitted ? RECOVERY_ATTEMPT_ID : null;
-      attempt.verifiedAt = requestPhase === 'verified' ? expiry + 2 : null;
-      attempt.verifiedByAttemptId = requestPhase === 'verified' ? RECOVERY_ATTEMPT_ID : null;
-      if (!submitted) attempt.locator = null;
-      action.phase = submitted ? 'submitted' : 'send_armed';
-      action.locator = submitted ? attempt.locator : null;
-      action.submittedAt = submitted ? expiry + 1 : null;
-      action.verifiedAt = null;
-      candidate.updatedAt = requestPhase === 'verified' ? expiry + 2 : submitted ? expiry + 1 : expiry;
+      Object.defineProperties(attempt, {
+        requestPhase: { value: requestPhase },
+        sendArmedAt: { value: expiry },
+        submittedAt: { value: submitted ? expiry + 1 : null },
+        submittedByAttemptId: { value: submitted ? RECOVERY_ATTEMPT_ID : null },
+        verifiedAt: { value: requestPhase === 'verified' ? expiry + 2 : null },
+        verifiedByAttemptId: {
+          value: requestPhase === 'verified' ? RECOVERY_ATTEMPT_ID : null,
+        },
+        locator: { value: submitted ? attempt.locator : null },
+      });
+      Object.defineProperties(action, {
+        phase: { value: submitted ? 'submitted' : 'send_armed' },
+        locator: { value: submitted ? attempt.locator : null },
+        submittedAt: { value: submitted ? expiry + 1 : null },
+        verifiedAt: { value: null },
+      });
+      Object.defineProperty(candidate, 'updatedAt', {
+        value: requestPhase === 'verified' ? expiry + 2 : submitted ? expiry + 1 : expiry,
+      });
       await expect(requireUninstallJournal(candidate)).rejects.toMatchObject({ code: 'session_invalid' });
     }
   });
@@ -2765,16 +2941,37 @@ describe('durable uninstall journal authority and lease boundary', () => {
 
   it('rejects binding, plan, install convergence, cycle, extra-key, and credential tampering', async () => {
     const { journal } = await initializedUninstall();
-    const mutations: ((value: any) => void)[] = [
-      (value) => { value.bindingHash = `sha256:${'f'.repeat(64)}`; },
-      (value) => { value.uninstallCycleId = `uninstall-${'f'.repeat(24)}`; },
-      (value) => { value.uninstallPlan.authorityHash = `sha256:${'f'.repeat(64)}`; },
-      (value) => { value.installJournal.actions.at(-1).locator.convergenceHash = `sha256:${'f'.repeat(64)}`; },
-      (value) => { value.actions[0].record.extra = true; },
-      (value) => { value.cloudflareAccessToken = 'must-never-persist'; },
+    const mutations: Array<(value: UninstallJournal) => void> = [
+      (value) => Object.defineProperty(value, 'bindingHash', {
+        value: `sha256:${'f'.repeat(64)}`,
+      }),
+      (value) => Object.defineProperty(value, 'uninstallCycleId', {
+        value: `uninstall-${'f'.repeat(24)}`,
+      }),
+      (value) => Object.defineProperty(value.uninstallPlan, 'authorityHash', {
+        value: `sha256:${'f'.repeat(64)}`,
+      }),
+      (value) => {
+        const finalInstallAction = value.installJournal.actions.at(-1);
+        if (!finalInstallAction?.locator || !('convergenceHash' in finalInstallAction.locator)) {
+          throw new TypeError('install convergence fixture missing');
+        }
+        Object.defineProperty(finalInstallAction.locator, 'convergenceHash', {
+          value: `sha256:${'f'.repeat(64)}`,
+        });
+      },
+      (value) => {
+        const firstAction = value.actions[0];
+        if (!firstAction) throw new TypeError('uninstall action fixture missing');
+        Object.defineProperty(firstAction.record, 'extra', { value: true, enumerable: true });
+      },
+      (value) => Object.defineProperty(value, 'cloudflareAccessToken', {
+        value: 'must-never-persist',
+        enumerable: true,
+      }),
     ];
     for (const mutate of mutations) {
-      const candidate = structuredClone(journal) as any;
+      const candidate = structuredClone(journal);
       mutate(candidate);
       await expect(requireUninstallJournal(candidate)).rejects.toMatchObject({ code: 'session_invalid' });
     }
@@ -2786,7 +2983,7 @@ describe('durable uninstall journal authority and lease boundary', () => {
     await expect(requireUninstallJournal(nullPrototype)).rejects.toMatchObject({ code: 'session_invalid' });
 
     let getterReads = 0;
-    const accessor = structuredClone(journal) as unknown as Record<string, unknown>;
+    const accessor = structuredClone(journal);
     Object.defineProperty(accessor, 'bindingHash', {
       enumerable: true,
       get() {
@@ -2797,19 +2994,21 @@ describe('durable uninstall journal authority and lease boundary', () => {
     await expect(requireUninstallJournal(accessor)).rejects.toMatchObject({ code: 'session_invalid' });
     expect(getterReads).toBe(0);
 
-    const symbol = structuredClone(journal) as unknown as Record<PropertyKey, unknown>;
-    symbol[Symbol('hidden')] = true;
+    const symbol = structuredClone(journal);
+    Object.defineProperty(symbol, Symbol('hidden'), { value: true, enumerable: true });
     await expect(requireUninstallJournal(symbol)).rejects.toMatchObject({ code: 'session_invalid' });
 
-    const sparse = structuredClone(journal) as unknown as { actions: unknown[] };
-    sparse.actions.length += 1;
+    const sparse = structuredClone(journal);
+    Object.defineProperty(sparse.actions, 'length', { value: sparse.actions.length + 1 });
     await expect(requireUninstallJournal(sparse)).rejects.toMatchObject({ code: 'session_invalid' });
 
-    const credential = structuredClone(journal) as unknown as { actions: Array<Record<string, unknown>> };
-    credential.actions[0].record = {
-      ...(credential.actions[0].record as Record<string, unknown>),
-      nested: { cloudflareAccessToken: 'must-never-be-read-or-stored' },
-    };
+    const credential = structuredClone(journal);
+    const firstCredentialAction = credential.actions[0];
+    if (!firstCredentialAction) throw new TypeError('uninstall action fixture missing');
+    Object.defineProperty(firstCredentialAction.record, 'nested', {
+      value: { cloudflareAccessToken: 'must-never-be-read-or-stored' },
+      enumerable: true,
+    });
     await expect(requireUninstallJournal(credential)).rejects.toMatchObject({ code: 'session_invalid' });
   });
 
@@ -2856,17 +3055,23 @@ describe('durable uninstall journal authority and lease boundary', () => {
     expect(expired.lease).toBeNull();
     await expect(requireUninstallJournal(structuredClone(expired))).resolves.toEqual(expired);
 
-    const authorityRewind = structuredClone(expired) as any;
-    authorityRewind.approvalHistory[1].plan = await buildStaticUninstallPlan(
+    const authorityRewind = structuredClone(expired);
+    const rewoundApproval = authorityRewind.approvalHistory[1];
+    if (!rewoundApproval) throw new TypeError('recovery approval fixture missing');
+    Object.defineProperty(rewoundApproval, 'plan', { value: await buildStaticUninstallPlan(
       fixture.installJournal,
       fixture.uninstallPlan.createdAt,
       renewed.expiresAt,
-    );
-    authorityRewind.approvalHistory[1].approvedAt = fixture.uninstallPlan.createdAt;
+    ) });
+    Object.defineProperty(rewoundApproval, 'approvedAt', {
+      value: fixture.uninstallPlan.createdAt,
+    });
     await expect(requireUninstallJournal(authorityRewind)).rejects.toMatchObject({ code: 'session_invalid' });
 
-    const reorderedLeases = structuredClone(expired) as any;
-    reorderedLeases.leaseAttemptIds.reverse();
+    const reorderedLeases = structuredClone(expired);
+    Object.defineProperty(reorderedLeases, 'leaseAttemptIds', {
+      value: [...reorderedLeases.leaseAttemptIds].reverse(),
+    });
     await expect(requireUninstallJournal(reorderedLeases)).rejects.toMatchObject({ code: 'session_invalid' });
   });
 
@@ -2910,14 +3115,14 @@ describe('durable uninstall journal authority and lease boundary', () => {
         attemptId: UNINSTALL_ATTEMPT_ID,
         now: fixture.now + 3,
       });
-    expect(journal.actions[0].preparedAt).toBe(fixture.now + 3);
+    expect(requiredFixture(journal.actions.at(0), 'uninstall preflight action').preparedAt).toBe(fixture.now + 3);
     expect(discardPreflightOnlyUninstallJournal(journal, {
       expectedRevision: journal.revision,
       attemptId: UNINSTALL_ATTEMPT_ID,
       now: fixture.now + 4,
     })).toBeNull();
 
-    const stale = structuredClone(journal) as UninstallJournal;
+    const stale = structuredClone(journal);
     const presence = {
       kind: 'admin_state_namespace_presence', accountId: ACCOUNT_ID, workerName, workerId: WORKER_ID,
       uninstallCycleId: UNINSTALL_CYCLE_ID, namespaceId: NAMESPACE_ID, namespaceName: 'namespace',
@@ -2972,11 +3177,7 @@ describe('durable uninstall journal authority and lease boundary', () => {
     state.storage.values.set('deploy-session-v1', structuredClone(storedInstall));
     state.storage.values.set('install-journal-v1', structuredClone(installJournal));
     let serverNow = installJournal.updatedAt + 1;
-    const object = new GatewayDeploySession(
-      state as unknown as DurableObjectState,
-      undefined,
-      () => serverNow,
-    );
+    const object = new GatewayDeploySession(state, undefined, () => serverNow);
     const releasePin = {
       verification: 'ed25519' as const,
       keyId: verifiedRelease.keyId,
@@ -2990,7 +3191,10 @@ describe('durable uninstall journal authority and lease boundary', () => {
       now: serverNow,
     }));
     expect(planResponse.status).toBe(200);
-    const uninstallPlan = (await planResponse.json() as any).uninstall.plan as StaticUninstallPlan;
+    const planBody = await parseResponseObject(planResponse);
+    const uninstallPlan = await parseStaticUninstallPlan(
+      requireResponseObject(planBody, 'uninstall').plan,
+    );
     expect(uninstallPlan.installationId).toBe(installJournal.installationId);
     expect(state.storage.values.get('deploy-session-v1')).toEqual(storedInstall);
 
@@ -3019,7 +3223,7 @@ describe('durable uninstall journal authority and lease boundary', () => {
       now: serverNow,
     }));
     expect(wrongPurpose.status).toBe(400);
-    expect(await wrongPurpose.json()).toEqual({ error: { code: 'oauth_state_invalid' } });
+    expect(await wrongPurpose.json()).toEqual({ error: { code: 'bad_request' } });
 
     const consumed = await object.fetch(internalRequest('/uninstall/consume', 'POST', {
       purpose: 'uninstall',
@@ -3055,9 +3259,11 @@ describe('durable uninstall journal authority and lease boundary', () => {
       },
     }));
     expect(initialized.status).toBe(201);
-    const publicBody = await (await object.fetch(internalRequest('/public', 'GET'))).json() as any;
-    expect(publicBody.session.result).toEqual(storedInstall.result);
-    expect(publicBody.uninstall).toMatchObject({ status: 'uninstalling', plan: {
+    const publicBody = await parseResponseObject(
+      await object.fetch(internalRequest('/public', 'GET')),
+    );
+    expect(requireResponseObject(publicBody, 'session').result).toEqual(storedInstall.result);
+    expect(requireResponseObject(publicBody, 'uninstall')).toMatchObject({ status: 'uninstalling', plan: {
       planId: uninstallPlan.planId,
       planHash: uninstallPlan.planHash,
     } });
@@ -3071,15 +3277,13 @@ describe('durable uninstall journal authority and lease boundary', () => {
       now: serverNow,
     }));
     expect(tMinusOne.status).toBe(200);
-    const renewedUninstall = (await tMinusOne.clone().json() as any).uninstall;
+    const renewedBody = await parseResponseObject(tMinusOne.clone());
+    const renewedUninstall = requireResponseObject(renewedBody, 'uninstall');
+    const renewedPlan = await parseStaticUninstallPlan(renewedUninstall.plan);
     const sessionId = 'S'.repeat(43);
-    const namespace = {
-      idFromName: (name: string) => ({ name, toString: () => name } as unknown as DurableObjectId),
-      get: (id: DurableObjectId) => {
-        if ((id as unknown as { name: string }).name !== sessionId) throw new Error('wrong session');
-        return { fetch: (request: Request) => object.fetch(request) } as unknown as DurableObjectStub;
-      },
-    } as unknown as DurableObjectNamespace;
+    const namespace = new ForwardingDeploySessionNamespace(sessionId, {
+      fetch: (request) => object.fetch(request),
+    });
     const providerCalls: string[] = [];
     const transport: FetchTransport = async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
@@ -3115,7 +3319,7 @@ describe('durable uninstall journal authority and lease boundary', () => {
       execute: async (input) => {
         executorCalled = true;
         expect(input.installJournal).toEqual(installJournal);
-        expect(input.uninstallPlan).toEqual(renewedUninstall.plan);
+        expect(input.uninstallPlan).toEqual(renewedPlan);
         expect(input.target).toEqual(target);
         expect(input.accessToken).toBe('uninstall-access-token-never-persisted');
         expect(input.approvedAt).toBe(serverNow);
@@ -3138,38 +3342,44 @@ describe('durable uninstall journal authority and lease boundary', () => {
       'x-csrf-token': 'c'.repeat(43),
       cookie: sessionPair,
     };
-    const apiPlan = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/uninstall/plan`, {
+    const apiPlan = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/uninstall/plan`, {
       method: 'POST',
       headers: mutationHeaders,
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(apiPlan.status).toBe(200);
     expect(await apiPlan.json()).toMatchObject({
       capabilities: { uninstall: true },
       removal: {
         status: 'planned',
         plan: {
-          planId: renewedUninstall.plan.planId,
-          planHash: renewedUninstall.plan.planHash,
+          planId: renewedPlan.planId,
+          planHash: renewedPlan.planHash,
           writesPerformed: false,
         },
       },
     });
-    const started = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/uninstall`, {
+    const started = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/uninstall`, {
       method: 'POST',
       headers: mutationHeaders,
       body: JSON.stringify({
-        planId: renewedUninstall.plan.planId,
-        planHash: renewedUninstall.plan.planHash,
+        planId: renewedPlan.planId,
+        planHash: renewedPlan.planHash,
       }),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(started.status).toBe(200);
-    const authorizationUrl = new URL((await started.json() as { authorizationUrl: string }).authorizationUrl);
-    const oauthPair = (started.headers.get('set-cookie') ?? '').split(';', 1)[0];
+    const authorizationUrl = new URL(requireResponseString(
+      await parseResponseObject(started),
+      'authorizationUrl',
+    ));
+    const oauthPair = requiredFixture(
+      (started.headers.get('set-cookie') ?? '').split(';', 1).at(0),
+      'OAuth cookie pair',
+    );
     expect(oauthPair.startsWith(`${OAUTH_COOKIE}=`)).toBe(true);
-    const callback = await worker.fetch!(new Request(
+    const callback = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${authorizationUrl.searchParams.get('state')}`,
       { headers: { cookie: `${sessionPair}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
+    ), workerEnv, undefined);
     expect(callback.status).toBe(303);
     expect(await callback.text()).toBe('');
     expect(executorCalled).toBe(true);
@@ -3180,15 +3390,17 @@ describe('durable uninstall journal authority and lease boundary', () => {
       /uninstall-(?:access|refresh)-token|authorization-code-value/iu,
     );
     const providerCallCount = providerCalls.length;
-    const replay = await worker.fetch!(new Request(
+    const replay = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${authorizationUrl.searchParams.get('state')}`,
       { headers: { cookie: `${sessionPair}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
+    ), workerEnv, undefined);
     expect(replay.status).toBe(400);
     expect(await replay.json()).toEqual({ code: 'oauth_state_invalid' });
     expect(providerCalls).toHaveLength(providerCallCount);
-    const failedPublic = await (await object.fetch(internalRequest('/public', 'GET'))).json() as any;
-    expect(failedPublic.uninstall.result).toEqual({
+    const failedPublic = await parseResponseObject(
+      await object.fetch(internalRequest('/public', 'GET')),
+    );
+    expect(requireResponseObject(failedPublic, 'uninstall').result).toEqual({
       code: 'uninstall_mutations_disabled',
       completedAt: serverNow,
     });
@@ -3201,5 +3413,5 @@ describe('durable uninstall journal authority and lease boundary', () => {
     }));
     expect(atBoundary.status).toBe(410);
     expect(await atBoundary.json()).toEqual({ error: { code: 'session_expired' } });
-  });
+  }, 30_000);
 });

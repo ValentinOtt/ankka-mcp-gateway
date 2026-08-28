@@ -1,3 +1,12 @@
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  boundaryValueSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+} from './boundary';
+import { canonicalJson } from './canonical-json';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 import {
   managementAccessApplicationName,
@@ -29,6 +38,8 @@ import {
   type WorkerDeletionRecoveryProof,
 } from './cloudflare-uninstall-worker-lifecycle';
 import type { AuthorizedTarget } from './cloudflare-target';
+import { sha256Hex as sha256 } from './crypto';
+import { deepFreezePlainData as deepFreeze } from './plain-data';
 
 const ACCOUNT_ID = /^[a-f0-9]{32}$/u;
 const PROVIDER_ID = /^(?:[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})$/u;
@@ -40,7 +51,6 @@ const WORKER_CORRELATION = /^ankka-worker-sha256:[a-f0-9]{64}$/u;
 const PLAN_HASH = /^sha256:[a-f0-9]{64}$/u;
 const EMAIL = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u;
 const DNS_LABEL = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/u;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 const MAX_RESPONSE_BYTES = 128 * 1024;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const PAGE_SIZE = 100;
@@ -51,6 +61,106 @@ const PREFLIGHT_ATTESTATION_TTL_MS = 60_000;
 const ACCESS_SESSION_DURATION = '24h';
 const MANAGED_WORKER_TAG = 'ankka-mcp-gateway';
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
+
+const providerIdentifierSchema = v.pipe(v.string(), v.regex(PROVIDER_ID));
+const workerCustomDomainIdSchema = v.pipe(v.string(), v.regex(
+  /^(?:(?:[a-f0-9]{32})|(?:[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})|(?:[a-f0-9]{40}))$/u,
+));
+const rfc3339Schema = v.pipe(
+  v.string(),
+  v.minLength(20),
+  v.maxLength(40),
+  v.regex(RFC3339),
+  v.check((value) => Number.isFinite(Date.parse(value))),
+);
+const emptyBoundaryArraySchema = v.pipe(v.array(boundaryValueSchema), v.length(0));
+const optionalFalseSchema = v.optional(v.literal(false));
+const accessApplicationObservationSchema = v.looseObject({
+  id: providerIdentifierSchema,
+  aud: v.pipe(v.string(), v.regex(ACCESS_AUD)),
+  name: v.string(),
+  type: v.literal('self_hosted'),
+  domain: v.string(),
+  session_duration: v.literal(ACCESS_SESSION_DURATION),
+  app_launcher_visible: v.literal(false),
+  auto_redirect_to_identity: v.literal(false),
+  allow_authenticate_via_warp: v.literal(false),
+  allowed_idps: v.array(providerIdentifierSchema),
+});
+const accessPolicyObservationSchema = v.looseObject({
+  id: providerIdentifierSchema,
+  name: v.string(),
+  decision: v.literal('allow'),
+  precedence: v.literal(1),
+  approval_required: optionalFalseSchema,
+  isolation_required: optionalFalseSchema,
+  purpose_justification_required: optionalFalseSchema,
+  include: v.array(v.strictObject({ email: v.strictObject({ email: v.string() }) })),
+  exclude: emptyBoundaryArraySchema,
+  require: emptyBoundaryArraySchema,
+});
+const customDomainObservationSchema = v.looseObject({
+  id: workerCustomDomainIdSchema,
+  cert_id: providerIdentifierSchema,
+  hostname: v.string(),
+  service: v.string(),
+  zone_id: v.string(),
+  zone_name: v.string(),
+  environment: v.optional(v.literal('production')),
+});
+const disabledObservabilityDetailSchema = v.looseObject({
+  enabled: optionalFalseSchema,
+  destinations: v.optional(emptyBoundaryArraySchema),
+});
+const disabledWorkerObservabilitySchema = v.strictObject({
+  enabled: v.literal(false),
+  head_sampling_rate: v.optional(boundaryValueSchema),
+  redact_query_string: optionalFalseSchema,
+  logs: v.optional(disabledObservabilityDetailSchema),
+  traces: v.optional(disabledObservabilityDetailSchema),
+});
+const workerReferenceSchema = v.strictObject({
+  dispatch_namespace_outbounds: emptyBoundaryArraySchema,
+  domains: v.pipe(v.array(v.strictObject({
+    hostname: v.string(),
+    id: workerCustomDomainIdSchema,
+    zone_id: v.string(),
+    zone_name: v.string(),
+  })), v.length(1)),
+  durable_objects: v.pipe(v.array(v.strictObject({
+    worker_id: providerIdentifierSchema,
+    worker_name: v.string(),
+    namespace_id: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+    namespace_name: v.string(),
+  })), v.length(1)),
+  queues: emptyBoundaryArraySchema,
+  workers: emptyBoundaryArraySchema,
+});
+const workerObservationSchema = v.strictObject({
+  created_on: rfc3339Schema,
+  deployed_on: rfc3339Schema,
+  id: providerIdentifierSchema,
+  logpush: v.literal(false),
+  name: v.string(),
+  observability: disabledWorkerObservabilitySchema,
+  references: workerReferenceSchema,
+  subdomain: v.strictObject({ enabled: v.literal(false), previews_enabled: v.literal(false) }),
+  tags: v.array(v.string()),
+  tail_consumers: emptyBoundaryArraySchema,
+  updated_on: rfc3339Schema,
+});
+const routeObservationSchema = v.looseObject({
+  id: providerIdentifierSchema,
+  pattern: v.string(),
+  script: v.optional(v.nullable(v.string())),
+});
+const singlePageInfoSchema = v.strictObject({
+  count: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0))),
+  page: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0))),
+  per_page: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0))),
+  total_count: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0))),
+  total_pages: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0))),
+});
 
 export const HOSTED_UNINSTALL_MANAGEMENT_DELETE_ORDER = Object.freeze([
   'management_custom_domain_delete',
@@ -453,15 +563,15 @@ export interface HostedUninstallManagementLifecycleEvidence {
 
 interface ProviderResponse {
   readonly status: number;
-  readonly value: unknown;
+  readonly value: BoundaryValue;
 }
 
 interface ProviderEnvelope {
-  readonly errors: null | readonly unknown[];
-  readonly messages: null | readonly unknown[];
-  readonly result: unknown;
+  readonly errors: null | readonly BoundaryValue[];
+  readonly messages: null | readonly BoundaryValue[];
+  readonly result: BoundaryValue;
   readonly success: boolean;
-  readonly resultInfo?: unknown;
+  readonly resultInfo?: BoundaryValue;
 }
 
 interface ExactManagementDomainObservation {
@@ -490,28 +600,17 @@ function fail(
   throw new CloudflareUninstallManagementError(code, stage, outcome);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+function isRecord<Value>(value: Value): value is Value & BoundaryObject {
+  return v.is(boundaryObjectSchema, value);
 }
 
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+function exactKeys(value: BoundaryObject, keys: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) =>
-      `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('canonical_json');
-}
-
-function canonicalEqual(left: unknown, right: unknown): boolean {
+function canonicalEqual<Left, Right>(left: Left, right: Right): boolean {
   try {
     return canonicalJson(left) === canonicalJson(right);
   } catch {
@@ -519,49 +618,292 @@ function canonicalEqual(left: unknown, right: unknown): boolean {
   }
 }
 
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
-    for (const child of Object.values(value)) deepFreeze(child);
-    Object.freeze(value);
-  }
-  return value;
-}
+const providerIdSchema = v.pipe(v.string(), v.regex(PROVIDER_ID));
+const customDomainIdSchema = v.pipe(v.string(), v.regex(/^(?:(?:[a-f0-9]{32})|(?:[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})|(?:[a-f0-9]{40}))$/u));
+const providerEnvelopeSchema = v.strictObject({
+  errors: v.union([v.array(boundaryValueSchema), v.null()]),
+  messages: v.union([v.array(boundaryValueSchema), v.null()]),
+  result: boundaryValueSchema,
+  success: v.boolean(),
+  result_info: v.optional(boundaryValueSchema),
+});
+const providerErrorListSchema = v.pipe(v.array(v.object({
+  code: v.pipe(v.number(), v.safeInteger()),
+  message: v.pipe(v.string(), v.minLength(1), v.maxLength(2_048)),
+})), v.minLength(1), v.maxLength(16));
+const listPageInfoSchema = v.strictObject({
+  count: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(PAGE_SIZE)),
+  page: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+  per_page: v.pipe(v.number(), v.safeInteger()),
+  total_count: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+  total_pages: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0))),
+});
+const providerListItemSchema = v.pipe(
+  boundaryObjectSchema,
+  v.check((item) => providerId(item.id)),
+);
+const hostedUninstallContextSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  installJournal: boundaryValueSchema,
+  approvalHistory: v.pipe(v.array(v.strictObject({
+    attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+    uninstallPlan: boundaryValueSchema,
+    authorizedTarget: boundaryValueSchema,
+  })), v.minLength(1), v.maxLength(MAX_UNINSTALL_APPROVALS)),
+  activeAttemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+});
+const uninstallManagementCallSchema = v.strictObject({
+  accessToken: v.pipe(v.string(), v.regex(TOKEN)),
+  transport: v.function(),
+  timeoutMs: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(100), v.maxValue(60_000))),
+});
+const evidenceHashSchema = v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u));
+const deleteActionSchema = v.picklist(HOSTED_UNINSTALL_MANAGEMENT_DELETE_ORDER);
+const workerListObservationSchema = v.looseObject({
+  id: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  name: v.pipe(v.string(), v.regex(WORKER_NAME)),
+});
+const workersDevObservationSchema = v.strictObject({
+  enabled: v.literal(false),
+  previews_enabled: v.literal(false),
+});
+const preflightResultSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('ready'),
+  uninstallPlanId: v.string(),
+  uninstallPlanHash: v.string(),
+  uninstallAuthorityHash: v.string(),
+  installBindingHash: v.string(),
+  installConvergenceHash: v.string(),
+  attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  ownershipMarker: v.string(),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  zoneId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  workerId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  namespaceId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  domainId: customDomainIdSchema,
+  domainCertificateId: providerIdSchema,
+  applicationId: providerIdSchema,
+  policyId: providerIdSchema,
+  checkedAt: v.pipe(v.number(), v.safeInteger()),
+  expiresAt: v.pipe(v.number(), v.safeInteger()),
+  attestationSha256: evidenceHashSchema,
+});
+const deleteLocatorSchema = v.union([
+  v.strictObject({ domainId: customDomainIdSchema }),
+  v.strictObject({ applicationId: providerIdSchema, policyId: providerIdSchema }),
+  v.strictObject({ applicationId: providerIdSchema, aud: v.pipe(v.string(), v.regex(ACCESS_AUD)) }),
+]);
+const absenceEvidenceSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('absent'),
+  action: deleteActionSchema,
+  uninstallPlanId: v.string(),
+  uninstallPlanHash: v.string(),
+  uninstallAuthorityHash: v.string(),
+  installBindingHash: v.string(),
+  installConvergenceHash: v.string(),
+  attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  ownershipMarker: v.string(),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  locator: deleteLocatorSchema,
+  proof: v.literal('id_get_404_and_complete_list_absence'),
+  evidenceSha256: evidenceHashSchema,
+});
+const providerOwnershipSchema = v.variant('kind', [
+  v.strictObject({
+    kind: v.literal('management_custom_domain'),
+    domainId: customDomainIdSchema,
+    certificateId: providerIdSchema,
+    hostname: v.string(),
+    workerName: v.string(),
+    zoneId: v.string(),
+    zoneName: v.string(),
+  }),
+  v.strictObject({
+    kind: v.literal('management_admin_policy'),
+    applicationId: providerIdSchema,
+    policyId: providerIdSchema,
+    name: v.string(),
+    adminEmails: v.array(v.string()),
+  }),
+  v.strictObject({
+    kind: v.literal('management_access_application'),
+    applicationId: providerIdSchema,
+    aud: v.pipe(v.string(), v.regex(ACCESS_AUD)),
+    name: v.string(),
+    hostname: v.string(),
+    allowedIdentityProviderIds: v.array(providerIdSchema),
+  }),
+]);
+const deletePrerequisitesSchema = v.variant('action', [
+  v.strictObject({
+    schemaVersion: v.literal(1),
+    action: v.literal('management_custom_domain_delete'),
+    preflight: preflightResultSchema,
+  }),
+  v.strictObject({
+    schemaVersion: v.literal(1),
+    action: v.literal('management_admin_policy_delete'),
+    domainAbsence: absenceEvidenceSchema,
+  }),
+  v.strictObject({
+    schemaVersion: v.literal(1),
+    action: v.literal('management_access_application_delete'),
+    domainAbsence: absenceEvidenceSchema,
+    policyAbsence: absenceEvidenceSchema,
+  }),
+]);
+const deleteIntentBaseEntries = {
+  schemaVersion: v.literal(1),
+  uninstallPlanId: v.string(),
+  uninstallPlanHash: v.string(),
+  uninstallAuthorityHash: v.string(),
+  installBindingHash: v.string(),
+  installConvergenceHash: v.string(),
+  attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  ownershipMarker: v.string(),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  zoneId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  managementHostname: v.string(),
+  workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
+  prerequisiteCommitments: v.array(evidenceHashSchema),
+};
+const deleteIntentSchema = v.variant('kind', [
+  v.strictObject({
+    ...deleteIntentBaseEntries,
+    kind: v.literal('management_custom_domain_delete'),
+    ordinal: v.literal(0),
+    locator: v.strictObject({ domainId: customDomainIdSchema }),
+  }),
+  v.strictObject({
+    ...deleteIntentBaseEntries,
+    kind: v.literal('management_admin_policy_delete'),
+    ordinal: v.literal(1),
+    locator: v.strictObject({ applicationId: providerIdSchema, policyId: providerIdSchema }),
+  }),
+  v.strictObject({
+    ...deleteIntentBaseEntries,
+    kind: v.literal('management_access_application_delete'),
+    ordinal: v.literal(2),
+    locator: v.strictObject({ applicationId: providerIdSchema, aud: v.pipe(v.string(), v.regex(ACCESS_AUD)) }),
+  }),
+]);
+const deleteArmSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('management_delete_arm'),
+  action: deleteActionSchema,
+  attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  armedAt: v.pipe(v.number(), v.safeInteger()),
+  intentSha256: evidenceHashSchema,
+});
+const deleteSubmissionSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('submitted'),
+  action: deleteActionSchema,
+  attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  intentSha256: evidenceHashSchema,
+  locator: deleteLocatorSchema,
+});
+const stillPresentEvidenceSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('still_present'),
+  outcome: v.literal('not_applied'),
+  action: deleteActionSchema,
+  uninstallPlanId: v.string(),
+  uninstallPlanHash: v.string(),
+  uninstallAuthorityHash: v.string(),
+  installBindingHash: v.string(),
+  installConvergenceHash: v.string(),
+  attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  deleteAttemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  ownershipMarker: v.string(),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  zoneId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  intentSha256: evidenceHashSchema,
+  locator: deleteLocatorSchema,
+  providerOwnership: providerOwnershipSchema,
+  providerOwnershipSha256: evidenceHashSchema,
+  proof: v.literal('id_get_200_and_complete_list_exact_match'),
+  evidenceSha256: evidenceHashSchema,
+});
+const finalNamespaceItemSchema = v.strictObject({
+  id: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  class: v.pipe(v.string(), v.minLength(1), v.maxLength(128)),
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(256)),
+  script: v.pipe(v.string(), v.minLength(1), v.maxLength(128)),
+  use_sqlite: v.boolean(),
+});
+const namespaceSnapshotSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('admin_state_namespace_absence_snapshot'),
+  observation: v.union([v.literal(1), v.literal(2)]),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  workerName: v.string(),
+  namespaceId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  uninstallCycleId: v.pipe(v.string(), v.regex(/^uninstall-[a-f0-9]{24}$/u)),
+  accountNamespaceCount: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(MAX_ITEMS)),
+  snapshotSha256: evidenceHashSchema,
+});
+const noManagedResidueEvidenceShellSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('hosted_uninstall_no_managed_residue_evidence'),
+  deletionEvidence: v.pipe(v.array(absenceEvidenceSchema), v.length(3)),
+  workerDeletion: boundaryValueSchema,
+  namespaceRetirement: boundaryValueSchema,
+  namespaceSnapshots: v.pipe(v.array(namespaceSnapshotSchema), v.length(2)),
+  evidenceSha256: evidenceHashSchema,
+});
+const noManagedResidueResultShellSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('no_ankka_managed_residue'),
+  uninstallPlanId: v.string(),
+  uninstallPlanHash: v.string(),
+  uninstallAuthorityHash: v.string(),
+  installBindingHash: v.string(),
+  installConvergenceHash: v.string(),
+  attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  ownershipMarker: v.string(),
+  managementHostname: v.string(),
+  dnsAbsenceObservations: v.literal(2),
+  advancedCertificate: v.literal('provider_retained_out_of_scope_not_observable_or_deleted'),
+  uninstallCycleId: v.pipe(v.string(), v.regex(/^uninstall-[a-f0-9]{24}$/u)),
+  deletionEvidenceSha256: evidenceHashSchema,
+  workerDeletionProofSha256: evidenceHashSchema,
+  namespaceRetirementProofSha256: evidenceHashSchema,
+  namespaceSnapshotSha256: evidenceHashSchema,
+  evidence: noManagedResidueEvidenceShellSchema,
+  proofSha256: evidenceHashSchema,
+});
 
-async function sha256(value: string): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
-  return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function providerId(value: unknown): value is string {
-  return typeof value === 'string' && PROVIDER_ID.test(value);
+function providerId<Input>(value: Input): value is Input & string {
+  return v.is(providerIdSchema, value);
 }
 
 /** Worker custom-domain ids are 40 lowercase hex characters (live 2026-08-23). */
-function customDomainId(value: unknown): value is string {
-  return typeof value === 'string' && (PROVIDER_ID.test(value) || /^[a-f0-9]{40}$/u.test(value));
+function customDomainId<Input>(value: Input): value is Input & string {
+  return v.is(customDomainIdSchema, value);
 }
 
-function safeText(value: unknown, maximum: number): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= maximum && !CONTROL_CHARACTER.test(value);
-}
-
-function validHostname(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length < 3 || value.length > 253 || value !== value.toLowerCase()) return false;
+function validHostname<Input>(value: Input): value is Input & string {
+  if (!v.is(v.string(), value) || value.length < 3 || value.length > 253 || value !== value.toLowerCase()) return false;
   const labels = value.split('.');
   return labels.length >= 2 && labels.every((label) => DNS_LABEL.test(label));
 }
 
-function canonicalProviderIds(value: unknown): readonly string[] | null {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 64 || !value.every(providerId)) return null;
-  const sorted = [...value] as string[];
+function canonicalProviderIds<Input>(value: Input): readonly string[] | null {
+  const result = v.safeParse(v.pipe(v.array(providerIdSchema), v.minLength(1), v.maxLength(64)), value);
+  if (!result.success) return null;
+  const sorted = [...result.output];
   sorted.sort();
   if (sorted.some((id, index) => index > 0 && id === sorted[index - 1])) return null;
   return Object.freeze(sorted);
 }
 
-function canonicalEmails(value: unknown): readonly string[] | null {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 64) return null;
-  const sorted = value.map((entry) => typeof entry === 'string' ? entry.trim().toLowerCase() : '');
+function canonicalEmails<Input>(value: Input): readonly string[] | null {
+  const result = v.safeParse(v.pipe(v.array(v.string()), v.minLength(1), v.maxLength(64)), value);
+  if (!result.success) return null;
+  const sorted = result.output.map((entry) => entry.trim().toLowerCase());
   if (sorted.some((email) => email.length > 254 || !EMAIL.test(email))) return null;
   sorted.sort();
   if (sorted.some((email, index) => index > 0 && email === sorted[index - 1])) return null;
@@ -577,24 +919,20 @@ async function validateContext(
   input: HostedUninstallManagementContext,
   stage: CloudflareUninstallManagementStage,
 ): Promise<Projection> {
-  if (!isRecord(input) || !exactKeys(input, [
-    'activeAttemptId', 'approvalHistory', 'installJournal', 'schemaVersion',
-  ]) || input.schemaVersion !== 1 || !Array.isArray(input.approvalHistory) ||
-    input.approvalHistory.length < 1 || input.approvalHistory.length > MAX_UNINSTALL_APPROVALS ||
-    typeof input.activeAttemptId !== 'string' || !ATTEMPT_ID.test(input.activeAttemptId)) {
-    fail('invalid_input', stage, 'not_sent');
-  }
+  const contextResult = v.safeParse(hostedUninstallContextSchema, input);
+  if (!contextResult.success) fail('invalid_input', stage, 'not_sent');
+  const validated = contextResult.output;
 
   let journal: InstallJournal;
   let final: Awaited<ReturnType<typeof prepareFinalConvergenceRecordAndLocator>>;
   try {
-    journal = await requireInstallJournal(input.installJournal);
+    journal = await requireInstallJournal(validated.installJournal);
     final = await prepareFinalConvergenceRecordAndLocator(journal);
   } catch {
     return fail('invalid_input', stage, 'not_sent');
   }
   const finalAction = journal.actions[journal.actions.length - 1];
-  if (!canonicalEqual(journal, input.installJournal) || !isCompleteInstallJournal(journal) ||
+  if (!canonicalEqual(journal, validated.installJournal) || !isCompleteInstallJournal(journal) ||
     finalAction?.name !== 'final_convergence' ||
     finalAction.phase !== 'verified' || !canonicalEqual(finalAction.record, final.record) ||
     !canonicalEqual(finalAction.locator, final.locator)) {
@@ -605,10 +943,8 @@ async function validateContext(
   const seenAttemptIds = new Set<string>();
   let baselinePlan: StaticUninstallPlan | null = null;
   let previousPlan: StaticUninstallPlan | null = null;
-  for (const raw of input.approvalHistory) {
-    if (!isRecord(raw) || !exactKeys(raw, ['attemptId', 'authorizedTarget', 'uninstallPlan']) ||
-      typeof raw.attemptId !== 'string' || !ATTEMPT_ID.test(raw.attemptId) ||
-      seenAttemptIds.has(raw.attemptId) ||
+  for (const raw of validated.approvalHistory) {
+    if (seenAttemptIds.has(raw.attemptId) ||
       journal.approvalHistory.some((entry) => entry.attemptId === raw.attemptId) ||
       journal.leaseAttemptIds.includes(raw.attemptId) ||
       !canonicalEqual(raw.authorizedTarget, journal.target)) fail('invalid_input', stage, 'not_sent');
@@ -640,7 +976,7 @@ async function validateContext(
   }
   const activeAuthority = approvedAuthorities[approvedAuthorities.length - 1];
   const activePlan = previousPlan;
-  if (!activeAuthority || !activePlan || input.activeAttemptId !== activeAuthority.attemptId) {
+  if (!activeAuthority || !activePlan || validated.activeAttemptId !== activeAuthority.attemptId) {
     fail('invalid_input', stage, 'not_sent');
   }
 
@@ -742,16 +1078,13 @@ function prepareCall(
   input: CloudflareUninstallManagementCall,
   stage: CloudflareUninstallManagementStage,
 ): PreparedCall {
-  if (!isRecord(input) || !exactKeys(input, input.timeoutMs === undefined
-    ? ['accessToken', 'transport']
-    : ['accessToken', 'transport', 'timeoutMs']) ||
-    typeof input.accessToken !== 'string' || !TOKEN.test(input.accessToken) ||
-    typeof input.transport !== 'function') fail('invalid_input', stage, 'not_sent');
-  const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) {
-    fail('invalid_input', stage, 'not_sent');
-  }
-  return { accessToken: input.accessToken, transport: input.transport, timeoutMs };
+  const result = v.safeParse(uninstallManagementCallSchema, input);
+  if (!result.success) fail('invalid_input', stage, 'not_sent');
+  return {
+    accessToken: result.output.accessToken,
+    transport: input.transport,
+    timeoutMs: result.output.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  };
 }
 
 function authHeaders(token: string): Headers {
@@ -766,7 +1099,7 @@ function zoneUrl(zoneId: string, path: string): URL {
   return new URL(`/client/v4/zones/${zoneId}${path}`, CLOUDFLARE_API_ORIGIN);
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+async function readBoundedJson(response: Response): Promise<BoundaryValue> {
   const length = response.headers.get('content-length');
   if (length !== null) {
     const parsed = Number(length);
@@ -796,7 +1129,7 @@ async function readBoundedJson(response: Response): Promise<unknown> {
     offset += chunk.byteLength;
   }
   try {
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
+    return v.parse(boundaryValueSchema, JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
   } catch {
     throw new TypeError('provider_response');
   }
@@ -842,31 +1175,26 @@ async function request(
   }
 }
 
-function isEmpty(value: unknown): value is null | readonly [] {
+function isEmpty(value: BoundaryValue): value is null | readonly [] {
   return value === null || (Array.isArray(value) && value.length === 0);
 }
 
-function providerErrors(value: unknown): boolean {
-  return Array.isArray(value) && value.length > 0 && value.length <= 16 && value.every((entry) =>
-    isRecord(entry) && typeof entry.code === 'number' && Number.isSafeInteger(entry.code) &&
-    typeof entry.message === 'string' && entry.message.length > 0 && entry.message.length <= 2_048);
+function providerErrors(value: BoundaryValue): boolean {
+  return v.safeParse(providerErrorListSchema, value).success;
 }
 
-function parseEnvelope(value: unknown): ProviderEnvelope | null {
-  if (!isRecord(value)) return null;
-  const allowed = new Set(['errors', 'messages', 'result', 'result_info', 'success']);
-  if (Object.keys(value).some((key) => !allowed.has(key)) ||
-    !Object.hasOwn(value, 'errors') || !Object.hasOwn(value, 'messages') ||
-    !Object.hasOwn(value, 'result') || !Object.hasOwn(value, 'success') ||
-    typeof value.success !== 'boolean' || !(value.errors === null || Array.isArray(value.errors)) ||
-    !(value.messages === null || Array.isArray(value.messages))) return null;
-  return {
-    errors: value.errors,
-    messages: value.messages,
-    result: value.result,
-    success: value.success,
-    ...(Object.hasOwn(value, 'result_info') ? { resultInfo: value.result_info } : {}),
+function parseEnvelope<Input>(value: Input): ProviderEnvelope | null {
+  const result = v.safeParse(providerEnvelopeSchema, value);
+  if (!result.success) return null;
+  const base = {
+    errors: result.output.errors,
+    messages: result.output.messages,
+    result: result.output.result,
+    success: result.output.success,
   };
+  return result.output.result_info === undefined
+    ? base
+    : { ...base, resultInfo: result.output.result_info };
 }
 
 function success(response: ProviderResponse, stage: CloudflareUninstallManagementStage): ProviderEnvelope {
@@ -888,7 +1216,7 @@ function exactAbsent(response: ProviderResponse): boolean {
 }
 
 interface ListPage {
-  readonly values: readonly unknown[];
+  readonly values: readonly BoundaryObject[];
   readonly page: number;
   readonly perPage: number;
   readonly totalCount: number;
@@ -896,31 +1224,22 @@ interface ListPage {
 }
 
 function parseListPage(envelope: ProviderEnvelope, requestedPage: number): ListPage | null {
-  if (!Array.isArray(envelope.result) || !isRecord(envelope.resultInfo) ||
-    // Live (2026-08-23): the Workers list omits total_pages entirely; every
-    // other list carries it. When it is absent the page count is derived from
-    // the totals the endpoint does report, never assumed.
-    !exactKeys(envelope.resultInfo, Object.hasOwn(envelope.resultInfo, 'total_pages')
-      ? ['count', 'page', 'per_page', 'total_count', 'total_pages']
-      : ['count', 'page', 'per_page', 'total_count'])) return null;
-  const info = envelope.resultInfo;
+  const result = v.safeParse(v.array(providerListItemSchema), envelope.result);
+  const infoResult = v.safeParse(listPageInfoSchema, envelope.resultInfo);
+  if (!result.success || !infoResult.success) return null;
+  const info = infoResult.output;
   if (
-    typeof info.page !== 'number' || !Number.isSafeInteger(info.page) || info.page !== requestedPage ||
-    typeof info.per_page !== 'number' || !Number.isSafeInteger(info.per_page) || info.per_page !== PAGE_SIZE ||
-    typeof info.count !== 'number' || !Number.isSafeInteger(info.count) || info.count < 0 ||
-    info.count !== envelope.result.length || info.count > PAGE_SIZE ||
-    typeof info.total_count !== 'number' || !Number.isSafeInteger(info.total_count) || info.total_count < 0 ||
-    (info.total_pages !== undefined &&
-      (typeof info.total_pages !== 'number' || !Number.isSafeInteger(info.total_pages) || info.total_pages < 0))
+    info.page !== requestedPage || info.per_page !== PAGE_SIZE ||
+    info.count !== result.output.length
   ) return null;
   return {
-    values: envelope.result,
+    values: result.output,
     page: info.page,
     perPage: info.per_page,
     totalCount: info.total_count,
     totalPages: info.total_pages === undefined
       ? (info.total_count === 0 ? 0 : Math.ceil(info.total_count / PAGE_SIZE))
-      : info.total_pages as number,
+      : info.total_pages,
   };
 }
 
@@ -929,8 +1248,8 @@ async function collectList(
   stage: CloudflareUninstallManagementStage,
   urlForPage: (page: number) => URL,
   mode: ListPaginationMode,
-): Promise<readonly unknown[]> {
-  const values: unknown[] = [];
+): Promise<readonly BoundaryObject[]> {
+  const values: BoundaryObject[] = [];
   const seenIds = new Set<string>();
   let totalCount: number | null = null;
   let totalPages: number | null = null;
@@ -956,12 +1275,13 @@ async function collectList(
     }
 
     if (mode === 'unfiltered') {
-      const remaining = (totalCount as number) - values.length;
+      if (totalCount === null) fail('provider_unknown', stage, 'unknown');
+      const remaining = totalCount - values.length;
       const expectedCount = Math.max(0, Math.min(PAGE_SIZE, remaining));
       if (page.values.length !== expectedCount) fail('provider_unknown', stage, 'unknown');
     }
     for (const value of page.values) {
-      if (!isRecord(value) || !providerId(value.id) || seenIds.has(value.id)) {
+      if (!providerId(value.id) || seenIds.has(value.id)) {
         fail('provider_ambiguous', stage, 'unknown');
       }
       seenIds.add(value.id);
@@ -974,7 +1294,8 @@ async function collectList(
       if (page.values.length < PAGE_SIZE) return Object.freeze(values);
       continue;
     }
-    const lastPage = (totalPages as number) === 0 ? 1 : totalPages as number;
+    if (totalPages === null) fail('provider_unknown', stage, 'unknown');
+    const lastPage = totalPages === 0 ? 1 : totalPages;
     if (pageNumber === lastPage) {
       if (values.length !== totalCount) fail('provider_unknown', stage, 'unknown');
       return Object.freeze(values);
@@ -990,77 +1311,43 @@ function filteredListUrl(base: URL, filter: string, value: string, page: number)
   return base;
 }
 
-function exactApplication(value: unknown, expected: Projection): boolean {
-  if (!isRecord(value) || value.id !== expected.applicationId || value.aud !== expected.applicationAud ||
-    value.name !== expected.applicationName || value.type !== 'self_hosted' ||
-    value.domain !== expected.managementHostname || value.session_duration !== ACCESS_SESSION_DURATION ||
-    value.app_launcher_visible !== false || value.auto_redirect_to_identity !== false ||
-    value.allow_authenticate_via_warp !== false || !Array.isArray(value.allowed_idps)) return false;
-  const ids = canonicalProviderIds(value.allowed_idps);
+function exactApplication(value: BoundaryValue, expected: Projection): boolean {
+  const observation = v.safeParse(accessApplicationObservationSchema, value);
+  if (!observation.success || observation.output.id !== expected.applicationId ||
+    observation.output.aud !== expected.applicationAud || observation.output.name !== expected.applicationName ||
+    observation.output.domain !== expected.managementHostname) return false;
+  const ids = canonicalProviderIds(observation.output.allowed_idps);
   return Boolean(ids && canonicalEqual(ids, expected.allowedIdentityProviderIds));
 }
 
-function exactPolicy(value: unknown, expected: Projection): boolean {
-  if (!isRecord(value) || value.id !== expected.policyId || value.name !== expected.policyName ||
-    value.decision !== 'allow' || value.precedence !== 1 ||
-    // Live (2026-08-23): these flags are omitted from the policy when false.
-    !(value.approval_required === false || value.approval_required === undefined) ||
-    !(value.isolation_required === false || value.isolation_required === undefined) ||
-    !(value.purpose_justification_required === false || value.purpose_justification_required === undefined) ||
-    !Array.isArray(value.include) || !Array.isArray(value.exclude) || value.exclude.length !== 0 ||
-    !Array.isArray(value.require) || value.require.length !== 0 ||
-    value.include.length !== expected.adminEmails.length) return false;
-  const emails: string[] = [];
-  for (const rule of value.include) {
-    if (!isRecord(rule) || !exactKeys(rule, ['email']) || !isRecord(rule.email) ||
-      !exactKeys(rule.email, ['email']) || typeof rule.email.email !== 'string') return false;
-    emails.push(rule.email.email);
-  }
+function exactPolicy(value: BoundaryValue, expected: Projection): boolean {
+  const observation = v.safeParse(accessPolicyObservationSchema, value);
+  if (!observation.success || observation.output.id !== expected.policyId ||
+    observation.output.name !== expected.policyName ||
+    observation.output.include.length !== expected.adminEmails.length) return false;
+  const emails = observation.output.include.map((rule) => rule.email.email);
   emails.sort();
   return canonicalEqual(emails, expected.adminEmails);
 }
 
 function exactDomain(
-  value: unknown,
+  value: BoundaryValue,
   expected: Projection,
 ): ExactManagementDomainObservation | null {
-  if (
-    !isRecord(value) || value.id !== expected.domainId || !customDomainId(value.id) ||
-    !providerId(value.cert_id) || value.hostname !== expected.managementHostname ||
-    value.service !== expected.workerName || value.zone_id !== expected.zoneId ||
-    value.zone_name !== expected.zoneName ||
-    (value.environment !== undefined && value.environment !== 'production')
-  ) return null;
+  const observation = v.safeParse(customDomainObservationSchema, value);
+  if (!observation.success || observation.output.id !== expected.domainId ||
+    observation.output.hostname !== expected.managementHostname ||
+    observation.output.service !== expected.workerName || observation.output.zone_id !== expected.zoneId ||
+    observation.output.zone_name !== expected.zoneName) return null;
   return Object.freeze({
-    id: value.id,
-    certificateId: value.cert_id,
-    hostname: value.hostname,
-    service: value.service,
-    zoneId: value.zone_id,
-    zoneName: value.zone_name,
+    id: observation.output.id,
+    certificateId: observation.output.cert_id,
+    hostname: observation.output.hostname,
+    service: observation.output.service,
+    zoneId: observation.output.zone_id,
+    zoneName: observation.output.zone_name,
     environment: 'production',
   });
-}
-
-function safeRfc3339(value: unknown): value is string {
-  return typeof value === 'string' && value.length >= 20 && value.length <= 40 &&
-    RFC3339.test(value) && Number.isFinite(Date.parse(value));
-}
-
-function disabledWorkerObservability(value: unknown): boolean {
-  if (!isRecord(value) || value.enabled !== false) return false;
-  const allowed = new Set(['enabled', 'head_sampling_rate', 'redact_query_string', 'logs', 'traces']);
-  if (Object.keys(value).some((key) => !allowed.has(key))) return false;
-  if (value.redact_query_string !== undefined && value.redact_query_string !== false) return false;
-  for (const key of ['logs', 'traces'] as const) {
-    const nested = value[key];
-    if (nested === undefined) continue;
-    if (!isRecord(nested)) return false;
-    if (nested.enabled !== undefined && nested.enabled !== false) return false;
-    if (nested.destinations !== undefined &&
-      (!Array.isArray(nested.destinations) || nested.destinations.length !== 0)) return false;
-  }
-  return true;
 }
 
 /**
@@ -1071,56 +1358,47 @@ function disabledWorkerObservability(value: unknown): boolean {
  * the install-side converged expectation asserts.
  */
 function exactWorkerReferences(
-  value: unknown,
+  value: BoundaryValue,
   expected: Projection,
   domain: ExactManagementDomainObservation,
 ): boolean {
-  if (!isRecord(value)) return false;
-  const keys = ['dispatch_namespace_outbounds', 'domains', 'durable_objects', 'queues', 'workers'];
-  if (!exactKeys(value, keys) || !Array.isArray(value.domains) || value.domains.length !== 1) return false;
-  if (!['dispatch_namespace_outbounds', 'queues', 'workers'].every(
-    (key) => Array.isArray(value[key]) && value[key].length === 0,
-  )) return false;
-  const reference = value.domains[0];
-  if (!isRecord(reference) || !exactKeys(reference, ['hostname', 'id', 'zone_id', 'zone_name']) ||
+  const observation = v.safeParse(workerReferenceSchema, value);
+  if (!observation.success) return false;
+  const reference = observation.output.domains.at(0);
+  const namespace = observation.output.durable_objects.at(0);
+  if (reference === undefined || namespace === undefined) return false;
+  if (
     reference.id !== domain.id || reference.hostname !== domain.hostname ||
     reference.zone_id !== domain.zoneId || reference.zone_name !== domain.zoneName) return false;
-  if (!Array.isArray(value.durable_objects) || value.durable_objects.length !== 1) return false;
-  const namespace = value.durable_objects[0];
-  return isRecord(namespace) &&
-    exactKeys(namespace, ['worker_id', 'worker_name', 'namespace_id', 'namespace_name']) &&
-    namespace.worker_id === expected.workerId &&
+  return namespace.worker_id === expected.workerId &&
     namespace.worker_name === expected.workerName &&
     namespace.namespace_id === expected.namespaceId &&
     namespace.namespace_name === `${expected.workerName}_AdminState`;
 }
 
 function exactWorker(
-  value: unknown,
+  value: BoundaryValue,
   expected: Projection,
   domain: ExactManagementDomainObservation,
 ): boolean {
-  if (!isRecord(value) || Object.keys(value).some((key) => !new Set([
-    'created_on', 'deployed_on', 'id', 'logpush', 'name', 'observability', 'references',
-    'subdomain', 'tags', 'tail_consumers', 'updated_on',
-  ]).has(key)) || value.id !== expected.workerId || value.name !== expected.workerName ||
-    value.logpush !== false || !disabledWorkerObservability(value.observability) ||
-    !isRecord(value.subdomain) || value.subdomain.enabled !== false || value.subdomain.previews_enabled !== false ||
-    !Array.isArray(value.tags) || !canonicalEqual(value.tags, [MANAGED_WORKER_TAG, expected.correlationTag]) ||
-    !Array.isArray(value.tail_consumers) || value.tail_consumers.length !== 0 ||
-    !safeRfc3339(value.created_on) || !safeRfc3339(value.updated_on) ||
-    !safeRfc3339(value.deployed_on) || !exactWorkerReferences(value.references, expected, domain)) return false;
-  return true;
+  const observation = v.safeParse(workerObservationSchema, value);
+  return observation.success && observation.output.id === expected.workerId &&
+    observation.output.name === expected.workerName &&
+    canonicalEqual(observation.output.tags, [MANAGED_WORKER_TAG, expected.correlationTag]) &&
+    exactWorkerReferences(observation.output.references, expected, domain);
 }
 
-function routeOverlapsHostname(pattern: unknown, hostname: string): boolean | null {
-  if (typeof pattern !== 'string' || pattern.length < 3 || pattern.length > 512 ||
-    pattern !== pattern.toLowerCase() || /[\u0000-\u0020\u007f]/u.test(pattern)) return null;
+function routeOverlapsHostname(pattern: string, hostname: string): boolean | null {
+  if (pattern.length < 3 || pattern.length > 512 || pattern !== pattern.toLowerCase() ||
+    [...pattern].some((character) => {
+      const codePoint = character.codePointAt(0);
+      return codePoint === undefined || codePoint <= 32 || codePoint === 127;
+    })) return null;
   const withoutScheme = pattern.replace(/^https?:\/\//u, '');
   const slash = withoutScheme.indexOf('/');
   if (slash <= 0 || slash === withoutScheme.length - 1) return null;
   const hostPattern = withoutScheme.slice(0, slash);
-  if (/[\[\]@:?#]/u.test(hostPattern)) return null;
+  if ([...hostPattern].some((character) => '[]@:?#'.includes(character))) return null;
   if (!hostPattern.includes('*')) return validHostname(hostPattern) ? hostPattern === hostname : null;
   if (!hostPattern.startsWith('*') || hostPattern.slice(1).includes('*')) return null;
   const suffix = hostPattern.slice(1).replace(/^\./u, '');
@@ -1180,38 +1458,32 @@ async function collectCustomDomainsSinglePage(
   call: PreparedCall,
   stage: CloudflareUninstallManagementStage,
   expected: Projection,
-): Promise<readonly unknown[]> {
+): Promise<readonly BoundaryObject[]> {
   const envelope = success(await request(call, stage, domainListUrl(expected), 'GET'), stage);
   if (!Array.isArray(envelope.result) || envelope.result.length > MAX_ITEMS) {
     fail('provider_unknown', stage, 'unknown');
   }
   if (envelope.resultInfo !== undefined) {
-    const info = envelope.resultInfo;
-    const known = new Set(['count', 'page', 'per_page', 'total_count', 'total_pages']);
-    if (!isRecord(info) || Object.keys(info).some((key) => !known.has(key)) ||
-      (Object.hasOwn(info, 'count') && (typeof info.count !== 'number' ||
-        !Number.isSafeInteger(info.count) || info.count !== envelope.result.length)) ||
-      (Object.hasOwn(info, 'page') && (typeof info.page !== 'number' ||
-        !Number.isSafeInteger(info.page) || info.page !== 1)) ||
+    const parsedInfo = v.safeParse(singlePageInfoSchema, envelope.resultInfo);
+    if (!parsedInfo.success ||
+      (parsedInfo.output.count !== undefined && parsedInfo.output.count !== envelope.result.length) ||
+      (parsedInfo.output.page !== undefined && parsedInfo.output.page !== 1) ||
       // Live (2026-08-23): an empty Custom Domains list reports per_page 0.
-      (Object.hasOwn(info, 'per_page') && (typeof info.per_page !== 'number' ||
-        !Number.isSafeInteger(info.per_page) || info.per_page < 0 ||
-        (info.per_page === 0 ? envelope.result.length !== 0 : envelope.result.length > info.per_page))) ||
-      (Object.hasOwn(info, 'total_count') && (typeof info.total_count !== 'number' ||
-        !Number.isSafeInteger(info.total_count) || info.total_count < envelope.result.length)) ||
-      (Object.hasOwn(info, 'total_pages') && (typeof info.total_pages !== 'number' ||
-        !Number.isSafeInteger(info.total_pages) || info.total_pages < 0)) ||
-      (typeof info.total_count === 'number' && typeof info.total_pages === 'number' &&
-        ((info.total_count === 0 && info.total_pages !== 0) ||
-          (info.total_count > 0 && info.total_pages < 1))) ||
-      (typeof info.total_count === 'number' && typeof info.total_pages === 'number' &&
-        typeof info.per_page === 'number' &&
-        info.total_pages !== (info.total_count === 0 ? 0 : Math.ceil(info.total_count / info.per_page)))) {
+      (parsedInfo.output.per_page !== undefined &&
+        (parsedInfo.output.per_page === 0 ? envelope.result.length !== 0 :
+          envelope.result.length > parsedInfo.output.per_page)) ||
+      (parsedInfo.output.total_count !== undefined && parsedInfo.output.total_count < envelope.result.length) ||
+      (parsedInfo.output.total_count !== undefined && parsedInfo.output.total_pages !== undefined &&
+        ((parsedInfo.output.total_count === 0 && parsedInfo.output.total_pages !== 0) ||
+          (parsedInfo.output.total_count > 0 && parsedInfo.output.total_pages < 1))) ||
+      (parsedInfo.output.total_count !== undefined && parsedInfo.output.total_pages !== undefined &&
+        parsedInfo.output.per_page !== undefined && parsedInfo.output.per_page > 0 &&
+        parsedInfo.output.total_pages !== Math.ceil(parsedInfo.output.total_count / parsedInfo.output.per_page))) {
       fail('provider_unknown', stage, 'unknown');
     }
   }
   const seenIds = new Set<string>();
-  const values: unknown[] = [];
+  const values: BoundaryObject[] = [];
   for (const value of envelope.result) {
     // Worker custom domains carry 40-hex ids, not the 32-hex provider id.
     if (!isRecord(value) || !customDomainId(value.id)) fail('provider_mismatch', stage, 'rejected');
@@ -1227,12 +1499,12 @@ async function collectWorkerRoutesSinglePage(
   call: PreparedCall,
   stage: CloudflareUninstallManagementStage,
   expected: Projection,
-): Promise<readonly unknown[]> {
+): Promise<readonly BoundaryObject[]> {
   const envelope = success(await request(call, stage, routeListUrl(expected), 'GET'), stage);
   if (envelope.resultInfo !== undefined || !Array.isArray(envelope.result) ||
     envelope.result.length > MAX_ITEMS) fail('provider_unknown', stage, 'unknown');
   const seenIds = new Set<string>();
-  const values: unknown[] = [];
+  const values: BoundaryObject[] = [];
   for (const value of envelope.result) {
     if (!isRecord(value) || !providerId(value.id)) fail('provider_mismatch', stage, 'rejected');
     if (seenIds.has(value.id)) fail('provider_ambiguous', stage, 'unknown');
@@ -1246,8 +1518,8 @@ async function requireExactGet(
   call: PreparedCall,
   stage: CloudflareUninstallManagementStage,
   url: URL,
-  matches: (value: unknown) => boolean,
-): Promise<unknown> {
+  matches: (value: BoundaryValue) => boolean,
+): Promise<BoundaryValue> {
   const envelope = success(await request(call, stage, url, 'GET'), stage);
   if (envelope.resultInfo !== undefined) fail('provider_unknown', stage, 'unknown');
   const result = envelope.result;
@@ -1259,25 +1531,27 @@ async function requireExactSingletonList(
   call: PreparedCall,
   stage: CloudflareUninstallManagementStage,
   urlForPage: (page: number) => URL,
-  matches: (value: unknown) => boolean,
+  matches: (value: BoundaryObject) => boolean,
   mode: ListPaginationMode,
-): Promise<unknown> {
+): Promise<BoundaryObject> {
   const values = await collectList(call, stage, urlForPage, mode);
   if (values.length > 1) fail('provider_ambiguous', stage, 'rejected');
-  if (values.length !== 1 || !matches(values[0])) fail('provider_mismatch', stage, 'rejected');
-  return values[0];
+  const value = values.length === 1 ? values.at(0) : undefined;
+  if (value === undefined || !matches(value)) fail('provider_mismatch', stage, 'rejected');
+  return value;
 }
 
 async function requireExactSingletonCustomDomainList(
   call: PreparedCall,
   stage: CloudflareUninstallManagementStage,
   expected: Projection,
-  matches: (value: unknown) => boolean,
-): Promise<unknown> {
+  matches: (value: BoundaryObject) => boolean,
+): Promise<BoundaryObject> {
   const values = await collectCustomDomainsSinglePage(call, stage, expected);
   if (values.length > 1) fail('provider_ambiguous', stage, 'rejected');
-  if (values.length !== 1 || !matches(values[0])) fail('provider_mismatch', stage, 'rejected');
-  return values[0];
+  const value = values.length === 1 ? values.at(0) : undefined;
+  if (value === undefined || !matches(value)) fail('provider_mismatch', stage, 'rejected');
+  return value;
 }
 
 async function requireNoDnsOrRouteCollision(
@@ -1316,11 +1590,11 @@ async function requireNoDnsOrRouteCollision(
 
   const routes = await collectWorkerRoutesSinglePage(call, routeStage, expected);
   for (const value of routes) {
-    if (!isRecord(value) || !providerId(value.id) || !Object.hasOwn(value, 'pattern') ||
-      (Object.hasOwn(value, 'script') && value.script !== null && typeof value.script !== 'string')) {
+    const route = v.safeParse(routeObservationSchema, value);
+    if (!route.success) {
       fail('provider_mismatch', routeStage, 'rejected');
     }
-    const overlaps = routeOverlapsHostname(value.pattern, expected.managementHostname);
+    const overlaps = routeOverlapsHostname(route.output.pattern, expected.managementHostname);
     if (overlaps === null) fail('provider_mismatch', routeStage, 'rejected');
     if (overlaps) fail(residueCode, routeStage, 'rejected');
   }
@@ -1393,12 +1667,12 @@ export async function preflightHostedUninstallManagement(
   );
   let workerMatches = 0;
   for (const value of workers) {
-    if (!isRecord(value) || typeof value.id !== 'string' || !ACCOUNT_ID.test(value.id) ||
-      typeof value.name !== 'string' || !WORKER_NAME.test(value.name)) {
+    const observation = v.safeParse(workerListObservationSchema, value);
+    if (!observation.success) {
       fail('provider_mismatch', 'fresh_worker_list', 'rejected');
     }
-    if (value.id === expected.workerId || value.name === expected.workerName) {
-      if (value.id !== expected.workerId || value.name !== expected.workerName) {
+    if (observation.output.id === expected.workerId || observation.output.name === expected.workerName) {
+      if (observation.output.id !== expected.workerId || observation.output.name !== expected.workerName) {
         fail('provider_mismatch', 'fresh_worker_list', 'rejected');
       }
       workerMatches += 1;
@@ -1410,8 +1684,7 @@ export async function preflightHostedUninstallManagement(
     call,
     'fresh_workers_dev_get',
     accountUrl(expected.accountId, `/workers/scripts/${encodeURIComponent(expected.workerName)}/subdomain`),
-    (value) => isRecord(value) && exactKeys(value, ['enabled', 'previews_enabled']) &&
-      value.enabled === false && value.previews_enabled === false,
+    (value) => v.is(workersDevObservationSchema, value),
   );
   await requireNoDnsOrRouteCollision(
     call,
@@ -1450,9 +1723,9 @@ export async function preflightHostedUninstallManagement(
   });
 }
 
-export async function parseHostedUninstallManagementPreflightResult(
+export async function parseHostedUninstallManagementPreflightResult<Input>(
   context: HostedUninstallManagementContext,
-  value: unknown,
+  value: Input,
 ): Promise<HostedUninstallManagementPreflightResult | null> {
   let expected: Projection;
   try {
@@ -1463,22 +1736,16 @@ export async function parseHostedUninstallManagementPreflightResult(
   return parsePreflightForExpected(expected, value);
 }
 
-async function parsePreflightForExpected(
+async function parsePreflightForExpected<Input>(
   expected: Projection,
-  value: unknown,
+  value: Input,
 ): Promise<HostedUninstallManagementPreflightResult | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'accountId', 'applicationId', 'attemptId', 'attestationSha256', 'checkedAt', 'domainCertificateId',
-    'domainId', 'expiresAt', 'installBindingHash', 'installConvergenceHash', 'namespaceId',
-    'ownershipMarker', 'policyId', 'schemaVersion', 'status', 'uninstallAuthorityHash',
-    'uninstallPlanHash', 'uninstallPlanId', 'workerId', 'zoneId',
-  ]) || value.schemaVersion !== 1 || value.status !== 'ready' ||
-    typeof value.checkedAt !== 'number' || !Number.isSafeInteger(value.checkedAt) ||
-    value.checkedAt < expected.uninstallPlanCreatedAt ||
-    typeof value.expiresAt !== 'number' || !Number.isSafeInteger(value.expiresAt) ||
-    value.expiresAt !== Math.min(value.checkedAt + PREFLIGHT_ATTESTATION_TTL_MS, expected.uninstallPlanExpiresAt) ||
-    value.expiresAt <= value.checkedAt || !providerId(value.domainCertificateId) ||
-    typeof value.attestationSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.attestationSha256)) return null;
+  const candidate = v.safeParse(preflightResultSchema, value);
+  if (!candidate.success || candidate.output.checkedAt < expected.uninstallPlanCreatedAt ||
+    candidate.output.expiresAt !== Math.min(
+      candidate.output.checkedAt + PREFLIGHT_ATTESTATION_TTL_MS,
+      expected.uninstallPlanExpiresAt,
+    ) || candidate.output.expiresAt <= candidate.output.checkedAt) return null;
   const semantic = {
     schemaVersion: 1 as const,
     status: 'ready' as const,
@@ -1494,18 +1761,18 @@ async function parsePreflightForExpected(
     workerId: expected.workerId,
     namespaceId: expected.namespaceId,
     domainId: expected.domainId,
-    domainCertificateId: value.domainCertificateId,
+    domainCertificateId: candidate.output.domainCertificateId,
     applicationId: expected.applicationId,
     policyId: expected.policyId,
-    checkedAt: value.checkedAt,
-    expiresAt: value.expiresAt,
+    checkedAt: candidate.output.checkedAt,
+    expiresAt: candidate.output.expiresAt,
   };
   const parsed = deepFreeze({
     ...semantic,
-    attestationSha256: value.attestationSha256,
+    attestationSha256: candidate.output.attestationSha256,
   });
-  return canonicalEqual(value, parsed) &&
-    value.attestationSha256 === await sha256(canonicalJson(semantic)) ? parsed : null;
+  return canonicalEqual(candidate.output, parsed) &&
+    candidate.output.attestationSha256 === await sha256(canonicalJson(semantic)) ? parsed : null;
 }
 
 function canonicalLocator(
@@ -1519,18 +1786,13 @@ function canonicalLocator(
   return deepFreeze({ applicationId: expected.applicationId, aud: expected.applicationAud });
 }
 
-async function parseAbsenceForAction(
+async function parseAbsenceForAction<Input>(
   expected: Projection,
   action: HostedUninstallManagementDeleteAction,
-  value: unknown,
+  value: Input,
 ): Promise<HostedUninstallManagementAbsenceEvidence | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'accountId', 'action', 'attemptId', 'evidenceSha256', 'installBindingHash', 'installConvergenceHash',
-    'locator', 'ownershipMarker', 'proof', 'schemaVersion', 'status', 'uninstallAuthorityHash',
-    'uninstallPlanHash', 'uninstallPlanId',
-  ]) || value.schemaVersion !== 1 || value.status !== 'absent' || value.action !== action ||
-    value.proof !== 'id_get_404_and_complete_list_absence' ||
-    typeof value.evidenceSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.evidenceSha256)) return null;
+  const candidate = v.safeParse(absenceEvidenceSchema, value);
+  if (!candidate.success || candidate.output.action !== action) return null;
   const semantic = {
     schemaVersion: 1 as const,
     status: 'absent' as const,
@@ -1546,20 +1808,21 @@ async function parseAbsenceForAction(
     locator: canonicalLocator(expected, action),
     proof: 'id_get_404_and_complete_list_absence' as const,
   };
-  const parsed = deepFreeze({ ...semantic, evidenceSha256: value.evidenceSha256 });
-  return canonicalEqual(value, parsed) &&
-    value.evidenceSha256 === await sha256(canonicalJson(semantic)) ? parsed : null;
+  const parsed = deepFreeze({ ...semantic, evidenceSha256: candidate.output.evidenceSha256 });
+  return canonicalEqual(candidate.output, parsed) &&
+    candidate.output.evidenceSha256 === await sha256(canonicalJson(semantic)) ? parsed : null;
 }
 
-async function parseApprovedAbsenceForAction(
+async function parseApprovedAbsenceForAction<Input>(
   active: Projection,
   action: HostedUninstallManagementDeleteAction,
-  value: unknown,
+  value: Input,
 ): Promise<HostedUninstallManagementAbsenceEvidence | null> {
-  if (!isRecord(value) || typeof value.attemptId !== 'string') return null;
-  const origin = projectionForApprovedAttempt(active, value.attemptId);
+  const candidate = v.safeParse(absenceEvidenceSchema, value);
+  if (!candidate.success) return null;
+  const origin = projectionForApprovedAttempt(active, candidate.output.attemptId);
   if (!origin || !stableAuthorityMatches(origin, active)) return null;
-  const parsed = await parseAbsenceForAction(origin, action, value);
+  const parsed = await parseAbsenceForAction(origin, action, candidate.output);
   if (!parsed || !canonicalEqual(parsed.locator, canonicalLocator(active, action)) ||
     parsed.accountId !== active.accountId || parsed.ownershipMarker !== active.ownershipMarker ||
     parsed.installBindingHash !== active.installBindingHash ||
@@ -1606,40 +1869,37 @@ function providerOwnershipObservation(
   });
 }
 
-function parseProviderOwnershipObservation(
+function parseProviderOwnershipObservation<Input>(
   expected: Projection,
   action: HostedUninstallManagementDeleteAction,
-  value: unknown,
+  value: Input,
 ): HostedUninstallManagementProviderOwnership | null {
-  if (!isRecord(value)) return null;
+  const candidate = v.safeParse(providerOwnershipSchema, value);
+  if (!candidate.success) return null;
   if (action === 'management_custom_domain_delete') {
-    if (!exactKeys(value, [
-      'certificateId', 'domainId', 'hostname', 'kind', 'workerName', 'zoneId', 'zoneName',
-    ]) || value.kind !== 'management_custom_domain' || value.domainId !== expected.domainId ||
-      !providerId(value.certificateId) || value.hostname !== expected.managementHostname ||
-      value.workerName !== expected.workerName || value.zoneId !== expected.zoneId ||
-      value.zoneName !== expected.zoneName) return null;
+    if (candidate.output.kind !== 'management_custom_domain' ||
+      candidate.output.domainId !== expected.domainId ||
+      candidate.output.hostname !== expected.managementHostname ||
+      candidate.output.workerName !== expected.workerName || candidate.output.zoneId !== expected.zoneId ||
+      candidate.output.zoneName !== expected.zoneName) return null;
     return deepFreeze({
       kind: 'management_custom_domain',
-      domainId: value.domainId,
-      certificateId: value.certificateId,
-      hostname: value.hostname,
-      workerName: value.workerName,
-      zoneId: value.zoneId,
-      zoneName: value.zoneName,
+      domainId: candidate.output.domainId,
+      certificateId: candidate.output.certificateId,
+      hostname: candidate.output.hostname,
+      workerName: candidate.output.workerName,
+      zoneId: candidate.output.zoneId,
+      zoneName: candidate.output.zoneName,
     });
   }
   if (action === 'management_admin_policy_delete') {
-    if (!exactKeys(value, ['adminEmails', 'applicationId', 'kind', 'name', 'policyId']) ||
-      value.kind !== 'management_admin_policy') return null;
+    if (candidate.output.kind !== 'management_admin_policy') return null;
     const canonical = providerOwnershipObservation(expected, action);
-    return canonicalEqual(value, canonical) ? canonical : null;
+    return canonicalEqual(candidate.output, canonical) ? canonical : null;
   }
-  if (!exactKeys(value, [
-    'allowedIdentityProviderIds', 'applicationId', 'aud', 'hostname', 'kind', 'name',
-  ]) || value.kind !== 'management_access_application') return null;
+  if (candidate.output.kind !== 'management_access_application') return null;
   const canonical = providerOwnershipObservation(expected, action);
-  return canonicalEqual(value, canonical) ? canonical : null;
+  return canonicalEqual(candidate.output, canonical) ? canonical : null;
 }
 
 async function buildStillPresentEvidence(
@@ -1682,51 +1942,38 @@ async function requirePrerequisites(
   readonly value: HostedUninstallManagementDeletePrerequisites;
   readonly commitments: readonly string[];
 }> {
-  if (!isRecord(value) || value.schemaVersion !== 1 || value.action !== action) {
+  const parsedValue = v.safeParse(deletePrerequisitesSchema, value);
+  if (!parsedValue.success || parsedValue.output.action !== action) {
     fail('invalid_input', 'validate', 'not_sent');
   }
-  if (action === 'management_custom_domain_delete') {
-    const source = value as Extract<HostedUninstallManagementDeletePrerequisites, {
-      readonly action: 'management_custom_domain_delete';
-    }>;
-    if (!exactKeys(value, ['action', 'preflight', 'schemaVersion'])) fail('invalid_input', 'validate', 'not_sent');
-    const preflight = await parsePreflightForExpected(expected, source.preflight);
+  if (parsedValue.output.action === 'management_custom_domain_delete') {
+    const preflight = await parsePreflightForExpected(expected, parsedValue.output.preflight);
     if (!preflight) fail('invalid_input', 'validate', 'not_sent');
     return deepFreeze({
-      value: { schemaVersion: 1, action, preflight },
+      value: { schemaVersion: 1, action: 'management_custom_domain_delete', preflight },
       commitments: [preflight.attestationSha256],
     });
   }
-  const source = value as Exclude<HostedUninstallManagementDeletePrerequisites, {
-    readonly action: 'management_custom_domain_delete';
-  }>;
   const domainAbsence = await parseApprovedAbsenceForAction(
     expected,
     'management_custom_domain_delete',
-    source.domainAbsence,
+    parsedValue.output.domainAbsence,
   );
   if (!domainAbsence) fail('invalid_input', 'validate', 'not_sent');
-  if (action === 'management_admin_policy_delete') {
-    if (!exactKeys(value, ['action', 'domainAbsence', 'schemaVersion'])) fail('invalid_input', 'validate', 'not_sent');
+  if (parsedValue.output.action === 'management_admin_policy_delete') {
     return deepFreeze({
-      value: { schemaVersion: 1, action, domainAbsence },
+      value: { schemaVersion: 1, action: 'management_admin_policy_delete', domainAbsence },
       commitments: [domainAbsence.evidenceSha256],
     });
   }
-  if (!exactKeys(value, ['action', 'domainAbsence', 'policyAbsence', 'schemaVersion'])) {
-    fail('invalid_input', 'validate', 'not_sent');
-  }
-  const appSource = source as Extract<HostedUninstallManagementDeletePrerequisites, {
-    readonly action: 'management_access_application_delete';
-  }>;
   const policyAbsence = await parseApprovedAbsenceForAction(
     expected,
     'management_admin_policy_delete',
-    appSource.policyAbsence,
+    parsedValue.output.policyAbsence,
   );
   if (!policyAbsence) fail('invalid_input', 'validate', 'not_sent');
   return deepFreeze({
-    value: { schemaVersion: 1, action, domainAbsence, policyAbsence },
+    value: { schemaVersion: 1, action: 'management_access_application_delete', domainAbsence, policyAbsence },
     commitments: [domainAbsence.evidenceSha256, policyAbsence.evidenceSha256],
   });
 }
@@ -1756,7 +2003,7 @@ function canonicalIntent(
       ...base,
       kind: action,
       ordinal: 0,
-      locator: canonicalLocator(expected, action) as { readonly domainId: string },
+      locator: { domainId: expected.domainId },
     });
   }
   if (action === 'management_admin_policy_delete') {
@@ -1764,14 +2011,14 @@ function canonicalIntent(
       ...base,
       kind: action,
       ordinal: 1,
-      locator: canonicalLocator(expected, action) as { readonly applicationId: string; readonly policyId: string },
+      locator: { applicationId: expected.applicationId, policyId: expected.policyId },
     });
   }
   return deepFreeze({
     ...base,
     kind: action,
     ordinal: 2,
-    locator: canonicalLocator(expected, action) as { readonly applicationId: string; readonly aud: string },
+    locator: { applicationId: expected.applicationId, aud: expected.applicationAud },
   });
 }
 
@@ -1795,42 +2042,41 @@ async function requireIntent(
   mode: 'active' | 'approved',
 ): Promise<{ readonly expected: Projection; readonly intent: HostedUninstallManagementDeleteIntent }> {
   const active = await validateContext(context, 'validate');
-  if (!isRecord(intent) || !HOSTED_UNINSTALL_MANAGEMENT_DELETE_ORDER.includes(intent.kind as HostedUninstallManagementDeleteAction)) {
+  const parsedIntent = v.safeParse(deleteIntentSchema, intent);
+  if (!parsedIntent.success) {
     fail('invalid_input', 'validate', 'not_sent');
   }
   const expected = mode === 'active'
     ? active
-    : typeof intent.attemptId === 'string'
-      ? projectionForApprovedAttempt(active, intent.attemptId)
-      : null;
-  if (!expected || (mode === 'active' && intent.attemptId !== active.attemptId) ||
+    : projectionForApprovedAttempt(active, parsedIntent.output.attemptId);
+  if (!expected || (mode === 'active' && parsedIntent.output.attemptId !== active.attemptId) ||
     !stableAuthorityMatches(expected, active)) fail('invalid_input', 'validate', 'not_sent');
   const parsed = await requirePrerequisites(
     context,
     expected,
-    intent.kind as HostedUninstallManagementDeleteAction,
+    parsedIntent.output.kind,
     prerequisites,
   );
   const canonical = canonicalIntent(
     expected,
-    intent.kind as HostedUninstallManagementDeleteAction,
+    parsedIntent.output.kind,
     parsed.commitments,
   );
-  if (!canonicalEqual(intent, canonical)) fail('invalid_input', 'validate', 'not_sent');
+  if (!canonicalEqual(parsedIntent.output, canonical)) fail('invalid_input', 'validate', 'not_sent');
   return Object.freeze({ expected, intent: canonical });
 }
 
-export async function parseHostedUninstallManagementDeleteIntent(
+export async function parseHostedUninstallManagementDeleteIntent<Input>(
   context: HostedUninstallManagementContext,
   prerequisites: HostedUninstallManagementDeletePrerequisites,
-  value: unknown,
+  value: Input,
 ): Promise<HostedUninstallManagementDeleteIntent | null> {
   try {
-    if (!isRecord(value) ||
-      !HOSTED_UNINSTALL_MANAGEMENT_DELETE_ORDER.includes(value.kind as HostedUninstallManagementDeleteAction)) return null;
+    const candidate = v.safeParse(deleteIntentSchema, value);
+    if (!candidate.success) return null;
     return (await requireIntent(
       context,
-      value as unknown as HostedUninstallManagementDeleteIntent,
+      candidate.output,
       prerequisites,
       'approved',
     )).intent;
@@ -1860,11 +2106,11 @@ export async function prepareHostedUninstallManagementDeleteArm(
   });
 }
 
-export async function parseHostedUninstallManagementDeleteArm(
+export async function parseHostedUninstallManagementDeleteArm<Input>(
   context: HostedUninstallManagementContext,
   intent: HostedUninstallManagementDeleteIntent,
   prerequisites: HostedUninstallManagementDeletePrerequisites,
-  value: unknown,
+  value: Input,
 ): Promise<HostedUninstallManagementDeleteArm | null> {
   let expected: Projection;
   let parsedIntent: HostedUninstallManagementDeleteIntent;
@@ -1875,20 +2121,19 @@ export async function parseHostedUninstallManagementDeleteArm(
   } catch {
     return null;
   }
-  if (!isRecord(value) || !exactKeys(value, HOSTED_UNINSTALL_MANAGEMENT_JOURNAL_ALLOWLIST.arm) ||
-    value.schemaVersion !== 1 || value.kind !== 'management_delete_arm' || value.action !== parsedIntent.kind ||
-    value.attemptId !== parsedIntent.attemptId || typeof value.attemptId !== 'string' || !ATTEMPT_ID.test(value.attemptId) ||
-    !Number.isSafeInteger(value.armedAt) || typeof value.armedAt !== 'number' ||
-    value.armedAt < expected.uninstallPlanCreatedAt || value.armedAt >= expected.uninstallPlanExpiresAt ||
-    typeof value.intentSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.intentSha256) ||
-    value.intentSha256 !== await sha256(canonicalJson(parsedIntent))) return null;
+  const candidate = v.safeParse(deleteArmSchema, value);
+  if (!candidate.success || candidate.output.action !== parsedIntent.kind ||
+    candidate.output.attemptId !== parsedIntent.attemptId ||
+    candidate.output.armedAt < expected.uninstallPlanCreatedAt ||
+    candidate.output.armedAt >= expected.uninstallPlanExpiresAt ||
+    candidate.output.intentSha256 !== await sha256(canonicalJson(parsedIntent))) return null;
   return deepFreeze({
     schemaVersion: 1,
     kind: 'management_delete_arm',
     action: parsedIntent.kind,
-    attemptId: value.attemptId,
-    armedAt: value.armedAt,
-    intentSha256: value.intentSha256,
+    attemptId: candidate.output.attemptId,
+    armedAt: candidate.output.armedAt,
+    intentSha256: candidate.output.intentSha256,
   });
 }
 
@@ -1905,7 +2150,7 @@ function deleteUrl(expected: Projection, action: HostedUninstallManagementDelete
   return accountUrl(expected.accountId, `/access/apps/${encodeURIComponent(expected.applicationId)}`);
 }
 
-function exactDeleteResult(result: unknown, intent: HostedUninstallManagementDeleteIntent): boolean {
+function exactDeleteResult(result: BoundaryValue, intent: HostedUninstallManagementDeleteIntent): boolean {
   if (result === null) return true;
   if (!isRecord(result) || !exactKeys(result, ['id'])) return false;
   if (intent.kind === 'management_custom_domain_delete') return false;
@@ -1927,9 +2172,8 @@ async function requireFreshDeletePrerequisites(
   nowMs: number,
 ): Promise<void> {
   if (action === 'management_custom_domain_delete') {
-    const preflight = (prerequisites as Extract<HostedUninstallManagementDeletePrerequisites, {
-      readonly action: 'management_custom_domain_delete';
-    }>).preflight;
+    if (prerequisites.action !== action) fail('invalid_input', 'validate', 'not_sent');
+    const preflight = prerequisites.preflight;
     if (nowMs < preflight.checkedAt || nowMs >= preflight.expiresAt) {
       fail('invalid_input', 'validate', 'not_sent');
     }
@@ -2045,19 +2289,19 @@ export async function submitHostedUninstallManagementDeleteOnce(
   return fail('provider_unknown', intent.kind, 'unknown');
 }
 
-export async function parseHostedUninstallManagementDeleteSubmission(
+export async function parseHostedUninstallManagementDeleteSubmission<Input>(
   context: HostedUninstallManagementContext,
   intent: HostedUninstallManagementDeleteIntent,
   prerequisites: HostedUninstallManagementDeletePrerequisites,
   arm: HostedUninstallManagementDeleteArm,
-  value: unknown,
+  value: Input,
 ): Promise<HostedUninstallManagementDeleteSubmission | null> {
   const parsedArm = await parseHostedUninstallManagementDeleteArm(context, intent, prerequisites, arm);
-  if (!parsedArm || !isRecord(value) || !exactKeys(value, [
-    'action', 'attemptId', 'intentSha256', 'locator', 'schemaVersion', 'status',
-  ]) || value.schemaVersion !== 1 || value.status !== 'submitted' || value.action !== intent.kind ||
-    value.attemptId !== parsedArm.attemptId || value.intentSha256 !== parsedArm.intentSha256 ||
-    !canonicalEqual(value.locator, intent.locator)) return null;
+  const candidate = v.safeParse(deleteSubmissionSchema, value);
+  if (!parsedArm || !candidate.success || candidate.output.action !== intent.kind ||
+    candidate.output.attemptId !== parsedArm.attemptId ||
+    candidate.output.intentSha256 !== parsedArm.intentSha256 ||
+    !canonicalEqual(candidate.output.locator, intent.locator)) return null;
   return deepFreeze({
     schemaVersion: 1,
     status: 'submitted',
@@ -2091,23 +2335,15 @@ async function requireId404AndListAbsence(
   const getStage = getStageOverride ?? defaultGetStage;
   const listStage = listStageOverride ?? defaultListStage;
   let getUrl: URL;
-  let listUrl: ((page: number) => URL) | null;
-  let mode: ListPaginationMode | null;
   if (action === 'management_custom_domain_delete') {
     getUrl = accountUrl(expected.accountId, `/workers/domains/${encodeURIComponent(expected.domainId)}`);
-    listUrl = null;
-    mode = null;
   } else if (action === 'management_admin_policy_delete') {
     getUrl = accountUrl(
       expected.accountId,
       `/access/apps/${encodeURIComponent(expected.applicationId)}/policies/${encodeURIComponent(expected.policyId)}`,
     );
-    listUrl = (page) => policyListUrl(expected, page);
-    mode = 'unfiltered';
   } else {
     getUrl = accountUrl(expected.accountId, `/access/apps/${encodeURIComponent(expected.applicationId)}`);
-    listUrl = (page) => applicationListUrl(expected, page);
-    mode = 'filtered';
   }
 
   const getResponse = await request(call, getStage, getUrl, 'GET');
@@ -2126,7 +2362,9 @@ async function requireId404AndListAbsence(
   }
   const values = action === 'management_custom_domain_delete'
     ? await collectCustomDomainsSinglePage(call, listStage, expected)
-    : await collectList(call, listStage, listUrl as (page: number) => URL, mode as ListPaginationMode);
+    : action === 'management_admin_policy_delete'
+      ? await collectList(call, listStage, (page) => policyListUrl(expected, page), 'unfiltered')
+      : await collectList(call, listStage, (page) => applicationListUrl(expected, page), 'filtered');
   if (values.length > 0) fail('replacement_detected', listStage, 'rejected');
 }
 
@@ -2147,7 +2385,7 @@ async function collectRecoveryList(
   expected: Projection,
   action: HostedUninstallManagementDeleteAction,
   stage: CloudflareUninstallManagementStage,
-): Promise<readonly unknown[]> {
+): Promise<readonly BoundaryObject[]> {
   if (action === 'management_custom_domain_delete') {
     return collectCustomDomainsSinglePage(call, stage, expected);
   }
@@ -2171,7 +2409,7 @@ function recoveryGetUrl(expected: Projection, action: HostedUninstallManagementD
 }
 
 function exactRecoveryOwnership(
-  value: unknown,
+  value: BoundaryValue,
   expected: Projection,
   action: HostedUninstallManagementDeleteAction,
 ): HostedUninstallManagementProviderOwnership | null {
@@ -2255,11 +2493,11 @@ export async function verifyHostedUninstallManagementDeleteAbsence(
   return buildAbsenceEvidence(active, intent.kind);
 }
 
-export async function parseHostedUninstallManagementAbsenceEvidence(
+export async function parseHostedUninstallManagementAbsenceEvidence<Input>(
   context: HostedUninstallManagementContext,
   intent: HostedUninstallManagementDeleteIntent,
   prerequisites: HostedUninstallManagementDeletePrerequisites,
-  value: unknown,
+  value: Input,
 ): Promise<HostedUninstallManagementAbsenceEvidence | null> {
   try {
     const active = await validateContext(context, 'validate');
@@ -2293,31 +2531,32 @@ export async function recoverHostedUninstallManagementDeleteOutcome(
   return buildStillPresentEvidence(active, intent, arm, state.providerOwnership);
 }
 
-export async function parseHostedUninstallManagementDeleteRecoveryEvidence(
+export async function parseHostedUninstallManagementDeleteRecoveryEvidence<Input>(
   context: HostedUninstallManagementContext,
   intentInput: HostedUninstallManagementDeleteIntent,
   armInput: HostedUninstallManagementDeleteArm,
   prerequisites: HostedUninstallManagementDeletePrerequisites,
-  value: unknown,
+  value: Input,
 ): Promise<HostedUninstallManagementDeleteRecoveryEvidence | null> {
   try {
     const active = await validateContext(context, 'validate');
     const { intent } = await requireIntent(context, intentInput, prerequisites, 'approved');
     const arm = await parseHostedUninstallManagementDeleteArm(context, intent, prerequisites, armInput);
-    if (!arm || !isRecord(value) || typeof value.status !== 'string') return null;
-    if (value.status === 'absent') {
-      return parseApprovedAbsenceForAction(active, intent.kind, value);
+    if (!arm) return null;
+    const absence = v.safeParse(absenceEvidenceSchema, value);
+    if (absence.success) {
+      return parseApprovedAbsenceForAction(active, intent.kind, absence.output);
     }
-    if (value.status !== 'still_present' || !exactKeys(value, [
-      'accountId', 'action', 'attemptId', 'deleteAttemptId', 'evidenceSha256', 'installBindingHash',
-      'installConvergenceHash', 'intentSha256', 'locator', 'outcome', 'ownershipMarker', 'proof',
-      'providerOwnership', 'providerOwnershipSha256', 'schemaVersion', 'status', 'uninstallAuthorityHash',
-      'uninstallPlanHash', 'uninstallPlanId', 'zoneId',
-    ])) return null;
-    const providerOwnership = parseProviderOwnershipObservation(active, intent.kind, value.providerOwnership);
+    const candidate = v.safeParse(stillPresentEvidenceSchema, value);
+    if (!candidate.success) return null;
+    const providerOwnership = parseProviderOwnershipObservation(
+      active,
+      intent.kind,
+      candidate.output.providerOwnership,
+    );
     if (!providerOwnership) return null;
     const canonical = await buildStillPresentEvidence(active, intent, arm, providerOwnership);
-    return canonicalEqual(value, canonical) ? canonical : null;
+    return canonicalEqual(candidate.output, canonical) ? canonical : null;
   } catch {
     return null;
   }
@@ -2331,16 +2570,15 @@ interface FinalNamespaceItem {
   readonly useSqlite: boolean;
 }
 
-function exactFinalNamespaceItem(value: unknown): FinalNamespaceItem | null {
-  if (!isRecord(value) || !exactKeys(value, ['class', 'id', 'name', 'script', 'use_sqlite']) ||
-    typeof value.id !== 'string' || !ACCOUNT_ID.test(value.id) || !safeText(value.class, 128) ||
-    !safeText(value.name, 256) || !safeText(value.script, 128) || typeof value.use_sqlite !== 'boolean') return null;
+function exactFinalNamespaceItem(value: BoundaryValue): FinalNamespaceItem | null {
+  const candidate = v.safeParse(finalNamespaceItemSchema, value);
+  if (!candidate.success) return null;
   return Object.freeze({
-    id: value.id,
-    className: value.class,
-    name: value.name,
-    script: value.script,
-    useSqlite: value.use_sqlite,
+    id: candidate.output.id,
+    className: candidate.output.class,
+    name: candidate.output.name,
+    script: candidate.output.script,
+    useSqlite: candidate.output.use_sqlite,
   });
 }
 
@@ -2395,34 +2633,29 @@ function namespaceSnapshotEvidence(
   });
 }
 
-function parseNamespaceSnapshotEvidence(
+function parseNamespaceSnapshotEvidence<Input>(
   expected: Projection,
   uninstallCycleId: string,
   observation: 1 | 2,
-  value: unknown,
+  value: Input,
 ): HostedUninstallManagementNamespaceAbsenceSnapshot | null {
-  if (!isRecord(value) || !exactKeys(value, [
-    'accountId', 'accountNamespaceCount', 'kind', 'namespaceId', 'observation', 'schemaVersion',
-    'snapshotSha256', 'uninstallCycleId', 'workerName',
-  ]) || value.schemaVersion !== 1 || value.kind !== 'admin_state_namespace_absence_snapshot' ||
-    value.observation !== observation || value.accountId !== expected.accountId ||
-    value.workerName !== expected.workerName || value.namespaceId !== expected.namespaceId ||
-    value.uninstallCycleId !== uninstallCycleId || typeof value.accountNamespaceCount !== 'number' ||
-    !Number.isSafeInteger(value.accountNamespaceCount) || value.accountNamespaceCount < 0 ||
-    value.accountNamespaceCount > MAX_ITEMS || typeof value.snapshotSha256 !== 'string' ||
-    !/^[a-f0-9]{64}$/u.test(value.snapshotSha256)) return null;
+  const candidate = v.safeParse(namespaceSnapshotSchema, value);
+  if (!candidate.success || candidate.output.observation !== observation ||
+    candidate.output.accountId !== expected.accountId || candidate.output.workerName !== expected.workerName ||
+    candidate.output.namespaceId !== expected.namespaceId ||
+    candidate.output.uninstallCycleId !== uninstallCycleId) return null;
   return namespaceSnapshotEvidence(
     expected,
     uninstallCycleId,
     observation,
-    value.accountNamespaceCount,
-    value.snapshotSha256,
+    candidate.output.accountNamespaceCount,
+    candidate.output.snapshotSha256,
   );
 }
 
 async function buildNoManagedResidueEvidence(
   expected: Projection,
-  deletionEvidence: readonly HostedUninstallManagementAbsenceEvidence[],
+  deletionEvidence: HostedUninstallManagementNoManagedResidueEvidence['deletionEvidence'],
   workerDeletion: WorkerDeletionRecoveryProof,
   namespaceRetirement: AdminStateNamespaceRetirementProof,
   namespaceSnapshots: readonly [
@@ -2433,7 +2666,7 @@ async function buildNoManagedResidueEvidence(
   const semantic = deepFreeze({
     schemaVersion: 1 as const,
     kind: 'hosted_uninstall_no_managed_residue_evidence' as const,
-    deletionEvidence: Object.freeze([...deletionEvidence]) as HostedUninstallManagementNoManagedResidueEvidence['deletionEvidence'],
+    deletionEvidence,
     workerDeletion,
     namespaceRetirement,
     namespaceSnapshots,
@@ -2453,9 +2686,9 @@ async function buildNoManagedResidueEvidence(
   return deepFreeze({ ...semantic, evidenceSha256: await sha256(canonicalJson(semantic)) });
 }
 
-export async function parseHostedUninstallManagementNoManagedResidueEvidence(
+export async function parseHostedUninstallManagementNoManagedResidueEvidence<Input>(
   context: HostedUninstallManagementContext,
-  value: unknown,
+  value: Input,
 ): Promise<HostedUninstallManagementNoManagedResidueEvidence | null> {
   let expected: Projection;
   try {
@@ -2463,44 +2696,44 @@ export async function parseHostedUninstallManagementNoManagedResidueEvidence(
   } catch {
     return null;
   }
-  if (!isRecord(value) || !exactKeys(value, [
-    'deletionEvidence', 'evidenceSha256', 'kind', 'namespaceRetirement', 'namespaceSnapshots',
-    'schemaVersion', 'workerDeletion',
-  ]) || value.schemaVersion !== 1 || value.kind !== 'hosted_uninstall_no_managed_residue_evidence' ||
-    !Array.isArray(value.deletionEvidence) || value.deletionEvidence.length !== 3 ||
-    !Array.isArray(value.namespaceSnapshots) || value.namespaceSnapshots.length !== 2 ||
-    typeof value.evidenceSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.evidenceSha256)) return null;
+  const candidate = v.safeParse(noManagedResidueEvidenceShellSchema, value);
+  if (!candidate.success) return null;
   const deletionEvidence: HostedUninstallManagementAbsenceEvidence[] = [];
   for (const [index, action] of HOSTED_UNINSTALL_MANAGEMENT_DELETE_ORDER.entries()) {
-    const parsed = await parseApprovedAbsenceForAction(expected, action, value.deletionEvidence[index]);
+    const parsed = await parseApprovedAbsenceForAction(expected, action, candidate.output.deletionEvidence[index]);
     if (!parsed) return null;
     deletionEvidence.push(parsed);
   }
-  const workerDeletion = parseWorkerDeletionRecoveryProof(value.workerDeletion);
-  const namespaceRetirement = parseAdminStateNamespaceRetirementProof(value.namespaceRetirement);
+  const workerDeletion = parseWorkerDeletionRecoveryProof(candidate.output.workerDeletion);
+  const namespaceRetirement = parseAdminStateNamespaceRetirementProof(candidate.output.namespaceRetirement);
   if (!workerDeletion || !namespaceRetirement) return null;
   const first = parseNamespaceSnapshotEvidence(
     expected,
     workerDeletion.uninstallCycleId,
     1,
-    value.namespaceSnapshots[0],
+    candidate.output.namespaceSnapshots[0],
   );
   const second = parseNamespaceSnapshotEvidence(
     expected,
     workerDeletion.uninstallCycleId,
     2,
-    value.namespaceSnapshots[1],
+    candidate.output.namespaceSnapshots[1],
   );
   if (!first || !second) return null;
+  const [firstDeletion, secondDeletion, thirdDeletion] = deletionEvidence;
+  if (!firstDeletion || !secondDeletion || !thirdDeletion) return null;
+  const deletionEvidenceTuple: HostedUninstallManagementNoManagedResidueEvidence['deletionEvidence'] =
+    Object.freeze([firstDeletion, secondDeletion, thirdDeletion]);
   try {
     const parsed = await buildNoManagedResidueEvidence(
       expected,
-      deletionEvidence,
+      deletionEvidenceTuple,
       workerDeletion,
       namespaceRetirement,
       Object.freeze([first, second]),
     );
-    return canonicalEqual(value, parsed) && value.evidenceSha256 === parsed.evidenceSha256 ? parsed : null;
+    return canonicalEqual(candidate.output, parsed) &&
+      candidate.output.evidenceSha256 === parsed.evidenceSha256 ? parsed : null;
   } catch {
     return null;
   }
@@ -2553,6 +2786,12 @@ export async function verifyHostedUninstallManagementNoManagedResidue(
     if (!parsed) fail('invalid_input', 'validate', 'not_sent');
     parsedDeletionEvidence.push(parsed);
   }
+  const [firstDeletion, secondDeletion, thirdDeletion] = parsedDeletionEvidence;
+  if (!firstDeletion || !secondDeletion || !thirdDeletion) {
+    fail('invalid_input', 'validate', 'not_sent');
+  }
+  const deletionEvidenceTuple: HostedUninstallManagementNoManagedResidueEvidence['deletionEvidence'] =
+    Object.freeze([firstDeletion, secondDeletion, thirdDeletion]);
   if (!isRecord(lifecycleEvidence) || !exactKeys(lifecycleEvidence, [
     'namespaceRetirement', 'workerDeleteIntent',
   ])) fail('invalid_input', 'validate', 'not_sent');
@@ -2602,7 +2841,7 @@ export async function verifyHostedUninstallManagementNoManagedResidue(
     !canonicalEqual(firstNamespace.items, secondNamespace.items)) {
     fail('provider_unknown', 'final_namespace_list', 'unknown');
   }
-  const namespaceSnapshots = Object.freeze([
+  const namespaceSnapshots: HostedUninstallManagementNoManagedResidueEvidence['namespaceSnapshots'] = Object.freeze([
     namespaceSnapshotEvidence(
       expected,
       workerDeleteIntent.uninstallCycleId,
@@ -2617,10 +2856,10 @@ export async function verifyHostedUninstallManagementNoManagedResidue(
       secondNamespace.count,
       secondNamespace.sha256,
     ),
-  ]) as HostedUninstallManagementNoManagedResidueEvidence['namespaceSnapshots'];
+  ]);
   const evidence = await buildNoManagedResidueEvidence(
     expected,
-    parsedDeletionEvidence,
+    deletionEvidenceTuple,
     workerAbsence,
     namespaceRetirement,
     namespaceSnapshots,
@@ -2637,9 +2876,9 @@ export async function verifyHostedUninstallManagementNoManagedResidue(
   return deepFreeze({ ...semantic, proofSha256: await sha256(canonicalJson(semantic)) });
 }
 
-export async function parseHostedUninstallManagementNoManagedResidueResult(
+export async function parseHostedUninstallManagementNoManagedResidueResult<Input>(
   context: HostedUninstallManagementContext,
-  value: unknown,
+  value: Input,
 ): Promise<HostedUninstallManagementNoManagedResidueResult | null> {
   let expected: Projection;
   try {
@@ -2647,17 +2886,9 @@ export async function parseHostedUninstallManagementNoManagedResidueResult(
   } catch {
     return null;
   }
-  if (!isRecord(value) || !exactKeys(value, [
-    'advancedCertificate', 'attemptId', 'deletionEvidenceSha256', 'dnsAbsenceObservations',
-    'evidence', 'installBindingHash', 'installConvergenceHash', 'managementHostname', 'namespaceRetirementProofSha256',
-    'namespaceSnapshotSha256', 'ownershipMarker', 'proofSha256', 'schemaVersion', 'status',
-    'uninstallAuthorityHash', 'uninstallCycleId', 'uninstallPlanHash', 'uninstallPlanId',
-    'workerDeletionProofSha256',
-  ]) || typeof value.uninstallCycleId !== 'string' || !/^uninstall-[a-f0-9]{24}$/u.test(value.uninstallCycleId) ||
-    !['deletionEvidenceSha256', 'workerDeletionProofSha256', 'namespaceRetirementProofSha256',
-      'namespaceSnapshotSha256', 'proofSha256'].every((key) =>
-      typeof value[key] === 'string' && /^[a-f0-9]{64}$/u.test(value[key] as string))) return null;
-  const evidence = await parseHostedUninstallManagementNoManagedResidueEvidence(context, value.evidence);
+  const candidate = v.safeParse(noManagedResidueResultShellSchema, value);
+  if (!candidate.success) return null;
+  const evidence = await parseHostedUninstallManagementNoManagedResidueEvidence(context, candidate.output.evidence);
   if (!evidence) return null;
   const semantic = noManagedResidueSemantic(
     expected,
@@ -2668,8 +2899,8 @@ export async function parseHostedUninstallManagementNoManagedResidueResult(
     await sha256(canonicalJson(evidence.namespaceSnapshots)),
     evidence,
   );
-  const parsed = deepFreeze({ ...semantic, proofSha256: value.proofSha256 as string });
-  return canonicalEqual(value, parsed) && parsed.proofSha256 === await sha256(canonicalJson(semantic))
+  const parsed = deepFreeze({ ...semantic, proofSha256: candidate.output.proofSha256 });
+  return canonicalEqual(candidate.output, parsed) && parsed.proofSha256 === await sha256(canonicalJson(semantic))
     ? parsed
     : null;
 }

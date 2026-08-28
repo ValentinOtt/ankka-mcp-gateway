@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 import {
   __testOnlyDeployVerifiedWorkerRelease,
   CloudflareDirectUploadError,
@@ -32,6 +34,8 @@ import {
   type VerifiedWorkerDirectUploadRelease,
   type WorkerSubmission,
 } from '../src/cloudflare-worker-direct-upload';
+import { boundaryObjectSchema } from '../src/boundary';
+import { requestJson } from './boundary';
 
 const ACCOUNT_ID = 'a'.repeat(32);
 const WORKER_ID = 'b'.repeat(32);
@@ -55,7 +59,73 @@ interface ReleaseFixture {
 }
 
 type UploadRequest = Parameters<CloudflareDirectUploadTransport>[0];
+type RecordedRequest = ReturnType<UploadRequest['clone']>;
 type ResponseFactory = (request: UploadRequest) => Response | Promise<Response>;
+
+const workerMutationBodySchema = v.object({ tags: v.array(v.string()) });
+const versionBindingSchema = v.object({
+  name: v.string(),
+  type: v.string(),
+  text: v.optional(v.string()),
+  class_name: v.optional(v.string()),
+});
+const versionSubmitBodySchema = v.object({
+  annotations: v.record(v.string(), v.string()),
+  assets: v.object({
+    config: boundaryObjectSchema,
+    jwt: v.string(),
+  }),
+  bindings: v.array(versionBindingSchema),
+  compatibility_date: v.string(),
+  compatibility_flags: v.array(v.string()),
+  exports: boundaryObjectSchema,
+  main_module: v.string(),
+  modules: v.array(v.object({
+    name: v.string(),
+    content_type: v.string(),
+    content_base64: v.string(),
+  })),
+});
+type VersionSubmitBody = v.InferOutput<typeof versionSubmitBodySchema>;
+const deploymentSubmitBodySchema = v.object({
+  annotations: v.record(v.string(), v.string()),
+  strategy: v.literal('percentage'),
+  versions: v.array(v.object({ percentage: v.number(), version_id: v.string() })),
+});
+type DeploymentSubmitBody = v.InferOutput<typeof deploymentSubmitBodySchema>;
+const versionSubmissionSchema = v.object({
+  kind: v.literal('version'),
+  phase: v.picklist(['provision', 'bootstrap', 'clean']),
+  accountId: v.string(),
+  workerName: v.string(),
+  workerId: v.string(),
+  versionId: v.string(),
+  requestHash: v.string(),
+  correlationTag: v.string(),
+});
+
+async function directUploadError<Output>(operation: PromiseLike<Output>): Promise<CloudflareDirectUploadError> {
+  try {
+    await operation;
+  } catch (error) {
+    if (error instanceof CloudflareDirectUploadError) return error;
+    throw error;
+  }
+  throw new Error('expected CloudflareDirectUploadError');
+}
+
+async function recoveryClone(
+  recovery: WorkerVersionRecoveryRecord,
+): Promise<WorkerVersionRecoveryRecord> {
+  const parsed = await parseWorkerVersionRecoveryRecord(JSON.parse(JSON.stringify(recovery)));
+  if (!parsed) throw new Error('serialized recovery did not parse');
+  return parsed;
+}
+
+function required<Value>(value: Value | undefined, name: string): Value {
+  if (value === undefined) throw new Error(`missing ${name}`);
+  return value;
+}
 
 function base64(bytes: Uint8Array): string {
   let binary = '';
@@ -71,7 +141,7 @@ function hex(bytes: Uint8Array): string {
 }
 
 async function sha256(value: Uint8Array | string): Promise<string> {
-  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+  const bytes = v.is(v.string(), value) ? new TextEncoder().encode(value) : value;
   return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes).buffer)));
 }
 
@@ -160,7 +230,8 @@ function prepareInput(release: VerifiedWorkerDirectUploadRelease) {
 }
 
 function call(transport: CloudflareDirectUploadTransport, timeoutMs?: number): CloudflareDirectUploadCall {
-  return { accessToken: ACCESS_TOKEN, transport, ...(timeoutMs === undefined ? {} : { timeoutMs }) };
+  const base = { accessToken: ACCESS_TOKEN, transport };
+  return timeoutMs === undefined ? base : { ...base, timeoutMs };
 }
 
 function input(
@@ -171,7 +242,7 @@ function input(
   return { ...prepareInput(release), ...call(transport, timeoutMs) };
 }
 
-function success(result: unknown, status = 200): Response {
+function success<Result>(result: Result, status = 200): Response {
   return Response.json({ errors: [], messages: [], result, success: true }, { status });
 }
 
@@ -181,7 +252,7 @@ function failure(status: number, message = 'provider rejected request'): Respons
   }, { status });
 }
 
-function workerState(tags: readonly string[], workerId = WORKER_ID): Record<string, unknown> {
+function workerState(tags: readonly string[], workerId = WORKER_ID) {
   return {
     id: workerId,
     created_on: CREATED_ON,
@@ -205,13 +276,14 @@ function workerState(tags: readonly string[], workerId = WORKER_ID): Record<stri
   };
 }
 
-function versionResultFromBody(
-  body: Record<string, unknown>,
+function versionResultFromBody<Input>(
+  input: Input,
   options: { readonly echoModuleContent?: boolean; readonly versionId?: string } = {},
-): Record<string, unknown> {
-  const modules = body.modules as Array<Record<string, unknown>>;
-  const bindings = body.bindings as Array<Record<string, unknown>>;
-  const assets = body.assets as Record<string, unknown>;
+ ) {
+  const body = v.parse(versionSubmitBodySchema, input);
+  const modules = body.modules;
+  const bindings = body.bindings;
+  const assets = body.assets;
   return {
     id: options.versionId ?? VERSION_ID,
     created_on: CREATED_ON,
@@ -224,11 +296,12 @@ function versionResultFromBody(
     compatibility_date: body.compatibility_date,
     compatibility_flags: body.compatibility_flags,
     main_module: body.main_module,
-    modules: modules.map((module) => ({
-      name: module.name,
-      content_type: module.content_type,
-      ...(options.echoModuleContent ? { content_base64: module.content_base64 } : {}),
-    })),
+    modules: modules.map((module) => {
+      const identity = { name: module.name, content_type: module.content_type };
+      return options.echoModuleContent
+        ? { ...identity, content_base64: module.content_base64 }
+        : identity;
+    }),
     exports: {
       AdminState: { type: 'durable-object', storage: 'sqlite', state: 'created' },
       default: { type: 'worker', state: 'created', cache: { enabled: false } },
@@ -244,10 +317,11 @@ function versionResultFromBody(
   };
 }
 
-function deploymentResultFromBody(
-  body: Record<string, unknown>,
+function deploymentResultFromBody<Input>(
+  input: Input,
   deploymentId = DEPLOYMENT_ID,
-): Record<string, unknown> {
+ ) {
+  const body = v.parse(deploymentSubmitBodySchema, input);
   return {
     id: deploymentId,
     annotations: body.annotations,
@@ -259,18 +333,20 @@ function deploymentResultFromBody(
   };
 }
 
-function sequencedTransport(steps: readonly ResponseFactory[]): {
+interface SequencedTransport {
   readonly transport: CloudflareDirectUploadTransport;
-  readonly requests: UploadRequest[];
+  readonly requests: RecordedRequest[];
   readonly callCount: () => number;
-} {
-  const requests: UploadRequest[] = [];
+}
+
+function sequencedTransport(steps: readonly ResponseFactory[]): SequencedTransport {
+  const requests: RecordedRequest[] = [];
   let index = 0;
   return {
     requests,
     callCount: () => index,
     transport: async (request) => {
-      requests.push(request.clone() as unknown as UploadRequest);
+      requests.push(request.clone());
       const step = steps[index];
       index += 1;
       if (!step) throw new Error('unexpected provider call');
@@ -279,7 +355,7 @@ function sequencedTransport(steps: readonly ResponseFactory[]): {
   };
 }
 
-function listPage(items: readonly unknown[], page: number, totalCount: number): Response {
+function listPage<Item>(items: readonly Item[], page: number, totalCount: number): Response {
   return Response.json({
     errors: [],
     messages: [],
@@ -291,7 +367,7 @@ function listPage(items: readonly unknown[], page: number, totalCount: number): 
   });
 }
 
-function namespacePage(items: readonly unknown[], page: number, totalCount: number): Response {
+function namespacePage<Item>(items: readonly Item[], page: number, totalCount: number): Response {
   return Response.json({
     errors: [], messages: [], result: items,
     result_info: {
@@ -305,10 +381,18 @@ function namespacePage(items: readonly unknown[], page: number, totalCount: numb
   });
 }
 
+interface NamespaceItem {
+  readonly id: string;
+  readonly class: string;
+  readonly name: string;
+  readonly script: string;
+  readonly use_sqlite: boolean;
+}
+
 function namespaceItem(
   id: string,
-  overrides: Partial<Record<'class' | 'name' | 'script' | 'use_sqlite', unknown>> = {},
-): Record<string, unknown> {
+  overrides: Partial<Omit<NamespaceItem, 'id'>> = {},
+): NamespaceItem {
   return {
     id,
     class: 'OtherState',
@@ -353,27 +437,26 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     [{ accountId: ACCOUNT_ID, workerName: WORKER_NAME, extra: true }],
     [null],
   ])('rejects an inexact Worker-create target without deriving an intent', async (invalid) => {
-    const error: unknown = await prepareWorkerMutationForTarget(invalid as never)
-      .catch((caught: unknown) => caught);
+    const error = await directUploadError(prepareWorkerMutationForTarget(invalid));
     expect(error).toBeInstanceOf(CloudflareDirectUploadError);
     expect(error).toMatchObject({
       code: 'invalid_input', stage: 'validate', outcome: 'not_sent', canRetry: false,
     });
-    expect((error as Error).message).toBe('invalid_input');
+    expect(error.message).toBe('invalid_input');
   });
 
   it('uses exact Worker, asset multipart, JSON Version, SQLite export, and 100% deployment contracts', async () => {
     const fixture = await releaseFixture();
-    const appHash = fixture.assetHashes['/app.js'];
-    const indexHash = fixture.assetHashes['/index.html'];
+    const appHash = required(fixture.assetHashes['/app.js'], 'app asset hash');
+    const indexHash = required(fixture.assetHashes['/index.html'], 'index asset hash');
     let workerTags: readonly string[] = [];
-    let versionBody: Record<string, unknown> | undefined;
-    let deploymentBody: Record<string, unknown> | undefined;
+    let versionBody: VersionSubmitBody | undefined;
+    let deploymentBody: DeploymentSubmitBody | undefined;
     const sequence = sequencedTransport([
       () => failure(404, 'worker not found'),
       async (request) => {
-        const body = await request.json() as Record<string, unknown>;
-        workerTags = body.tags as readonly string[];
+        const body = await requestJson(request, workerMutationBodySchema);
+        workerTags = body.tags;
         return success({ id: WORKER_ID }, 201);
       },
       () => success(workerState(workerTags)),
@@ -381,15 +464,15 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       () => success(null, 202),
       () => success({ jwt: COMPLETION_JWT }, 201),
       async (request) => {
-        versionBody = await request.json() as Record<string, unknown>;
+        versionBody = await requestJson(request, versionSubmitBodySchema);
         return success({ id: VERSION_ID }, 201);
       },
-      () => success(versionResultFromBody(versionBody ?? {})),
+      () => success(versionResultFromBody(required(versionBody, 'version request body'))),
       async (request) => {
-        deploymentBody = await request.json() as Record<string, unknown>;
+        deploymentBody = await requestJson(request, deploymentSubmitBodySchema);
         return success({ id: DEPLOYMENT_ID }, 201);
       },
-      () => success(deploymentResultFromBody(deploymentBody ?? {})),
+      () => success(deploymentResultFromBody(required(deploymentBody, 'deployment request body'))),
     ]);
 
     await expect(__testOnlyDeployVerifiedWorkerRelease(input(fixture.release, sequence.transport))).resolves.toEqual({
@@ -414,7 +497,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       `GET /client/v4/accounts/${ACCOUNT_ID}/workers/scripts/${WORKER_NAME}/deployments/${DEPLOYMENT_ID}`,
     ]);
 
-    const workerBody = await sequence.requests[1].clone().json() as Record<string, unknown>;
+    const workerBody = await requestJson(required(sequence.requests.at(1), 'worker create request').clone(), boundaryObjectSchema);
     expect(workerBody).toMatchObject({
       logpush: false,
       name: WORKER_NAME,
@@ -425,10 +508,10 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     expect(workerTags).toHaveLength(2);
     expect(workerTags[0]).toBe('ankka-mcp-gateway');
     expect(workerTags[1]).toMatch(/^ankka-worker-sha256:[a-f0-9]{64}$/u);
-    expect(await sequence.requests[3].clone().json()).toEqual({
+    expect(await required(sequence.requests.at(3), 'asset session request').clone().json()).toEqual({
       manifest: {
-        '/app.js': { hash: appHash, size: fixture.release.worker.assets.files[1].bytes.byteLength },
-        '/index.html': { hash: indexHash, size: fixture.release.worker.assets.files[0].bytes.byteLength },
+        '/app.js': { hash: appHash, size: required(fixture.release.worker.assets.files.at(1), 'app asset').bytes.byteLength },
+        '/index.html': { hash: indexHash, size: required(fixture.release.worker.assets.files.at(0), 'index asset').bytes.byteLength },
       },
     });
 
@@ -436,7 +519,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       [4, appHash, '/app.js'],
       [5, indexHash, '/index.html'],
     ] as const) {
-      const request = sequence.requests[offset];
+      const request = required(sequence.requests.at(offset), `asset upload request ${offset}`);
       expect(new URL(request.url).search).toBe('?base64=true');
       expect(request.headers.get('authorization')).toBe(`Bearer ${UPLOAD_JWT}`);
       expect(request.headers.get('content-type')).toMatch(/^multipart\/form-data; boundary=/u);
@@ -450,11 +533,12 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       expect(await part.text()).toBe(fixture.assetBase64[path]);
     }
 
-    expect(Object.keys(versionBody ?? {}).sort()).toEqual([
+    const submittedVersion = required(versionBody, 'version request body');
+    expect(Object.keys(submittedVersion).sort()).toEqual([
       'annotations', 'assets', 'bindings', 'compatibility_date', 'compatibility_flags',
       'exports', 'main_module', 'modules',
     ]);
-    expect(versionBody).toMatchObject({
+    expect(submittedVersion).toMatchObject({
       annotations: { 'workers/tag': expect.stringMatching(/^ankka-version-bootstrap-sha256:[a-f0-9]{64}$/u) },
       assets: {
         config: {
@@ -471,8 +555,8 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
         name: 'index.js', content_type: 'application/javascript+module', content_base64: fixture.moduleBase64,
       }],
     });
-    expect(Object.hasOwn(versionBody ?? {}, 'migrations')).toBe(false);
-    const versionBindings = (versionBody?.bindings ?? []) as Array<Record<string, unknown>>;
+    expect(Object.hasOwn(submittedVersion, 'migrations')).toBe(false);
+    const versionBindings = submittedVersion.bindings;
     expect(versionBindings.find((binding) => binding.name === 'ADMIN_STATE')).toEqual({
       class_name: 'AdminState', name: 'ADMIN_STATE', type: 'durable_object_namespace',
     });
@@ -490,27 +574,34 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       versions: [{ percentage: 100, version_id: VERSION_ID }],
     });
     for (const index of [0, 1, 2, 3, 6, 7, 8, 9]) {
-      expect(sequence.requests[index].headers.get('authorization')).toBe(`Bearer ${ACCESS_TOKEN}`);
+      expect(required(sequence.requests.at(index), `authenticated request ${index}`).headers.get('authorization'))
+        .toBe(`Bearer ${ACCESS_TOKEN}`);
     }
   });
 
   it('requires exact 202 for every nonfinal asset bucket and exact 201 plus JWT for final', async () => {
     const fixture = await releaseFixture();
-    const hashes = [fixture.assetHashes['/app.js'], fixture.assetHashes['/index.html']];
+    const hashes = [
+      required(fixture.assetHashes['/app.js'], 'app asset hash'),
+      required(fixture.assetHashes['/index.html'], 'index asset hash'),
+    ];
     let tags: readonly string[] = [];
     const sequence = sequencedTransport([
       () => failure(404),
       async (request) => {
-        tags = ((await request.json() as Record<string, unknown>).tags ?? []) as readonly string[];
+        tags = (await requestJson(request, workerMutationBodySchema)).tags;
         return success({ id: WORKER_ID }, 201);
       },
       () => success(workerState(tags)),
-      () => success({ jwt: UPLOAD_JWT, buckets: [[hashes[0]], [hashes[1]]] }),
+      () => success({
+        jwt: UPLOAD_JWT,
+        buckets: [[required(hashes.at(0), 'app asset hash')], [required(hashes.at(1), 'index asset hash')]],
+      }),
       () => success(null, 200),
     ]);
-    const error: unknown = await __testOnlyDeployVerifiedWorkerRelease(
+    const error = await directUploadError(__testOnlyDeployVerifiedWorkerRelease(
       input(fixture.release, sequence.transport),
-    ).catch((caught: unknown) => caught);
+    ));
     expect(error).toMatchObject({ code: 'provider_unknown', stage: 'asset_bucket', outcome: 'unknown' });
     expect(sequence.callCount()).toBe(5);
   });
@@ -528,8 +619,8 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       'bootstrap',
     );
     const clean = await prepareWorkerVersionMutation(prepared, worker, COMPLETION_JWT, 'clean');
-    const bootstrapBindings = bootstrap.ephemeral.body.bindings as Array<Record<string, unknown>>;
-    const cleanBindings = clean.ephemeral.body.bindings as Array<Record<string, unknown>>;
+    const bootstrapBindings = v.parse(versionSubmitBodySchema, bootstrap.ephemeral.body).bindings;
+    const cleanBindings = v.parse(versionSubmitBodySchema, clean.ephemeral.body).bindings;
     for (const bindings of [bootstrapBindings, cleanBindings]) {
       expect(bindings.find((binding) => binding.name === 'ZERO_TRUST_READY')).toEqual({
         name: 'ZERO_TRUST_READY', type: 'plain_text', text: 'true',
@@ -595,9 +686,11 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     expect(refreshed.recovery).toEqual(first.recovery);
     expect(refreshed.recovery.requestHash).toBe(first.recovery.requestHash);
     expect(refreshed.recovery.correlationTag).toBe(first.recovery.correlationTag);
-    expect((first.ephemeral.body.assets as Record<string, unknown>).jwt).toBe(COMPLETION_JWT);
-    expect((refreshed.ephemeral.body.assets as Record<string, unknown>).jwt).toBe(REFRESHED_COMPLETION_JWT);
-    const refreshedBindings = refreshed.ephemeral.body.bindings as Array<Record<string, unknown>>;
+    const firstBody = v.parse(versionSubmitBodySchema, first.ephemeral.body);
+    const refreshedBody = v.parse(versionSubmitBodySchema, refreshed.ephemeral.body);
+    expect(firstBody.assets.jwt).toBe(COMPLETION_JWT);
+    expect(refreshedBody.assets.jwt).toBe(REFRESHED_COMPLETION_JWT);
+    const refreshedBindings = refreshedBody.bindings;
     expect(refreshedBindings.find((binding) => binding.name === 'ANKKA_BOOTSTRAP_NONCE')?.text)
       .toBe(refreshedBootstrapValue);
 
@@ -607,7 +700,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       first.recovery,
       call(sequence.transport),
     )).resolves.toMatchObject({ kind: 'version', versionId: VERSION_ID });
-    expect((await sequence.requests[0].json() as Record<string, unknown>).assets).toMatchObject({
+    expect((await requestJson(required(sequence.requests.at(0), 'version submit request'), versionSubmitBodySchema)).assets).toMatchObject({
       jwt: REFRESHED_COMPLETION_JWT,
     });
     const serialized = JSON.stringify(first.recovery);
@@ -617,6 +710,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     expect(serialized).not.toContain(refreshedBootstrapValue);
     expect(JSON.stringify(first.ephemeral.semanticCommitment)).not.toMatch(/jwt|nonce|token|secret/iu);
     const parsedRecovery = await parseWorkerVersionRecoveryRecord(JSON.parse(serialized));
+    if (!parsedRecovery) throw new Error('serialized recovery did not parse');
     expect(parsedRecovery).toEqual(first.recovery);
     expect(parsedRecovery).not.toBe(first.recovery);
     expect(Object.isFrozen(parsedRecovery)).toBe(true);
@@ -628,7 +722,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       'bootstrap',
     )).rejects.toMatchObject({ code: 'invalid_input', stage: 'validate', outcome: 'not_sent' });
     expect(await parseWorkerVersionRecoveryRecord({
-      ...JSON.parse(serialized) as Record<string, unknown>,
+      ...parsedRecovery,
       requestHash: 'f'.repeat(64),
     })).toBeNull();
   });
@@ -647,7 +741,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     const baseline = await prepareWorkerVersionMutation(baselinePrepared, worker, COMPLETION_JWT, 'bootstrap');
     expect(baseline.recovery).toEqual(storedRecovery);
 
-    const originalAsset = fixture.release.worker.assets.files[0];
+    const originalAsset = required(fixture.release.worker.assets.files.at(0), 'original asset');
     const changedAssetBytes = new TextEncoder().encode('<!doctype html><title>Changed gateway</title>');
     const assetDriftRelease: VerifiedWorkerDirectUploadRelease = {
       ...fixture.release,
@@ -724,8 +818,12 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     )).rejects.toMatchObject({ code: 'invalid_input', stage: 'validate', outcome: 'not_sent' });
     expect(maskedNoCall.callCount()).toBe(0);
 
-    const contradictory = JSON.parse(JSON.stringify(baseline.recovery)) as WorkerVersionRecoveryRecord;
-    (contradictory.assets[0] as { byteLength: number }).byteLength += 1;
+    const contradictory: WorkerVersionRecoveryRecord = {
+      ...baseline.recovery,
+      assets: baseline.recovery.assets.map((asset, index) => (
+        index === 0 ? { ...asset, byteLength: asset.byteLength + 1 } : asset
+      )),
+    };
     const noCall = sequencedTransport([]);
     await expect(submitWorkerVersionMutation(
       baseline.ephemeral,
@@ -789,12 +887,12 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
 
     for (const response of [success({ jwt: COMPLETION_JWT }, 202), success({}, 201)]) {
       const sequence = sequencedTransport([() => response]);
-      const error: unknown = await submitAssetBucketMutation(
+      const error = await directUploadError(submitAssetBucketMutation(
         finalIntent,
         session,
         prepared,
         call(sequence.transport),
-      ).catch((caught: unknown) => caught);
+      ));
       expect(error).toMatchObject({ stage: 'asset_bucket', outcome: 'unknown' });
       expect(sequence.callCount()).toBe(1);
     }
@@ -805,34 +903,35 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     moduleBytes.fill(97);
     const fixture = await releaseFixture(moduleBytes);
     let tags: readonly string[] = [];
-    let versionBody: Record<string, unknown> | undefined;
-    let deploymentBody: Record<string, unknown> | undefined;
+    let versionBody: VersionSubmitBody | undefined;
+    let deploymentBody: DeploymentSubmitBody | undefined;
     const sequence = sequencedTransport([
       () => failure(404),
       async (request) => {
-        tags = (await request.json() as Record<string, unknown>).tags as readonly string[];
+        tags = (await requestJson(request, workerMutationBodySchema)).tags;
         return success({ id: WORKER_ID }, 201);
       },
       () => success(workerState(tags)),
       () => success({ jwt: COMPLETION_JWT, buckets: [] }),
       async (request) => {
-        versionBody = await request.json() as Record<string, unknown>;
+        versionBody = await requestJson(request, versionSubmitBodySchema);
         return success(versionResultFromBody(versionBody, { echoModuleContent: true }), 201);
       },
-      () => success(versionResultFromBody(versionBody ?? {})),
+      () => success(versionResultFromBody(required(versionBody, 'version request body'))),
       async (request) => {
-        deploymentBody = await request.json() as Record<string, unknown>;
+        deploymentBody = await requestJson(request, deploymentSubmitBodySchema);
         return success({ id: DEPLOYMENT_ID }, 201);
       },
-      () => success(deploymentResultFromBody(deploymentBody ?? {})),
+      () => success(deploymentResultFromBody(required(deploymentBody, 'deployment request body'))),
     ]);
 
     await expect(__testOnlyDeployVerifiedWorkerRelease(input(fixture.release, sequence.transport))).resolves.toMatchObject({
       versionId: VERSION_ID, percentage: 100,
     });
-    expect(JSON.stringify(versionResultFromBody(versionBody ?? {}, { echoModuleContent: true })).length)
+    const submittedVersion = required(versionBody, 'version request body');
+    expect(JSON.stringify(versionResultFromBody(submittedVersion, { echoModuleContent: true })).length)
       .toBeGreaterThan(128 * 1024);
-    expect((versionResultFromBody(versionBody ?? {}).modules as Array<Record<string, unknown>>)[0])
+    expect(versionResultFromBody(submittedVersion).modules[0])
       .not.toHaveProperty('content_base64');
   });
 
@@ -852,7 +951,13 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     };
     const deploymentIntent = await prepareWorkerDeploymentMutation(version);
 
-    const cases = [
+    interface SubmissionFailureCase {
+      readonly kind: 'worker' | 'version' | 'deployment';
+      readonly id: string;
+      readonly status: number;
+      invoke(transport: CloudflareDirectUploadTransport): Promise<object>;
+    }
+    const cases: readonly SubmissionFailureCase[] = [
       {
         kind: 'worker', id: WORKER_ID, status: 202,
         invoke: (transport: CloudflareDirectUploadTransport) => submitWorkerMutation(workerIntent, call(transport)),
@@ -869,15 +974,15 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
         kind: 'deployment', id: DEPLOYMENT_ID, status: 201,
         invoke: (transport: CloudflareDirectUploadTransport) => submitWorkerDeploymentMutation(deploymentIntent, call(transport)),
       },
-    ] as const;
+    ];
     for (const testCase of cases) {
       const sequence = sequencedTransport([() => Response.json({
         errors: [], messages: [], result: { id: testCase.id }, success: false,
       }, { status: testCase.status })]);
-      const error: unknown = await testCase.invoke(sequence.transport).catch((caught: unknown) => caught);
+      const error = await directUploadError(testCase.invoke(sequence.transport));
       expect(error).toBeInstanceOf(CloudflareDirectUploadError);
       expect(error).toMatchObject({ outcome: 'submitted', canRetry: false });
-      expect((error as CloudflareDirectUploadError).submissions).toEqual([
+      expect(error.submissions).toEqual([
         expect.objectContaining({ kind: testCase.kind, [`${testCase.kind}Id`]: testCase.id }),
       ]);
       expect(sequence.callCount()).toBe(1);
@@ -896,8 +1001,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID,
     });
     const wrong = sequencedTransport([() => success(workerState(['ankka-mcp-gateway', 'wrong-marker']))]);
-    const error: unknown = await inspectWorkerRecovery(intent, call(wrong.transport))
-      .catch((caught: unknown) => caught);
+    const error = await directUploadError(inspectWorkerRecovery(intent, call(wrong.transport)));
     expect(error).toMatchObject({ code: 'worker_name_collision', stage: 'worker_recovery' });
     const unsafeObservability = sequencedTransport([() => success({
       ...workerState(intent.body.tags),
@@ -940,7 +1044,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     const exact = namespaceItem(NAMESPACE_ID, {
       class: 'AdminState', name: 'admin-state-namespace', script: WORKER_NAME, use_sqlite: true,
     });
-    const cases: Array<{ value: readonly unknown[]; code: string; expected?: string }> = [
+    const cases: Array<{ value: readonly object[]; code: string; expected?: string }> = [
       { value: [{ id: NAMESPACE_ID, class: 'AdminState', name: 'partial', script: WORKER_NAME }], code: 'provider_mismatch' },
       { value: [exact, exact], code: 'recovery_ambiguous' },
       { value: [exact, namespaceItem('f'.repeat(32), { class: 'AdminState', name: 'second', script: WORKER_NAME })], code: 'recovery_ambiguous' },
@@ -949,13 +1053,13 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     ];
     for (const testCase of cases) {
       const transport = sequencedTransport([() => namespacePage(testCase.value, 1, testCase.value.length)]);
-      const error: unknown = await inspectAdminStateDurableObjectNamespace({
+      const error = await directUploadError(inspectAdminStateDurableObjectNamespace({
         accountId: ACCOUNT_ID,
         workerName: WORKER_NAME,
         className: 'AdminState',
         storage: 'sqlite',
         expectedNamespaceId: testCase.expected ?? NAMESPACE_ID,
-      }, call(transport.transport)).catch((caught: unknown) => caught);
+      }, call(transport.transport)));
       expect(error).toMatchObject({ code: testCase.code, stage: 'namespace_verify', outcome: 'unknown' });
     }
   });
@@ -971,7 +1075,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     expect(serializedRecovery).not.toMatch(/jwt|nonce|token|secret/iu);
     expect(serializedRecovery).not.toContain(COMPLETION_JWT);
     expect(serializedRecovery).not.toContain('bootstrap_nonce_value_that_is_never_returned');
-    const recovery = JSON.parse(serializedRecovery) as WorkerVersionRecoveryRecord;
+    const recovery = await recoveryClone(plan.recovery);
     const sequence = sequencedTransport([
       () => listPage([{ id: OTHER_VERSION_ID, annotations: { 'workers/tag': 'unrelated' } }], 1, 2),
       () => listPage([{ id: VERSION_ID, annotations: { 'workers/tag': recovery.correlationTag } }], 2, 2),
@@ -1009,8 +1113,8 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       expect(serialized).not.toContain(COMPLETION_JWT);
       expect(serialized).not.toContain('bootstrap_nonce_value_that_is_never_returned');
     }
-    const restartedRecord = JSON.parse(persistedRecord) as WorkerVersionRecoveryRecord;
-    const restartedSubmission = JSON.parse(persistedSubmission) as VersionSubmission;
+    const restartedRecord = await recoveryClone(plan.recovery);
+    const restartedSubmission = v.parse(versionSubmissionSchema, JSON.parse(persistedSubmission));
     const verifyTransport = sequencedTransport([() => success(providerVersion)]);
     await expect(verifyWorkerVersionSubmission(
       restartedRecord,
@@ -1026,11 +1130,13 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID,
     };
     const plan = await prepareWorkerVersionMutation(prepared, worker, COMPLETION_JWT, 'bootstrap');
-    const returned = versionResultFromBody(plan.ephemeral.body);
-    const admin = (returned.bindings as Array<Record<string, unknown>>)
-      .find((binding) => binding.name === 'ADMIN_STATE');
-    if (!admin) throw new TypeError('missing ADMIN_STATE fixture');
-    admin.namespace_id = 'f'.repeat(32);
+    const returnedVersion = versionResultFromBody(plan.ephemeral.body);
+    const returned = {
+      ...returnedVersion,
+      bindings: returnedVersion.bindings.map((binding) => binding.name === 'ADMIN_STATE'
+        ? { ...binding, namespace_id: 'f'.repeat(32) }
+        : binding),
+    };
     const submission: VersionSubmission = {
       kind: 'version', phase: 'bootstrap', accountId: ACCOUNT_ID, workerName: WORKER_NAME,
       workerId: WORKER_ID, versionId: VERSION_ID, requestHash: plan.recovery.requestHash,
@@ -1052,7 +1158,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID,
     };
     const plan = await prepareWorkerVersionMutation(prepared, worker, COMPLETION_JWT, 'clean');
-    const recovery = JSON.parse(JSON.stringify(plan.recovery)) as WorkerVersionRecoveryRecord;
+    const recovery = await recoveryClone(plan.recovery);
     const providerVersion = versionResultFromBody(plan.ephemeral.body);
     const sequence = sequencedTransport([
       () => listPage([{ id: VERSION_ID, annotations: { 'workers/tag': recovery.correlationTag } }], 1, 1),
@@ -1071,9 +1177,14 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID,
     };
     const plan = await prepareWorkerVersionMutation(prepared, worker, COMPLETION_JWT, 'clean');
-    const returned = versionResultFromBody(plan.ephemeral.body);
-    const bindings = returned.bindings as Array<Record<string, unknown>>;
-    bindings.push({ name: 'ANKKA_BOOTSTRAP_NONCE', type: 'secret_text' });
+    const returnedVersion = versionResultFromBody(plan.ephemeral.body);
+    const returned = {
+      ...returnedVersion,
+      bindings: [
+        ...returnedVersion.bindings,
+        { name: 'ANKKA_BOOTSTRAP_NONCE', type: 'secret_text' },
+      ],
+    };
     const submission: VersionSubmission = {
       kind: 'version',
       phase: 'clean',
@@ -1084,12 +1195,13 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       requestHash: plan.recovery.requestHash,
       correlationTag: plan.recovery.correlationTag,
     };
-    const recovery = JSON.parse(JSON.stringify(plan.recovery)) as WorkerVersionRecoveryRecord;
+    const recovery = await recoveryClone(plan.recovery);
     const sequence = sequencedTransport([() => success(returned)]);
-    const error: unknown = await verifyWorkerVersionSubmission(recovery, submission, call(sequence.transport))
-      .catch((caught: unknown) => caught);
+    const error = await directUploadError(
+      verifyWorkerVersionSubmission(recovery, submission, call(sequence.transport)),
+    );
     expect(error).toMatchObject({ code: 'provider_mismatch', stage: 'version_verify', outcome: 'submitted' });
-    expect((error as CloudflareDirectUploadError).submissions).toEqual([submission]);
+    expect(error.submissions).toEqual([submission]);
   });
 
   it('rejects contradictory returned module content even when metadata and tag match', async () => {
@@ -1099,11 +1211,16 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID,
     };
     const plan = await prepareWorkerVersionMutation(prepared, worker, COMPLETION_JWT, 'bootstrap');
-    const returned = versionResultFromBody(plan.ephemeral.body, { echoModuleContent: true });
-    const modules = returned.modules as Array<Record<string, unknown>>;
+    const returnedVersion = versionResultFromBody(plan.ephemeral.body, { echoModuleContent: true });
     const contradictoryBytes = Uint8Array.from(atob(fixture.moduleBase64), (character) => character.charCodeAt(0));
-    contradictoryBytes[0] ^= 1;
-    modules[0].content_base64 = base64(contradictoryBytes);
+    const firstByte = required(contradictoryBytes.at(0), 'contradictory module byte');
+    contradictoryBytes[0] = firstByte ^ 1;
+    const returned = {
+      ...returnedVersion,
+      modules: returnedVersion.modules.map((module, index) => index === 0
+        ? { ...module, content_base64: base64(contradictoryBytes) }
+        : module),
+    };
     const submission: VersionSubmission = {
       kind: 'version',
       phase: 'bootstrap',
@@ -1114,12 +1231,13 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       requestHash: plan.recovery.requestHash,
       correlationTag: plan.recovery.correlationTag,
     };
-    const recovery = JSON.parse(JSON.stringify(plan.recovery)) as WorkerVersionRecoveryRecord;
+    const recovery = await recoveryClone(plan.recovery);
     const sequence = sequencedTransport([() => success(returned)]);
-    const error: unknown = await verifyWorkerVersionSubmission(recovery, submission, call(sequence.transport))
-      .catch((caught: unknown) => caught);
+    const error = await directUploadError(
+      verifyWorkerVersionSubmission(recovery, submission, call(sequence.transport)),
+    );
     expect(error).toMatchObject({ code: 'provider_mismatch', stage: 'version_verify', outcome: 'submitted' });
-    expect((error as CloudflareDirectUploadError).submissions).toEqual([submission]);
+    expect(error.submissions).toEqual([submission]);
     expect(JSON.stringify(error)).not.toContain(COMPLETION_JWT);
     expect(JSON.stringify(error)).not.toContain('bootstrap_nonce_value_that_is_never_returned');
   });
@@ -1131,13 +1249,12 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID,
     };
     const plan = await prepareWorkerVersionMutation(prepared, worker, COMPLETION_JWT, 'bootstrap');
-    const recovery = JSON.parse(JSON.stringify(plan.recovery)) as WorkerVersionRecoveryRecord;
+    const recovery = await recoveryClone(plan.recovery);
     const sequence = sequencedTransport([
       () => listPage([{ id: VERSION_ID, annotations: { 'workers/tag': recovery.correlationTag } }], 1, 2),
       () => listPage([{ id: OTHER_VERSION_ID, annotations: { 'workers/tag': recovery.correlationTag } }], 2, 2),
     ]);
-    const error: unknown = await inspectWorkerVersionRecovery(recovery, call(sequence.transport))
-      .catch((caught: unknown) => caught);
+    const error = await directUploadError(inspectWorkerVersionRecovery(recovery, call(sequence.transport)));
     expect(error).toMatchObject({ code: 'recovery_ambiguous', stage: 'version_recovery', outcome: 'unknown' });
     expect(sequence.callCount()).toBe(2);
   });
@@ -1149,13 +1266,12 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID,
     };
     const plan = await prepareWorkerVersionMutation(prepared, worker, COMPLETION_JWT, 'bootstrap');
-    const recovery = JSON.parse(JSON.stringify(plan.recovery)) as WorkerVersionRecoveryRecord;
+    const recovery = await recoveryClone(plan.recovery);
     const sequence = sequencedTransport([
       () => listPage([{ id: OTHER_VERSION_ID, annotations: { 'workers/tag': 'unrelated' } }], 1, 2),
       () => listPage([{ id: OTHER_VERSION_ID, annotations: { 'workers/tag': 'still-unrelated' } }], 2, 2),
     ]);
-    const error: unknown = await inspectWorkerVersionRecovery(recovery, call(sequence.transport))
-      .catch((caught: unknown) => caught);
+    const error = await directUploadError(inspectWorkerVersionRecovery(recovery, call(sequence.transport)));
     expect(error).toMatchObject({ code: 'provider_mismatch', stage: 'version_recovery', outcome: 'unknown' });
     expect(sequence.callCount()).toBe(2);
   });
@@ -1192,8 +1308,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     const ambiguous = sequencedTransport([() => success({ deployments: [
       matching, deploymentResultFromBody(intent.body, OTHER_DEPLOYMENT_ID),
     ] })]);
-    const error: unknown = await inspectWorkerDeploymentRecovery(intent, call(ambiguous.transport))
-      .catch((caught: unknown) => caught);
+    const error = await directUploadError(inspectWorkerDeploymentRecovery(intent, call(ambiguous.transport)));
     expect(error).toMatchObject({ code: 'recovery_ambiguous', stage: 'deployment_recovery' });
     expect(ambiguous.callCount()).toBe(1);
   });
@@ -1234,8 +1349,9 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     await expect(verifyActiveWorkerDeployment(intent, submission, call(sequence.transport)))
       .resolves.toEqual(submission);
     expect(sequence.callCount()).toBe(1);
-    expect(sequence.requests[0].method).toBe('GET');
-    const requestUrl = new URL(sequence.requests[0].url);
+    const deploymentRequest = required(sequence.requests.at(0), 'deployment request');
+    expect(deploymentRequest.method).toBe('GET');
+    const requestUrl = new URL(deploymentRequest.url);
     expect(requestUrl.pathname).toBe(
       `/client/v4/accounts/${ACCOUNT_ID}/workers/scripts/${WORKER_NAME}/deployments`,
     );
@@ -1301,11 +1417,13 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     };
     const deploymentIntent = await prepareWorkerDeploymentMutation(version);
     const active = deploymentResultFromBody(deploymentIntent.body);
-    const changed = versionResultFromBody(versionPlan.ephemeral.body, { echoModuleContent: true });
-    const releaseBinding = (changed.bindings as Array<Record<string, unknown>>)
-      .find((binding) => binding.name === 'ANKKA_GATEWAY_RELEASE');
-    if (!releaseBinding) throw new TypeError('missing release binding fixture');
-    releaseBinding.text = 'gateway-v1.2.4';
+    const providerVersion = versionResultFromBody(versionPlan.ephemeral.body, { echoModuleContent: true });
+    const changed = {
+      ...providerVersion,
+      bindings: providerVersion.bindings.map((binding) => binding.name === 'ANKKA_GATEWAY_RELEASE'
+        ? { ...binding, text: 'gateway-v1.2.4' }
+        : binding),
+    };
     const sequence = sequencedTransport([
       () => success({ deployments: [active] }),
       () => success(changed),
@@ -1407,11 +1525,11 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     ] as const;
     for (const testCase of cases) {
       const sequence = sequencedTransport([() => testCase.response.clone()]);
-      const error: unknown = await verifyActiveWorkerDeployment(
+      const error = await directUploadError(verifyActiveWorkerDeployment(
         intent,
         submission,
         call(sequence.transport),
-      ).catch((caught: unknown) => caught);
+      ));
       expect(error, testCase.label).toBeInstanceOf(CloudflareDirectUploadError);
       expect(error, testCase.label).toMatchObject({
         code: testCase.code,
@@ -1452,18 +1570,19 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
   ])('rejects %s assets without uploading or assuming replay safety', async (_label, buckets) => {
     const fixture = await releaseFixture();
     let tags: readonly string[] = [];
-    const known = fixture.assetHashes['/app.js'];
+    const known = required(fixture.assetHashes['/app.js'], 'app asset hash');
     const sequence = sequencedTransport([
       () => failure(404),
       async (request) => {
-        tags = (await request.json() as Record<string, unknown>).tags as readonly string[];
+        tags = (await requestJson(request, workerMutationBodySchema)).tags;
         return success({ id: WORKER_ID }, 201);
       },
       () => success(workerState(tags)),
       () => success({ jwt: UPLOAD_JWT, buckets: buckets(known) }),
     ]);
-    const error: unknown = await __testOnlyDeployVerifiedWorkerRelease(input(fixture.release, sequence.transport))
-      .catch((caught: unknown) => caught);
+    const error = await directUploadError(
+      __testOnlyDeployVerifiedWorkerRelease(input(fixture.release, sequence.transport)),
+    );
     expect(error).toMatchObject({
       code: 'provider_mismatch', stage: 'asset_session', outcome: 'unknown', canRetry: false,
     });
@@ -1477,7 +1596,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     const sequence = sequencedTransport([
       () => failure(404),
       async (request) => {
-        tags = (await request.json() as Record<string, unknown>).tags as readonly string[];
+        tags = (await requestJson(request, workerMutationBodySchema)).tags;
         return success({ id: WORKER_ID }, 201);
       },
       () => success(workerState(tags)),
@@ -1485,14 +1604,15 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       () => success(null, 202),
       () => { throw new Error('sensitive provider body must not escape'); },
     ]);
-    const error: unknown = await __testOnlyDeployVerifiedWorkerRelease(input(fixture.release, sequence.transport))
-      .catch((caught: unknown) => caught);
+    const error = await directUploadError(
+      __testOnlyDeployVerifiedWorkerRelease(input(fixture.release, sequence.transport)),
+    );
     expect(error).toBeInstanceOf(CloudflareDirectUploadError);
     expect(error).toMatchObject({
       code: 'provider_unknown', stage: 'asset_bucket', outcome: 'unknown',
       progress: { assetBucketsCompleted: 1, assetBucketCount: 2 },
     });
-    expect((error as CloudflareDirectUploadError).submissions).toEqual([
+    expect(error.submissions).toEqual([
       expect.objectContaining({ kind: 'worker', workerId: WORKER_ID }),
     ]);
     expect(sequence.callCount()).toBe(6);
@@ -1504,59 +1624,62 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
   it('rejects mismatched version/deployment reads while preserving submitted locators', async () => {
     const fixture = await releaseFixture();
     let tags: readonly string[] = [];
-    let versionBody: Record<string, unknown> | undefined;
+    let versionBody: VersionSubmitBody | undefined;
     const versionMismatch = sequencedTransport([
       () => failure(404),
       async (request) => {
-        tags = (await request.json() as Record<string, unknown>).tags as readonly string[];
+        tags = (await requestJson(request, workerMutationBodySchema)).tags;
         return success({ id: WORKER_ID }, 201);
       },
       () => success(workerState(tags)),
       () => success({ jwt: COMPLETION_JWT, buckets: [] }),
       async (request) => {
-        versionBody = await request.json() as Record<string, unknown>;
+        versionBody = await requestJson(request, versionSubmitBodySchema);
         return success({ id: VERSION_ID }, 201);
       },
-      () => success({ ...versionResultFromBody(versionBody ?? {}), main_module: 'other.js' }),
+      () => success({
+        ...versionResultFromBody(required(versionBody, 'version request body')),
+        main_module: 'other.js',
+      }),
     ]);
-    const versionError: unknown = await __testOnlyDeployVerifiedWorkerRelease(
+    const versionError = await directUploadError(__testOnlyDeployVerifiedWorkerRelease(
       input(fixture.release, versionMismatch.transport),
-    ).catch((caught: unknown) => caught);
+    ));
     expect(versionError).toMatchObject({ code: 'provider_mismatch', stage: 'version_verify', outcome: 'submitted' });
-    expect((versionError as CloudflareDirectUploadError).submissions).toEqual(expect.arrayContaining([
+    expect(versionError.submissions).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'version', versionId: VERSION_ID }),
     ]));
 
-    let deploymentBody: Record<string, unknown> | undefined;
+    let deploymentBody: DeploymentSubmitBody | undefined;
     const deploymentMismatch = sequencedTransport([
       () => failure(404),
       async (request) => {
-        tags = (await request.json() as Record<string, unknown>).tags as readonly string[];
+        tags = (await requestJson(request, workerMutationBodySchema)).tags;
         return success({ id: WORKER_ID }, 201);
       },
       () => success(workerState(tags)),
       () => success({ jwt: COMPLETION_JWT, buckets: [] }),
       async (request) => {
-        versionBody = await request.json() as Record<string, unknown>;
+        versionBody = await requestJson(request, versionSubmitBodySchema);
         return success({ id: VERSION_ID }, 201);
       },
-      () => success(versionResultFromBody(versionBody ?? {})),
+      () => success(versionResultFromBody(required(versionBody, 'version request body'))),
       async (request) => {
-        deploymentBody = await request.json() as Record<string, unknown>;
+        deploymentBody = await requestJson(request, deploymentSubmitBodySchema);
         return success({ id: DEPLOYMENT_ID }, 201);
       },
       () => success({
-        ...deploymentResultFromBody(deploymentBody ?? {}),
+        ...deploymentResultFromBody(required(deploymentBody, 'deployment request body')),
         versions: [{ percentage: 50, version_id: OTHER_VERSION_ID }],
       }),
     ]);
-    const deploymentError: unknown = await __testOnlyDeployVerifiedWorkerRelease(
+    const deploymentError = await directUploadError(__testOnlyDeployVerifiedWorkerRelease(
       input(fixture.release, deploymentMismatch.transport),
-    ).catch((caught: unknown) => caught);
+    ));
     expect(deploymentError).toMatchObject({
       code: 'provider_mismatch', stage: 'deployment_verify', outcome: 'submitted',
     });
-    expect((deploymentError as CloudflareDirectUploadError).submissions).toEqual(expect.arrayContaining([
+    expect(deploymentError.submissions).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'deployment', deploymentId: DEPLOYMENT_ID }),
     ]));
   });
@@ -1567,9 +1690,9 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       status: 404,
       headers: { 'content-type': 'application/json', 'content-length': String(128 * 1024 + 1) },
     })]);
-    const oversizedError: unknown = await __testOnlyDeployVerifiedWorkerRelease(
+    const oversizedError = await directUploadError(__testOnlyDeployVerifiedWorkerRelease(
       input(fixture.release, oversized.transport),
-    ).catch((caught: unknown) => caught);
+    ));
     expect(oversizedError).toMatchObject({ code: 'provider_unknown', stage: 'worker_recovery', outcome: 'unknown' });
     expect(oversized.callCount()).toBe(1);
 
@@ -1581,9 +1704,9 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
         return new Promise<Response>(() => undefined);
       },
     ]);
-    const timeoutError: unknown = await __testOnlyDeployVerifiedWorkerRelease(
+    const timeoutError = await directUploadError(__testOnlyDeployVerifiedWorkerRelease(
       input(fixture.release, timeout.transport, 100),
-    ).catch((caught: unknown) => caught);
+    ));
     expect(timeoutError).toMatchObject({ code: 'provider_unknown', stage: 'worker_create', outcome: 'unknown' });
     expect(timeout.callCount()).toBe(2);
     expect(pendingRequest?.signal.aborted).toBe(true);
@@ -1592,10 +1715,13 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
 
   it('re-hashes bytes and rejects prefixed, double-prefixed, or component digest evidence', async () => {
     const fixture = await releaseFixture();
-    fixture.release.worker.modules[0].bytes[0] ^= 1;
+    const module = required(fixture.release.worker.modules.at(0), 'worker module');
+    const firstByte = required(module.bytes.at(0), 'worker module byte');
+    module.bytes[0] = firstByte ^ 1;
     const untouched = sequencedTransport([]);
-    const hashError: unknown = await __testOnlyDeployVerifiedWorkerRelease(input(fixture.release, untouched.transport))
-      .catch((caught: unknown) => caught);
+    const hashError = await directUploadError(
+      __testOnlyDeployVerifiedWorkerRelease(input(fixture.release, untouched.transport)),
+    );
     expect(hashError).toMatchObject({ code: 'invalid_input', stage: 'validate', outcome: 'not_sent' });
     expect(untouched.callCount()).toBe(0);
 
@@ -1606,7 +1732,10 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     const cases: Array<{ readonly release: VerifiedWorkerDirectUploadRelease; readonly binding?: string }> = [
       { release: prefixed },
       { release: clean.release, binding: `sha256:sha256:${clean.release.artifactSha256}` },
-      { release: clean.release, binding: `sha256:${clean.release.worker.modules[0].sha256}` },
+      {
+        release: clean.release,
+        binding: `sha256:${required(clean.release.worker.modules.at(0), 'worker module').sha256}`,
+      },
     ];
     for (const testCase of cases) {
       const sequence = sequencedTransport([]);
@@ -1620,8 +1749,7 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
               ANKKA_GATEWAY_RELEASE_SHA256: testCase.binding,
             },
           };
-      const error: unknown = await __testOnlyDeployVerifiedWorkerRelease(invalid)
-        .catch((caught: unknown) => caught);
+      const error = await directUploadError(__testOnlyDeployVerifiedWorkerRelease(invalid));
       expect(error).toMatchObject({ code: 'invalid_input', stage: 'validate', outcome: 'not_sent' });
       expect(sequence.callCount()).toBe(0);
     }

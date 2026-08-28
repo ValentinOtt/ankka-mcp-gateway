@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as v from 'valibot';
 import {
   GatewayReconcileError,
   applyGateway,
@@ -9,9 +10,9 @@ import {
   planLiveGateway,
   rollbackPendingPortalCreate,
   uninstallGateway,
-} from '../src/reconciler.mjs';
-import { buildGatewayDesiredState } from '../src/plan.mjs';
-import { readCloudflareObservedState } from '../src/cloudflare-observed.mjs';
+} from '../src/reconciler.ts';
+import { buildGatewayDesiredState } from '../src/plan.ts';
+import { readCloudflareObservedState } from '../src/cloudflare-observed.ts';
 import {
   beginReceiptAction,
   clearReceiptAction,
@@ -19,7 +20,7 @@ import {
   createInstallationReceipt,
   ownershipMarker,
   validateInstallationReceipt,
-} from '../src/receipt.mjs';
+} from '../src/receipt.ts';
 
 const EXPECTED_ORDER = [
   'mcp_server',
@@ -30,6 +31,10 @@ const EXPECTED_ORDER = [
   'portal_access_policy',
   'dns_record',
 ];
+
+const canonicalPrimitiveSchema = v.union([v.null(), v.boolean(), v.string()]);
+const canonicalNumberSchema = v.pipe(v.number(), v.finite());
+const canonicalRecordSchema = v.record(v.string(), v.unknown());
 const REVERSE_ORDER = [...EXPECTED_ORDER].reverse();
 const DRIFT_HASH = `sha256:${'0'.repeat(64)}`;
 
@@ -101,13 +106,14 @@ async function testHashCanonical(value) {
 }
 
 function testCanonicalJson(value) {
-  if (value === null || ['boolean', 'string'].includes(typeof value)) return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
+  if (v.safeParse(canonicalPrimitiveSchema, value).success) return JSON.stringify(value);
+  if (v.safeParse(canonicalNumberSchema, value).success) return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(testCanonicalJson).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.keys(value)
+  const record = v.safeParse(canonicalRecordSchema, value);
+  if (record.success) {
+    return `{${Object.keys(record.output)
       .sort()
-      .map((key) => `${JSON.stringify(key)}:${testCanonicalJson(value[key])}`)
+      .map((key) => `${JSON.stringify(key)}:${testCanonicalJson(record.output[key])}`)
       .join(',')}}`;
   }
   throw new TypeError('unsupported test hash value');
@@ -444,14 +450,15 @@ async function seedPendingPortalRollback(provider, receiptStore, {
   });
   provider.resources = lowerResources.map((resource) => ({ ...clone(resource) }));
   if (portalPresent) {
-    provider.resources.push({
+    const portalResource = {
       kind: portal.kind,
       key: portal.key,
       provider: { id: portal.key },
       desiredHash: portal.desiredHash,
       marker: ownershipMarker(desired.installationId, portal.key),
-      ...(portalForeign ? { forceForeign: true } : {}),
-    });
+    };
+    if (portalForeign) portalResource.forceForeign = true;
+    provider.resources.push(portalResource);
   }
   return { base, desired, portal };
 }

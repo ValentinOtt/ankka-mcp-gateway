@@ -22,6 +22,7 @@ import {
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+import * as v from 'valibot';
 
 import {
   ACCESS_HOST,
@@ -54,6 +55,9 @@ const MAX_ACCESS_PAGES = 10;
 const ACCESS_PAGE_SIZE = 100;
 const TIMEOUT_MS = 10_000;
 const SPKI_PUBLIC_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+const FUNCTION_SCHEMA = v.function();
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
 
 const NORMAL_UPDATE_CHANGES = Object.freeze([
   'customer_worker_code',
@@ -82,7 +86,7 @@ function fail(code = 'public_access_verification_failed') {
 }
 
 function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return v.is(OBJECT_SCHEMA, value) && !Array.isArray(value);
 }
 
 function exactKeys(value, keys) {
@@ -165,7 +169,7 @@ async function readAllAccessApplications(fetchImpl, token) {
   if (!Array.isArray(zones.result)) fail('access_configuration_unavailable');
   const matchingZones = zones.result.filter((zone) => (
     isRecord(zone) && zone.name === ZONE && isRecord(zone.account) &&
-    typeof zone.account.id === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(zone.account.id)
+    v.is(STRING_SCHEMA, zone.account.id) && /^[A-Za-z0-9_-]{1,128}$/u.test(zone.account.id)
   ));
   if (matchingZones.length !== 1) fail('access_configuration_unavailable');
   const accountId = matchingZones[0].account.id;
@@ -198,7 +202,7 @@ async function readAllAccessApplications(fetchImpl, token) {
     ) fail('access_configuration_unavailable');
     totalPages = reportedTotalPages;
     for (const application of body.result) {
-      if (!isRecord(application) || typeof application.id !== 'string' ||
+      if (!isRecord(application) || !v.is(STRING_SCHEMA, application.id) ||
           application.id.length === 0 || application.id.length > 256 || seenIds.has(application.id)) {
         fail('access_configuration_unavailable');
       }
@@ -210,7 +214,7 @@ async function readAllAccessApplications(fetchImpl, token) {
 }
 
 function exactPublicReleaseManifest(serialized, expected) {
-  if (typeof serialized !== 'string' || serialized.length === 0 ||
+  if (!v.is(STRING_SCHEMA, serialized) || serialized.length === 0 ||
       Buffer.byteLength(serialized, 'utf8') > MAX_PUBLIC_RESPONSE_BYTES) fail('public_release_invalid');
   let manifest;
   try {
@@ -244,7 +248,7 @@ function exactPublicReleaseManifest(serialized, expected) {
     file.path === 'payload/installer/index.html' &&
     file.contentType === 'text/html; charset=utf-8' &&
     Number.isSafeInteger(file.byteSize) && file.byteSize > 0 &&
-    typeof file.sha256 === 'string' && SHA256_PATTERN.test(file.sha256)
+    v.is(STRING_SCHEMA, file.sha256) && SHA256_PATTERN.test(file.sha256)
   ));
   if (rootFiles.length !== 1) fail('public_release_invalid');
   return Object.freeze({
@@ -268,7 +272,7 @@ export function verifyPublicReleaseDescriptor(input, expected) {
     !exactStrings(input.classification.changes, NORMAL_UPDATE_CHANGES) ||
     !exactStrings(input.classification.excludes, NORMAL_UPDATE_EXCLUSIONS) ||
     !Array.isArray(input.notes) || input.notes.length < 1 || input.notes.length > 8 ||
-    input.notes.some((note) => typeof note !== 'string' || note.length < 1 || note.length > 512) ||
+    input.notes.some((note) => !v.is(STRING_SCHEMA, note) || note.length < 1 || note.length > 512) ||
     !exactKeys(input.verification, [
       'algorithm', 'channel', 'keyId', 'manifest', 'schemaVersion', 'signature', 'signatureContext',
     ]) ||
@@ -276,7 +280,7 @@ export function verifyPublicReleaseDescriptor(input, expected) {
     input.verification.keyId !== expected.keyId ||
     input.verification.schemaVersion !== RELEASE_ENVELOPE_SCHEMA_VERSION ||
     input.verification.signatureContext !== RELEASE_SIGNATURE_CONTEXT ||
-    typeof input.verification.signature !== 'string' ||
+    !v.is(STRING_SCHEMA, input.verification.signature) ||
     !SIGNATURE_PATTERN.test(input.verification.signature)
   ) fail('public_release_invalid');
 
@@ -356,12 +360,12 @@ function requireContentType(response, mediaType) {
  * cookie, follows a redirect, or sends a state-minting GET to /api/session.
  */
 export async function verifyPublicSelfService({ fetchImpl = fetch, readToken, expected }) {
-  if (typeof fetchImpl !== 'function' || typeof readToken !== 'function' ||
+  if (!v.is(FUNCTION_SCHEMA, fetchImpl) || !v.is(FUNCTION_SCHEMA, readToken) ||
       !validExpectedRelease(expected)) fail('input_invalid');
   let token;
   try {
     token = await readToken();
-    if (typeof token !== 'string' || !TOKEN_PATTERN.test(token)) fail('input_invalid');
+    if (!v.is(STRING_SCHEMA, token) || !TOKEN_PATTERN.test(token)) fail('input_invalid');
     const applications = await readAllAccessApplications(fetchImpl, token);
     for (const application of applications) {
       const classification = classifyAccessApplicationForInstaller(application);

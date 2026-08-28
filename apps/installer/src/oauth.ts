@@ -1,3 +1,10 @@
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  boundaryValueSchema,
+  type BoundaryValue,
+} from './boundary';
 import {
   OAUTH_AUTHORIZE_URL,
   OAUTH_CALLBACK_URL,
@@ -15,6 +22,15 @@ export interface CloudflareOauthConfig {
   clientSecret: string;
 }
 
+const oauthErrorResponseSchema = v.looseObject({ error: v.string() });
+
+function containsControlCharacter(value: string): boolean {
+  return Array.from(value).some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || code === 127;
+  });
+}
+
 export function assertCloudflareOauthConfig(config: CloudflareOauthConfig): void {
   if (!/^[A-Za-z0-9_-]{16,128}$/u.test(config.clientId)) {
     throw new DeployError(500, 'oauth_exchange_failed', 'oauth_client_id_invalid');
@@ -22,7 +38,8 @@ export function assertCloudflareOauthConfig(config: CloudflareOauthConfig): void
   if (
     config.clientSecret.length < 16 ||
     config.clientSecret.length > 512 ||
-    /[:\u0000-\u001f\u007f]/u.test(config.clientSecret)
+    config.clientSecret.includes(':') ||
+    containsControlCharacter(config.clientSecret)
   ) {
     throw new DeployError(500, 'oauth_exchange_failed', 'oauth_client_secret_invalid');
   }
@@ -37,11 +54,10 @@ const STANDARD_OAUTH_ERRORS = new Set([
 function tokenEndpointReason(status: number, serialized: string): string {
   let standard = '';
   try {
-    const parsed = JSON.parse(serialized) as unknown;
-    const value = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>).error
-      : undefined;
-    if (typeof value === 'string' && STANDARD_OAUTH_ERRORS.has(value)) standard = `_${value}`;
+    const result = v.safeParse(oauthErrorResponseSchema, JSON.parse(serialized));
+    if (result.success && STANDARD_OAUTH_ERRORS.has(result.output.error)) {
+      standard = `_${result.output.error}`;
+    }
   } catch {
     standard = '';
   }
@@ -68,7 +84,7 @@ export function buildAuthorizationUrl(input: {
   }
   const scopes = input.scopes ?? REQUIRED_OAUTH_SCOPES;
   if (scopes.length < 1 || scopes.length > 32 || scopes.some((scope) =>
-    typeof scope !== 'string' || !/^[a-z][a-z0-9-]*\.(?:read|write)$/u.test(scope)
+    !/^[a-z][a-z0-9-]*\.(?:read|write)$/u.test(scope)
   ) || new Set(scopes).size !== scopes.length) {
     throw new DeployError(500, 'oauth_grant_invalid');
   }
@@ -83,9 +99,10 @@ export function buildAuthorizationUrl(input: {
   return url.toString();
 }
 
-function parseGrantedScopes(scope: unknown): readonly string[] {
-  if (typeof scope !== 'string' || scope.length > 8192) return Object.freeze([]);
-  const values = [...new Set(scope.split(/\s+/u).filter(Boolean))].sort();
+function parseGrantedScopes<Value>(scope: Value): readonly string[] {
+  const result = v.safeParse(v.pipe(v.string(), v.maxLength(8192)), scope);
+  if (!result.success) return Object.freeze([]);
+  const values = [...new Set(result.output.split(/\s+/u).filter(Boolean))].sort();
   return Object.freeze(values);
 }
 
@@ -141,7 +158,7 @@ export class EphemeralCloudflareGrant {
 
   async revoke(transport: FetchTransport, config: CloudflareOauthConfig): Promise<void> {
     const tokens = [this.#accessToken, this.#refreshToken].filter(
-      (value): value is string => typeof value === 'string',
+      (value): value is string => value !== undefined,
     );
     let failed = false;
     for (const token of tokens) {
@@ -180,18 +197,17 @@ export class EphemeralCloudflareGrant {
   }
 }
 
-function capturedCredential(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length >= 1 && value.length <= 8192
-    ? value
+function capturedCredential<Value>(value: Value): string | undefined {
+  const result = v.safeParse(v.pipe(v.string(), v.minLength(1), v.maxLength(8192)), value);
+  return result.success
+    ? result.output
     : undefined;
 }
 
-function validCredentialMetadata(value: unknown, required: boolean): boolean {
+function validCredentialMetadata<Value>(value: Value, required: boolean): boolean {
   if (value === undefined) return !required;
-  return typeof value === 'string' &&
-    value.length >= 16 &&
-    value.length <= 8192 &&
-    !/[\u0000-\u001f\u007f]/u.test(value);
+  const result = v.safeParse(v.pipe(v.string(), v.minLength(16), v.maxLength(8192)), value);
+  return result.success && !containsControlCharacter(result.output);
 }
 
 export async function exchangeAuthorizationCode(input: {
@@ -203,7 +219,7 @@ export async function exchangeAuthorizationCode(input: {
   if (
     input.code.length < 8 ||
     input.code.length > 4096 ||
-    /[\u0000-\u001f\u007f]/u.test(input.code) ||
+    containsControlCharacter(input.code) ||
     !/^[A-Za-z0-9_-]{43}$/u.test(input.verifier)
   ) {
     throw new DeployError(400, 'oauth_exchange_failed', 'exchange_input_invalid');
@@ -215,7 +231,7 @@ export async function exchangeAuthorizationCode(input: {
     redirect_uri: OAUTH_CALLBACK_URL,
     code_verifier: input.verifier,
   });
-  let payload: unknown;
+  let payload: BoundaryValue;
   try {
     payload = await withDeadline(async (signal) => {
       let response: Response;
@@ -238,7 +254,11 @@ export async function exchangeAuthorizationCode(input: {
         throw new DeployError(502, 'oauth_exchange_failed', tokenEndpointReason(response.status, serialized));
       }
       try {
-        return JSON.parse(serialized) as unknown;
+        const result = v.safeParse(boundaryValueSchema, JSON.parse(serialized));
+        if (!result.success) {
+          throw new DeployError(502, 'oauth_exchange_failed', 'token_response_not_json');
+        }
+        return result.output;
       } catch {
         throw new DeployError(502, 'oauth_exchange_failed', 'token_response_not_json');
       }
@@ -253,18 +273,20 @@ export async function exchangeAuthorizationCode(input: {
     }
     throw new DeployError(502, 'oauth_exchange_failed', 'token_exchange_unknown');
   }
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+  const tokenResult = v.safeParse(boundaryObjectSchema, payload);
+  if (!tokenResult.success) {
     throw new DeployError(502, 'oauth_exchange_failed', 'token_response_not_object');
   }
-  const token = payload as Record<string, unknown>;
+  const token = tokenResult.output;
   // Capture every bounded credential string from a successful token response
   // before validating any accompanying metadata. The callback therefore owns
   // a disposable revocation handle even when token_type, refresh metadata, or
   // the returned scope set is malformed.
   const accessToken = capturedCredential(token.access_token);
   const refreshToken = capturedCredential(token.refresh_token);
+  const tokenType = v.safeParse(v.string(), token.token_type);
   const metadataValid =
-    typeof token.token_type === 'string' && token.token_type.toLowerCase() === 'bearer' &&
+    tokenType.success && tokenType.output.toLowerCase() === 'bearer' &&
     validCredentialMetadata(token.access_token, true) &&
     validCredentialMetadata(token.refresh_token, false);
   return new EphemeralCloudflareGrant(

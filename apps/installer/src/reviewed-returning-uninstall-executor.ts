@@ -1,3 +1,11 @@
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  boundaryValueSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+} from './boundary';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 import {
   inspectAdminStateDurableObjectNamespace,
@@ -82,7 +90,7 @@ type ProviderCall = CloudflareDirectUploadCall;
 
 interface ProviderResponse {
   readonly status: number;
-  readonly value: unknown;
+  readonly value: BoundaryValue;
 }
 
 interface ManagementLocator {
@@ -106,26 +114,193 @@ interface ManagementLocator {
 
 type UnprovedManagementLocator = Omit<ManagementLocator, 'activeRelease'>;
 
-function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
-    Object.getPrototypeOf(value) === Object.prototype;
+const providerEnvelopeSchema = v.object({
+  success: v.boolean(),
+  result: v.optional(boundaryValueSchema),
+  errors: v.union([v.array(boundaryValueSchema), v.null()]),
+  messages: v.union([v.array(boundaryValueSchema), v.null()]),
+  result_info: v.optional(v.object({
+    page: v.number(),
+    per_page: v.number(),
+    count: v.number(),
+    total_count: v.number(),
+  })),
+});
+const providerItemSchema = v.pipe(
+  boundaryObjectSchema,
+  v.check((item) => v.is(v.string(), item.id)),
+);
+const domainCandidateSchema = v.looseObject({
+  id: v.pipe(v.string(), v.regex(DOMAIN_ID)),
+  cert_id: v.pipe(v.string(), v.regex(PROVIDER_ID)),
+  hostname: v.string(),
+  service: v.string(),
+  zone_id: v.string(),
+  zone_name: v.string(),
+  environment: v.optional(v.literal('production')),
+});
+const applicationCandidateSchema = v.looseObject({
+  id: v.pipe(v.string(), v.regex(PROVIDER_ID)),
+  aud: v.pipe(v.string(), v.regex(ACCESS_AUD)),
+  type: v.literal('self_hosted'),
+  name: v.string(),
+  domain: v.string(),
+  session_duration: v.literal('24h'),
+  app_launcher_visible: v.literal(false),
+  auto_redirect_to_identity: v.literal(false),
+  allow_authenticate_via_warp: v.literal(false),
+  allowed_idps: v.pipe(
+    v.array(v.pipe(v.string(), v.regex(PROVIDER_ID))),
+    v.minLength(1),
+    v.maxLength(64),
+    v.check((ids) => new Set(ids).size === ids.length),
+  ),
+});
+const policyCandidateSchema = v.looseObject({
+  id: v.pipe(v.string(), v.regex(PROVIDER_ID)),
+  name: v.string(),
+  decision: v.literal('allow'),
+  precedence: v.literal(1),
+  approval_required: v.optional(v.literal(false)),
+  isolation_required: v.optional(v.literal(false)),
+  purpose_justification_required: v.optional(v.literal(false)),
+  include: v.pipe(v.array(v.strictObject({
+    email: v.strictObject({ email: v.string() }),
+  })), v.minLength(1)),
+  exclude: v.pipe(v.array(boundaryValueSchema), v.length(0)),
+  require: v.pipe(v.array(boundaryValueSchema), v.length(0)),
+});
+const workerCandidateSchema = v.looseObject({
+  id: v.pipe(v.string(), v.regex(WORKER_ID)),
+  name: v.string(),
+  logpush: v.literal(false),
+  tags: v.tuple([v.literal('ankka-mcp-gateway'), v.pipe(v.string(), v.regex(/^ankka-worker-sha256:[a-f0-9]{64}$/u))]),
+  tail_consumers: v.pipe(v.array(boundaryValueSchema), v.length(0)),
+  subdomain: v.looseObject({ enabled: v.literal(false), previews_enabled: v.literal(false) }),
+  references: v.looseObject({
+    durable_objects: v.pipe(v.array(v.looseObject({
+      worker_id: v.string(),
+      worker_name: v.string(),
+      namespace_id: v.string(),
+      namespace_name: v.string(),
+    })), v.length(1)),
+    domains: v.array(v.looseObject({ id: v.string(), hostname: v.string(), zone_id: v.string() })),
+    dispatch_namespace_outbounds: v.pipe(v.array(boundaryValueSchema), v.length(0)),
+    queues: v.pipe(v.array(boundaryValueSchema), v.length(0)),
+    workers: v.pipe(v.array(boundaryValueSchema), v.length(0)),
+  }),
+});
+const listedWorkerSchema = v.object({
+  id: v.pipe(v.string(), v.regex(WORKER_ID)),
+  name: v.string(),
+});
+const disabledSubdomainSchema = v.strictObject({
+  enabled: v.literal(false),
+  previews_enabled: v.literal(false),
+});
+const managementLocatorSchema = v.strictObject({
+  marker: v.string(),
+  workerId: v.pipe(v.string(), v.regex(WORKER_ID)),
+  namespace: v.strictObject({
+    accountId: v.string(),
+    className: v.literal('AdminState'),
+    namespaceId: v.pipe(v.string(), v.regex(WORKER_ID)),
+    namespaceName: v.pipe(v.string(), v.minLength(1), v.maxLength(256)),
+    storage: v.literal('sqlite'),
+    workerName: v.string(),
+  }),
+  domain: v.strictObject({
+    id: v.pipe(v.string(), v.regex(DOMAIN_ID)),
+    certificateId: v.pipe(v.string(), v.regex(PROVIDER_ID)),
+  }),
+  application: v.strictObject({
+    id: v.pipe(v.string(), v.regex(PROVIDER_ID)),
+    aud: v.pipe(v.string(), v.regex(ACCESS_AUD)),
+    allowedIdentityProviderIds: v.pipe(
+      v.array(v.pipe(v.string(), v.regex(PROVIDER_ID))),
+      v.minLength(1),
+      v.check((ids) => new Set(ids).size === ids.length),
+    ),
+  }),
+  policy: v.strictObject({
+    id: v.pipe(v.string(), v.regex(PROVIDER_ID)),
+    applicationId: v.pipe(v.string(), v.regex(PROVIDER_ID)),
+    adminEmails: v.pipe(v.array(v.string()), v.minLength(1)),
+  }),
+  activeRelease: v.strictObject({
+    schemaVersion: v.literal(1),
+    versionId: v.pipe(v.string(), v.regex(PROVIDER_ID)),
+    deploymentId: v.pipe(v.string(), v.regex(PROVIDER_ID)),
+    versionRequestHash: v.pipe(v.string(), v.regex(SHA256)),
+  }),
+});
+const surfaceLocatorEvidenceSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('ready'),
+  authorityHash: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+  surface: managementLocatorSchema,
+  surfaceHash: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+});
+const gatewayRemovalEvidenceSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('gateway_removed'),
+  actionId: v.pipe(v.string(), v.regex(/^action_[A-Za-z0-9_-]{32}$/u)),
+  installationId: v.string(),
+  removedResourceCount: v.pipe(v.number(), v.safeInteger(), v.minValue(4), v.maxValue(103)),
+});
+const routeListSchema = v.array(v.pipe(
+  boundaryObjectSchema,
+  v.check((route) => v.is(v.string(), route.pattern)),
+));
+const noResidueEvidenceSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('no_managed_residue'),
+  authorityHash: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+  workerDeletionHash: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+  namespaceRetirementHash: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+  namespaceSnapshotHash: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+  routeSnapshotHash: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+  evidenceHash: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+});
+const finalConvergenceEvidenceSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('removed'),
+  installationId: v.string(),
+  convergenceHash: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+});
+
+type ParsedProviderEnvelope = v.InferOutput<typeof providerEnvelopeSchema>;
+type ParsedDomain = v.InferOutput<typeof domainCandidateSchema>;
+type ParsedApplication = v.InferOutput<typeof applicationCandidateSchema>;
+type ParsedPolicy = v.InferOutput<typeof policyCandidateSchema>;
+type GatewayRemovalEvidence = v.InferOutput<typeof gatewayRemovalEvidenceSchema>;
+type NoResidueEvidence = v.InferOutput<typeof noResidueEvidenceSchema>;
+type FinalConvergenceEvidence = v.InferOutput<typeof finalConvergenceEvidenceSchema>;
+
+interface SurfaceLocatorEvidence {
+  readonly schemaVersion: 1;
+  readonly status: 'ready';
+  readonly authorityHash: string;
+  readonly surface: ManagementLocator;
+  readonly surfaceHash: string;
 }
 
-function same(left: unknown, right: unknown): boolean {
+function record(value: BoundaryValue): value is BoundaryObject {
+  return v.is(boundaryObjectSchema, value);
+}
+
+function same<Left, Right>(left: Left, right: Right): boolean {
   try { return canonicalJson(left) === canonicalJson(right); }
   catch { return false; }
 }
 
-function empty(value: unknown): boolean {
+function empty(value: BoundaryValue): boolean {
   return value === null || (Array.isArray(value) && value.length === 0);
 }
 
-function envelope(value: unknown): Record<string, unknown> | null {
-  if (!record(value) || typeof value.success !== 'boolean' || !Object.hasOwn(value, 'result') ||
-    !Object.hasOwn(value, 'errors') || !Object.hasOwn(value, 'messages') ||
-    !(value.errors === null || Array.isArray(value.errors)) ||
-    !(value.messages === null || Array.isArray(value.messages))) return null;
-  return value;
+function envelope<Input>(value: Input): ParsedProviderEnvelope | null {
+  const result = v.safeParse(providerEnvelopeSchema, value);
+  return result.success ? result.output : null;
 }
 
 async function providerRequest(call: ProviderCall, path: string, method: 'GET' | 'DELETE'): Promise<ProviderResponse> {
@@ -148,17 +323,17 @@ async function providerRequest(call: ProviderCall, path: string, method: 'GET' |
       return Object.freeze({ status: 204, value: null });
     }
     const serialized = await readBoundedText(response, 'session_conflict', MAX_RESPONSE_BYTES);
-    let value: unknown;
-    try { value = JSON.parse(serialized); }
+    let value: BoundaryValue;
+    try { value = v.parse(boundaryValueSchema, JSON.parse(serialized)); }
     catch { throw new DeployError(409, 'session_conflict', 'returning_provider_response'); }
     return Object.freeze({ status: response.status, value });
   }, 'session_conflict', call.timeoutMs);
 }
 
-function successResult(response: ProviderResponse): unknown {
+function successResult(response: ProviderResponse): BoundaryValue {
   const parsed = envelope(response.value);
   if (response.status !== 200 || !parsed || parsed.success !== true ||
-    !empty(parsed.errors) || !empty(parsed.messages)) {
+    !Object.hasOwn(parsed, 'result') || !empty(parsed.errors) || !empty(parsed.messages)) {
     throw new DeployError(409, 'session_conflict', 'returning_provider_mismatch');
   }
   return parsed.result;
@@ -170,26 +345,32 @@ function exactAbsent(response: ProviderResponse): boolean {
     Array.isArray(parsed.errors) && parsed.errors.length > 0 && empty(parsed.messages);
 }
 
-async function getResult(call: ProviderCall, path: string): Promise<unknown | null> {
+async function getResult(call: ProviderCall, path: string): Promise<BoundaryValue | null> {
   const response = await providerRequest(call, path, 'GET');
   if (exactAbsent(response)) return null;
   return successResult(response);
 }
 
-function page(value: unknown, requested: number): readonly unknown[] {
+function page<Input>(value: Input, requested: number): readonly BoundaryObject[] {
   const parsed = envelope(value);
   const info = parsed?.result_info;
   if (!parsed || parsed.success !== true || !empty(parsed.errors) || !empty(parsed.messages) ||
     !Array.isArray(parsed.result) || !record(info) || info.page !== requested || info.per_page !== PAGE_SIZE ||
     info.count !== parsed.result.length || !Number.isSafeInteger(info.count) ||
-    !Number.isSafeInteger(info.total_count) || (info.total_count as number) < 0) {
+    !Number.isSafeInteger(info.total_count) || info.total_count < 0) {
     throw new DeployError(409, 'session_conflict', 'returning_provider_mismatch');
   }
-  return parsed.result;
+  const items: BoundaryObject[] = [];
+  for (const candidate of parsed.result) {
+    const result = v.safeParse(providerItemSchema, candidate);
+    if (!result.success) throw new DeployError(409, 'session_conflict', 'returning_provider_ambiguous');
+    items.push(result.output);
+  }
+  return items;
 }
 
-async function paginated(call: ProviderCall, path: string, filter: URLSearchParams): Promise<readonly unknown[]> {
-  const values: unknown[] = [];
+async function paginated(call: ProviderCall, path: string, filter: URLSearchParams): Promise<readonly BoundaryObject[]> {
+  const values: BoundaryObject[] = [];
   const ids = new Set<string>();
   for (let number = 1; number <= MAX_PAGES; number += 1) {
     const query = new URLSearchParams(filter);
@@ -198,7 +379,7 @@ async function paginated(call: ProviderCall, path: string, filter: URLSearchPara
     const response = await providerRequest(call, `${path}?${query}`, 'GET');
     const current = page(response.value, number);
     for (const item of current) {
-      if (!record(item) || typeof item.id !== 'string' || ids.has(item.id)) {
+      if (!v.is(v.string(), item.id) || ids.has(item.id)) {
         throw new DeployError(409, 'session_conflict', 'returning_provider_ambiguous');
       }
       ids.add(item.id);
@@ -213,7 +394,7 @@ async function customDomains(
   call: ProviderCall,
   accountId: string,
   hostname: string,
-): Promise<readonly unknown[]> {
+): Promise<readonly BoundaryValue[]> {
   const query = new URLSearchParams({ hostname });
   const response = await providerRequest(call, `/accounts/${accountId}/workers/domains?${query}`, 'GET');
   const result = successResult(response);
@@ -225,76 +406,85 @@ async function customDomains(
 
 function markerFromWorkerName(workerName: string): string {
   const match = workerName.match(/-(acg-[a-f0-9]{24})$/u);
-  if (!match) throw new DeployError(409, 'session_conflict');
-  return match[1];
+  const marker = match?.at(1);
+  if (marker === undefined) throw new DeployError(409, 'session_conflict');
+  return marker;
 }
 
-function exactDomain(value: unknown, authority: ReturningUninstallImportedAuthority): boolean {
-  return record(value) && typeof value.id === 'string' && DOMAIN_ID.test(value.id) &&
-    typeof value.cert_id === 'string' && PROVIDER_ID.test(value.cert_id) &&
-    value.hostname === authority.runtime.managementHostname && value.service === authority.runtime.workerName &&
-    value.zone_id === authority.runtime.zoneId && value.zone_name === authority.runtime.zoneName &&
-    (value.environment === undefined || value.environment === 'production');
+function parseDomain(
+  value: BoundaryValue,
+  authority: ReturningUninstallImportedAuthority,
+): ParsedDomain | null {
+  const result = v.safeParse(domainCandidateSchema, value);
+  if (!result.success || result.output.hostname !== authority.runtime.managementHostname ||
+      result.output.service !== authority.runtime.workerName || result.output.zone_id !== authority.runtime.zoneId ||
+      result.output.zone_name !== authority.runtime.zoneName) return null;
+  return result.output;
 }
 
-function exactApplication(value: unknown, authority: ReturningUninstallImportedAuthority, marker: string): boolean {
-  return record(value) && typeof value.id === 'string' && PROVIDER_ID.test(value.id) &&
-    typeof value.aud === 'string' && ACCESS_AUD.test(value.aud) && value.type === 'self_hosted' &&
-    value.name === `${authority.control.portal.name} management [${marker}]` &&
-    value.domain === authority.runtime.managementHostname && value.session_duration === '24h' &&
-    value.app_launcher_visible === false && value.auto_redirect_to_identity === false &&
-    value.allow_authenticate_via_warp === false && Array.isArray(value.allowed_idps) &&
-    value.allowed_idps.length > 0 && value.allowed_idps.length <= 64 &&
-    value.allowed_idps.every((id) => typeof id === 'string' && PROVIDER_ID.test(id)) &&
-    new Set(value.allowed_idps).size === value.allowed_idps.length;
+function exactDomain(value: BoundaryValue, authority: ReturningUninstallImportedAuthority): boolean {
+  return parseDomain(value, authority) !== null;
 }
 
-function exactPolicy(value: unknown, authority: ReturningUninstallImportedAuthority, marker: string): boolean {
-  if (!record(value) || typeof value.id !== 'string' || !PROVIDER_ID.test(value.id) ||
-    value.name !== `${authority.control.portal.name} administrators [${marker}]` ||
-    value.decision !== 'allow' || value.precedence !== 1 ||
-    !(value.approval_required === false || value.approval_required === undefined) ||
-    !(value.isolation_required === false || value.isolation_required === undefined) ||
-    !(value.purpose_justification_required === false || value.purpose_justification_required === undefined) ||
-    !Array.isArray(value.include) || value.include.length < 1 ||
-    !Array.isArray(value.exclude) || value.exclude.length !== 0 ||
-    !Array.isArray(value.require) || value.require.length !== 0) return false;
-  const emails: string[] = [];
-  for (const rule of value.include) {
-    if (!record(rule) || Object.keys(rule).join(',') !== 'email' || !record(rule.email) ||
-      Object.keys(rule.email).join(',') !== 'email' || typeof rule.email.email !== 'string' ||
-      rule.email.email !== rule.email.email.toLowerCase() ||
-      !authority.control.audienceEmails.includes(rule.email.email)) return false;
-    emails.push(rule.email.email);
+function parseApplication(
+  value: BoundaryValue,
+  authority: ReturningUninstallImportedAuthority,
+  marker: string,
+): ParsedApplication | null {
+  const result = v.safeParse(applicationCandidateSchema, value);
+  if (!result.success || result.output.name !== `${authority.control.portal.name} management [${marker}]` ||
+      result.output.domain !== authority.runtime.managementHostname) return null;
+  return result.output;
+}
+
+function exactApplication(
+  value: BoundaryValue,
+  authority: ReturningUninstallImportedAuthority,
+  marker: string,
+): boolean {
+  return parseApplication(value, authority, marker) !== null;
+}
+
+function parsePolicy(
+  value: BoundaryValue,
+  authority: ReturningUninstallImportedAuthority,
+  marker: string,
+): ParsedPolicy | null {
+  const result = v.safeParse(policyCandidateSchema, value);
+  if (!result.success || result.output.name !== `${authority.control.portal.name} administrators [${marker}]`) {
+    return null;
   }
+  const emails = result.output.include.map((rule) => rule.email.email);
+  if (emails.some((email) => email !== email.toLowerCase() ||
+      !authority.control.audienceEmails.includes(email))) return null;
   emails.sort();
-  return new Set(emails).size === emails.length && emails.includes(authority.actorEmail);
+  return new Set(emails).size === emails.length && emails.includes(authority.actorEmail) ? result.output : null;
+}
+
+function exactPolicy(
+  value: BoundaryValue,
+  authority: ReturningUninstallImportedAuthority,
+  marker: string,
+): boolean {
+  return parsePolicy(value, authority, marker) !== null;
 }
 
 function exactWorker(
-  value: unknown,
+  value: BoundaryValue,
   authority: ReturningUninstallImportedAuthority,
   workerId: string,
   namespace: AdminStateDurableObjectNamespaceLocator,
   domain: ManagementLocator['domain'],
 ): boolean {
-  if (!record(value) || value.id !== workerId || value.name !== authority.runtime.workerName ||
-    value.logpush !== false || !Array.isArray(value.tags) || value.tags.length !== 2 ||
-    value.tags[0] !== 'ankka-mcp-gateway' || typeof value.tags[1] !== 'string' ||
-    !/^ankka-worker-sha256:[a-f0-9]{64}$/u.test(value.tags[1]) ||
-    !Array.isArray(value.tail_consumers) || value.tail_consumers.length !== 0 ||
-    !record(value.subdomain) || value.subdomain.enabled !== false ||
-    value.subdomain.previews_enabled !== false || !record(value.references)) return false;
-  const durableObjects = value.references.durable_objects;
-  const domains = value.references.domains;
-  if (!Array.isArray(durableObjects) || durableObjects.length !== 1 || !Array.isArray(domains)) return false;
-  for (const key of ['dispatch_namespace_outbounds', 'queues', 'workers']) {
-    if (!Array.isArray(value.references[key]) || value.references[key].length !== 0) return false;
+  const result = v.safeParse(workerCandidateSchema, value);
+  if (!result.success || result.output.id !== workerId || result.output.name !== authority.runtime.workerName) {
+    return false;
   }
-  const durable = durableObjects[0];
-  if (!record(durable) || durable.worker_id !== workerId || durable.worker_name !== authority.runtime.workerName ||
+  const durable = result.output.references.durable_objects[0];
+  if (!durable || durable.worker_id !== workerId || durable.worker_name !== authority.runtime.workerName ||
     durable.namespace_id !== namespace.namespaceId || durable.namespace_name !== namespace.namespaceName) return false;
-  return domains.length === 1 && record(domains[0]) && domains[0].id === domain.id &&
+  const domains = result.output.references.domains;
+  return domains.length === 1 && domains[0]?.id === domain.id &&
     domains[0].hostname === authority.runtime.managementHostname && domains[0].zone_id === authority.runtime.zoneId;
 }
 
@@ -372,42 +562,59 @@ async function inspectManagement(
     authority.runtime.accountId,
     authority.runtime.managementHostname,
   );
-  const domainMatches = domainValues.filter((value) => exactDomain(value, authority));
+  const domainMatches: ParsedDomain[] = [];
+  for (const value of domainValues) {
+    const parsed = parseDomain(value, authority);
+    if (parsed) domainMatches.push(parsed);
+  }
   if (domainValues.length !== domainMatches.length || domainMatches.length !== 1) {
     throw new DeployError(409, 'session_conflict', 'returning_management_domain_ambiguous');
   }
-  const domain = domainMatches[0] as Record<string, unknown> | undefined;
+  const domain = domainMatches[0];
+  if (!domain) throw new DeployError(409, 'session_conflict', 'returning_management_domain_ambiguous');
   const applications = await paginated(
     call,
     `/accounts/${authority.runtime.accountId}/access/apps`,
     new URLSearchParams({ domain: authority.runtime.managementHostname }),
   );
-  const applicationMatches = applications.filter((value) => exactApplication(value, authority, marker));
+  const applicationMatches: ParsedApplication[] = [];
+  for (const value of applications) {
+    const parsed = parseApplication(value, authority, marker);
+    if (parsed) applicationMatches.push(parsed);
+  }
   if (applications.length !== applicationMatches.length || applicationMatches.length !== 1) {
     throw new DeployError(409, 'session_conflict', 'returning_management_application_ambiguous');
   }
-  const application = applicationMatches[0] as Record<string, unknown> | undefined;
+  const application = applicationMatches[0];
+  if (!application) {
+    throw new DeployError(409, 'session_conflict', 'returning_management_application_ambiguous');
+  }
   const policies = await paginated(
     call,
-    `/accounts/${authority.runtime.accountId}/access/apps/${encodeURIComponent(String(application!.id))}/policies`,
+    `/accounts/${authority.runtime.accountId}/access/apps/${encodeURIComponent(application.id)}/policies`,
     new URLSearchParams(),
   );
-  const policyMatches = policies.filter((value) => exactPolicy(value, authority, marker));
+  const policyMatches: ParsedPolicy[] = [];
+  for (const value of policies) {
+    const parsed = parsePolicy(value, authority, marker);
+    if (parsed) policyMatches.push(parsed);
+  }
   if (policies.length !== policyMatches.length || policyMatches.length !== 1) {
     throw new DeployError(409, 'session_conflict', 'returning_management_policy_ambiguous');
   }
-  const policy = policyMatches[0] as Record<string, unknown>;
+  const policy = policyMatches[0];
+  if (!policy) throw new DeployError(409, 'session_conflict', 'returning_management_policy_ambiguous');
   const workers = await paginated(
     call,
     `/accounts/${authority.runtime.accountId}/workers/workers`,
     new URLSearchParams(),
   );
-  const workerMatches = workers.filter((value) => record(value) && value.name === authority.runtime.workerName);
-  if (workerMatches.length !== 1 || !record(workerMatches[0]) ||
-    typeof workerMatches[0].id !== 'string' || !WORKER_ID.test(workerMatches[0].id)) {
+  const workerMatches = workers.map((value) => v.safeParse(listedWorkerSchema, value))
+    .filter((result) => result.success && result.output.name === authority.runtime.workerName);
+  if (workerMatches.length !== 1 || !workerMatches[0]?.success) {
     throw new DeployError(409, 'session_conflict', 'returning_management_worker_ambiguous');
   }
-  const workerId = workerMatches[0].id;
+  const workerId = workerMatches[0].output.id;
   const namespace = await inspectAdminStateDurableObjectNamespace({
     accountId: authority.runtime.accountId,
     workerName: authority.runtime.workerName,
@@ -422,17 +629,16 @@ async function inspectManagement(
     marker,
     workerId,
     namespace,
-    domain: Object.freeze({ id: String(domain!.id), certificateId: String(domain!.cert_id) }),
+    domain: Object.freeze({ id: domain.id, certificateId: domain.cert_id }),
     application: Object.freeze({
-      id: String(application!.id),
-      aud: String(application!.aud),
-      allowedIdentityProviderIds: Object.freeze([...(application!.allowed_idps as string[])].sort()),
+      id: application.id,
+      aud: application.aud,
+      allowedIdentityProviderIds: Object.freeze([...application.allowed_idps].sort()),
     }),
     policy: Object.freeze({
-      id: String(policy.id),
-      applicationId: String(application!.id),
-      adminEmails: Object.freeze((policy.include as Record<string, { email: string }>[])
-        .map((rule) => rule.email.email).sort()),
+      id: policy.id,
+      applicationId: application.id,
+      adminEmails: Object.freeze(policy.include.map((rule) => rule.email.email).sort()),
     }),
   });
   if (!exactWorker(exactWorkerValue, authority, workerId, namespace, locator.domain)) {
@@ -442,8 +648,7 @@ async function inspectManagement(
     call,
     `/accounts/${authority.runtime.accountId}/workers/scripts/${encodeURIComponent(authority.runtime.workerName)}/subdomain`,
   );
-  if (!record(subdomain) || Object.keys(subdomain).sort().join(',') !== 'enabled,previews_enabled' ||
-    subdomain.enabled !== false || subdomain.previews_enabled !== false) {
+  if (!v.safeParse(disabledSubdomainSchema, subdomain).success) {
     throw new DeployError(409, 'session_conflict', 'returning_workers_dev_enabled');
   }
   const activeRelease = await proveInstalledManagementWorkerRelease(
@@ -467,7 +672,7 @@ function exactDeleteSuccess(response: ProviderResponse, expectedId: string | nul
 async function proveAbsent(
   call: ProviderCall,
   path: string,
-  list: () => Promise<readonly unknown[]>,
+  list: () => Promise<readonly BoundaryValue[]>,
 ): Promise<void> {
   for (let observation = 0; observation < 2; observation += 1) {
     const direct = await providerRequest(call, path, 'GET');
@@ -484,8 +689,8 @@ async function deleteAndProve(
   path: string,
   id: string,
   domain: boolean,
-  matches: (value: unknown) => boolean,
-  list: () => Promise<readonly unknown[]>,
+  matches: (value: BoundaryValue) => boolean,
+  list: () => Promise<readonly BoundaryValue[]>,
 ): Promise<void> {
   const before = await providerRequest(call, path, 'GET');
   if (exactAbsent(before)) {
@@ -530,6 +735,14 @@ type ManagementDeleteName =
   | 'management_admin_policy_delete'
   | 'management_access_application_delete';
 
+interface ManagementDeleteSpec {
+  readonly path: string;
+  readonly id: string;
+  readonly domain: boolean;
+  readonly matches: (value: BoundaryValue) => boolean;
+  readonly list: () => Promise<readonly BoundaryValue[]>;
+}
+
 interface ExecutionState {
   readonly input: ReturningUninstallExecutionInput | ReturningUninstallRecoveryExecutionInput;
   readonly releaseBundle: VerifiedReleaseBundle;
@@ -539,7 +752,7 @@ interface ExecutionState {
   journal: ReturningUninstallJournal;
 }
 
-async function digest(value: unknown): Promise<string> {
+async function digest<Value>(value: Value): Promise<string> {
   return `sha256:${await sha256Hex(canonicalJson(value))}`;
 }
 
@@ -583,11 +796,16 @@ async function refreshLease(state: ExecutionState): Promise<void> {
   });
 }
 
-async function prepareAction(state: ExecutionState, name: ReturningUninstallActionName, value: unknown): Promise<void> {
+async function prepareAction<Value>(
+  state: ExecutionState,
+  name: ReturningUninstallActionName,
+  value: Value,
+): Promise<void> {
+  const normalized = v.parse(boundaryValueSchema, value);
   await refreshLease(state);
   const current = journalAction(state, name);
   if (current) {
-    if (!same(current.record, value)) throw new DeployError(409, 'session_conflict', 'returning_journal_mismatch');
+    if (!same(current.record, normalized)) throw new DeployError(409, 'session_conflict', 'returning_journal_mismatch');
     return;
   }
   state.journal = await state.input.journal.prepare({
@@ -595,7 +813,7 @@ async function prepareAction(state: ExecutionState, name: ReturningUninstallActi
     attemptId: state.input.attemptId,
     now: operationNow(state),
     name,
-    record: value,
+    record: normalized,
   });
 }
 
@@ -613,93 +831,65 @@ async function armAction(state: ExecutionState, name: ReturningUninstallActionNa
   return true;
 }
 
-async function submitAction(
+async function submitAction<Locator>(
   state: ExecutionState,
   name: ReturningUninstallActionName,
-  locator: unknown,
+  locator: Locator,
 ): Promise<void> {
+  const normalized = v.parse(boundaryValueSchema, locator);
   state.journal = await state.input.journal.submit({
     expectedRevision: state.journal.revision,
     attemptId: state.input.attemptId,
     now: operationNow(state),
     name,
-    locator,
+    locator: normalized,
   });
 }
 
-async function verifyAction(
+async function verifyAction<Locator>(
   state: ExecutionState,
   name: ReturningUninstallActionName,
-  locator: unknown,
+  locator: Locator,
 ): Promise<void> {
+  const normalized = v.parse(boundaryValueSchema, locator);
   state.journal = await state.input.journal.verify({
     expectedRevision: state.journal.revision,
     attemptId: state.input.attemptId,
     now: operationNow(state),
     name,
-    locator,
+    locator: normalized,
   });
 }
 
 async function surfaceLocator(
   authority: ReturningUninstallImportedAuthority,
   surface: ManagementLocator,
-): Promise<Record<string, unknown>> {
-  const semantic = { schemaVersion: 1, status: 'ready', authorityHash: authority.authorityHash, surface } as const;
+): Promise<SurfaceLocatorEvidence> {
+  const semantic = {
+    schemaVersion: 1,
+    status: 'ready',
+    authorityHash: authority.authorityHash,
+    surface,
+  } satisfies Omit<SurfaceLocatorEvidence, 'surfaceHash'>;
   return Object.freeze({ ...semantic, surfaceHash: await digest(semantic) });
 }
 
-async function parseSurfaceLocator(
+async function parseSurfaceLocator<Input>(
   authority: ReturningUninstallImportedAuthority,
-  value: unknown,
+  value: Input,
 ): Promise<ManagementLocator | null> {
-  if (!record(value) || value.schemaVersion !== 1 || value.status !== 'ready' ||
-    value.authorityHash !== authority.authorityHash || !record(value.surface) ||
-    typeof value.surfaceHash !== 'string') return null;
-  const { surfaceHash, ...semantic } = value;
+  const result = v.safeParse(surfaceLocatorEvidenceSchema, value);
+  if (!result.success || result.output.authorityHash !== authority.authorityHash) return null;
+  const { surfaceHash, ...semantic } = result.output;
   if (surfaceHash !== await digest(semantic)) return null;
-  const surface = value.surface;
-  if (Object.keys(surface).sort().join(',') !==
-      'activeRelease,application,domain,marker,namespace,policy,workerId' ||
-    typeof surface.marker !== 'string' || typeof surface.workerId !== 'string' ||
-    !WORKER_ID.test(surface.workerId) || !record(surface.namespace) || !record(surface.domain) ||
-    !record(surface.application) || !record(surface.policy) || !record(surface.activeRelease) ||
-    surface.marker !== markerFromWorkerName(
-      authority.runtime.workerName,
-    ) || Object.keys(surface.namespace).sort().join(',') !==
-      'accountId,className,namespaceId,namespaceName,storage,workerName' ||
+  const surface = result.output.surface;
+  if (surface.marker !== markerFromWorkerName(authority.runtime.workerName) ||
     surface.namespace.accountId !== authority.runtime.accountId ||
-    typeof surface.namespace.namespaceId !== 'string' || !WORKER_ID.test(surface.namespace.namespaceId) ||
-    typeof surface.namespace.namespaceName !== 'string' || surface.namespace.namespaceName.length < 1 ||
-    surface.namespace.namespaceName.length > 256 || surface.namespace.workerName !== authority.runtime.workerName ||
-    surface.namespace.className !== 'AdminState' || surface.namespace.storage !== 'sqlite' ||
-    Object.keys(surface.domain).sort().join(',') !== 'certificateId,id' ||
-    typeof surface.domain.id !== 'string' || !DOMAIN_ID.test(surface.domain.id) ||
-    typeof surface.domain.certificateId !== 'string' || !PROVIDER_ID.test(surface.domain.certificateId) ||
-    Object.keys(surface.application).sort().join(',') !== 'allowedIdentityProviderIds,aud,id' ||
-    typeof surface.application.id !== 'string' || !PROVIDER_ID.test(surface.application.id) ||
-    typeof surface.application.aud !== 'string' || !ACCESS_AUD.test(surface.application.aud) ||
-    !Array.isArray(surface.application.allowedIdentityProviderIds) ||
-    surface.application.allowedIdentityProviderIds.length < 1 ||
-    surface.application.allowedIdentityProviderIds.some((id) =>
-      typeof id !== 'string' || !PROVIDER_ID.test(id)) ||
-    new Set(surface.application.allowedIdentityProviderIds).size !==
-      surface.application.allowedIdentityProviderIds.length ||
-    Object.keys(surface.policy).sort().join(',') !== 'adminEmails,applicationId,id' ||
-    typeof surface.policy.id !== 'string' || !PROVIDER_ID.test(surface.policy.id) ||
-    surface.policy.applicationId !== surface.application.id || !Array.isArray(surface.policy.adminEmails) ||
-    surface.policy.adminEmails.length < 1 || surface.policy.adminEmails.some((email) =>
-      typeof email !== 'string' || !authority.control.audienceEmails.includes(email)) ||
-    !surface.policy.adminEmails.includes(authority.actorEmail) ||
-    Object.keys(surface.activeRelease).sort().join(',') !==
-      'deploymentId,schemaVersion,versionId,versionRequestHash' ||
-    surface.activeRelease.schemaVersion !== 1 ||
-    typeof surface.activeRelease.versionId !== 'string' || !PROVIDER_ID.test(surface.activeRelease.versionId) ||
-    typeof surface.activeRelease.deploymentId !== 'string' ||
-    !PROVIDER_ID.test(surface.activeRelease.deploymentId) ||
-    typeof surface.activeRelease.versionRequestHash !== 'string' ||
-    !SHA256.test(surface.activeRelease.versionRequestHash)) return null;
-  return surface as unknown as ManagementLocator;
+    surface.policy.applicationId !== surface.application.id ||
+    surface.namespace.workerName !== authority.runtime.workerName ||
+    surface.policy.adminEmails.some((email) => !authority.control.audienceEmails.includes(email)) ||
+    !surface.policy.adminEmails.includes(authority.actorEmail)) return null;
+  return surface;
 }
 
 async function convergeSurface(state: ExecutionState): Promise<ManagementLocator> {
@@ -747,19 +937,15 @@ async function convergeSurface(state: ExecutionState): Promise<ManagementLocator
   return surface;
 }
 
-function validGatewayRemovalEvidence(value: unknown, installationId: string): value is Record<string, unknown> {
-  return record(value) && Object.keys(value).sort().join(',') ===
-    'actionId,installationId,removedResourceCount,schemaVersion,status' && value.schemaVersion === 1 &&
-    value.status === 'gateway_removed' && value.installationId === installationId &&
-    typeof value.actionId === 'string' && /^action_[A-Za-z0-9_-]{32}$/u.test(value.actionId) &&
-    Number.isSafeInteger(value.removedResourceCount) && (value.removedResourceCount as number) >= 4 &&
-    (value.removedResourceCount as number) <= 103;
+function parseGatewayRemovalEvidence<Input>(value: Input, installationId: string): GatewayRemovalEvidence | null {
+  const result = v.safeParse(gatewayRemovalEvidenceSchema, value);
+  return result.success && result.output.installationId === installationId ? result.output : null;
 }
 
 async function convergeGatewayRemoval(
   state: ExecutionState,
   surface: ManagementLocator,
-): Promise<Record<string, unknown>> {
+): Promise<GatewayRemovalEvidence> {
   const name = 'customer_gateway_remove' as const;
   if (!state.action) throw new DeployError(409, 'session_conflict', 'returning_action_required');
   const recordValue = Object.freeze({
@@ -793,17 +979,18 @@ async function convergeGatewayRemoval(
   }
   current = journalAction(state, name);
   if (current?.phase === 'submitted') {
-    if (!validGatewayRemovalEvidence(current.locator, state.authority.installationId)) {
+    const evidence = parseGatewayRemovalEvidence(current.locator, state.authority.installationId);
+    if (!evidence) {
       throw new DeployError(409, 'session_conflict', 'returning_journal_mismatch');
     }
-    await verifyAction(state, name, current.locator);
+    await verifyAction(state, name, evidence);
   }
   current = journalAction(state, name);
-  if (current?.phase !== 'verified' ||
-    !validGatewayRemovalEvidence(current.locator, state.authority.installationId)) {
+  const evidence = parseGatewayRemovalEvidence(current?.locator, state.authority.installationId);
+  if (current?.phase !== 'verified' || !evidence) {
     throw new DeployError(409, 'session_conflict', 'returning_journal_mismatch');
   }
-  return current.locator;
+  return evidence;
 }
 
 function managementDeleteSpec(
@@ -811,13 +998,7 @@ function managementDeleteSpec(
   surface: ManagementLocator,
   call: ProviderCall,
   name: ManagementDeleteName,
-): {
-  readonly path: string;
-  readonly id: string;
-  readonly domain: boolean;
-  readonly matches: (value: unknown) => boolean;
-  readonly list: () => Promise<readonly unknown[]>;
-} {
+): ManagementDeleteSpec {
   if (name === 'management_custom_domain_delete') return {
     path: `/accounts/${authority.runtime.accountId}/workers/domains/${encodeURIComponent(surface.domain.id)}`,
     id: surface.domain.id,
@@ -849,7 +1030,7 @@ async function convergeManagementDelete(
   state: ExecutionState,
   surface: ManagementLocator,
   name: ManagementDeleteName,
-): Promise<Record<string, unknown>> {
+): Promise<BoundaryObject> {
   const spec = managementDeleteSpec(state.authority, surface, state.call, name);
   const recordValue = Object.freeze({
     schemaVersion: 1,
@@ -905,8 +1086,8 @@ async function inspectVersionTwice(
   return second;
 }
 
-function parsedRetirementVersion(
-  value: unknown,
+function parsedRetirementVersion<Input>(
+  value: Input,
   recovery: RetirementWorkerVersionRecoveryRecord,
 ): UninstallWorkerVersionSubmission | null {
   const parsed = parseCloudflareUninstallWorkerLifecycleSubmission(value);
@@ -930,7 +1111,7 @@ async function convergeRetirementVersion(
     releaseSet,
   });
   if (mutation.recovery.stage !== 'retirement') throw new DeployError(500, 'internal_error');
-  const recovery = mutation.recovery as RetirementWorkerVersionRecoveryRecord;
+  const recovery = mutation.recovery;
   const name = 'retirement_worker_version_create' as const;
   await prepareAction(state, name, Object.freeze({
     schemaVersion: 1,
@@ -983,8 +1164,8 @@ async function inspectDeploymentTwice(
   return second;
 }
 
-function parsedRetirementDeployment(
-  value: unknown,
+function parsedRetirementDeployment<Input>(
+  value: Input,
   intent: UninstallWorkerDeploymentMutationIntent,
 ): UninstallWorkerDeploymentSubmission | null {
   const parsed = parseCloudflareUninstallWorkerLifecycleSubmission(value);
@@ -1201,7 +1382,10 @@ async function convergeWorkerDelete(
   return Object.freeze({ intent, proof: persisted });
 }
 
-async function namespaceAbsenceSnapshot(state: ExecutionState, surface: ManagementLocator): Promise<readonly unknown[]> {
+async function namespaceAbsenceSnapshot(
+  state: ExecutionState,
+  surface: ManagementLocator,
+): Promise<readonly BoundaryObject[]> {
   const values = await paginated(
     state.call,
     `/accounts/${state.authority.runtime.accountId}/workers/durable_objects/namespaces`,
@@ -1219,7 +1403,7 @@ async function verifyNoResidue(
   surface: ManagementLocator,
   worker: { readonly intent: WorkerDeleteMutationIntent; readonly proof: WorkerDeletionRecoveryProof },
   namespaceRetirement: AdminStateNamespaceRetirementProof,
-): Promise<Record<string, unknown>> {
+): Promise<NoResidueEvidence> {
   const domainSpec = managementDeleteSpec(
     state.authority, surface, state.call, 'management_custom_domain_delete',
   );
@@ -1253,12 +1437,12 @@ async function verifyNoResidue(
     state.call,
     `/zones/${state.authority.runtime.zoneId}/workers/routes`,
   );
-  if (!Array.isArray(routesResult)) throw new DeployError(409, 'session_conflict', 'returning_route_residue');
-  for (const route of routesResult) {
-    if (!record(route) || typeof route.pattern !== 'string') {
-      throw new DeployError(409, 'session_conflict', 'returning_route_residue');
-    }
-    const pattern = route.pattern.replace(/^https?:\/\//u, '').split('/', 1)[0];
+  const routes = v.safeParse(routeListSchema, routesResult);
+  if (!routes.success) throw new DeployError(409, 'session_conflict', 'returning_route_residue');
+  for (const route of routes.output) {
+    if (!v.is(v.string(), route.pattern)) throw new DeployError(409, 'session_conflict', 'returning_route_residue');
+    const pattern = route.pattern.replace(/^https?:\/\//u, '').split('/', 1).at(0);
+    if (pattern === undefined) throw new DeployError(409, 'session_conflict', 'returning_route_residue');
     if (pattern === state.authority.runtime.managementHostname ||
       (pattern.startsWith('*.') && state.authority.runtime.managementHostname.endsWith(pattern.slice(1)))) {
       throw new DeployError(409, 'session_conflict', 'returning_route_residue');
@@ -1271,25 +1455,19 @@ async function verifyNoResidue(
     workerDeletionHash: await digest(worker.proof),
     namespaceRetirementHash: await digest(namespaceRetirement),
     namespaceSnapshotHash: await digest(firstNamespaces),
-    routeSnapshotHash: await digest(routesResult),
+    routeSnapshotHash: await digest(routes.output),
   });
   return Object.freeze({ ...semantic, evidenceHash: await digest(semantic) });
 }
 
-async function parseNoResidueEvidence(
+async function parseNoResidueEvidence<Input>(
   state: ExecutionState,
-  value: unknown,
-): Promise<Record<string, unknown> | null> {
-  if (!record(value) || Object.keys(value).sort().join(',') !== [
-    'schemaVersion', 'status', 'authorityHash', 'workerDeletionHash', 'namespaceRetirementHash',
-    'namespaceSnapshotHash', 'routeSnapshotHash', 'evidenceHash',
-  ].sort().join(',') || value.schemaVersion !== 1 || value.status !== 'no_managed_residue' ||
-    value.authorityHash !== state.authority.authorityHash ||
-    ![value.workerDeletionHash, value.namespaceRetirementHash, value.namespaceSnapshotHash,
-      value.routeSnapshotHash, value.evidenceHash].every((hash) =>
-      typeof hash === 'string' && /^sha256:[a-f0-9]{64}$/u.test(hash))) return null;
-  const { evidenceHash, ...semantic } = value;
-  return evidenceHash === await digest(semantic) ? value : null;
+  value: Input,
+): Promise<NoResidueEvidence | null> {
+  const result = v.safeParse(noResidueEvidenceSchema, value);
+  if (!result.success || result.output.authorityHash !== state.authority.authorityHash) return null;
+  const { evidenceHash, ...semantic } = result.output;
+  return evidenceHash === await digest(semantic) ? result.output : null;
 }
 
 async function convergeNoResidue(
@@ -1297,7 +1475,7 @@ async function convergeNoResidue(
   surface: ManagementLocator,
   worker: { readonly intent: WorkerDeleteMutationIntent; readonly proof: WorkerDeletionRecoveryProof },
   namespaceRetirement: AdminStateNamespaceRetirementProof,
-): Promise<Record<string, unknown>> {
+): Promise<NoResidueEvidence> {
   const name = 'no_managed_residue_verify' as const;
   let current = journalAction(state, name);
   if (current?.phase === 'verified') {
@@ -1335,9 +1513,9 @@ async function convergeNoResidue(
 
 async function convergeFinal(
   state: ExecutionState,
-  gatewayRemoval: Record<string, unknown>,
-  residue: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
+  gatewayRemoval: GatewayRemovalEvidence,
+  residue: NoResidueEvidence,
+): Promise<FinalConvergenceEvidence> {
   const convergenceHash = await digest({
     schemaVersion: 1,
     authorityHash: state.authority.authorityHash,
@@ -1461,20 +1639,20 @@ async function acquireRecoveryJournal(
   });
 }
 
-function persistedGatewayRemoval(state: ExecutionState): Record<string, unknown> {
+function persistedGatewayRemoval(state: ExecutionState): GatewayRemovalEvidence {
   const current = journalAction(state, 'customer_gateway_remove');
-  if (current?.phase !== 'verified' ||
-    !validGatewayRemovalEvidence(current.locator, state.authority.installationId)) {
+  const evidence = parseGatewayRemovalEvidence(current?.locator, state.authority.installationId);
+  if (current?.phase !== 'verified' || !evidence) {
     throw new DeployError(409, 'session_conflict', 'returning_recovery_not_authorized');
   }
-  return current.locator;
+  return evidence;
 }
 
 async function convergeRemainingTeardown(
   state: ExecutionState,
   surface: ManagementLocator,
-  gatewayRemoval: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
+  gatewayRemoval: GatewayRemovalEvidence,
+): Promise<FinalConvergenceEvidence> {
   await convergeManagementDelete(state, surface, 'management_custom_domain_delete');
   await convergeManagementDelete(state, surface, 'management_admin_policy_delete');
   await convergeManagementDelete(state, surface, 'management_access_application_delete');
@@ -1514,11 +1692,9 @@ async function convergeRemainingTeardown(
 
 function returningResult(
   authority: ReturningUninstallImportedAuthority,
-  final: Record<string, unknown> | null,
+  final: FinalConvergenceEvidence | null,
 ): ReturningUninstallExecutionResult {
-  if (!final || final.status !== 'removed' || typeof final.convergenceHash !== 'string') {
-    throw new DeployError(500, 'internal_error');
-  }
+  if (!final) throw new DeployError(500, 'internal_error');
   const result = Object.freeze({
     status: 'removed' as const,
     installationId: authority.installationId,
@@ -1586,7 +1762,7 @@ export async function executeReviewedReturningUninstall(
     call,
     journal: await acquireJournal(input, authority, existingJournal),
   };
-  let final: Record<string, unknown> | null = null;
+  let final: FinalConvergenceEvidence | null = null;
   try {
     const surface = await convergeSurface(state);
     const gatewayRemoval = await convergeGatewayRemoval(state, surface);
@@ -1632,7 +1808,7 @@ export async function resumeReviewedReturningUninstall(
     call,
     journal: await acquireRecoveryJournal(input, existing),
   };
-  let final: Record<string, unknown> | null = null;
+  let final: FinalConvergenceEvidence | null = null;
   try {
     const surface = await convergeSurface(state);
     final = await convergeRemainingTeardown(state, surface, persistedGatewayRemoval(state));

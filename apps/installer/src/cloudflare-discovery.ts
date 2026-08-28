@@ -1,3 +1,9 @@
+import * as v from 'valibot';
+
+import {
+  boundaryValueSchema,
+  type BoundaryValue,
+} from './boundary';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 import { sha256Hex } from './crypto';
 import { DeployError, isDeployErrorCode, type DeployErrorCode } from './errors';
@@ -7,6 +13,46 @@ import type { StoredOauthAttempt } from './session';
 
 const ACCOUNT_ID = /^[a-f0-9]{32}$/u;
 const TARGET_ID_HASH = /^sha256:[a-f0-9]{64}$/u;
+const safeIntegerSchema = v.pipe(v.number(), v.safeInteger());
+const oauthAttemptSchema = v.strictObject({
+  attemptId: v.string(),
+  expiresAt: safeIntegerSchema,
+  stateHash: v.string(),
+  usedAt: v.nullable(safeIntegerSchema),
+  verifierHash: v.string(),
+});
+const discoveredTargetSchema = v.strictObject({
+  account: v.strictObject({ id: v.string(), name: v.string() }),
+  targetIdHash: v.string(),
+  zone: v.strictObject({ id: v.string(), name: v.string(), status: v.literal('active') }),
+});
+const discoveryResultSchema = v.strictObject({
+  actor: v.strictObject({ email: v.string(), id: v.string() }),
+  targets: v.array(discoveredTargetSchema),
+});
+const storedDiscoverySchema = v.strictObject({
+  expiresAt: safeIntegerSchema,
+  failureCode: v.nullable(v.string()),
+  grantRevocation: v.nullable(v.picklist(['confirmed', 'unconfirmed'])),
+  oauthAttempt: oauthAttemptSchema,
+  result: v.nullable(discoveryResultSchema),
+  schemaVersion: v.literal(1),
+  selectedTargetIdHash: v.nullable(v.string()),
+  status: v.picklist(['authorizing', 'ready', 'failed']),
+  updatedAt: safeIntegerSchema,
+});
+const providerResponseSchema = v.looseObject({
+  result: boundaryValueSchema,
+  success: v.literal(true),
+});
+const providerUserSchema = v.looseObject({ email: v.string(), id: v.string() });
+const providerAccountSchema = v.looseObject({ id: v.string(), name: v.string() });
+const providerZoneSchema = v.looseObject({
+  account: v.looseObject({ id: v.string() }),
+  id: v.string(),
+  name: v.string(),
+  status: v.literal('active'),
+});
 
 export interface DiscoveredCloudflareTarget {
   targetIdHash: string;
@@ -46,77 +92,75 @@ export interface PublicCloudflareDiscovery {
   updatedAt: string | null;
 }
 
-function record(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+function validName(value: string): boolean {
+  return value.length >= 1 && value.length <= 256 &&
+    !Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    });
 }
 
-function exact(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  return Object.keys(value).sort().join(',') === [...keys].sort().join(',');
-}
-
-function validName(value: unknown): value is string {
-  return typeof value === 'string' && value.length >= 1 && value.length <= 256 &&
-    !/[\u0000-\u001f\u007f]/u.test(value);
-}
-
-function validEmail(value: unknown): value is string {
-  return typeof value === 'string' && value.length <= 254 &&
+function validEmail(value: string): boolean {
+  return value.length <= 254 &&
     /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u.test(value);
 }
 
-function validAttempt(value: unknown): value is StoredOauthAttempt {
-  if (!record(value) || !exact(value, ['attemptId', 'stateHash', 'verifierHash', 'expiresAt', 'usedAt'])) return false;
-  return typeof value.attemptId === 'string' && /^att_[A-Za-z0-9_-]{32}$/u.test(value.attemptId) &&
-    typeof value.stateHash === 'string' && /^[A-Za-z0-9_-]{43}$/u.test(value.stateHash) &&
-    typeof value.verifierHash === 'string' && /^[A-Za-z0-9_-]{43}$/u.test(value.verifierHash) &&
-    typeof value.expiresAt === 'number' && Number.isSafeInteger(value.expiresAt) &&
-    (value.usedAt === null || (typeof value.usedAt === 'number' && Number.isSafeInteger(value.usedAt)));
+function validAttempt(value: v.InferOutput<typeof oauthAttemptSchema>): boolean {
+  return /^att_[A-Za-z0-9_-]{32}$/u.test(value.attemptId) &&
+    /^[A-Za-z0-9_-]{43}$/u.test(value.stateHash) &&
+    /^[A-Za-z0-9_-]{43}$/u.test(value.verifierHash);
 }
 
-export function requireStoredCloudflareDiscovery(value: unknown): StoredCloudflareDiscovery {
-  if (!record(value) || !exact(value, [
-    'schemaVersion', 'status', 'updatedAt', 'expiresAt', 'oauthAttempt', 'result',
-    'selectedTargetIdHash', 'failureCode', 'grantRevocation',
-  ]) || value.schemaVersion !== 1 ||
-    (value.status !== 'authorizing' && value.status !== 'ready' && value.status !== 'failed') ||
-    typeof value.updatedAt !== 'number' || !Number.isSafeInteger(value.updatedAt) ||
-    typeof value.expiresAt !== 'number' || !Number.isSafeInteger(value.expiresAt) ||
-    value.updatedAt > value.expiresAt || !validAttempt(value.oauthAttempt) ||
-    (value.selectedTargetIdHash !== null &&
-      (typeof value.selectedTargetIdHash !== 'string' || !TARGET_ID_HASH.test(value.selectedTargetIdHash))) ||
-    (value.failureCode !== null && !isDeployErrorCode(value.failureCode)) ||
-    (value.grantRevocation !== null && value.grantRevocation !== 'confirmed' && value.grantRevocation !== 'unconfirmed')) {
+export function requireStoredCloudflareDiscovery<Input>(value: Input): StoredCloudflareDiscovery {
+  const result = v.safeParse(storedDiscoverySchema, value);
+  if (!result.success) throw new DeployError(500, 'session_invalid');
+  const input = result.output;
+  const failureCode = input.failureCode;
+  if (input.updatedAt > input.expiresAt || !validAttempt(input.oauthAttempt) ||
+    (input.selectedTargetIdHash !== null && !TARGET_ID_HASH.test(input.selectedTargetIdHash)) ||
+    (failureCode !== null && !isDeployErrorCode(failureCode))) {
     throw new DeployError(500, 'session_invalid');
   }
-  let resultTargets: readonly unknown[] = [];
-  if (value.result !== null) {
-    if (!record(value.result) || !exact(value.result, ['actor', 'targets']) ||
-      !record(value.result.actor) || !exact(value.result.actor, ['id', 'email']) ||
-      !validName(value.result.actor.id) || !validEmail(value.result.actor.email) ||
-      !Array.isArray(value.result.targets) || value.result.targets.length > 1000) {
+  const resultTargets = input.result?.targets ?? Object.freeze([]);
+  if (input.result !== null) {
+    if (!validName(input.result.actor.id) || !validEmail(input.result.actor.email) ||
+      input.result.targets.length > 1000) {
       throw new DeployError(500, 'session_invalid');
     }
-    resultTargets = value.result.targets;
     for (const target of resultTargets) {
-      if (!record(target) || !exact(target, ['targetIdHash', 'account', 'zone']) ||
-        typeof target.targetIdHash !== 'string' || !TARGET_ID_HASH.test(target.targetIdHash) ||
-        !record(target.account) || !exact(target.account, ['id', 'name']) ||
-        typeof target.account.id !== 'string' || !ACCOUNT_ID.test(target.account.id) || !validName(target.account.name) ||
-        !record(target.zone) || !exact(target.zone, ['id', 'name', 'status']) ||
-        typeof target.zone.id !== 'string' || !ACCOUNT_ID.test(target.zone.id) ||
+      if (!TARGET_ID_HASH.test(target.targetIdHash) ||
+        !ACCOUNT_ID.test(target.account.id) || !validName(target.account.name) ||
+        !ACCOUNT_ID.test(target.zone.id) ||
         !validName(target.zone.name) || target.zone.status !== 'active') {
         throw new DeployError(500, 'session_invalid');
       }
     }
   }
-  if ((value.status === 'ready') !== (value.result !== null) ||
-    (value.status === 'failed') !== (value.failureCode !== null) ||
-    (value.selectedTargetIdHash !== null && !resultTargets.some(
-      (target) => record(target) && target.targetIdHash === value.selectedTargetIdHash,
+  if ((input.status === 'ready') !== (input.result !== null) ||
+    (input.status === 'failed') !== (input.failureCode !== null) ||
+    (input.selectedTargetIdHash !== null && !resultTargets.some(
+      (target) => target.targetIdHash === input.selectedTargetIdHash,
     ))) {
     throw new DeployError(500, 'session_invalid');
   }
-  return value as unknown as StoredCloudflareDiscovery;
+  return Object.freeze({
+    schemaVersion: 1,
+    status: input.status,
+    updatedAt: input.updatedAt,
+    expiresAt: input.expiresAt,
+    oauthAttempt: Object.freeze({ ...input.oauthAttempt }),
+    result: input.result === null ? null : Object.freeze({
+      actor: Object.freeze({ ...input.result.actor }),
+      targets: Object.freeze(input.result.targets.map((target) => Object.freeze({
+        targetIdHash: target.targetIdHash,
+        account: Object.freeze({ ...target.account }),
+        zone: Object.freeze({ ...target.zone }),
+      }))),
+    }),
+    selectedTargetIdHash: input.selectedTargetIdHash,
+    failureCode,
+    grantRevocation: input.grantRevocation,
+  });
 }
 
 export function publicCloudflareDiscovery(
@@ -152,24 +196,30 @@ async function api(
   transport: FetchTransport,
   accessToken: string,
   url: URL,
-): Promise<unknown> {
+): Promise<BoundaryValue> {
   return withDeadline(async (signal) => {
     const response = await transport(url, {
       headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' },
       signal,
     });
     if (!response.ok) throw new DeployError(403, 'oauth_grant_invalid');
-    let body: unknown;
+    let body: BoundaryValue;
     try {
-      body = JSON.parse(await readBoundedText(response, 'oauth_grant_invalid'));
+      const result = v.safeParse(
+        boundaryValueSchema,
+        JSON.parse(await readBoundedText(response, 'oauth_grant_invalid')),
+      );
+      if (!result.success) throw new DeployError(502, 'oauth_grant_invalid');
+      body = result.output;
     } catch (error) {
       if (error instanceof DeployError) throw error;
       throw new DeployError(502, 'oauth_grant_invalid');
     }
-    if (!record(body) || body.success !== true || !Object.hasOwn(body, 'result')) {
+    const result = v.safeParse(providerResponseSchema, body);
+    if (!result.success) {
       throw new DeployError(403, 'oauth_grant_invalid');
     }
-    return body.result;
+    return result.output.result;
   }, 'oauth_grant_invalid');
 }
 
@@ -177,34 +227,44 @@ export async function discoverCloudflareTargets(input: {
   accessToken: string;
   transport: FetchTransport;
 }): Promise<CloudflareDiscoveryResult> {
-  const user = await api(
+  const userResult = v.safeParse(providerUserSchema, await api(
     input.transport,
     input.accessToken,
     new URL('/client/v4/user', CLOUDFLARE_API_ORIGIN),
-  );
-  if (!record(user) || !validName(user.id) || !validEmail(user.email)) {
+  ));
+  if (!userResult.success || !validName(userResult.output.id) || !validEmail(userResult.output.email)) {
     throw new DeployError(403, 'oauth_grant_invalid');
   }
+  const user = userResult.output;
   const accountsUrl = new URL('/client/v4/accounts', CLOUDFLARE_API_ORIGIN);
   accountsUrl.searchParams.set('per_page', '50');
-  const accounts = await api(input.transport, input.accessToken, accountsUrl);
-  if (!Array.isArray(accounts) || accounts.length > 50) {
+  const accountsResult = v.safeParse(
+    v.array(providerAccountSchema),
+    await api(input.transport, input.accessToken, accountsUrl),
+  );
+  if (!accountsResult.success || accountsResult.output.length > 50) {
     throw new DeployError(502, 'target_account_ambiguous');
   }
+  const accounts = accountsResult.output;
   const targets: DiscoveredCloudflareTarget[] = [];
   for (const account of accounts) {
-    if (!record(account) || typeof account.id !== 'string' || !ACCOUNT_ID.test(account.id) || !validName(account.name)) {
+    if (!ACCOUNT_ID.test(account.id) || !validName(account.name)) {
       throw new DeployError(502, 'target_account_ambiguous');
     }
     const zonesUrl = new URL('/client/v4/zones', CLOUDFLARE_API_ORIGIN);
     zonesUrl.searchParams.set('account.id', account.id);
     zonesUrl.searchParams.set('status', 'active');
     zonesUrl.searchParams.set('per_page', '50');
-    const zones = await api(input.transport, input.accessToken, zonesUrl);
-    if (!Array.isArray(zones) || zones.length > 50) throw new DeployError(502, 'target_zone_invalid');
+    const zonesResult = v.safeParse(
+      v.array(providerZoneSchema),
+      await api(input.transport, input.accessToken, zonesUrl),
+    );
+    if (!zonesResult.success || zonesResult.output.length > 50) {
+      throw new DeployError(502, 'target_zone_invalid');
+    }
+    const zones = zonesResult.output;
     for (const zone of zones) {
-      if (!record(zone) || typeof zone.id !== 'string' || !ACCOUNT_ID.test(zone.id) ||
-        !validName(zone.name) || zone.status !== 'active' || !record(zone.account) || zone.account.id !== account.id) {
+      if (!ACCOUNT_ID.test(zone.id) || !validName(zone.name) || zone.account.id !== account.id) {
         throw new DeployError(502, 'target_zone_invalid');
       }
       const targetIdHash = `sha256:${await sha256Hex(

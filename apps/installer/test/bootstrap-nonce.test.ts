@@ -24,12 +24,11 @@ const INPUT: BootstrapNonceDerivationInput = Object.freeze({
   releaseArtifactSha256: '3c'.repeat(32),
 });
 
-function serializedError(error: unknown): string {
-  const candidate = error as { name?: unknown; message?: unknown; code?: unknown };
+function serializedError(error: BootstrapNonceDerivationError): string {
   return JSON.stringify({
-    name: candidate?.name,
-    message: candidate?.message,
-    code: candidate?.code,
+    name: error.name,
+    message: error.message,
+    code: error.code,
   });
 }
 
@@ -98,13 +97,14 @@ describe('bootstrap nonce derivation', () => {
       installationId: INPUT.installationId,
     }],
   ])('rejects an inexact commitment without reflecting values: %s', async (_label, value) => {
-    let caught: unknown;
+    let caught: BootstrapNonceDerivationError | null = null;
     try {
       await deriveBootstrapNonce(KEY_BASE64URL, value);
     } catch (error) {
-      caught = error;
+      if (error instanceof BootstrapNonceDerivationError) caught = error;
     }
     expect(caught).toBeInstanceOf(BootstrapNonceDerivationError);
+    if (!caught) throw new TypeError('expected bootstrap nonce derivation error');
     const serialized = serializedError(caught);
     expect(serialized).toBe(JSON.stringify({
       name: 'BootstrapNonceDerivationError',
@@ -132,12 +132,13 @@ describe('bootstrap nonce derivation', () => {
 
   it('never reflects a rejected source key in the stable error', async () => {
     const rejectedKey = `sensitive-${'x'.repeat(80)}`;
-    let caught: unknown;
+    let caught: BootstrapNonceDerivationError | null = null;
     try {
       await deriveBootstrapNonce(rejectedKey, INPUT);
     } catch (error) {
-      caught = error;
+      if (error instanceof BootstrapNonceDerivationError) caught = error;
     }
+    if (!caught) throw new TypeError('expected bootstrap nonce derivation error');
     expect(serializedError(caught)).not.toContain(rejectedKey);
   });
 });

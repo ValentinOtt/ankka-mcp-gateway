@@ -50,6 +50,27 @@ test('public-boundary check covers publishable untracked files and force-tracked
   }
 });
 
+test('public-boundary check excludes tracked files deleted from the working tree', async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), 'ankka-public-boundary-deleted-'));
+  const gitEnv = fixtureGitEnv();
+
+  try {
+    git(fixture, ['init', '--quiet'], gitEnv);
+    await writeFile(path.join(fixture, 'README.md'), '# Safe fixture\n');
+    await writeFile(path.join(fixture, '.env'), 'deleted fixture\n');
+    git(fixture, ['add', 'README.md'], gitEnv);
+    git(fixture, ['add', '--force', '.env'], gitEnv);
+    git(fixture, ['commit', '--quiet', '-m', 'tracked fixture'], gitEnv);
+    await rm(path.join(fixture, '.env'));
+
+    const result = run(fixture);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /passed for 1 publishable file/u);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test('public-boundary check rejects embedded opaque credentials but allows explicit placeholders', async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), 'ankka-public-boundary-credential-'));
   const gitEnv = fixtureGitEnv();
@@ -113,9 +134,12 @@ test('public-boundary check rejects generated release names and conservative JSO
       sourceCommit: 'b'.repeat(40),
     };
     await writeFile(path.join(fixture, 'renamed.json'), JSON.stringify(generatedManifest));
-    const shaped = run(fixture);
-    assert.equal(shaped.status, 1);
-    assert.match(shaped.stderr, /renamed\.json contains generated release candidate manifest/u);
+    const disguisedManifest = run(fixture);
+    assert.equal(disguisedManifest.status, 1);
+    assert.match(
+      disguisedManifest.stderr,
+      /renamed\.json contains generated release candidate manifest/u,
+    );
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

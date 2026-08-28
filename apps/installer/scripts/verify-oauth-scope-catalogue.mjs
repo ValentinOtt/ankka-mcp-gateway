@@ -5,6 +5,7 @@
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+import * as v from 'valibot';
 
 export const REQUIRED_SCOPE_IDS = Object.freeze([
   'access-acct.write',
@@ -23,6 +24,9 @@ const CATALOGUE_URL = 'https://api.cloudflare.com/client/v4/oauth/scopes';
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{20,256}$/u;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const TIMEOUT_MS = 10_000;
+const FUNCTION_SCHEMA = v.function();
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
 
 export class OAuthScopeCatalogueError extends Error {
   constructor(code) {
@@ -37,7 +41,7 @@ function fail(code = 'oauth_scope_catalogue_invalid') {
 }
 
 function isRecord(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  return v.is(OBJECT_SCHEMA, value) && !Array.isArray(value);
 }
 
 async function readBoundedResponse(response) {
@@ -55,11 +59,11 @@ async function readBoundedResponse(response) {
 }
 
 export async function verifyOAuthScopeCatalogue({ fetchImpl = fetch, readToken }) {
-  if (typeof fetchImpl !== 'function' || typeof readToken !== 'function') fail();
+  if (!v.is(FUNCTION_SCHEMA, fetchImpl) || !v.is(FUNCTION_SCHEMA, readToken)) fail();
   let token;
   try {
     token = await readToken();
-    if (typeof token !== 'string' || !TOKEN_PATTERN.test(token)) fail('oauth_scope_token_invalid');
+    if (!v.is(STRING_SCHEMA, token) || !TOKEN_PATTERN.test(token)) fail('oauth_scope_token_invalid');
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
     let response;
@@ -82,7 +86,7 @@ export async function verifyOAuthScopeCatalogue({ fetchImpl = fetch, readToken }
     const body = await readBoundedResponse(response);
     if (!isRecord(body) || body.success !== true || !Array.isArray(body.result)) fail();
     const ids = body.result.map((entry) => isRecord(entry) ? entry.id : null);
-    if (ids.some((id) => typeof id !== 'string') || new Set(ids).size !== ids.length) fail();
+    if (ids.some((id) => !v.is(STRING_SCHEMA, id)) || new Set(ids).size !== ids.length) fail();
     const available = new Set(ids);
     if (REQUIRED_SCOPE_IDS.some((scope) => !available.has(scope))) {
       fail('oauth_scope_catalogue_required_scope_missing');

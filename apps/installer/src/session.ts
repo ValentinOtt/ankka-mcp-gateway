@@ -1,3 +1,6 @@
+import * as v from 'valibot';
+
+import { boundaryValueSchema, type BoundaryValue } from './boundary';
 import { constantTimeEqual } from './crypto';
 import {
   parseExistingAnkkaGatewaySummary,
@@ -13,6 +16,53 @@ import {
 } from './schema';
 
 export type DeploySessionStatus = 'draft' | 'authorizing' | 'installing' | 'succeeded' | 'failed';
+const deploySessionStatusSchema = v.picklist([
+  'draft',
+  'authorizing',
+  'installing',
+  'succeeded',
+  'failed',
+]);
+const safeIntegerSchema = v.pipe(v.number(), v.safeInteger());
+const storedOauthAttemptSchema = v.strictObject({
+  attemptId: v.string(),
+  expiresAt: safeIntegerSchema,
+  stateHash: v.string(),
+  usedAt: v.nullable(safeIntegerSchema),
+  verifierHash: v.string(),
+});
+const successfulDeployResultSchema = v.strictObject({
+  code: v.literal('install_complete'),
+  completedAt: safeIntegerSchema,
+  grantRevocation: v.picklist(['confirmed', 'unconfirmed']),
+  installationId: v.string(),
+});
+const failedDeployResultSchema = v.strictObject({
+  code: v.string(),
+  completedAt: safeIntegerSchema,
+  existingGateway: v.optional(boundaryValueSchema),
+  reason: v.optional(v.string()),
+});
+const storedDeploySessionSchema = v.strictObject({
+  createdAt: safeIntegerSchema,
+  csrfHash: v.string(),
+  expiresAt: safeIntegerSchema,
+  oauthAttempt: v.nullable(boundaryValueSchema),
+  plan: v.nullable(boundaryValueSchema),
+  result: v.nullable(boundaryValueSchema),
+  schemaVersion: v.literal(1),
+  selection: v.nullable(boundaryValueSchema),
+  status: deploySessionStatusSchema,
+  updatedAt: safeIntegerSchema,
+});
+const publicDeployRecoverySchema = v.strictObject({
+  recoverUntil: safeIntegerSchema,
+  status: v.literal('recovery_required'),
+});
+const publicDeployResultRetentionSchema = v.strictObject({
+  resultUntil: safeIntegerSchema,
+  status: v.literal('result_available'),
+});
 
 export interface StoredOauthAttempt {
   attemptId: string;
@@ -69,34 +119,18 @@ export interface PublicDeployResultRetention {
   resultUntil: number;
 }
 
-export function parsePublicDeployRecovery(value: unknown): PublicDeployRecovery | null {
+export function parsePublicDeployRecovery<Input>(value: Input): PublicDeployRecovery | null {
   if (value === null) return null;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new DeployError(500, 'session_invalid');
-  }
-  const input = value as Record<string, unknown>;
-  if (
-    Object.keys(input).sort().join(',') !== ['recoverUntil', 'status'].sort().join(',') ||
-    input.status !== 'recovery_required' ||
-    typeof input.recoverUntil !== 'number' ||
-    !Number.isSafeInteger(input.recoverUntil)
-  ) throw new DeployError(500, 'session_invalid');
-  return Object.freeze({ status: 'recovery_required', recoverUntil: input.recoverUntil });
+  const result = v.safeParse(publicDeployRecoverySchema, value);
+  if (!result.success) throw new DeployError(500, 'session_invalid');
+  return Object.freeze(result.output);
 }
 
-export function parsePublicDeployResultRetention(value: unknown): PublicDeployResultRetention | null {
+export function parsePublicDeployResultRetention<Input>(value: Input): PublicDeployResultRetention | null {
   if (value === null) return null;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new DeployError(500, 'session_invalid');
-  }
-  const input = value as Record<string, unknown>;
-  if (
-    Object.keys(input).sort().join(',') !== ['resultUntil', 'status'].sort().join(',') ||
-    input.status !== 'result_available' ||
-    typeof input.resultUntil !== 'number' ||
-    !Number.isSafeInteger(input.resultUntil)
-  ) throw new DeployError(500, 'session_invalid');
-  return Object.freeze({ status: 'result_available', resultUntil: input.resultUntil });
+  const result = v.safeParse(publicDeployResultRetentionSchema, value);
+  if (!result.success) throw new DeployError(500, 'session_invalid');
+  return Object.freeze(result.output);
 }
 
 export function publicSession(session: StoredDeploySession): PublicDeploySession {
@@ -111,83 +145,77 @@ export function publicSession(session: StoredDeploySession): PublicDeploySession
   };
 }
 
-function isStoredSession(value: unknown): value is StoredDeploySession {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const input = value as Record<string, unknown>;
-  if (Object.keys(input).sort().join(',') !== [
-    'schemaVersion', 'status', 'csrfHash', 'createdAt', 'updatedAt', 'expiresAt',
-    'selection', 'plan', 'oauthAttempt', 'result',
-  ].sort().join(',')) return false;
-  if (
-    input.schemaVersion !== 1 ||
-    typeof input.status !== 'string' ||
-    !['draft', 'authorizing', 'installing', 'succeeded', 'failed'].includes(input.status) ||
-    typeof input.csrfHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(input.csrfHash) ||
-    typeof input.createdAt !== 'number' || !Number.isSafeInteger(input.createdAt) ||
-    typeof input.updatedAt !== 'number' || !Number.isSafeInteger(input.updatedAt) ||
-    typeof input.expiresAt !== 'number' || !Number.isSafeInteger(input.expiresAt) ||
-    input.createdAt > input.updatedAt || input.updatedAt > input.expiresAt
-  ) return false;
-  try {
-    if (input.selection !== null) parseDeploySelection(input.selection);
-    if (input.plan !== null) parseStaticDeployPlan(input.plan);
-  } catch {
-    return false;
-  }
-  if (input.oauthAttempt !== null) {
-    if (!input.oauthAttempt || typeof input.oauthAttempt !== 'object' || Array.isArray(input.oauthAttempt)) return false;
-    const attempt = input.oauthAttempt as Record<string, unknown>;
-    if (
-      Object.keys(attempt).sort().join(',') !== ['attemptId', 'stateHash', 'verifierHash', 'expiresAt', 'usedAt'].sort().join(',') ||
-      typeof attempt.attemptId !== 'string' || !/^att_[A-Za-z0-9_-]{32}$/u.test(attempt.attemptId) ||
-      typeof attempt.stateHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(attempt.stateHash) ||
-      typeof attempt.verifierHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(attempt.verifierHash) ||
-      typeof attempt.expiresAt !== 'number' ||
-      (attempt.usedAt !== null && typeof attempt.usedAt !== 'number')
-    ) return false;
-  }
-  if (input.result !== null) {
-    if (!input.result || typeof input.result !== 'object' || Array.isArray(input.result)) return false;
-    const result = input.result as Record<string, unknown>;
-    const keys = Object.keys(result).sort().join(',');
-    if (
-      keys !== ['code', 'completedAt'].sort().join(',') &&
-      keys !== ['code', 'completedAt', 'reason'].sort().join(',') &&
-      keys !== ['code', 'completedAt', 'existingGateway'].sort().join(',') &&
-      keys !== ['code', 'completedAt', 'existingGateway', 'reason'].sort().join(',') &&
-      keys !== ['code', 'completedAt', 'installationId', 'grantRevocation'].sort().join(',')
-    ) return false;
-    if (typeof result.completedAt !== 'number' || !Number.isSafeInteger(result.completedAt)) return false;
-    if (result.reason !== undefined && !isFailureReason(result.reason)) return false;
-    if (result.existingGateway !== undefined && (
-      result.code !== 'existing_gateway_detected' ||
-      parseExistingAnkkaGatewaySummary(result.existingGateway) === null
-    )) return false;
-    if (result.code === 'existing_gateway_detected' && result.existingGateway === undefined) return false;
-    if (result.reason !== undefined && result.code === 'install_complete') return false;
-    if (result.code === 'install_complete') {
-      if (
-        typeof result.installationId !== 'string' ||
-        !/^acg-[a-f0-9]{24}$/u.test(result.installationId) ||
-        (result.grantRevocation !== 'confirmed' && result.grantRevocation !== 'unconfirmed')
-      ) {
-        return false;
-      }
-    } else if (
-      !isDeployErrorCode(result.code) ||
-      result.installationId !== undefined ||
-      result.grantRevocation !== undefined
-    ) {
-      return false;
-    }
-  }
-  return true;
+function parseOauthAttempt(value: BoundaryValue): StoredOauthAttempt | null {
+  const result = v.safeParse(storedOauthAttemptSchema, value);
+  if (!result.success || !/^att_[A-Za-z0-9_-]{32}$/u.test(result.output.attemptId) ||
+    !/^[A-Za-z0-9_-]{43}$/u.test(result.output.stateHash) ||
+    !/^[A-Za-z0-9_-]{43}$/u.test(result.output.verifierHash)) return null;
+  return Object.freeze(result.output);
 }
 
-export function requireStoredSession(value: unknown): StoredDeploySession {
-  if (!isStoredSession(value)) throw new DeployError(500, 'session_invalid');
-  assertSecretFree(value);
-  return value;
+function parseDeployResult(value: BoundaryValue): DeployResult | null {
+  const successful = v.safeParse(successfulDeployResultSchema, value);
+  if (successful.success) {
+    if (!/^acg-[a-f0-9]{24}$/u.test(successful.output.installationId)) return null;
+    return Object.freeze(successful.output);
+  }
+  const failed = v.safeParse(failedDeployResultSchema, value);
+  if (!failed.success || !isDeployErrorCode(failed.output.code)) return null;
+  if (failed.output.reason !== undefined && !isFailureReason(failed.output.reason)) return null;
+  const existingGateway = failed.output.existingGateway === undefined
+    ? undefined
+    : parseExistingAnkkaGatewaySummary(failed.output.existingGateway) ?? undefined;
+  if (
+    (failed.output.existingGateway !== undefined && existingGateway === undefined) ||
+    (existingGateway !== undefined && failed.output.code !== 'existing_gateway_detected') ||
+    (failed.output.code === 'existing_gateway_detected' && existingGateway === undefined)
+  ) return null;
+  const result: DeployResult = {
+    code: failed.output.code,
+    completedAt: failed.output.completedAt,
+  };
+  if (failed.output.reason !== undefined) result.reason = failed.output.reason;
+  if (existingGateway !== undefined) result.existingGateway = existingGateway;
+  return Object.freeze(result);
+}
+
+function parseStoredSession<Input>(value: Input): StoredDeploySession | null {
+  const parsed = v.safeParse(storedDeploySessionSchema, value);
+  if (!parsed.success) return null;
+  const input = parsed.output;
+  if (!/^[A-Za-z0-9_-]{43}$/u.test(input.csrfHash) ||
+    input.createdAt > input.updatedAt || input.updatedAt > input.expiresAt) return null;
+  let selection: DeploySelection | null = null;
+  let plan: StaticDeployPlan | null = null;
+  try {
+    if (input.selection !== null) selection = parseDeploySelection(input.selection);
+    if (input.plan !== null) plan = parseStaticDeployPlan(input.plan);
+  } catch {
+    return null;
+  }
+  const oauthAttempt = input.oauthAttempt === null ? null : parseOauthAttempt(input.oauthAttempt);
+  const result = input.result === null ? null : parseDeployResult(input.result);
+  if ((input.oauthAttempt !== null && oauthAttempt === null) ||
+      (input.result !== null && result === null)) return null;
+  return Object.freeze({
+    schemaVersion: 1,
+    status: input.status,
+    csrfHash: input.csrfHash,
+    createdAt: input.createdAt,
+    updatedAt: input.updatedAt,
+    expiresAt: input.expiresAt,
+    selection,
+    plan,
+    oauthAttempt,
+    result,
+  });
+}
+
+export function requireStoredSession<Input>(value: Input): StoredDeploySession {
+  const session = parseStoredSession(value);
+  if (!session) throw new DeployError(500, 'session_invalid');
+  assertSecretFree(session);
+  return session;
 }
 
 export function verifyHash(actual: string, expected: string): void {

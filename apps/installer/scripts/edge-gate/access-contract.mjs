@@ -9,6 +9,18 @@
  */
 
 import { isIsolatedCanaryHostname } from '../isolated-canary-target.mjs';
+import * as v from 'valibot';
+
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
+
+function hasControlCharacter(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return true;
+  }
+  return false;
+}
 
 export const ACCESS_HOST = 'deploy.ankka.ai';
 export const OAUTH_CALLBACK_PATH = '/oauth/callback';
@@ -26,11 +38,12 @@ const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
  */
 export function isCloudflareAccessLoginUrl(value) {
   if (
-    typeof value !== 'string' || value.length === 0 || value.length > 2048 ||
-    value !== value.trim() || /[\u0000-\u001f\u007f\\]/u.test(value)
+    !v.is(STRING_SCHEMA, value) || value.length === 0 || value.length > 2048 ||
+    value !== value.trim() || hasControlCharacter(value) || value.includes('\\')
   ) return false;
   const authorityMatch = /^https:\/\/([^/?#]+)(?:[/?#]|$)/iu.exec(value);
-  if (!authorityMatch || authorityMatch[1].includes('@') || authorityMatch[1].includes(':')) {
+  const authority = authorityMatch?.[1];
+  if (!v.is(STRING_SCHEMA, authority) || authority.includes('@') || authority.includes(':')) {
     return false;
   }
   let url;
@@ -41,7 +54,7 @@ export function isCloudflareAccessLoginUrl(value) {
   }
   if (
     url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.port !== '' ||
-    authorityMatch[1].toLowerCase() !== url.hostname.toLowerCase()
+    authority.toLowerCase() !== url.hostname.toLowerCase()
   ) return false;
   const hostname = url.hostname.toLowerCase();
   const labels = hostname.split('.');
@@ -117,19 +130,16 @@ function protectedInstallerApplicationBodyFor(
   { emails, identityProviderId, sessionDuration },
 ) {
   if (!Array.isArray(emails) || emails.length === 0 ||
-      emails.some((email) => typeof email !== 'string' || email.length === 0) ||
+      emails.some((email) => !v.is(STRING_SCHEMA, email) || email.length === 0) ||
       new Set(emails).size !== emails.length ||
       !(identityProviderId === null ||
-        (typeof identityProviderId === 'string' && identityProviderId.length > 0)) ||
-      typeof sessionDuration !== 'string' || !/^[1-9]\d*(?:m|h|d)$/u.test(sessionDuration)) {
+        (v.is(STRING_SCHEMA, identityProviderId) && identityProviderId.length > 0)) ||
+      !v.is(STRING_SCHEMA, sessionDuration) || !/^[1-9]\d*(?:m|h|d)$/u.test(sessionDuration)) {
     throw new TypeError('invalid_protected_installer_application');
   }
-  return {
+  const application = {
     ...baseApplication(specification.name, specification.domain),
     session_duration: sessionDuration,
-    ...(identityProviderId
-      ? { allowed_idps: [identityProviderId], auto_redirect_to_identity: true }
-      : {}),
     policies: [{
       name: specification.policyName,
       decision: 'allow',
@@ -137,6 +147,11 @@ function protectedInstallerApplicationBodyFor(
       include: emails.map((email) => ({ email: { email } })),
     }],
   };
+  if (identityProviderId) {
+    application.allowed_idps = [identityProviderId];
+    application.auto_redirect_to_identity = true;
+  }
+  return application;
 }
 
 export function protectedInstallerApplicationBody(input) {
@@ -144,7 +159,7 @@ export function protectedInstallerApplicationBody(input) {
 }
 
 function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return v.is(OBJECT_SCHEMA, value) && !Array.isArray(value);
 }
 
 function baseApplicationMatches(application, specification) {
@@ -197,14 +212,14 @@ export function assessPrivateBypassApplication(application, specification) {
 /** Exact structural read-back contract for the private whole-host Allow app. */
 function assessPrivateInstallerApplicationFor(application, specification) {
   if (!baseApplicationMatches(application, specification) ||
-      typeof application.session_duration !== 'string' ||
+      !v.is(STRING_SCHEMA, application.session_duration) ||
       !/^[1-9]\d*(?:m|h|d)$/u.test(application.session_duration) ||
       !Array.isArray(application.policies) || application.policies.length !== 1) {
     return Object.freeze({ ok: false, operatorIdentityCount: 0, identityProviderCount: 0 });
   }
   const idps = application.allowed_idps ?? [];
   if (!Array.isArray(idps) || idps.length > 1 ||
-      idps.some((idp) => typeof idp !== 'string' || idp.length === 0) ||
+      idps.some((idp) => !v.is(STRING_SCHEMA, idp) || idp.length === 0) ||
       application.auto_redirect_to_identity !== (idps.length === 1)) {
     return Object.freeze({ ok: false, operatorIdentityCount: 0, identityProviderCount: 0 });
   }
@@ -217,7 +232,7 @@ function assessPrivateInstallerApplicationFor(application, specification) {
   }
   const emails = policy.include.map((rule) => (
     isRecord(rule) && Object.keys(rule).length === 1 && isRecord(rule.email) &&
-    Object.keys(rule.email).length === 1 && typeof rule.email.email === 'string' &&
+    Object.keys(rule.email).length === 1 && v.is(STRING_SCHEMA, rule.email.email) &&
     rule.email.email.length > 0 ? rule.email.email : null
   ));
   const ok = emails.every((email) => email !== null) && new Set(emails).size === emails.length;
@@ -262,12 +277,12 @@ export function createIsolatedPrivateAccessContract(accessHost) {
  * public-mode verifier may not assume an unknown selector is unrelated.
  */
 export function accessApplicationHostSelectors(application) {
-  if (!isRecord(application) || typeof application.type !== 'string') {
+  if (!isRecord(application) || !v.is(STRING_SCHEMA, application.type)) {
     return Object.freeze({ status: 'unverifiable', selectors: Object.freeze([]) });
   }
   const selectors = [];
   if (application.domain !== undefined && application.domain !== null) {
-    if (typeof application.domain !== 'string') {
+    if (!v.is(STRING_SCHEMA, application.domain)) {
       return Object.freeze({ status: 'unverifiable', selectors: Object.freeze([]) });
     }
     selectors.push(application.domain);
@@ -277,7 +292,7 @@ export function accessApplicationHostSelectors(application) {
       return Object.freeze({ status: 'unverifiable', selectors: Object.freeze([]) });
     }
     for (const destination of application.destinations) {
-      if (!isRecord(destination) || typeof destination.uri !== 'string') {
+      if (!isRecord(destination) || !v.is(STRING_SCHEMA, destination.uri)) {
         return Object.freeze({ status: 'unverifiable', selectors: Object.freeze([]) });
       }
       selectors.push(destination.uri);
@@ -294,8 +309,8 @@ export function accessApplicationHostSelectors(application) {
 
 function selectorHostname(selector) {
   if (
-    typeof selector !== 'string' || selector.length === 0 || selector.length > 2048 ||
-    /[\u0000-\u001f\u007f?#@]/u.test(selector) || selector !== selector.trim()
+    !v.is(STRING_SCHEMA, selector) || selector.length === 0 || selector.length > 2048 ||
+    hasControlCharacter(selector) || /[?#@]/u.test(selector) || selector !== selector.trim()
   ) return null;
   let value = selector;
   const scheme = /^(https?):\/\//iu.exec(value);
@@ -331,7 +346,7 @@ function wildcardHostnameMatches(pattern, hostname) {
  * not accepted merely because the particular probe URLs happen to work.
  */
 export function classifyAccessApplicationForHostname(application, targetHostname) {
-  if (typeof targetHostname !== 'string' || targetHostname.length === 0) return 'unverifiable';
+  if (!v.is(STRING_SCHEMA, targetHostname) || targetHostname.length === 0) return 'unverifiable';
   const parsed = accessApplicationHostSelectors(application);
   if (parsed.status !== 'parsed') return parsed.status;
   for (const selector of parsed.selectors) {

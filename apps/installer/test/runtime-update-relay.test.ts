@@ -1,6 +1,8 @@
+import * as v from 'valibot';
 import { describe, expect, it } from 'vitest';
 import { relayRuntimeUpdate } from '../src/runtime-update-relay';
 import { verifiedReleaseBundle } from './fixtures';
+import { requestJson } from './boundary';
 
 const ACCOUNT_ID = 'a'.repeat(32);
 const WORKER_ID = 'b'.repeat(32);
@@ -14,16 +16,34 @@ const COMPENSATION_DEPLOYMENT = '66666666-6666-4666-8666-666666666666';
 const ACTION_ID = `action_${'a'.repeat(32)}`;
 const ACTION_KEY = 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc';
 const EXPIRES_AT = 1_800_000_600_000;
+const commandSchema = v.object({ command: v.string() });
+const subdomainSchema = v.object({ enabled: v.boolean() });
+const deploymentBodySchema = v.object({
+  versions: v.array(v.object({ percentage: v.number(), version_id: v.string() })),
+});
 
-function json(result: unknown, status = 200): Response {
+interface DeploymentTarget {
+  readonly percentage: number;
+  readonly version_id: string;
+}
+
+interface TransportFixture {
+  readonly transport: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  readonly deployments: Array<readonly DeploymentTarget[]>;
+  readonly commands: string[];
+  readonly subdomainStates: boolean[];
+  readonly currentSubdomain: () => boolean;
+}
+
+function json<Result>(result: Result, status = 200): Response {
   return new Response(JSON.stringify({ success: status < 300, errors: [], messages: [], result }), {
     status,
     headers: { 'content-type': 'application/json' },
   });
 }
 
-function bindings(): readonly unknown[] {
-  const values: Record<string, string> = {
+function bindings() {
+  const values = {
     ADMIN_EMAILS: 'owner@example.com',
     ANKKA_GATEWAY_RELEASE: 'gateway-v1.1.0',
     ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${'1'.repeat(64)}`,
@@ -52,18 +72,12 @@ function transportFixture(options: Readonly<{
   initialSubdomain?: boolean;
   managementDomainService?: string;
   workerTags?: readonly string[];
-}> = {}): {
-  transport: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-  deployments: Array<readonly unknown[]>;
-  commands: string[];
-  subdomainStates: boolean[];
-  currentSubdomain: () => boolean;
-} {
-  let active = [{ percentage: 100, version_id: OLD_VERSION }];
+}> = {}): TransportFixture {
+  let active: readonly DeploymentTarget[] = [{ percentage: 100, version_id: OLD_VERSION }];
   let deploymentId = INITIAL_DEPLOYMENT;
   let deploymentWrites = 0;
   let subdomain = options.initialSubdomain ?? false;
-  const deployments: Array<readonly unknown[]> = [];
+  const deployments: Array<readonly DeploymentTarget[]> = [];
   const commands: string[] = [];
   const subdomainStates: boolean[] = [];
   return {
@@ -78,7 +92,7 @@ function transportFixture(options: Readonly<{
         if (request.method === 'HEAD') {
           return new Response(null, { status: 204, headers: { 'x-ankka-runtime-action': 'ready' } });
         }
-        const body = await request.json() as { command: string };
+        const body = await requestJson(request, commandSchema);
         commands.push(body.command);
         if (body.command === 'probe') {
           return options.probeFails
@@ -90,7 +104,7 @@ function transportFixture(options: Readonly<{
       const path = url.pathname;
       if (path.endsWith(`/workers/scripts/${WORKER_NAME}/subdomain`)) {
         if (request.method === 'POST') {
-          const body = await request.json() as { enabled: boolean };
+          const body = await requestJson(request, subdomainSchema);
           subdomain = body.enabled;
           subdomainStates.push(subdomain);
         }
@@ -123,8 +137,8 @@ function transportFixture(options: Readonly<{
       }
       if (path.endsWith(`/workers/scripts/${WORKER_NAME}/deployments`)) {
         if (request.method === 'POST') {
-          const body = await request.json() as { versions: readonly unknown[] };
-          active = [...body.versions] as typeof active;
+          const body = await requestJson(request, deploymentBodySchema);
+          active = [...body.versions];
           deployments.push(active);
           deploymentWrites += 1;
           deploymentId = deploymentWrites === 1

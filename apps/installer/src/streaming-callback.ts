@@ -2,13 +2,17 @@ const encoder = new TextEncoder();
 const HEARTBEAT = encoder.encode('\n<!-- ankka-install-stream-heartbeat -->\n');
 export const INSTALL_STREAM_HEARTBEAT_MS = 10_000;
 
-export interface StreamingCallbackOptions {
-  readonly heartbeatMs?: number;
-  readonly context?: ExecutionContext;
+export interface StreamingCallbackContext {
+  waitUntil(task: Promise<unknown>): void;
 }
 
-function safeWaitUntil(context: ExecutionContext | undefined, task: Promise<void>): void {
-  if (context && typeof context.waitUntil === 'function') context.waitUntil(task);
+export interface StreamingCallbackOptions {
+  readonly heartbeatMs?: number;
+  readonly context?: StreamingCallbackContext;
+}
+
+function safeWaitUntil(context: StreamingCallbackContext | undefined, task: Promise<void>): void {
+  if (context) context.waitUntil(task);
 }
 
 /**

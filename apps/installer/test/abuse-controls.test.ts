@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as v from 'valibot';
 
 import { PUBLIC_ORIGIN, SESSION_COOKIE } from '../src/constants';
 import type { GatewayDeployEnv } from '../src/env';
@@ -21,7 +22,7 @@ class RecordingRateLimit implements RateLimit {
     this.keys.push(options.key);
     const outcome = this.outcomes.shift();
     if (outcome instanceof Error) throw outcome;
-    if (typeof outcome === 'boolean') return { success: outcome };
+    if (v.is(v.boolean(), outcome)) return { success: outcome };
     return outcome ?? { success: this.defaultSuccess };
   }
 }
@@ -30,7 +31,7 @@ class CountingNamespace extends FakeDeploySessionNamespace {
   getCalls = 0;
   readonly names: string[] = [];
 
-  override get(id: DurableObjectId): DurableObjectStub {
+  override get(id: DurableObjectId) {
     this.getCalls += 1;
     this.names.push(id.toString());
     return super.get(id);
@@ -43,12 +44,11 @@ function protectedEnv(
   mutation: RateLimit | null = new RecordingRateLimit(),
   read: RateLimit | null = new RecordingRateLimit(),
 ): GatewayDeployEnv {
-  return {
-    ...env(namespace),
-    ...(anonymous === null ? {} : { ANONYMOUS_SESSION_RATE_LIMIT: anonymous }),
-    ...(read === null ? {} : { SESSION_READ_RATE_LIMIT: read }),
-    ...(mutation === null ? {} : { SESSION_MUTATION_RATE_LIMIT: mutation }),
-  };
+  const workerEnv = { ...env(namespace) };
+  if (anonymous !== null) Object.assign(workerEnv, { ANONYMOUS_SESSION_RATE_LIMIT: anonymous });
+  if (read !== null) Object.assign(workerEnv, { SESSION_READ_RATE_LIMIT: read });
+  if (mutation !== null) Object.assign(workerEnv, { SESSION_MUTATION_RATE_LIMIT: mutation });
+  return workerEnv;
 }
 
 function edgeRequest(path: string, init: RequestInit = {}, address = '192.0.2.44'): Request {
@@ -69,9 +69,9 @@ async function activeSession(
   worker: ReturnType<typeof activeWorker>,
   workerEnv: GatewayDeployEnv,
 ): Promise<{ cookie: string; csrf: string }> {
-  const response = await worker.fetch(edgeRequest('/api/session'), workerEnv, {} as ExecutionContext);
+  const response = await worker.fetch(edgeRequest('/api/session'), workerEnv, undefined);
   expect(response.status).toBe(200);
-  const payload = await response.json() as { csrf: string };
+  const payload = v.parse(v.looseObject({ csrf: v.string() }), await response.json());
   return {
     cookie: cookiePair(response.headers.get('set-cookie') ?? '', SESSION_COOKIE),
     csrf: payload.csrf,
@@ -97,7 +97,7 @@ describe('hosted installer Worker-native abuse controls', () => {
     const response = await activeWorker().fetch(
       edgeRequest('/api/session', {}, address),
       protectedEnv(namespace, anonymous),
-      {} as ExecutionContext,
+      undefined,
     );
 
     expect(response.status).toBe(429);
@@ -124,7 +124,7 @@ describe('hosted installer Worker-native abuse controls', () => {
 
       const response = await activeWorker().fetch(edgeRequest(path, {
         headers: { cookie: sprayedCookie },
-      }, address), workerEnv, {} as ExecutionContext);
+      }, address), workerEnv, undefined);
 
       expect(response.status).toBe(200);
       expect(response.headers.get('retry-after')).toBeNull();
@@ -154,7 +154,7 @@ describe('hosted installer Worker-native abuse controls', () => {
       anonymous.defaultSuccess = false;
       const response = await activeWorker().fetch(edgeRequest(path, {
         headers: { cookie: `${SESSION_COOKIE}=${'A'.repeat(43)}` },
-      }), protectedEnv(namespace, anonymous, mutation, read), {} as ExecutionContext);
+      }), protectedEnv(namespace, anonymous, mutation, read), undefined);
 
       expect(response.status).toBe(429);
       expect(response.headers.get('retry-after')).toBe('60');
@@ -182,14 +182,14 @@ describe('hosted installer Worker-native abuse controls', () => {
 
     const response = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: session.cookie },
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
 
     expect(response.status).toBe(200);
-    expect((await response.json() as { csrf: string }).csrf).toBe(session.csrf);
+    expect(v.parse(v.looseObject({ csrf: v.string() }), await response.json()).csrf).toBe(session.csrf);
     const beforeLimitedRead = namespace.getCalls;
     const limited = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/discovery`, {
       headers: { cookie: session.cookie },
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(limited.status).toBe(429);
     expect(limited.headers.get('retry-after')).toBe('60');
     expect(await limited.json()).toEqual({ code: 'rate_limited' });
@@ -215,14 +215,14 @@ describe('hosted installer Worker-native abuse controls', () => {
       method: 'PUT',
       headers: mutationHeaders(session),
       body: JSON.stringify(selectionInput),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(first.status).toBe(200);
 
     const limited = await worker.fetch(edgeRequest('/api/selection', {
       method: 'PUT',
       headers: mutationHeaders(session),
       body: JSON.stringify(selectionInput),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(limited.status).toBe(429);
     expect(limited.headers.get('retry-after')).toBe('60');
     const body = await limited.text();
@@ -246,21 +246,21 @@ describe('hosted installer Worker-native abuse controls', () => {
 
     const sessionRead = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: session.cookie },
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(sessionRead.status).toBe(200);
 
     const anonymousMutation = await worker.fetch(edgeRequest('/api/not-real', {
       method: 'POST',
       headers: { origin: PUBLIC_ORIGIN, 'content-type': 'application/json' },
       body: '{}',
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(anonymousMutation.status).toBe(404);
 
     const sessionMutation = await worker.fetch(edgeRequest('/api/not-real', {
       method: 'POST',
       headers: { cookie: session.cookie, origin: PUBLIC_ORIGIN, 'content-type': 'application/json' },
       body: '{}',
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(sessionMutation.status).toBe(404);
 
     expect(anonymous.keys).toHaveLength(1);
@@ -273,7 +273,7 @@ describe('hosted installer Worker-native abuse controls', () => {
     const missing = await activeWorker().fetch(
       edgeRequest('/api/session'),
       protectedEnv(new CountingNamespace(), null, new RecordingRateLimit()),
-      {} as ExecutionContext,
+      undefined,
     );
     expect(missing.status).toBe(503);
     expect(await missing.json()).toEqual({ code: 'abuse_controls_unavailable' });
@@ -286,9 +286,11 @@ describe('hosted installer Worker-native abuse controls', () => {
     const session = await activeSession(worker, workerEnv);
 
     const beforeMissingRead = namespace.getCalls;
+    const missingReadEnv = { ...workerEnv };
+    delete missingReadEnv.SESSION_READ_RATE_LIMIT;
     const missingRead = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: session.cookie },
-    }), { ...workerEnv, SESSION_READ_RATE_LIMIT: undefined }, {} as ExecutionContext);
+    }), missingReadEnv, undefined);
     expect(missingRead.status).toBe(503);
     expect(await missingRead.json()).toEqual({ code: 'abuse_controls_unavailable' });
     expect(namespace.getCalls).toBe(beforeMissingRead);
@@ -297,7 +299,7 @@ describe('hosted installer Worker-native abuse controls', () => {
     const beforeFailedRead = namespace.getCalls;
     const failedRead = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/discovery`, {
       headers: { cookie: session.cookie },
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(failedRead.status).toBe(503);
     const failedReadBody = await failedRead.text();
     expect(JSON.parse(failedReadBody)).toEqual({ code: 'abuse_controls_unavailable' });
@@ -307,7 +309,7 @@ describe('hosted installer Worker-native abuse controls', () => {
     mutation.outcomes.push(new Error('provider failure with private detail'));
     const failed = await worker.fetch(edgeRequest('/api/selection', {
       method: 'PUT', headers: mutationHeaders(session), body: JSON.stringify(selectionInput),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(failed.status).toBe(503);
     const body = await failed.text();
     expect(JSON.parse(body)).toEqual({ code: 'abuse_controls_unavailable' });
@@ -320,14 +322,14 @@ describe('hosted installer Worker-native abuse controls', () => {
     const stable = await worker.fetch(
       new Request(`${PUBLIC_ORIGIN}/api/releases/stable`),
       workerEnv,
-      {} as ExecutionContext,
+      undefined,
     );
     expect(stable.status).toBe(200);
 
     const callback = await worker.fetch(
       new Request(`${PUBLIC_ORIGIN}/oauth/callback?state=not-valid`),
       workerEnv,
-      {} as ExecutionContext,
+      undefined,
     );
     expect(callback.status).toBe(400);
     expect(await callback.json()).not.toEqual({ code: 'abuse_controls_unavailable' });
@@ -335,7 +337,7 @@ describe('hosted installer Worker-native abuse controls', () => {
     const context = await worker.fetch(
       new Request(`${PUBLIC_ORIGIN}/api/management/context`),
       workerEnv,
-      {} as ExecutionContext,
+      undefined,
     );
     expect(context.status).toBe(404);
     expect(await context.json()).toEqual({ code: 'session_invalid' });
@@ -352,7 +354,7 @@ describe('hosted installer Worker-native abuse controls', () => {
     );
     const response = await activeWorker().fetch(new Request(`${PUBLIC_ORIGIN}/api/management/context`, {
       headers: { cookie: `${SESSION_COOKIE}=${'B'.repeat(43)}` },
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
 
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ code: 'session_invalid' });
@@ -369,7 +371,7 @@ describe('hosted installer Worker-native abuse controls', () => {
     const response = await activeWorker().fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?state=not-valid`,
       { headers: { cookie: `${SESSION_COOKIE}=${'C'.repeat(43)}` } },
-    ), workerEnv, {} as ExecutionContext);
+    ), workerEnv, undefined);
 
     expect(response.status).toBe(400);
     expect(await response.json()).not.toEqual({ code: 'abuse_controls_unavailable' });
@@ -387,7 +389,7 @@ describe('hosted installer Worker-native abuse controls', () => {
     const workerEnv = protectedEnv(namespace, anonymous, mutation, read);
     const response = await activeWorker().fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: `${SESSION_COOKIE}=not-a-valid-session-cookie!` },
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
 
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ code: 'session_invalid' });

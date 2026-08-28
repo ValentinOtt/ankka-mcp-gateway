@@ -1,3 +1,11 @@
+import * as v from 'valibot';
+
+import {
+  boundaryValueSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+} from './boundary';
+import { canonicalJson } from './canonical-json';
 import type { AuthorizedTarget } from './cloudflare-target';
 import type { AccountWorkersSubdomain } from './cloudflare-management-surface';
 import { base64UrlEncode } from './crypto';
@@ -11,9 +19,11 @@ import { parseReleaseManifest } from './release-manifest';
 import type { VerifiedRelease } from './release';
 import {
   parseReadyInstallationReceipt,
+  type InstallationReceiptResourceExpectation,
   type ReadyInstallationReceipt,
   type ReadyInstallationReceiptExpectation,
 } from './provider-neutral-installation-receipt';
+import { isPlainDataTree } from './plain-data';
 
 export type { AccountWorkersSubdomain } from './cloudflare-management-surface';
 
@@ -56,6 +66,72 @@ const PORTAL_RESOURCE_KINDS = Object.freeze([
   'portal_access_policy',
   'dns_record',
 ] as const satisfies readonly GatewayResourceKind[]);
+
+function unsafeTextCharacter(character: string): boolean {
+  const codePoint = character.codePointAt(0);
+  return codePoint === undefined || codePoint <= 0x1f || codePoint === 0x7f;
+}
+
+const safeNonnegativeIntegerSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
+const positiveTimeoutSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(1), v.maxValue(MAX_TIMEOUT_MS));
+const accountWorkersSubdomainSchema = v.strictObject({
+  accountId: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
+  subdomain: v.pipe(v.string(), v.regex(HOST_LABEL)),
+});
+const authorizedTargetSchema = v.strictObject({
+  actor: v.strictObject({
+    id: v.pipe(v.string(), v.minLength(8), v.maxLength(128), v.regex(SAFE_ID)),
+    email: v.string(),
+  }),
+  account: v.strictObject({
+    id: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
+    name: v.pipe(v.string(), v.minLength(1), v.maxLength(256)),
+  }),
+  zone: v.strictObject({
+    id: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
+    name: v.string(),
+    status: v.literal('active'),
+  }),
+});
+const verifiedReleaseInputSchema = v.strictObject({
+  verification: v.literal('ed25519'),
+  keyId: v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9._-]{0,63}$/u)),
+  manifest: boundaryValueSchema,
+});
+const releaseEvidenceInputSchema = v.strictObject({
+  id: v.pipe(v.string(), v.regex(RELEASE)),
+  artifactSha256: v.pipe(v.string(), v.regex(BARE_SHA256)),
+});
+const recoveryResponseSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  error: v.picklist([
+    'bootstrap_recovery_required',
+    'bootstrap_requires_repair',
+    'bootstrap_request_mismatch',
+  ]),
+  retryable: v.boolean(),
+});
+const readyResponseSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('ready'),
+  installationId: v.pipe(v.string(), v.regex(INSTALLATION_ID)),
+  approvedPlanId: v.pipe(v.string(), v.regex(PLAN_ID)),
+  configurationHash: v.pipe(v.string(), v.regex(SHA256)),
+  desiredHash: v.pipe(v.string(), v.regex(SHA256)),
+  settingsRevision: v.literal(1),
+  release: v.strictObject({
+    id: v.pipe(v.string(), v.regex(RELEASE)),
+    artifactSha256: v.pipe(v.string(), v.regex(SHA256)),
+  }),
+  gateway: v.strictObject({ hostname: v.string(), mcpUrl: v.string() }),
+  receipt: v.strictObject({
+    revision: safeNonnegativeIntegerSchema,
+    resourceCount: v.union([v.literal(4), v.literal(7)]),
+    evidence: boundaryValueSchema,
+  }),
+  applyInvoked: v.boolean(),
+  resumed: v.boolean(),
+});
 
 export type CustomerBootstrapStage =
   | 'validate'
@@ -289,10 +365,16 @@ export interface SubmitCustomerBootstrapInput extends PrepareCustomerBootstrapCl
 }
 
 interface DesiredResource {
-  readonly kind: string;
+  readonly kind: GatewayResourceKind;
   readonly key: string;
   readonly desiredHash: string;
-  readonly desired: Record<string, unknown>;
+  readonly desired: BoundaryObject;
+}
+
+interface DesiredResourceSpecification {
+  readonly kind: GatewayResourceKind;
+  readonly key: string;
+  readonly desired: BoundaryObject;
 }
 
 interface ValidatedContext {
@@ -316,32 +398,6 @@ function fail(
   outcome: CustomerBootstrapOutcome,
 ): never {
   throw new CustomerBootstrapRequestError(code, stage, outcome);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort(compareText);
-  const sortedExpected = [...expected].sort(compareText);
-  return actual.length === sortedExpected.length &&
-    actual.every((key, index) => key === sortedExpected[index]);
-}
-
-function exactDataKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  try {
-    if (Object.getPrototypeOf(value) !== Object.prototype || !exactKeys(value, expected)) {
-      return false;
-    }
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    return expected.every((key) => {
-      const descriptor = descriptors[key];
-      return descriptor !== undefined && descriptor.enumerable === true && 'value' in descriptor;
-    });
-  } catch {
-    return false;
-  }
 }
 
 function compareText(left: string, right: string): number {
@@ -376,13 +432,14 @@ function requireFreshRandomBytes(
   return owned;
 }
 
-function requireNonce(value: unknown): Uint8Array {
-  if (typeof value !== 'string' || !NONCE.test(value)) {
+function requireNonce<Value>(value: Value): Uint8Array {
+  const parsed = v.safeParse(v.pipe(v.string(), v.regex(NONCE)), value);
+  if (!parsed.success) {
     fail('invalid_input', 'validate', 'not_sent');
   }
   let bytes: Uint8Array;
   try {
-    const base64 = value.replaceAll('-', '+').replaceAll('_', '/');
+    const base64 = parsed.output.replaceAll('-', '+').replaceAll('_', '/');
     const decoded = atob(`${base64}=`);
     bytes = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
   } catch {
@@ -395,53 +452,53 @@ function requireNonce(value: unknown): Uint8Array {
   return bytes;
 }
 
-function requireAccessToken(value: unknown): string {
+function requireAccessToken<Value>(value: Value): string {
+  const parsed = v.safeParse(v.string(), value);
   if (
-    typeof value !== 'string' ||
-    value.length === 0 ||
-    new TextEncoder().encode(value).byteLength > MAX_ACCESS_TOKEN_BYTES ||
-    value.trim() !== value ||
-    /[\u0000-\u001f\u007f]/u.test(value)
+    !parsed.success ||
+    parsed.output.length === 0 ||
+    new TextEncoder().encode(parsed.output).byteLength > MAX_ACCESS_TOKEN_BYTES ||
+    parsed.output.trim() !== parsed.output ||
+    [...parsed.output].some(unsafeTextCharacter)
   ) {
     fail('invalid_input', 'validate', 'not_sent');
   }
-  return value;
+  return parsed.output;
 }
 
-function requireTimeout(value: unknown): number {
+function requireTimeout<Value>(value: Value): number {
   const timeout = value === undefined ? DEFAULT_TIMEOUT_MS : value;
-  if (!Number.isSafeInteger(timeout) || (timeout as number) < 1 || (timeout as number) > MAX_TIMEOUT_MS) {
+  const parsed = v.safeParse(positiveTimeoutSchema, timeout);
+  if (!parsed.success) {
     fail('invalid_input', 'validate', 'not_sent');
   }
-  return timeout as number;
+  return parsed.output;
 }
 
 function managementWorkerName(plan: StaticDeployPlan): string {
   const workers = plan.managementResources.filter((resource) => resource.kind === 'management_worker');
-  if (workers.length !== 1 || !WORKER_NAME.test(workers[0].name)) {
+  const worker = workers.length === 1 ? workers.at(0) : undefined;
+  if (worker === undefined || !WORKER_NAME.test(worker.name)) {
     fail('plan_mismatch', 'validate', 'not_sent');
   }
-  return workers[0].name;
+  return worker.name;
 }
 
-function requireBootstrapUrl(
-  accountWorkersSubdomain: unknown,
+function requireBootstrapUrl<AccountWorkersSubdomainCandidate>(
+  accountWorkersSubdomain: AccountWorkersSubdomainCandidate,
   reviewedWorkerName: string,
   authorizedAccountId: string,
 ): URL {
-  if (
-    !isRecord(accountWorkersSubdomain) ||
-    !exactDataKeys(accountWorkersSubdomain, ['accountId', 'subdomain'])
-  ) {
+  if (!isPlainDataTree(accountWorkersSubdomain)) {
     fail('origin_invalid', 'validate', 'not_sent');
   }
+  const parsed = v.safeParse(accountWorkersSubdomainSchema, accountWorkersSubdomain);
+  if (!parsed.success) fail('origin_invalid', 'validate', 'not_sent');
   // Read each provider-returned primitive exactly once. The captured values are
   // the only values validated and later interpolated into the secret-bearing URL.
-  const accountId = accountWorkersSubdomain.accountId;
-  const subdomain = accountWorkersSubdomain.subdomain;
+  const { accountId, subdomain } = parsed.output;
   if (
     accountId !== authorizedAccountId ||
-    typeof subdomain !== 'string' ||
     !HOST_LABEL.test(subdomain)
   ) {
     fail('origin_invalid', 'validate', 'not_sent');
@@ -454,74 +511,51 @@ function requireBootstrapUrl(
   );
 }
 
-function requireAuthorizedTarget(value: unknown, selection: DeploySelection): AuthorizedTarget {
-  if (!isRecord(value) || !exactDataKeys(value, ['actor', 'account', 'zone'])) {
-    fail('invalid_input', 'validate', 'not_sent');
-  }
-  const actor = value.actor;
-  const account = value.account;
-  const zone = value.zone;
+function requireAuthorizedTarget<Value>(value: Value, selection: DeploySelection): AuthorizedTarget {
+  if (!isPlainDataTree(value)) fail('invalid_input', 'validate', 'not_sent');
+  const parsed = v.safeParse(authorizedTargetSchema, value);
+  if (!parsed.success) fail('invalid_input', 'validate', 'not_sent');
+  const { actor, account, zone } = parsed.output;
   if (
-    !isRecord(actor) || !exactDataKeys(actor, ['id', 'email']) ||
-    !isRecord(account) || !exactDataKeys(account, ['id', 'name']) ||
-    !isRecord(zone) || !exactDataKeys(zone, ['id', 'name', 'status'])
-  ) {
-    fail('invalid_input', 'validate', 'not_sent');
-  }
-  const actorId = actor.id;
-  const actorEmail = actor.email;
-  const accountId = account.id;
-  const accountName = account.name;
-  const zoneId = zone.id;
-  const zoneName = zone.name;
-  const zoneStatus = zone.status;
-  if (
-    typeof actorId !== 'string' || actorId.length < 8 || actorId.length > 128 ||
-    !SAFE_ID.test(actorId) || typeof actorEmail !== 'string' ||
-    actorEmail !== selection.basics.adminEmail ||
-    typeof accountId !== 'string' || !/^[a-f0-9]{32}$/u.test(accountId) ||
-    typeof accountName !== 'string' || accountName.length < 1 || accountName.length > 256 ||
-    /[\u0000-\u001f\u007f]/u.test(accountName) ||
-    typeof zoneId !== 'string' || !/^[a-f0-9]{32}$/u.test(zoneId) ||
-    typeof zoneName !== 'string' ||
-    zoneName !== selection.basics.zoneName || zoneStatus !== 'active'
+    actor.email !== selection.basics.adminEmail ||
+    [...account.name].some(unsafeTextCharacter) ||
+    zone.name !== selection.basics.zoneName
   ) {
     fail('invalid_input', 'validate', 'not_sent');
   }
   return Object.freeze({
-    actor: Object.freeze({ id: actorId, email: actorEmail }),
-    account: Object.freeze({ id: accountId, name: accountName }),
-    zone: Object.freeze({ id: zoneId, name: zoneName, status: 'active' as const }),
+    actor: Object.freeze(actor),
+    account: Object.freeze(account),
+    zone: Object.freeze(zone),
   });
 }
 
 async function validateContext(input: PrepareCustomerBootstrapClaimInput): Promise<ValidatedContext> {
   try {
     const selection = parseDeploySelection(input.selection);
-    if (
-      !isRecord(input.release) ||
-      !exactKeys(input.release, ['verification', 'keyId', 'manifest']) ||
-      input.release.verification !== 'ed25519' ||
-      typeof input.release.keyId !== 'string' ||
-      !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(input.release.keyId)
-    ) fail('plan_mismatch', 'validate', 'not_sent');
+    const releaseInput = v.safeParse(verifiedReleaseInputSchema, input.release);
+    if (!releaseInput.success) fail('plan_mismatch', 'validate', 'not_sent');
     const release = Object.freeze({
-      verification: 'ed25519' as const,
-      keyId: input.release.keyId,
-      manifest: parseReleaseManifest(input.release.manifest),
+      verification: 'ed25519',
+      keyId: releaseInput.output.keyId,
+      manifest: parseReleaseManifest(releaseInput.output.manifest),
     });
     const parsedPlan = parseStaticDeployPlan(input.plan);
     const expiresAt = parsedPlan.expiresAt;
-    if (!Number.isSafeInteger(expiresAt) || expiresAt <= 0) {
+    if (!v.is(safeNonnegativeIntegerSchema, expiresAt) || expiresAt <= 0) {
       fail('plan_mismatch', 'validate', 'not_sent');
     }
     const target = requireAuthorizedTarget(input.target, selection);
     const expectedPlan = await buildStaticDeployPlan(selection, release.manifest, expiresAt);
-    if (canonicalJson(parsedPlan) !== canonicalJson(expectedPlan)) {
+    const reviewedPlanJson = canonicalJson(expectedPlan);
+    const firstInputSnapshot = canonicalJson(input.plan);
+    const secondInputSnapshot = canonicalJson(input.plan);
+    if (canonicalJson(parsedPlan) !== reviewedPlanJson ||
+        firstInputSnapshot !== reviewedPlanJson || secondInputSnapshot !== firstInputSnapshot) {
       fail('plan_mismatch', 'validate', 'not_sent');
     }
     const nowMs = input.nowMs ?? Date.now();
-    if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
+    if (!v.is(safeNonnegativeIntegerSchema, nowMs)) {
       fail('invalid_input', 'validate', 'not_sent');
     }
     if (expectedPlan.expiresAt <= nowMs) {
@@ -651,7 +685,7 @@ async function buildDesiredResources(
     allowedTools: [...source.enabledTools].sort(compareText),
     onBehalfOfUser: false,
   }];
-  const sourceSpecifications: Array<{ kind: string; key: string; desired: Record<string, unknown> }> =
+  const sourceSpecifications: DesiredResourceSpecification[] =
     source === null || mcpKey === null || sourceApplicationKey === null || sourceAccessKey === null
       ? []
       : [
@@ -692,7 +726,7 @@ async function buildDesiredResources(
           },
         },
       ];
-  const specifications: Array<{ kind: string; key: string; desired: Record<string, unknown> }> = [
+  const specifications: DesiredResourceSpecification[] = [
     ...sourceSpecifications,
     {
       kind: 'portal',
@@ -774,28 +808,29 @@ async function installationReceiptExpectation(
     ...settings.access.memberEmails,
   ].sort(compareText);
   const identitiesHash = await hashCanonical({ emails: allowedEmails });
+  const receiptResources = resources.map((resource): InstallationReceiptResourceExpectation => {
+    const common = {
+      kind: resource.kind,
+      key: resource.key,
+      desiredHash: resource.desiredHash,
+      marker: customerResourceOwnershipMarker(expected.installationId, resource.key),
+    };
+    return resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy'
+      ? Object.freeze({ ...common, identityHash: identitiesHash })
+      : Object.freeze(common);
+  });
   return Object.freeze({
     installationId: expected.installationId,
     release: release.id,
     desiredHash: expected.desiredHash,
     target: Object.freeze({ ...target, hostname: settings.connect.hostname }),
     accessPolicy: Object.freeze({
-      identityType: 'email' as const,
+      identityType: 'email',
       identityCount: allowedEmails.length,
       identitiesHash,
     }),
-    resources: Object.freeze(resources.map((resource) => Object.freeze({
-      kind: resource.kind as GatewayResourceKind,
-      key: resource.key,
-      desiredHash: resource.desiredHash,
-      marker: customerResourceOwnershipMarker(expected.installationId, resource.key),
-      ...(
-        resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy'
-          ? { identityHash: identitiesHash }
-          : {}
-      ),
-    }))),
-  }) as ReadyInstallationReceiptExpectation;
+    resources: Object.freeze(receiptResources),
+  });
 }
 
 /** Rebuild the exact public receipt contract without allocating a request ID. */
@@ -820,14 +855,16 @@ function exactDesiredResource(
   kind: GatewayResourceKind,
 ): DesiredResource {
   const matches = resources.filter((resource) => resource.kind === kind);
-  if (matches.length !== 1) fail('plan_mismatch', 'claim', 'not_sent');
-  return matches[0];
+  const match = matches.length === 1 ? matches.at(0) : undefined;
+  if (match === undefined) fail('plan_mismatch', 'claim', 'not_sent');
+  return match;
 }
 
 function requiredDesiredString(resource: DesiredResource, field: string): string {
   const value = resource.desired[field];
-  if (typeof value !== 'string') fail('plan_mismatch', 'claim', 'not_sent');
-  return value;
+  const parsed = v.safeParse(v.string(), value);
+  if (!parsed.success) fail('plan_mismatch', 'claim', 'not_sent');
+  return parsed.output;
 }
 
 function customerResourceOwnershipMarker(installationId: string, key: string): string {
@@ -854,11 +891,11 @@ export async function deriveCustomerGatewayExpectedProjection(
   } catch {
     fail('plan_mismatch', 'claim', 'not_sent');
   }
+  const releaseInput = v.safeParse(releaseEvidenceInputSchema, input.release);
   if (
-    !isRecord(input.release) || !exactDataKeys(input.release, ['id', 'artifactSha256']) ||
-    typeof input.release.id !== 'string' || !RELEASE.test(input.release.id) ||
-    typeof input.release.artifactSha256 !== 'string' || !BARE_SHA256.test(input.release.artifactSha256) ||
-    input.release.id !== plan.releaseId || input.release.artifactSha256 !== plan.releaseArtifactSha256 ||
+    !releaseInput.success ||
+    releaseInput.output.id !== plan.releaseId ||
+    releaseInput.output.artifactSha256 !== plan.releaseArtifactSha256 ||
     plan.primaryAdminEmail !== selection.basics.adminEmail ||
     canonicalJson(plan.managementAdminEmails) !== canonicalJson([
       selection.basics.adminEmail,
@@ -886,8 +923,8 @@ export async function deriveCustomerGatewayExpectedProjection(
     zoneName: authorizedTarget.zone.name,
   });
   const releaseEvidence = Object.freeze({
-    id: input.release.id,
-    artifactSha256: `sha256:${input.release.artifactSha256}`,
+    id: releaseInput.output.id,
+    artifactSha256: `sha256:${releaseInput.output.artifactSha256}`,
   });
   const expected = await configurationEvidence(settings, target, releaseEvidence);
   const resources = await buildDesiredResources(settings, expected.installationId);
@@ -1083,71 +1120,40 @@ async function signRawBody(rawBody: string, nonceBytes: Uint8Array): Promise<str
 }
 
 function recoveryResult(
-  value: Record<string, unknown>,
+  value: BoundaryValue,
   status: number,
 ): CustomerBootstrapRecoveryResult | null {
+  const result = v.safeParse(recoveryResponseSchema, value);
   if (
     status !== 409 ||
-    !exactKeys(value, ['schemaVersion', 'error', 'retryable']) ||
-    value.schemaVersion !== 1 ||
-    typeof value.error !== 'string' ||
-    ![
-      'bootstrap_recovery_required',
-      'bootstrap_requires_repair',
-      'bootstrap_request_mismatch',
-    ].includes(value.error) ||
-    typeof value.retryable !== 'boolean'
+    !result.success
   ) return null;
-  if (value.error === 'bootstrap_recovery_required' && value.retryable !== true) return null;
-  if (value.error !== 'bootstrap_recovery_required' && value.retryable !== false) return null;
+  if (result.output.error === 'bootstrap_recovery_required' && result.output.retryable !== true) return null;
+  if (result.output.error !== 'bootstrap_recovery_required' && result.output.retryable !== false) return null;
   return Object.freeze({
     schemaVersion: 1,
     status: 'recovery_required',
-    reason: value.error as CustomerBootstrapRecoveryReason,
+    reason: result.output.error,
     canRetry: false,
   });
 }
 
 async function parseReadyResult(
-  value: unknown,
+  value: BoundaryValue,
   claim: PreparedCustomerBootstrapClaim,
 ): Promise<CustomerBootstrapReadyResult> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion',
-    'status',
-    'installationId',
-    'approvedPlanId',
-    'configurationHash',
-    'desiredHash',
-    'settingsRevision',
-    'release',
-    'gateway',
-    'receipt',
-    'applyInvoked',
-    'resumed',
-  ])) fail('response_invalid', 'response', 'unknown');
+  const result = v.safeParse(readyResponseSchema, value);
+  if (!result.success) fail('response_invalid', 'response', 'unknown');
+  const ready = result.output;
   const expectedResourceCount = claim.settings.sources.length === 0 ? 4 : 7;
   if (
-    value.schemaVersion !== 1 || value.status !== 'ready' ||
-    value.installationId !== claim.expected.installationId ||
-    typeof value.installationId !== 'string' || !INSTALLATION_ID.test(value.installationId) ||
-    typeof value.approvedPlanId !== 'string' || !PLAN_ID.test(value.approvedPlanId) ||
-    value.configurationHash !== claim.expected.configurationHash ||
-    typeof value.configurationHash !== 'string' || !SHA256.test(value.configurationHash) ||
-    value.desiredHash !== claim.expected.desiredHash ||
-    typeof value.desiredHash !== 'string' || !SHA256.test(value.desiredHash) ||
-    value.settingsRevision !== 1 ||
-    !isRecord(value.release) || !exactKeys(value.release, ['id', 'artifactSha256']) ||
-    value.release.id !== claim.release.id || value.release.artifactSha256 !== claim.release.artifactSha256 ||
-    typeof value.release.id !== 'string' || !RELEASE.test(value.release.id) ||
-    typeof value.release.artifactSha256 !== 'string' || !SHA256.test(value.release.artifactSha256) ||
-    !isRecord(value.gateway) || !exactKeys(value.gateway, ['hostname', 'mcpUrl']) ||
-    value.gateway.hostname !== claim.settings.connect.hostname ||
-    value.gateway.mcpUrl !== `https://${claim.settings.connect.hostname}/mcp` ||
-    !isRecord(value.receipt) || !exactKeys(value.receipt, ['revision', 'resourceCount', 'evidence']) ||
-    !Number.isSafeInteger(value.receipt.revision) || (value.receipt.revision as number) < 0 ||
-    value.receipt.resourceCount !== expectedResourceCount ||
-    typeof value.applyInvoked !== 'boolean' || typeof value.resumed !== 'boolean'
+    ready.installationId !== claim.expected.installationId ||
+    ready.configurationHash !== claim.expected.configurationHash ||
+    ready.desiredHash !== claim.expected.desiredHash ||
+    ready.release.id !== claim.release.id || ready.release.artifactSha256 !== claim.release.artifactSha256 ||
+    ready.gateway.hostname !== claim.settings.connect.hostname ||
+    ready.gateway.mcpUrl !== `https://${claim.settings.connect.hostname}/mcp` ||
+    ready.receipt.resourceCount !== expectedResourceCount
   ) fail('response_invalid', 'response', 'unknown');
   const receiptExpectation = await installationReceiptExpectation(
     claim.settings,
@@ -1155,37 +1161,37 @@ async function parseReadyResult(
     claim.release,
     claim.expected,
   );
-  const evidence = await parseReadyInstallationReceipt(value.receipt.evidence, receiptExpectation);
-  if (!evidence || evidence.revision !== value.receipt.revision) {
+  const evidence = await parseReadyInstallationReceipt(ready.receipt.evidence, receiptExpectation);
+  if (!evidence || evidence.revision !== ready.receipt.revision) {
     fail('response_invalid', 'response', 'unknown');
   }
   return Object.freeze({
     schemaVersion: 1,
     status: 'ready',
-    installationId: value.installationId,
-    approvedPlanId: value.approvedPlanId,
-    configurationHash: value.configurationHash,
-    desiredHash: value.desiredHash,
+    installationId: ready.installationId,
+    approvedPlanId: ready.approvedPlanId,
+    configurationHash: ready.configurationHash,
+    desiredHash: ready.desiredHash,
     settingsRevision: 1,
     release: Object.freeze({
-      id: value.release.id,
-      artifactSha256: value.release.artifactSha256,
+      id: ready.release.id,
+      artifactSha256: ready.release.artifactSha256,
     }),
     gateway: Object.freeze({
-      hostname: value.gateway.hostname as string,
-      mcpUrl: value.gateway.mcpUrl as string,
+      hostname: ready.gateway.hostname,
+      mcpUrl: ready.gateway.mcpUrl,
     }),
     receipt: Object.freeze({
-      revision: value.receipt.revision as number,
+      revision: ready.receipt.revision,
       resourceCount: expectedResourceCount,
       evidence,
     }),
-    applyInvoked: value.applyInvoked,
-    resumed: value.resumed,
+    applyInvoked: ready.applyInvoked,
+    resumed: ready.resumed,
   });
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+async function readBoundedJson(response: Response): Promise<BoundaryValue> {
   const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
   if (contentType !== 'application/json') fail('response_invalid', 'response', 'unknown');
   const declared = response.headers.get('content-length');
@@ -1217,7 +1223,9 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   }
   try {
     const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    return JSON.parse(text) as unknown;
+    const parsed = v.safeParse(boundaryValueSchema, JSON.parse(text));
+    if (!parsed.success) fail('response_invalid', 'response', 'unknown');
+    return parsed.output;
   } catch {
     fail('response_invalid', 'response', 'unknown');
   } finally {
@@ -1241,10 +1249,8 @@ async function parseBootstrapResponse(
   }
   const value = await readBoundedJson(response);
   if (response.status === 200) return await parseReadyResult(value, claim);
-  if (isRecord(value)) {
-    const recovery = recoveryResult(value, response.status);
-    if (recovery) return recovery;
-  }
+  const recovery = recoveryResult(value, response.status);
+  if (recovery) return recovery;
   if (response.status >= 500) fail('outcome_unknown', 'response', 'unknown');
   fail('bootstrap_rejected', 'response', 'rejected');
 }
@@ -1266,11 +1272,12 @@ export function customerBootstrapUrl(input: {
   return requireBootstrapUrl(input.accountWorkersSubdomain, input.workerName, input.accountId).toString();
 }
 
-export async function submitCustomerBootstrap(
-  input: SubmitCustomerBootstrapInput,
+export async function submitCustomerBootstrap<AccountWorkersSubdomainCandidate>(
+  input: Omit<SubmitCustomerBootstrapInput, 'accountWorkersSubdomain'> & {
+    readonly accountWorkersSubdomain: AccountWorkersSubdomainCandidate;
+  },
 ): Promise<CustomerBootstrapResult> {
-  if (!input || typeof input !== 'object') fail('invalid_input', 'validate', 'not_sent');
-  if (typeof input.transport !== 'function') fail('invalid_input', 'validate', 'not_sent');
+  if (!v.is(v.function(), input.transport)) fail('invalid_input', 'validate', 'not_sent');
   const timeoutMs = requireTimeout(input.timeoutMs);
   const token = requireAccessToken(input.cloudflareAccessToken);
   const nonceBytes = requireNonce(input.bootstrapNonce);
@@ -1328,35 +1335,15 @@ export async function submitCustomerBootstrap(
   fail('outcome_unknown', 'submit', 'unknown');
 }
 
-export function canonicalCustomerBootstrapJson(value: unknown): string {
+export function canonicalCustomerBootstrapJson<Value>(value: Value): string {
   return canonicalJson(value);
 }
 
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
-    return JSON.stringify(value);
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new TypeError('canonical_json_invalid');
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
-  }
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .sort(compareText)
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
-      .join(',')}}`;
-  }
-  throw new TypeError('canonical_json_invalid');
-}
-
-async function hashCanonical(value: unknown): Promise<string> {
+async function hashCanonical<Value>(value: Value): Promise<string> {
   return `sha256:${await hashHex(value)}`;
 }
 
-async function hashHex(value: unknown): Promise<string> {
+async function hashHex<Value>(value: Value): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest(
     'SHA-256',
     new TextEncoder().encode(canonicalJson(value)),

@@ -1,10 +1,14 @@
+import * as v from 'valibot';
+
+import { boundaryObjectSchema } from './boundary';
+export { canonicalJson } from './canonical-json';
+import { canonicalJson } from './canonical-json';
 import { REQUIRED_OAUTH_SCOPES } from './constants';
 import { DeployError } from './errors';
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const RELEASE_PATTERN = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 
 export const MAX_RELEASE_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_RELEASE_PAYLOAD_BYTES = 32 * 1024 * 1024;
@@ -175,22 +179,44 @@ export interface ReleaseManifest {
   readonly sourceCommit: string;
 }
 
+const safeNonnegativeIntegerSchema = v.pipe(
+  v.number(),
+  v.safeInteger(),
+  v.minValue(0),
+);
+const releaseFileRecordSchema = v.strictObject({
+  byteSize: safeNonnegativeIntegerSchema,
+  contentType: v.string(),
+  path: v.string(),
+  sha256: v.string(),
+});
+const releaseComponentSchema = v.strictObject({
+  byteSize: safeNonnegativeIntegerSchema,
+  fileCount: safeNonnegativeIntegerSchema,
+  files: v.array(releaseFileRecordSchema),
+  treeSha256: v.string(),
+});
+const releaseManifestSchema = v.strictObject({
+  artifact: v.strictObject({
+    byteSize: safeNonnegativeIntegerSchema,
+    fileCount: safeNonnegativeIntegerSchema,
+    treeSha256: v.string(),
+  }),
+  cloudflare: boundaryObjectSchema,
+  components: v.strictObject({
+    admin: releaseComponentSchema,
+    installer: releaseComponentSchema,
+    worker: releaseComponentSchema,
+    workerCleanup: releaseComponentSchema,
+    workerRetirement: releaseComponentSchema,
+  }),
+  oauthScopeIds: v.array(v.string()),
+  release: v.string(),
+  schemaVersion: v.literal(1),
+  sourceCommit: v.string(),
+});
 function invalid(): never {
   throw new DeployError(503, 'release_invalid');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
-function isSafeNonnegativeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 function extension(path: string): string {
@@ -205,13 +231,15 @@ function componentPayloadDirectory(component: ReleaseComponentName): string {
   return component;
 }
 
-function safePayloadPath(path: unknown, component: ReleaseComponentName): path is string {
+function safePayloadPath(path: string, component: ReleaseComponentName): boolean {
   const payloadDirectory = componentPayloadDirectory(component);
   if (
-    typeof path !== 'string' ||
     !path.startsWith(`payload/${payloadDirectory}/`) ||
     path.includes('\\') ||
-    CONTROL_CHARACTER.test(path)
+    Array.from(path).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    })
   ) return false;
   const segments = path.split('/');
   return segments.length >= 3 && segments.every(
@@ -226,15 +254,14 @@ function expectedContentType(component: ReleaseComponentName, path: string): str
   return contentTypes[extension(path)];
 }
 
-function parseFileRecord(input: unknown, component: ReleaseComponentName): ReleaseFileRecord {
-  if (!isRecord(input) || !exactKeys(input, ['byteSize', 'contentType', 'path', 'sha256'])) invalid();
+function parseFileRecord(
+  input: v.InferOutput<typeof releaseFileRecordSchema>,
+  component: ReleaseComponentName,
+): ReleaseFileRecord {
   if (
-    !isSafeNonnegativeInteger(input.byteSize) ||
     input.byteSize > MAX_RELEASE_FILE_BYTES ||
     !safePayloadPath(input.path, component) ||
-    typeof input.contentType !== 'string' ||
     input.contentType !== expectedContentType(component, input.path) ||
-    typeof input.sha256 !== 'string' ||
     !SHA256_PATTERN.test(input.sha256)
   ) invalid();
   return Object.freeze({
@@ -245,20 +272,20 @@ function parseFileRecord(input: unknown, component: ReleaseComponentName): Relea
   });
 }
 
-function parseComponent(input: unknown, component: ReleaseComponentName): ReleaseComponent {
-  if (!isRecord(input) || !exactKeys(input, ['byteSize', 'fileCount', 'files', 'treeSha256'])) invalid();
+function parseComponent(
+  input: v.InferOutput<typeof releaseComponentSchema>,
+  component: ReleaseComponentName,
+): ReleaseComponent {
   if (
-    !isSafeNonnegativeInteger(input.byteSize) ||
     input.byteSize > MAX_RELEASE_PAYLOAD_BYTES ||
-    !isSafeNonnegativeInteger(input.fileCount) ||
-    !Array.isArray(input.files) ||
-    typeof input.treeSha256 !== 'string' ||
     !SHA256_PATTERN.test(input.treeSha256)
   ) invalid();
   const files = input.files.map((file) => parseFileRecord(file, component));
   if (files.length !== input.fileCount || files.length === 0) invalid();
   for (let index = 1; index < files.length; index += 1) {
-    if (files[index - 1].path >= files[index].path) invalid();
+    const previous = files.at(index - 1);
+    const current = files.at(index);
+    if (previous === undefined || current === undefined || previous.path >= current.path) invalid();
   }
   const byteSize = files.reduce((total, file) => total + file.byteSize, 0);
   if (!Number.isSafeInteger(byteSize) || byteSize !== input.byteSize) invalid();
@@ -274,13 +301,12 @@ function parseComponent(input: unknown, component: ReleaseComponentName): Releas
   });
 }
 
-function scopesAreExact(input: unknown): input is typeof REQUIRED_OAUTH_SCOPES {
-  return Array.isArray(input) &&
-    input.length === REQUIRED_OAUTH_SCOPES.length &&
+function scopesAreExact(input: readonly string[]): boolean {
+  return input.length === REQUIRED_OAUTH_SCOPES.length &&
     input.every((scope, index) => scope === REQUIRED_OAUTH_SCOPES[index]);
 }
 
-function cloudflareContractIsExact(input: unknown): input is typeof APPROVED_CLOUDFLARE_RELEASE_CONTRACT {
+function cloudflareContractIsExact(input: v.InferOutput<typeof boundaryObjectSchema>): boolean {
   try {
     return canonicalJson(input) === canonicalJson(APPROVED_CLOUDFLARE_RELEASE_CONTRACT);
   } catch {
@@ -288,47 +314,25 @@ function cloudflareContractIsExact(input: unknown): input is typeof APPROVED_CLO
   }
 }
 
-export function parseReleaseManifest(input: unknown): ReleaseManifest {
-  if (!isRecord(input) || !exactKeys(input, [
-    'artifact',
-    'cloudflare',
-    'components',
-    'oauthScopeIds',
-    'release',
-    'schemaVersion',
-    'sourceCommit',
-  ])) invalid();
+export function parseReleaseManifest<Input>(input: Input): ReleaseManifest {
+  const result = v.safeParse(releaseManifestSchema, input);
+  if (!result.success) invalid();
+  const value = result.output;
   if (
-    input.schemaVersion !== 1 ||
-    typeof input.release !== 'string' ||
-    !RELEASE_PATTERN.test(input.release) ||
-    typeof input.sourceCommit !== 'string' ||
-    !COMMIT_PATTERN.test(input.sourceCommit) ||
-    !scopesAreExact(input.oauthScopeIds) ||
-    !cloudflareContractIsExact(input.cloudflare) ||
-    !isRecord(input.artifact) ||
-    !exactKeys(input.artifact, ['byteSize', 'fileCount', 'treeSha256']) ||
-    !isSafeNonnegativeInteger(input.artifact.byteSize) ||
-    input.artifact.byteSize > MAX_RELEASE_PAYLOAD_BYTES ||
-    !isSafeNonnegativeInteger(input.artifact.fileCount) ||
-    typeof input.artifact.treeSha256 !== 'string' ||
-    !SHA256_PATTERN.test(input.artifact.treeSha256) ||
-    !isRecord(input.components) ||
-    !exactKeys(input.components, [
-      'admin',
-      'installer',
-      'worker',
-      'workerCleanup',
-      'workerRetirement',
-    ])
+    !RELEASE_PATTERN.test(value.release) ||
+    !COMMIT_PATTERN.test(value.sourceCommit) ||
+    !scopesAreExact(value.oauthScopeIds) ||
+    !cloudflareContractIsExact(value.cloudflare) ||
+    value.artifact.byteSize > MAX_RELEASE_PAYLOAD_BYTES ||
+    !SHA256_PATTERN.test(value.artifact.treeSha256)
   ) invalid();
 
   const components = Object.freeze({
-    admin: parseComponent(input.components.admin, 'admin'),
-    installer: parseComponent(input.components.installer, 'installer'),
-    worker: parseComponent(input.components.worker, 'worker'),
-    workerCleanup: parseComponent(input.components.workerCleanup, 'workerCleanup'),
-    workerRetirement: parseComponent(input.components.workerRetirement, 'workerRetirement'),
+    admin: parseComponent(value.components.admin, 'admin'),
+    installer: parseComponent(value.components.installer, 'installer'),
+    worker: parseComponent(value.components.worker, 'worker'),
+    workerCleanup: parseComponent(value.components.workerCleanup, 'workerCleanup'),
+    workerRetirement: parseComponent(value.components.workerRetirement, 'workerRetirement'),
   });
   const allFiles = [
     ...components.admin.files,
@@ -339,36 +343,39 @@ export function parseReleaseManifest(input: unknown): ReleaseManifest {
   ].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   const byteSize = allFiles.reduce((total, file) => total + file.byteSize, 0);
   if (
-    allFiles.length !== input.artifact.fileCount ||
-    byteSize !== input.artifact.byteSize ||
+    allFiles.length !== value.artifact.fileCount ||
+    byteSize !== value.artifact.byteSize ||
     !Number.isSafeInteger(byteSize)
   ) invalid();
   for (let index = 1; index < allFiles.length; index += 1) {
-    if (allFiles[index - 1].path >= allFiles[index].path) invalid();
+    const previous = allFiles.at(index - 1);
+    const current = allFiles.at(index);
+    if (previous === undefined || current === undefined || previous.path >= current.path) invalid();
   }
 
   return Object.freeze({
     artifact: Object.freeze({
-      byteSize: input.artifact.byteSize,
-      fileCount: input.artifact.fileCount,
-      treeSha256: input.artifact.treeSha256,
+      byteSize: value.artifact.byteSize,
+      fileCount: value.artifact.fileCount,
+      treeSha256: value.artifact.treeSha256,
     }),
     cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
     components,
     oauthScopeIds: REQUIRED_OAUTH_SCOPES,
-    release: input.release,
+    release: value.release,
     schemaVersion: 1,
-    sourceCommit: input.sourceCommit,
+    sourceCommit: value.sourceCommit,
   });
 }
 
 export function parseCanonicalReleaseManifest(serialized: string): ReleaseManifest {
-  if (typeof serialized !== 'string') invalid();
   const bytes = new TextEncoder().encode(serialized);
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_CANONICAL_MANIFEST_BYTES) invalid();
-  let input: unknown;
+  let input: v.InferOutput<typeof releaseManifestSchema>;
   try {
-    input = JSON.parse(serialized);
+    const result = v.safeParse(releaseManifestSchema, JSON.parse(serialized));
+    if (!result.success) invalid();
+    input = result.output;
   } catch {
     invalid();
   }
@@ -378,35 +385,4 @@ export function parseCanonicalReleaseManifest(serialized: string): ReleaseManife
     invalid();
   }
   return parseReleaseManifest(input);
-}
-
-export function canonicalJson(value: unknown): string {
-  return serializeCanonical(value, new Set<object>());
-}
-
-function serializeCanonical(value: unknown, seen: Set<object>): string {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
-    return JSON.stringify(value);
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new TypeError('Canonical JSON requires finite numbers');
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    if (seen.has(value)) throw new TypeError('Canonical JSON does not support cycles');
-    seen.add(value);
-    const serialized = `[${value.map((entry) => serializeCanonical(entry, seen)).join(',')}]`;
-    seen.delete(value);
-    return serialized;
-  }
-  if (isRecord(value) && Object.getPrototypeOf(value) === Object.prototype) {
-    if (seen.has(value)) throw new TypeError('Canonical JSON does not support cycles');
-    seen.add(value);
-    const entries = Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${serializeCanonical(value[key], seen)}`);
-    seen.delete(value);
-    return `{${entries.join(',')}}`;
-  }
-  throw new TypeError('Canonical JSON supports only JSON values');
 }

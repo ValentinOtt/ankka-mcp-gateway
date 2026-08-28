@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, sign } from 'node:crypto';
 import { readFile, readdir } from 'node:fs/promises';
 import test from 'node:test';
+import * as v from 'valibot';
 
 import worker, { AdminState } from '../payload/worker/index.js';
 import {
@@ -13,7 +14,6 @@ import {
 } from '../apps/installer/scripts/sign-gateway-release.mjs';
 import {
   ACCOUNT_ID,
-  BOOTSTRAP_GRANT,
   BOOTSTRAP_NONCE,
   CONFIGURATION_HASH,
   DESIRED_HASH,
@@ -160,8 +160,8 @@ async function accessAssertion(email, issuer, audience, privateKey, kid) {
 test('primary payload has the exact dependency-free Worker export and layout', async () => {
   const entries = await readdir(new URL('../payload/worker/', import.meta.url));
   assert.deepEqual(entries, ['index.js']);
-  assert.equal(typeof AdminState, 'function');
-  assert.equal(typeof worker.fetch, 'function');
+  assert.equal(v.is(v.function(), AdminState), true);
+  assert.equal(v.is(v.function(), worker.fetch), true);
   const source = await readFile(new URL('../payload/worker/index.js', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /\b(?:console|eval|WebSocket)\b/u);
   assert.doesNotMatch(source, /sourceMappingURL\s*=/iu);
@@ -1162,7 +1162,7 @@ test('management API discovers and applies a customer-owned MCP source through o
       new URL(teardownAuthorization.handoffUrl).hash.slice(1), 'base64url',
     ).toString('utf8'));
     const sendTeardown = async (command, requestId = undefined) => {
-      const body = canonicalJson({
+      const teardownRequest = {
         schemaVersion: 1,
         command,
         actionId: teardownClaim.actionId,
@@ -1170,13 +1170,14 @@ test('management API discovers and applies a customer-owned MCP source through o
         actorEmail: teardownClaim.actorEmail,
         accountId: teardownClaim.accountId,
         installationId: teardownClaim.installationId,
-        ...(requestId === undefined ? {} : {
-          requestId,
-          cloudflareAccessToken: 'ephemeral-returning-teardown-grant',
-        }),
         issuedAt: Date.now(),
         expiresAt: teardownClaim.expiresAt,
-      });
+      };
+      if (requestId !== undefined) {
+        teardownRequest.requestId = requestId;
+        teardownRequest.cloudflareAccessToken = 'ephemeral-returning-teardown-grant';
+      }
+      const body = canonicalJson(teardownRequest);
       const signature = `sha256=${createHmac(
         'sha256', Buffer.from(teardownClaim.actionKey, 'base64url'),
       ).update(body).digest('hex')}`;

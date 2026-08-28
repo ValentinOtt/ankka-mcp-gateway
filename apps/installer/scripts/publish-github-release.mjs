@@ -13,11 +13,12 @@ import {
   verify as ed25519Verify,
 } from 'node:crypto';
 import { constants as FS_CONSTANTS } from 'node:fs';
-import { lstat, mkdir, open, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import * as v from 'valibot';
 
 import { loadVerifiedR2PublicationDirectory } from './generate-r2-publication-worker.mjs';
 import {
@@ -62,6 +63,8 @@ const OUTPUT_FILES = Object.freeze([
 ]);
 const MAX_INPUT_BYTES = 2 * 1024 * 1024;
 const SPKI_PUBLIC_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
 
 export class GitHubReleasePublicationError extends Error {
   constructor(code) {
@@ -76,7 +79,7 @@ function fail(code = 'github_release_invalid') {
 }
 
 function isRecord(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  return v.is(OBJECT_SCHEMA, value) && !Array.isArray(value);
 }
 
 function exactKeys(value, expected) {
@@ -95,7 +98,7 @@ function safeInteger(value, maximum = Number.MAX_SAFE_INTEGER) {
 }
 
 async function readRegularBytes(filename, maximum = MAX_INPUT_BYTES) {
-  if (typeof filename !== 'string' || filename.length === 0 || filename.includes('\0')) fail();
+  if (!v.is(STRING_SCHEMA, filename) || filename.length === 0 || filename.includes('\0')) fail();
   const resolved = path.resolve(filename);
   let handle;
   try {
@@ -144,15 +147,15 @@ function parsePublicationReceipt(input) {
   if (
     input.schemaVersion !== 1 ||
     input.status !== 'published' ||
-    typeof input.accountId !== 'string' || !ACCOUNT_ID_PATTERN.test(input.accountId) ||
-    typeof input.bucketName !== 'string' || !BUCKET_PATTERN.test(input.bucketName) ||
-    typeof input.channel !== 'string' || !CHANNEL_PATTERN.test(input.channel) ||
-    typeof input.release !== 'string' || !RELEASE_PATTERN.test(input.release) ||
-    typeof input.keyId !== 'string' || !KEY_ID_PATTERN.test(input.keyId) ||
-    typeof input.publicKey !== 'string' || !PUBLIC_KEY_PATTERN.test(input.publicKey) ||
-    typeof input.artifactSha256 !== 'string' || !SHA256_PATTERN.test(input.artifactSha256) ||
-    typeof input.releaseEnvelopeSha256 !== 'string' || !SHA256_PATTERN.test(input.releaseEnvelopeSha256) ||
-    typeof input.objectPlanSha256 !== 'string' || !SHA256_PATTERN.test(input.objectPlanSha256) ||
+    !v.is(STRING_SCHEMA, input.accountId) || !ACCOUNT_ID_PATTERN.test(input.accountId) ||
+    !v.is(STRING_SCHEMA, input.bucketName) || !BUCKET_PATTERN.test(input.bucketName) ||
+    !v.is(STRING_SCHEMA, input.channel) || !CHANNEL_PATTERN.test(input.channel) ||
+    !v.is(STRING_SCHEMA, input.release) || !RELEASE_PATTERN.test(input.release) ||
+    !v.is(STRING_SCHEMA, input.keyId) || !KEY_ID_PATTERN.test(input.keyId) ||
+    !v.is(STRING_SCHEMA, input.publicKey) || !PUBLIC_KEY_PATTERN.test(input.publicKey) ||
+    !v.is(STRING_SCHEMA, input.artifactSha256) || !SHA256_PATTERN.test(input.artifactSha256) ||
+    !v.is(STRING_SCHEMA, input.releaseEnvelopeSha256) || !SHA256_PATTERN.test(input.releaseEnvelopeSha256) ||
+    !v.is(STRING_SCHEMA, input.objectPlanSha256) || !SHA256_PATTERN.test(input.objectPlanSha256) ||
     input.prefix !== `${RELEASE_ROOT}/${input.channel}/${input.release}/`
   ) fail();
   return Object.freeze({ ...input });
@@ -177,7 +180,7 @@ function parseEnvelope(bytes, receipt, serializedManifest) {
     envelope.channel !== receipt.channel ||
     envelope.keyId !== receipt.keyId ||
     envelope.manifest !== serializedManifest ||
-    typeof envelope.signature !== 'string' || !SIGNATURE_PATTERN.test(envelope.signature) ||
+    !v.is(STRING_SCHEMA, envelope.signature) || !SIGNATURE_PATTERN.test(envelope.signature) ||
     envelope.signatureContext !== RELEASE_SIGNATURE_CONTEXT
   ) fail();
 
@@ -244,7 +247,7 @@ function zeroVerifiedPublication(verified) {
 
 export async function prepareGitHubReleaseOutput(input) {
   if (!exactKeys(input, ['publicationResult', 'publishDirectory', 'releaseDirectory', 'repository', 'sbom'])) fail();
-  if (typeof input.repository !== 'string' || !REPOSITORY_PATTERN.test(input.repository)) fail();
+  if (!v.is(STRING_SCHEMA, input.repository) || !REPOSITORY_PATTERN.test(input.repository)) fail();
   const receipt = parsePublicationReceipt(await readJson(input.publicationResult));
   let signed;
   let candidate;
@@ -356,7 +359,7 @@ async function writeCreateOnly(filename, bytes) {
 }
 
 export async function writeGitHubReleaseOutput(prepared, outputDirectory) {
-  if (!prepared?.plan || typeof outputDirectory !== 'string' || outputDirectory.length === 0 || outputDirectory.includes('\0')) fail();
+  if (!prepared?.plan || !v.is(STRING_SCHEMA, outputDirectory) || outputDirectory.length === 0 || outputDirectory.includes('\0')) fail();
   const resolved = path.resolve(outputDirectory);
   const basename = path.basename(resolved);
   if (!SAFE_SEGMENT.test(basename) || basename === '.' || basename === '..') fail();
@@ -384,16 +387,16 @@ function parseOutputPlan(input) {
   ])) fail();
   if (
     input.schemaVersion !== 1 ||
-    typeof input.release !== 'string' || !RELEASE_PATTERN.test(input.release) ||
+    !v.is(STRING_SCHEMA, input.release) || !RELEASE_PATTERN.test(input.release) ||
     input.tag !== input.release ||
-    typeof input.channel !== 'string' || !CHANNEL_PATTERN.test(input.channel) ||
-    typeof input.repository !== 'string' || !REPOSITORY_PATTERN.test(input.repository) ||
-    typeof input.sourceCommit !== 'string' || !COMMIT_PATTERN.test(input.sourceCommit) ||
-    typeof input.artifactSha256 !== 'string' || !SHA256_PATTERN.test(input.artifactSha256) ||
-    typeof input.notesSha256 !== 'string' || !SHA256_PATTERN.test(input.notesSha256) ||
+    !v.is(STRING_SCHEMA, input.channel) || !CHANNEL_PATTERN.test(input.channel) ||
+    !v.is(STRING_SCHEMA, input.repository) || !REPOSITORY_PATTERN.test(input.repository) ||
+    !v.is(STRING_SCHEMA, input.sourceCommit) || !COMMIT_PATTERN.test(input.sourceCommit) ||
+    !v.is(STRING_SCHEMA, input.artifactSha256) || !SHA256_PATTERN.test(input.artifactSha256) ||
+    !v.is(STRING_SCHEMA, input.notesSha256) || !SHA256_PATTERN.test(input.notesSha256) ||
     input.prerelease !== (input.channel === 'canary') ||
     input.latest !== (input.channel === 'stable') ||
-    typeof input.title !== 'string' || input.title !== releaseTitle(input.release, input.channel) ||
+    !v.is(STRING_SCHEMA, input.title) || input.title !== releaseTitle(input.release, input.channel) ||
     !Array.isArray(input.assets) || input.assets.length !== 5
   ) fail();
   const expectedNames = [
@@ -406,14 +409,14 @@ function parseOutputPlan(input) {
       !exactKeys(asset, ['byteSize', 'name', 'sha256']) ||
       asset.name !== expectedNames[index] ||
       !safeInteger(asset.byteSize, MAX_INPUT_BYTES) || asset.byteSize === 0 ||
-      typeof asset.sha256 !== 'string' || !SHA256_PATTERN.test(asset.sha256)
+      !v.is(STRING_SCHEMA, asset.sha256) || !SHA256_PATTERN.test(asset.sha256)
     ) fail();
   }
   return Object.freeze(input);
 }
 
 export async function loadGitHubReleaseOutput(outputDirectory) {
-  if (typeof outputDirectory !== 'string' || outputDirectory.length === 0 || outputDirectory.includes('\0')) fail();
+  if (!v.is(STRING_SCHEMA, outputDirectory) || outputDirectory.length === 0 || outputDirectory.includes('\0')) fail();
   let root;
   try {
     root = await realpath(path.resolve(outputDirectory));
@@ -473,10 +476,10 @@ export async function loadGitHubReleaseOutput(outputDirectory) {
       verification.artifactSha256 !== plan.artifactSha256 ||
       verification.releaseEnvelopeSha256 !== plan.assets[0].sha256 ||
       verification.signatureAlgorithm !== 'ed25519' ||
-      typeof verification.keyId !== 'string' || !KEY_ID_PATTERN.test(verification.keyId) ||
-      typeof verification.publicKey !== 'string' || !PUBLIC_KEY_PATTERN.test(verification.publicKey) ||
-      typeof verification.manifestSha256 !== 'string' || !SHA256_PATTERN.test(verification.manifestSha256) ||
-      typeof verification.objectPlanSha256 !== 'string' || !SHA256_PATTERN.test(verification.objectPlanSha256)
+      !v.is(STRING_SCHEMA, verification.keyId) || !KEY_ID_PATTERN.test(verification.keyId) ||
+      !v.is(STRING_SCHEMA, verification.publicKey) || !PUBLIC_KEY_PATTERN.test(verification.publicKey) ||
+      !v.is(STRING_SCHEMA, verification.manifestSha256) || !SHA256_PATTERN.test(verification.manifestSha256) ||
+      !v.is(STRING_SCHEMA, verification.objectPlanSha256) || !SHA256_PATTERN.test(verification.objectPlanSha256)
     ) fail();
     const envelope = parseEnvelope(envelopeBytes, {
       channel: verification.channel,
@@ -524,8 +527,8 @@ async function defaultCommand(command, args) {
   } catch (error) {
     return Object.freeze({
       code: Number.isInteger(error?.code) ? error.code : 1,
-      stdout: typeof error?.stdout === 'string' ? error.stdout : '',
-      stderr: typeof error?.stderr === 'string' ? error.stderr : '',
+      stdout: v.is(STRING_SCHEMA, error?.stdout) ? error.stdout : '',
+      stderr: v.is(STRING_SCHEMA, error?.stderr) ? error.stderr : '',
     });
   }
 }
@@ -604,7 +607,7 @@ export async function publishGitHubReleaseOutput(outputDirectory, command = defa
     release.immutable !== true ||
     release.prerelease !== plan.prerelease ||
     !assetsMatch ||
-    typeof release.html_url !== 'string' || !release.html_url.startsWith(`https://github.com/${plan.repository}/releases/tag/`)
+    !v.is(STRING_SCHEMA, release.html_url) || !release.html_url.startsWith(`https://github.com/${plan.repository}/releases/tag/`)
   ) fail('github_release_verification_failed');
 
   const releaseVerified = await command('gh', [
@@ -659,7 +662,7 @@ function parseCli(argv) {
     if (!allowed.has(flag) || index + 1 >= argv.length || argv[index + 1].startsWith('--') || flag in values) fail();
     values[flag] = argv[index + 1];
   }
-  if ([...allowed].some((flag) => typeof values[flag] !== 'string')) fail();
+  if ([...allowed].some((flag) => !v.is(STRING_SCHEMA, values[flag]))) fail();
   return Object.freeze({
     mode: 'prepare',
     outputDirectory: values['--out'],

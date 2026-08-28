@@ -15,6 +15,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build as esbuildBuild, version as esbuildRuntimeVersion } from 'esbuild';
+import * as v from 'valibot';
 
 import {
   LIVE_INSTALLER_HOSTNAME,
@@ -31,6 +32,7 @@ const WORKER_NAME = LIVE_INSTALLER_WORKER_NAME;
 const PUBLIC_HOSTNAME = LIVE_INSTALLER_HOSTNAME;
 const OAUTH_CLIENT_ID = LIVE_INSTALLER_OAUTH_CLIENT_ID;
 const EXPECTED_ESBUILD_VERSION = '0.28.1';
+const EXPECTED_VALIBOT_VERSION = '1.4.2';
 const EXPECTED_WRANGLER_VERSION = '4.123.0';
 const RELEASE_BUCKET_BINDING = 'GATEWAY_RELEASE_BUCKET';
 const HOSTED_ANALYTICS_BINDING = 'HOSTED_INSTALLER_ANALYTICS';
@@ -59,6 +61,11 @@ const BUCKET_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/u;
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/u;
 const EVIDENCE_SEGMENT = /^[A-Za-z0-9@._-]+$/u;
 const SECRET_ASSIGNMENT = /^(?:CLOUDFLARE_OAUTH_CLIENT_SECRET|DEPLOY_SESSION_ENCRYPTION_KEY|BOOTSTRAP_NONCE_DERIVATION_KEY)\s*=/mu;
+const VALIBOT_RUNTIME_LOGICAL_PATH = '/node_modules/valibot/dist/index.mjs';
+const BOOLEAN_SCHEMA = v.boolean();
+const NUMBER_SCHEMA = v.number();
+const PLAIN_OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
 const GENERATED_FILES = Object.freeze([
   'reviewed-canary-worker.mjs',
   'reviewed-rollback-worker.mjs',
@@ -87,8 +94,7 @@ function fail() {
 }
 
 function isPlainRecord(value) {
-  return value !== null &&
-    typeof value === 'object' &&
+  return v.is(PLAIN_OBJECT_SCHEMA, value) &&
     !Array.isArray(value) &&
     Object.getPrototypeOf(value) === Object.prototype;
 }
@@ -101,7 +107,7 @@ function exactKeys(value, keys) {
 }
 
 function safeInteger(value, maximum = Number.MAX_SAFE_INTEGER) {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+  return v.is(NUMBER_SCHEMA, value) && Number.isSafeInteger(value) && value >= 0 && value <= maximum;
 }
 
 function isWithinRepository(filename) {
@@ -118,10 +124,10 @@ function canonicalJson(value) {
 }
 
 function canonicalValue(value, seen) {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+  if (value === null || v.is(STRING_SCHEMA, value) || v.is(BOOLEAN_SCHEMA, value)) {
     return JSON.stringify(value);
   }
-  if (typeof value === 'number') {
+  if (v.is(NUMBER_SCHEMA, value)) {
     if (!Number.isFinite(value)) fail();
     return JSON.stringify(value);
   }
@@ -159,11 +165,11 @@ function parsePin(input) {
   ])) fail();
   if (
     input.schemaVersion !== 1 ||
-    typeof input.channel !== 'string' || !CHANNEL_PATTERN.test(input.channel) ||
-    typeof input.release !== 'string' || !RELEASE_PATTERN.test(input.release) ||
-    typeof input.keyId !== 'string' || !KEY_ID_PATTERN.test(input.keyId) ||
-    typeof input.publicKey !== 'string' || !PUBLIC_KEY_PATTERN.test(input.publicKey) ||
-    typeof input.artifactSha256 !== 'string' || !SHA256_PATTERN.test(input.artifactSha256)
+    !v.is(STRING_SCHEMA, input.channel) || !CHANNEL_PATTERN.test(input.channel) ||
+    !v.is(STRING_SCHEMA, input.release) || !RELEASE_PATTERN.test(input.release) ||
+    !v.is(STRING_SCHEMA, input.keyId) || !KEY_ID_PATTERN.test(input.keyId) ||
+    !v.is(STRING_SCHEMA, input.publicKey) || !PUBLIC_KEY_PATTERN.test(input.publicKey) ||
+    !v.is(STRING_SCHEMA, input.artifactSha256) || !SHA256_PATTERN.test(input.artifactSha256)
   ) fail();
   let decoded;
   try {
@@ -200,15 +206,15 @@ function parsePublicationResult(input) {
   if (
     input.schemaVersion !== 1 ||
     input.status !== 'published' ||
-    typeof input.accountId !== 'string' || !ACCOUNT_ID_PATTERN.test(input.accountId) ||
-    typeof input.bucketName !== 'string' || !BUCKET_PATTERN.test(input.bucketName) ||
-    typeof input.channel !== 'string' || !CHANNEL_PATTERN.test(input.channel) ||
-    typeof input.release !== 'string' || !RELEASE_PATTERN.test(input.release) ||
-    typeof input.keyId !== 'string' || !KEY_ID_PATTERN.test(input.keyId) ||
-    typeof input.publicKey !== 'string' || !PUBLIC_KEY_PATTERN.test(input.publicKey) ||
-    typeof input.artifactSha256 !== 'string' || !SHA256_PATTERN.test(input.artifactSha256) ||
-    typeof input.releaseEnvelopeSha256 !== 'string' || !SHA256_PATTERN.test(input.releaseEnvelopeSha256) ||
-    typeof input.objectPlanSha256 !== 'string' || !SHA256_PATTERN.test(input.objectPlanSha256)
+    !v.is(STRING_SCHEMA, input.accountId) || !ACCOUNT_ID_PATTERN.test(input.accountId) ||
+    !v.is(STRING_SCHEMA, input.bucketName) || !BUCKET_PATTERN.test(input.bucketName) ||
+    !v.is(STRING_SCHEMA, input.channel) || !CHANNEL_PATTERN.test(input.channel) ||
+    !v.is(STRING_SCHEMA, input.release) || !RELEASE_PATTERN.test(input.release) ||
+    !v.is(STRING_SCHEMA, input.keyId) || !KEY_ID_PATTERN.test(input.keyId) ||
+    !v.is(STRING_SCHEMA, input.publicKey) || !PUBLIC_KEY_PATTERN.test(input.publicKey) ||
+    !v.is(STRING_SCHEMA, input.artifactSha256) || !SHA256_PATTERN.test(input.artifactSha256) ||
+    !v.is(STRING_SCHEMA, input.releaseEnvelopeSha256) || !SHA256_PATTERN.test(input.releaseEnvelopeSha256) ||
+    !v.is(STRING_SCHEMA, input.objectPlanSha256) || !SHA256_PATTERN.test(input.objectPlanSha256)
   ) fail();
   const prefix = `${RELEASE_ROOT}/${input.channel}/${input.release}/`;
   if (input.prefix !== prefix) fail();
@@ -253,7 +259,7 @@ function verifiedIsolatedTarget(input, accountId) {
 }
 
 async function readRegularJson(filename) {
-  if (typeof filename !== 'string' || filename.length === 0 || filename.includes('\0')) fail();
+  if (!v.is(STRING_SCHEMA, filename) || filename.length === 0 || filename.includes('\0')) fail();
   const resolved = path.resolve(filename);
   let handle;
   try {
@@ -378,12 +384,33 @@ async function loadSourceSnapshot() {
     }
   };
   await visit(sourceRoot, '');
+  const valibotBytes = await readRegularBytes(
+    path.join(REPOSITORY_ROOT, VALIBOT_RUNTIME_LOGICAL_PATH.slice(1)),
+    MAX_SOURCE_FILE_BYTES,
+  );
+  let valibotContents;
+  try {
+    valibotContents = new TextDecoder('utf-8', { fatal: true }).decode(valibotBytes);
+    snapshot.set(VALIBOT_RUNTIME_LOGICAL_PATH, Object.freeze({
+      byteSize: valibotBytes.byteLength,
+      contents: valibotContents,
+      path: VALIBOT_RUNTIME_LOGICAL_PATH.slice(1),
+      sha256: sha256Hex(valibotBytes),
+    }));
+  } finally {
+    valibotBytes.fill(0);
+  }
   if (snapshot.size === 0) fail();
   return snapshot;
 }
 
 function resolveSnapshotPath(snapshot, importer, requestPath) {
-  if (typeof requestPath !== 'string' || !requestPath.startsWith('.') || requestPath.includes('\\')) fail();
+  if (!v.is(STRING_SCHEMA, requestPath) || requestPath.includes('\\')) fail();
+  if (requestPath === 'valibot') {
+    if (!snapshot.has(VALIBOT_RUNTIME_LOGICAL_PATH)) fail();
+    return VALIBOT_RUNTIME_LOGICAL_PATH;
+  }
+  if (!requestPath.startsWith('.')) fail();
   const normalizedImporter = importer.startsWith('/') ? importer : `/${importer}`;
   const base = path.posix.resolve(path.posix.dirname(normalizedImporter), requestPath);
   const candidates = [base, `${base}.ts`, `${base}/index.ts`];
@@ -420,8 +447,8 @@ function compiledSourceContents(logicalPath, source, publicOrigin) {
 async function bundleWorkerModule(kind, entrySource, snapshot, publicOrigin) {
   if (
     !['active', 'rollback'].includes(kind) ||
-    typeof entrySource !== 'string' ||
-    typeof publicOrigin !== 'string' ||
+    !v.is(STRING_SCHEMA, entrySource) ||
+    !v.is(STRING_SCHEMA, publicOrigin) ||
     !/^https:\/\/[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])$/u.test(publicOrigin)
   ) fail();
   const used = new Set();
@@ -456,7 +483,7 @@ async function bundleWorkerModule(kind, entrySource, snapshot, publicOrigin) {
             used.add(args.path);
             return {
               contents: compiledSourceContents(args.path, source, publicOrigin),
-              loader: 'ts',
+              loader: args.path.endsWith('.ts') ? 'ts' : 'js',
               resolveDir: path.posix.dirname(args.path),
             };
           });
@@ -492,7 +519,7 @@ async function bundleWorkerModule(kind, entrySource, snapshot, publicOrigin) {
   ) fail();
   const contents = result.outputFiles[0].text;
   if (
-    typeof contents !== 'string' ||
+    !v.is(STRING_SCHEMA, contents) ||
     Buffer.byteLength(contents, 'utf8') === 0 ||
     Buffer.byteLength(contents, 'utf8') > MAX_GENERATED_FILE_BYTES ||
     /sourceMappingURL\s*=/u.test(contents) ||
@@ -521,7 +548,7 @@ async function bundleWorkerModule(kind, entrySource, snapshot, publicOrigin) {
 
 async function fileEvidence(relativePath, maximumBytes = MAX_TOOL_FILE_BYTES, root = APP_ROOT) {
   if (
-    typeof relativePath !== 'string' ||
+    !v.is(STRING_SCHEMA, relativePath) ||
     relativePath.startsWith('/') ||
     relativePath.includes('\\') ||
     relativePath.split('/').some((segment) => !EVIDENCE_SEGMENT.test(segment) || segment === '.' || segment === '..')
@@ -556,10 +583,11 @@ async function readToolJson(relativePath, root = APP_ROOT) {
 async function loadToolchainProvenance() {
   const esbuildPlatformPackageName = `@esbuild/${process.platform}-${process.arch}`;
   const esbuildPlatformRoot = `node_modules/${esbuildPlatformPackageName}`;
-  const [lock, esbuildPackage, esbuildPlatformPackage, wranglerPackage] = await Promise.all([
+  const [lock, esbuildPackage, esbuildPlatformPackage, valibotPackage, wranglerPackage] = await Promise.all([
     readToolJson('package-lock.json', REPOSITORY_ROOT),
     readToolJson('node_modules/esbuild/package.json', REPOSITORY_ROOT),
     readToolJson(`${esbuildPlatformRoot}/package.json`, REPOSITORY_ROOT),
+    readToolJson('node_modules/valibot/package.json', REPOSITORY_ROOT),
     readToolJson('node_modules/wrangler/package.json'),
   ]);
   if (
@@ -571,6 +599,10 @@ async function loadToolchainProvenance() {
     !isPlainRecord(esbuildPlatformPackage) ||
     esbuildPlatformPackage.name !== esbuildPlatformPackageName ||
     esbuildPlatformPackage.version !== EXPECTED_ESBUILD_VERSION ||
+    !isPlainRecord(valibotPackage) ||
+    valibotPackage.name !== 'valibot' ||
+    valibotPackage.version !== EXPECTED_VALIBOT_VERSION ||
+    valibotPackage.main !== './dist/index.mjs' ||
     !isPlainRecord(wranglerPackage) ||
     wranglerPackage.name !== 'wrangler' ||
     wranglerPackage.version !== EXPECTED_WRANGLER_VERSION ||
@@ -580,6 +612,7 @@ async function loadToolchainProvenance() {
     !isPlainRecord(lock.packages) ||
     lock.packages['node_modules/esbuild']?.version !== EXPECTED_ESBUILD_VERSION ||
     lock.packages[esbuildPlatformRoot]?.version !== EXPECTED_ESBUILD_VERSION ||
+    lock.packages['node_modules/valibot']?.version !== EXPECTED_VALIBOT_VERSION ||
     lock.packages['apps/installer/node_modules/wrangler']?.version !== EXPECTED_WRANGLER_VERSION
   ) fail();
   const [
@@ -589,6 +622,8 @@ async function loadToolchainProvenance() {
     esbuildLauncher,
     esbuildNativeBinary,
     esbuildPlatformPackageFile,
+    valibotPackageFile,
+    valibotRuntime,
     wranglerPackageFile,
     wranglerCli,
     wranglerRuntime,
@@ -601,6 +636,8 @@ async function loadToolchainProvenance() {
       fileEvidence('node_modules/esbuild/bin/esbuild', MAX_TOOL_FILE_BYTES, REPOSITORY_ROOT),
       fileEvidence(`${esbuildPlatformRoot}/bin/esbuild`, MAX_TOOL_FILE_BYTES, REPOSITORY_ROOT),
       fileEvidence(`${esbuildPlatformRoot}/package.json`, MAX_TOOL_FILE_BYTES, REPOSITORY_ROOT),
+      fileEvidence('node_modules/valibot/package.json', MAX_TOOL_FILE_BYTES, REPOSITORY_ROOT),
+      fileEvidence('node_modules/valibot/dist/index.mjs', MAX_TOOL_FILE_BYTES, REPOSITORY_ROOT),
       fileEvidence('node_modules/wrangler/package.json'),
       fileEvidence('node_modules/wrangler/bin/wrangler.js'),
       fileEvidence('node_modules/wrangler/wrangler-dist/cli.js'),
@@ -618,6 +655,14 @@ async function loadToolchainProvenance() {
       version: EXPECTED_ESBUILD_VERSION,
     }),
     packageLock,
+    runtimeDependencies: Object.freeze({
+      valibot: Object.freeze({
+        name: 'valibot',
+        packageFile: valibotPackageFile,
+        runtimeFile: valibotRuntime,
+        version: EXPECTED_VALIBOT_VERSION,
+      }),
+    }),
     schemaVersion: 1,
     wrangler: Object.freeze({
       cliFile: wranglerCli,
@@ -721,7 +766,7 @@ function rollbackWrangler(accountId, deploymentTarget) {
 function assertSelfContainedModule(contents, kind, pin, deploymentTarget) {
   const publicOrigin = `https://${deploymentTarget.hostname}`;
   if (
-    typeof contents !== 'string' ||
+    !v.is(STRING_SCHEMA, contents) ||
     !['active', 'rollback'].includes(kind) ||
     Buffer.byteLength(contents, 'utf8') === 0 ||
     Buffer.byteLength(contents, 'utf8') > MAX_GENERATED_FILE_BYTES ||
@@ -758,7 +803,7 @@ async function materializeGeneratedArtifacts(pin, publication, deploymentTarget)
   for (const [filename, contents] of Object.entries(files)) {
     if (
       !GENERATED_FILES.includes(filename) ||
-      typeof contents !== 'string' ||
+      !v.is(STRING_SCHEMA, contents) ||
       Buffer.byteLength(contents, 'utf8') === 0 ||
       Buffer.byteLength(contents, 'utf8') > MAX_GENERATED_FILE_BYTES ||
       SECRET_ASSIGNMENT.test(contents)
@@ -862,7 +907,7 @@ async function assertWranglerSchemaContract() {
 
 async function freshOutputRoot(outputDirectory, requireOutsideRepository) {
   if (
-    typeof outputDirectory !== 'string' ||
+    !v.is(STRING_SCHEMA, outputDirectory) ||
     outputDirectory.length === 0 ||
     outputDirectory.includes('\0')
   ) fail();
@@ -936,7 +981,7 @@ function parseEvidenceFile(input, options = {}) {
   if (
     !safeInteger(input.byteSize, maximumBytes) ||
     input.byteSize === 0 ||
-    typeof input.path !== 'string' ||
+    !v.is(STRING_SCHEMA, input.path) ||
     input.path.length === 0 ||
     input.path.startsWith('/') ||
     input.path.includes('\\') ||
@@ -944,7 +989,7 @@ function parseEvidenceFile(input, options = {}) {
       (segment) => !EVIDENCE_SEGMENT.test(segment) || segment === '.' || segment === '..',
     ) ||
     (options.expectedPath !== undefined && input.path !== options.expectedPath) ||
-    typeof input.sha256 !== 'string' ||
+    !v.is(STRING_SCHEMA, input.sha256) ||
     !SHA256_PATTERN.test(input.sha256)
   ) fail();
   return Object.freeze({
@@ -968,11 +1013,11 @@ function parseBundleProvenance(input, expectedKind, pin, outputFile) {
     input.kind !== expectedKind ||
     !safeInteger(input.entryByteSize, MAX_GENERATED_FILE_BYTES) ||
     input.entryByteSize === 0 ||
-    typeof input.entrySha256 !== 'string' || !SHA256_PATTERN.test(input.entrySha256) ||
+    !v.is(STRING_SCHEMA, input.entrySha256) || !SHA256_PATTERN.test(input.entrySha256) ||
     !safeInteger(input.outputByteSize, MAX_GENERATED_FILE_BYTES) ||
     input.outputByteSize === 0 ||
-    typeof input.outputSha256 !== 'string' || !SHA256_PATTERN.test(input.outputSha256) ||
-    typeof input.publicOrigin !== 'string' ||
+    !v.is(STRING_SCHEMA, input.outputSha256) || !SHA256_PATTERN.test(input.outputSha256) ||
+    !v.is(STRING_SCHEMA, input.publicOrigin) ||
     !Array.isArray(input.sourceInputs) ||
     input.sourceInputs.length === 0 ||
     input.sourceInputs.length > 256 ||
@@ -981,9 +1026,10 @@ function parseBundleProvenance(input, expectedKind, pin, outputFile) {
   ) fail();
   const sourceInputs = input.sourceInputs.map((entry) => {
     const parsed = parseEvidenceFile(entry, { maximumBytes: MAX_SOURCE_FILE_BYTES });
+    const installerSource = parsed.path.startsWith('src/') && parsed.path.endsWith('.ts');
+    const reviewedDependency = parsed.path === VALIBOT_RUNTIME_LOGICAL_PATH.slice(1);
     if (
-      !parsed.path.startsWith('src/') ||
-      !parsed.path.endsWith('.ts') ||
+      (!installerSource && !reviewedDependency) ||
       parsed.path === 'src/r2-publication-operator.ts' ||
       parsed.path === 'src/r2-release-publisher.ts'
     ) fail();
@@ -993,6 +1039,7 @@ function parseBundleProvenance(input, expectedKind, pin, outputFile) {
   if (
     new Set(sourcePaths).size !== sourcePaths.length ||
     sourcePaths.some((entry, index) => index > 0 && sourcePaths[index - 1] >= entry) ||
+    !sourcePaths.includes(VALIBOT_RUNTIME_LOGICAL_PATH.slice(1)) ||
     !sourcePaths.includes('src/durable/gateway-deploy-session.ts') ||
     !sourcePaths.includes('src/reviewed-runtime.ts')
   ) fail();
@@ -1054,7 +1101,7 @@ async function parseRecord(input) {
     input.kind === 'ankka-gateway-deploy-reviewed-isolated-canary';
   if (
     (!live && !isolated) ||
-    typeof input.objectPlanSha256 !== 'string' || !SHA256_PATTERN.test(input.objectPlanSha256) ||
+    !v.is(STRING_SCHEMA, input.objectPlanSha256) || !SHA256_PATTERN.test(input.objectPlanSha256) ||
     !Array.isArray(input.outputFiles) ||
     input.outputFiles.length !== GENERATED_FILES.length
   ) fail();
@@ -1154,7 +1201,7 @@ export async function generateReviewedIsolatedCanaryArtifacts(input) {
 
 export async function validateGeneratedReviewedCanaryDirectory(outputDirectory) {
   await assertWranglerSchemaContract();
-  if (typeof outputDirectory !== 'string' || outputDirectory.length === 0 || outputDirectory.includes('\0')) fail();
+  if (!v.is(STRING_SCHEMA, outputDirectory) || outputDirectory.length === 0 || outputDirectory.includes('\0')) fail();
   let outputRoot;
   try {
     outputRoot = await realpath(path.resolve(outputDirectory));

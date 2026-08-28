@@ -1,6 +1,11 @@
 import { streamingInstallCallbackResponse } from '../src/streaming-callback';
 
-function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+interface Deferred {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+}
+
+function deferred(): Deferred {
   let resolve = (): void => undefined;
   const promise = new Promise<void>((nextResolve) => {
     resolve = nextResolve;
@@ -50,7 +55,7 @@ describe('streaming OAuth callback response', () => {
       waitUntil(task: Promise<unknown>) {
         registered.push(task);
       },
-    } as unknown as ExecutionContext;
+    };
     const response = await streamingInstallCallbackResponse(new Response(
       '<!doctype html><main>live installer</main>',
       { headers: { 'content-type': 'text/html; charset=utf-8' } },

@@ -5,6 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import * as v from 'valibot';
 
 import { canonicalJson } from '../apps/installer/scripts/sign-gateway-release.mjs';
 
@@ -22,6 +23,10 @@ const SENSITIVE_FIELD = /^(?:accountId|apiKey|bucketName|clientSecret|credential
 const LOCAL_LOCATOR = /(?:^|[\s"'])(?:\/Users\/|\/home\/|[A-Za-z]:\\)/u;
 const CLOUDFLARE_LOCATOR = /(?:api\.cloudflare\.com\/client\/v4\/accounts\/|r2\.cloudflarestorage\.com)/iu;
 const PRIVATE_MATERIAL = /-----BEGIN [^-\r\n]*PRIVATE KEY-----|(?:CLOUDFLARE_API_TOKEN|GITHUB_TOKEN|NPM_TOKEN)\s*=/iu;
+const BOOLEAN_SCHEMA = v.boolean();
+const NUMBER_SCHEMA = v.number();
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
 
 export class ReleaseSbomError extends Error {
   constructor(code) {
@@ -36,7 +41,7 @@ function fail(code = 'release_sbom_invalid') {
 }
 
 function isRecord(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  return v.is(OBJECT_SCHEMA, value) && !Array.isArray(value);
 }
 
 function exactKeys(value, expected) {
@@ -59,8 +64,8 @@ function decodeUtf8(bytes) {
 }
 
 function assertPublicSbomValue(value, seen = new Set()) {
-  if (value === null || typeof value === 'boolean' || typeof value === 'number') return;
-  if (typeof value === 'string') {
+  if (value === null || v.is(BOOLEAN_SCHEMA, value) || v.is(NUMBER_SCHEMA, value)) return;
+  if (v.is(STRING_SCHEMA, value)) {
     if (LOCAL_LOCATOR.test(value) || CLOUDFLARE_LOCATOR.test(value) || PRIVATE_MATERIAL.test(value)) fail();
     try {
       const locator = new URL(value);
@@ -70,12 +75,12 @@ function assertPublicSbomValue(value, seen = new Set()) {
     }
     return;
   }
-  if (typeof value !== 'object' || seen.has(value)) fail();
+  if (!v.is(OBJECT_SCHEMA, value) || seen.has(value)) fail();
   seen.add(value);
   if (Array.isArray(value)) {
     for (const entry of value) assertPublicSbomValue(entry, seen);
   } else {
-    if (typeof value.name === 'string' && Object.hasOwn(value, 'value') &&
+    if (v.is(STRING_SCHEMA, value.name) && Object.hasOwn(value, 'value') &&
         SENSITIVE_FIELD.test(value.name)) fail();
     for (const [key, entry] of Object.entries(value)) {
       if (SENSITIVE_FIELD.test(key)) fail();
@@ -88,7 +93,7 @@ function assertPublicSbomValue(value, seen = new Set()) {
 function normalizeComponents(input) {
   const references = new Set();
   const components = structuredClone(input).map((component) => {
-    if (!isRecord(component) || typeof component['bom-ref'] !== 'string' || component['bom-ref'].length === 0 ||
+    if (!isRecord(component) || !v.is(STRING_SCHEMA, component['bom-ref']) || component['bom-ref'].length === 0 ||
         references.has(component['bom-ref'])) fail();
     if (component.scope === 'optional' || (Array.isArray(component.properties) &&
         component.properties.some((entry) => isRecord(entry) &&
@@ -104,13 +109,13 @@ function normalizeDependencies(input, oldRootReference, rootReference, component
   const references = new Set();
   const dependencies = structuredClone(input).map((dependency) => {
     if (!isRecord(dependency) || !exactKeys(dependency, ['dependsOn', 'ref']) ||
-        typeof dependency.ref !== 'string' || !Array.isArray(dependency.dependsOn)) fail();
+        !v.is(STRING_SCHEMA, dependency.ref) || !Array.isArray(dependency.dependsOn)) fail();
     const ref = dependency.ref === oldRootReference ? rootReference : dependency.ref;
     if (references.has(ref)) fail();
     references.add(ref);
     const dependsOn = dependency.dependsOn.map((entry) =>
       entry === oldRootReference ? rootReference : entry);
-    if (dependsOn.some((entry) => typeof entry !== 'string') || new Set(dependsOn).size !== dependsOn.length) fail();
+    if (dependsOn.some((entry) => !v.is(STRING_SCHEMA, entry)) || new Set(dependsOn).size !== dependsOn.length) fail();
     dependsOn.sort(lexicalCompare);
     return { dependsOn, ref };
   });
@@ -145,7 +150,7 @@ export function prepareReleaseSbom({ npmSbom, packageLockSha256, release, source
     !Array.isArray(npmSbom.metadata.tools) || npmSbom.metadata.tools.length !== 1 ||
     !exactKeys(npmSbom.metadata.tools[0], ['name', 'vendor', 'version']) ||
     npmSbom.metadata.tools[0].name !== 'cli' || npmSbom.metadata.tools[0].vendor !== 'npm' ||
-    typeof npmSbom.metadata.tools[0].version !== 'string' ||
+    !v.is(STRING_SCHEMA, npmSbom.metadata.tools[0].version) ||
     !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(npmSbom.metadata.tools[0].version) ||
     !isRecord(npmSbom.metadata.component) ||
     !Array.isArray(npmSbom.components) || npmSbom.components.length === 0 ||
@@ -154,7 +159,7 @@ export function prepareReleaseSbom({ npmSbom, packageLockSha256, release, source
 
   const root = structuredClone(npmSbom.metadata.component);
   const oldRootReference = root['bom-ref'];
-  if (typeof oldRootReference !== 'string' || oldRootReference.length === 0) fail();
+  if (!v.is(STRING_SCHEMA, oldRootReference) || oldRootReference.length === 0) fail();
   const rootReference = `urn:ankka:mcp-gateway:${release}:${sourceCommit}`;
   const version = release.slice('gateway-v'.length);
   root['bom-ref'] = rootReference;
@@ -228,7 +233,7 @@ export function loadReleaseSbom(bytes, { packageLockSha256, release, sourceCommi
     !Array.isArray(parsed.metadata.tools) || parsed.metadata.tools.length !== 1 ||
     !exactKeys(parsed.metadata.tools[0], ['name', 'vendor', 'version']) ||
     parsed.metadata.tools[0].name !== 'cli' || parsed.metadata.tools[0].vendor !== 'npm' ||
-    typeof parsed.metadata.tools[0].version !== 'string' ||
+    !v.is(STRING_SCHEMA, parsed.metadata.tools[0].version) ||
     !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(parsed.metadata.tools[0].version) ||
     !isRecord(parsed.metadata.component) ||
     parsed.metadata.component['bom-ref'] !== `urn:ankka:mcp-gateway:${release}:${sourceCommit}` ||
@@ -262,7 +267,7 @@ export function loadReleaseSbom(bytes, { packageLockSha256, release, sourceCommi
   const properties = new Map(parsed.metadata.component.properties.map((entry) => [entry.name, entry.value]));
   if (
     properties.size !== 5 ||
-    typeof properties.get('ai.ankka.packageLockSha256') !== 'string' ||
+    !v.is(STRING_SCHEMA, properties.get('ai.ankka.packageLockSha256')) ||
     !SHA256_PATTERN.test(properties.get('ai.ankka.packageLockSha256')) ||
     (packageLockSha256 !== undefined && properties.get('ai.ankka.packageLockSha256') !== packageLockSha256) ||
     properties.get('ai.ankka.release') !== release ||
@@ -376,7 +381,7 @@ function parseCli(argv) {
     if (!allowed.has(flag) || !argv[index + 1] || argv[index + 1].startsWith('--') || flag in values) fail();
     values[flag] = argv[index + 1];
   }
-  if ([...allowed].some((flag) => typeof values[flag] !== 'string')) fail();
+  if ([...allowed].some((flag) => !v.is(STRING_SCHEMA, values[flag]))) fail();
   return {
     output: values['--out'],
     release: values['--release'],

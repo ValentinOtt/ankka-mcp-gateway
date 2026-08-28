@@ -1,24 +1,21 @@
 import { DeployError } from './errors';
 import type { VerifiedWorkerDirectUploadRelease } from './cloudflare-worker-direct-upload';
 import {
-  RELEASE_ENVELOPE_SCHEMA_VERSION,
-  RELEASE_SIGNATURE_CONTEXT,
   verifyReleaseManifestDigests,
-  type VerifiedReleaseBundle,
 } from './release';
 import {
   APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
-  canonicalJson,
   MAX_RELEASE_FILE_BYTES,
   MAX_RELEASE_PAYLOAD_BYTES,
-  parseReleaseManifest,
   type ReleaseComponentName,
   type ReleaseFileRecord,
   type ReleaseManifest,
 } from './release-manifest';
+import {
+  parseVerifiedReleaseBundle,
+  type ParsedVerifiedPayloadBlob,
+} from './verified-release-bundle';
 
-const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 const WORKER_PREFIX = 'payload/worker/';
 const WORKER_CLEANUP_PREFIX = 'payload/worker-cleanup/';
 const WORKER_RETIREMENT_PREFIX = 'payload/worker-retirement/';
@@ -77,16 +74,6 @@ function invalid(): never {
   throw new DeployError(503, 'release_invalid');
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
 function lexicalCompare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -96,52 +83,12 @@ function safeRelativePath(value: string): boolean {
     value.length === 0 ||
     value.startsWith('/') ||
     value.includes('\\') ||
-    CONTROL_CHARACTER.test(value)
+    Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    })
   ) return false;
   return value.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
-}
-
-function assertApprovedCloudflareContract(manifestInput: Record<string, unknown>): void {
-  const cloudflare = manifestInput.cloudflare;
-  try {
-    if (canonicalJson(cloudflare) !== canonicalJson(APPROVED_CLOUDFLARE_RELEASE_CONTRACT)) invalid();
-  } catch {
-    invalid();
-  }
-  if (!isRecord(cloudflare) || !isRecord(cloudflare.durableObjects)) invalid();
-  if (!exactKeys(cloudflare.durableObjects, ['bindings', 'exports'])) invalid();
-  if (!isRecord(cloudflare.durableObjects.exports)) invalid();
-  if (!exactKeys(cloudflare.durableObjects.exports, ['AdminState'])) invalid();
-  const adminState = cloudflare.durableObjects.exports.AdminState;
-  if (
-    !isRecord(adminState) ||
-    !exactKeys(adminState, ['storage', 'type']) ||
-    adminState.storage !== 'sqlite' ||
-    adminState.type !== 'durable-object'
-  ) invalid();
-
-  if (Object.hasOwn(cloudflare.durableObjects, 'migrations')) invalid();
-  if (!isRecord(cloudflare.workerVariants) || !exactKeys(cloudflare.workerVariants, ['cleanup', 'retirement'])) {
-    invalid();
-  }
-  const cleanup = cloudflare.workerVariants.cleanup;
-  const retirement = cloudflare.workerVariants.retirement;
-  if (!isRecord(cleanup) || !isRecord(retirement)) invalid();
-  if (Object.hasOwn(cleanup, 'migrations') || Object.hasOwn(retirement, 'migrations')) invalid();
-  if (
-    !isRecord(cleanup.durableObjects) ||
-    Object.hasOwn(cleanup.durableObjects, 'migrations') ||
-    canonicalJson(cleanup.durableObjects) !== canonicalJson({
-      bindings: [{ binding: 'ADMIN_STATE', className: 'AdminState' }],
-      exports: { AdminState: { storage: 'sqlite', type: 'durable-object' } },
-    }) ||
-    !isRecord(retirement.durableObjects) ||
-    Object.hasOwn(retirement.durableObjects, 'migrations') ||
-    canonicalJson(retirement.durableObjects) !== canonicalJson({
-      bindings: [],
-      exports: { AdminState: { state: 'deleted', type: 'durable-object' } },
-    })
-  ) invalid();
 }
 
 function expectedPayload(manifest: ReleaseManifest): readonly ExpectedPayloadRecord[] {
@@ -162,7 +109,7 @@ function expectedPayload(manifest: ReleaseManifest): readonly ExpectedPayloadRec
 }
 
 function snapshotPayload(
-  input: readonly unknown[],
+  input: readonly ParsedVerifiedPayloadBlob[],
   expected: readonly ExpectedPayloadRecord[],
   manifest: ReleaseManifest,
 ): ReadonlyMap<string, PayloadSnapshot> {
@@ -172,23 +119,16 @@ function snapshotPayload(
   let declaredBytes = 0;
 
   for (const entry of input) {
-    if (!isRecord(entry) || !exactKeys(entry, ['byteSize', 'bytes', 'contentType', 'path', 'sha256'])) invalid();
-    if (typeof entry.path !== 'string' || snapshots.has(entry.path)) invalid();
+    if (snapshots.has(entry.path)) invalid();
     const expectedEntry = records.get(entry.path);
     if (!expectedEntry) invalid();
     const { record } = expectedEntry;
     if (
-      typeof entry.byteSize !== 'number' ||
-      !Number.isSafeInteger(entry.byteSize) ||
-      entry.byteSize < 0 ||
       (entry.byteSize === 0 && expectedEntry.component !== 'installer') ||
       entry.byteSize > MAX_RELEASE_FILE_BYTES ||
       entry.byteSize !== record.byteSize ||
-      typeof entry.contentType !== 'string' ||
       entry.contentType !== record.contentType ||
-      typeof entry.sha256 !== 'string' ||
       entry.sha256 !== record.sha256 ||
-      !(entry.bytes instanceof Blob) ||
       entry.bytes.size !== record.byteSize ||
       entry.bytes.type !== record.contentType
     ) invalid();
@@ -217,7 +157,7 @@ async function sha256(bytes: Uint8Array): Promise<string> {
 async function readExactBlob(snapshot: PayloadSnapshot): Promise<Uint8Array> {
   let buffer: ArrayBuffer;
   try {
-    buffer = await Blob.prototype.arrayBuffer.call(snapshot.blob) as ArrayBuffer;
+    buffer = await snapshot.blob.arrayBuffer();
   } catch {
     invalid();
   }
@@ -250,8 +190,8 @@ function adminAssetPath(path: string): string {
  * Pure handoff from the signed release-bundle boundary to the reviewed Worker
  * direct-upload primitive. This module is intentionally not runtime-wired.
  */
-export async function adaptVerifiedReleaseBundleForWorkerDirectUpload(
-  bundle: VerifiedReleaseBundle,
+export async function adaptVerifiedReleaseBundleForWorkerDirectUpload<Input>(
+  bundle: Input,
 ): Promise<VerifiedWorkerDirectUploadRelease> {
   return (await adaptVerifiedReleaseBundleForGatewayDeployments(bundle)).primary;
 }
@@ -261,37 +201,11 @@ export async function adaptVerifiedReleaseBundleForWorkerDirectUpload(
  * customer-Worker deployment variants. This module is intentionally not
  * runtime-wired.
  */
-export async function adaptVerifiedReleaseBundleForGatewayDeployments(
-  bundle: VerifiedReleaseBundle,
+export async function adaptVerifiedReleaseBundleForGatewayDeployments<Input>(
+  bundle: Input,
 ): Promise<VerifiedGatewayWorkerReleaseSet> {
-  const input: unknown = bundle;
-  if (!isRecord(input) || !exactKeys(input, [
-    'channel', 'envelope', 'keyId', 'manifest', 'payload', 'publicKey', 'verification',
-  ])) invalid();
-  if (
-    input.verification !== 'ed25519' ||
-    typeof input.channel !== 'string' || !/^(?:canary|stable)$/u.test(input.channel) ||
-    typeof input.keyId !== 'string' ||
-    !KEY_ID_PATTERN.test(input.keyId) ||
-    !isRecord(input.manifest) ||
-    !isRecord(input.envelope) ||
-    !exactKeys(input.envelope, [
-      'channel', 'keyId', 'manifest', 'schemaVersion', 'signature', 'signatureContext',
-    ]) ||
-    input.envelope.schemaVersion !== RELEASE_ENVELOPE_SCHEMA_VERSION ||
-    input.envelope.channel !== input.channel ||
-    input.envelope.keyId !== input.keyId ||
-    input.envelope.manifest !== canonicalJson(input.manifest) ||
-    typeof input.envelope.signature !== 'string' ||
-    !/^[A-Za-z0-9_-]{86}$/u.test(input.envelope.signature) ||
-    input.envelope.signatureContext !== RELEASE_SIGNATURE_CONTEXT ||
-    typeof input.publicKey !== 'string' ||
-    !/^[A-Za-z0-9_-]{43}$/u.test(input.publicKey) ||
-    !Array.isArray(input.payload)
-  ) invalid();
-
-  assertApprovedCloudflareContract(input.manifest);
-  const manifest = parseReleaseManifest(input.manifest);
+  const input = parseVerifiedReleaseBundle(bundle);
+  const { manifest } = input;
   await verifyReleaseManifestDigests(manifest);
   const expected = expectedPayload(manifest);
   const snapshots = snapshotPayload(input.payload, expected, manifest);
@@ -360,6 +274,7 @@ export async function adaptVerifiedReleaseBundleForGatewayDeployments(
   assets.sort((left, right) => lexicalCompare(left.path, right.path));
   const durableObjectBinding = manifest.cloudflare.durableObjects.bindings[0];
   const durableObjectExport = manifest.cloudflare.durableObjects.exports.AdminState;
+  if (durableObjectBinding === undefined) invalid();
   const primary: VerifiedWorkerDirectUploadRelease = Object.freeze({
     verification: 'ed25519',
     release: manifest.release,

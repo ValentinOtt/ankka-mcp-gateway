@@ -24,7 +24,23 @@ const EXISTING_GATEWAY = Object.freeze({
   workerName: 'ankka-gateway-example',
 });
 
-function encodeHandoff(value: unknown): string {
+const preparedResponseSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  reviewUrl: v.string(),
+  planId: v.string(),
+});
+const publicSessionSchema = v.looseObject({
+  capabilities: v.looseObject({ uninstall: v.boolean() }),
+  removal: v.looseObject({
+    plan: v.looseObject({ planId: v.string(), planHash: v.string() }),
+  }),
+});
+const startedResponseSchema = v.looseObject({
+  authorizationUrl: v.string(),
+  handoffUrl: v.string(),
+});
+
+function encodeHandoff(value: BoundaryValue): string {
   return base64UrlEncode(new TextEncoder().encode(JSON.stringify(value)));
 }
 
@@ -69,8 +85,8 @@ async function seedExistingGatewaySession(
   const sessionId = sessionCookie.slice(sessionCookie.indexOf('=') + 1);
   const state = namespace.states.get(sessionId);
   if (!state) throw new Error('test session was not created');
-  const stored = state.storage.values.get('deploy-session-v1') as Record<string, unknown>;
-  const expiresAt = stored.expiresAt as number;
+  const stored = v.parse(boundaryObjectSchema, state.storage.values.get('deploy-session-v1'));
+  const expiresAt = v.parse(v.number(), stored.expiresAt);
   state.storage.values.set('deploy-session-v1', {
     ...stored,
     status: 'failed',
@@ -133,7 +149,7 @@ async function submitHandoff(
   worker: ReturnType<typeof createGatewayDeployWorker>,
   workerEnv: ReturnType<typeof env>,
   seeded: SeededSession,
-  claim: unknown = seeded.claim,
+  claim: BoundaryValue = seeded.claim,
 ): Promise<Response> {
   return worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/management/authorize`, {
     method: 'POST',
@@ -154,7 +170,7 @@ describe('returning-customer management handoff', () => {
 
     const prepared = await submitHandoff(worker, workerEnv, seeded);
     expect(prepared.status).toBe(200);
-    const preparedBody = await prepared.json() as { schemaVersion: number; reviewUrl: string; planId: string };
+    const preparedBody = v.parse(preparedResponseSchema, await prepared.json());
     expect(preparedBody).toEqual({
       schemaVersion: 1,
       reviewUrl: '/result',
@@ -182,7 +198,7 @@ describe('returning-customer management handoff', () => {
     const publicResponse = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: seeded.sessionCookie },
     }), workerEnv);
-    const publicSession = await publicResponse.json() as Record<string, any>;
+    const publicSession = v.parse(publicSessionSchema, await publicResponse.json());
     expect(publicSession.capabilities.uninstall).toBe(true);
     expect(publicSession.removal).toMatchObject({
       status: 'planned',
@@ -276,11 +292,11 @@ describe('returning-customer management handoff', () => {
     expect(secondPrepared.status).toBe(200);
     const firstReview = cookiePair(firstPrepared.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
     const secondReview = cookiePair(secondPrepared.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
-    const secondPlan = (await secondPrepared.json() as { planId: string }).planId;
+    const secondPlan = v.parse(preparedResponseSchema, await secondPrepared.json()).planId;
     const secondPublic = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: second.sessionCookie },
     }), workerEnv);
-    const plan = (await secondPublic.json() as Record<string, any>).removal.plan;
+    const plan = v.parse(publicSessionSchema, await secondPublic.json()).removal.plan;
     expect(plan.planId).toBe(secondPlan);
 
     const crossed = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/returning-uninstall`, {
@@ -297,7 +313,7 @@ describe('returning-customer management handoff', () => {
       body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
     }), workerEnv);
     expect(started.status).toBe(200);
-    const startedBody = await started.json() as { authorizationUrl: string; handoffUrl: string };
+    const startedBody = v.parse(startedResponseSchema, await started.json());
     expect(new URL(startedBody.authorizationUrl).origin).toBe('https://dash.cloudflare.com');
     expect(new URL(startedBody.handoffUrl).origin + new URL(startedBody.handoffUrl).pathname)
       .toBe(`${PUBLIC_ORIGIN}/oauth/handoff`);
@@ -321,3 +337,6 @@ describe('returning-customer management handoff', () => {
     expect(replay.status).toBe(409);
   });
 });
+import * as v from 'valibot';
+
+import { boundaryObjectSchema, type BoundaryValue } from '../src/boundary';

@@ -1,4 +1,9 @@
-import { CloudflareApiError } from './cloudflare-client.mjs';
+import * as v from 'valibot';
+
+import { CloudflareApiError } from './cloudflare-client.ts';
+import {
+  type BoundaryValue,
+} from './json.ts';
 
 const CLOUDFLARE_ID = /^[a-fA-F0-9]{32}$/;
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -8,13 +13,104 @@ const SAFE_INTERNAL_CODES = new Set([
   'network_error',
   'pagination_limit',
 ]);
+const stringSchema = v.string();
+const numberSchema = v.number();
+const functionSchema = v.function();
+const zoneResponseSchema = v.object({
+  account: v.object({ id: v.string() }),
+  id: v.string(),
+  name: v.string(),
+  status: v.string(),
+});
+
+type CapabilityStatus = 'available' | 'denied' | 'failed' | 'not_found' | 'skipped';
+type PrerequisiteStatus = 'not_ready' | 'ready' | 'unavailable';
+type IdentityProviderStatus = PrerequisiteStatus;
+type PreflightQuery = {
+  readonly 'name.exact': string;
+  readonly match: 'all';
+};
+type CloudflareReadMethod = (query?: PreflightQuery) => Promise<BoundaryValue>;
+
+export interface CloudflarePreflightClient {
+  readonly getZone: CloudflareReadMethod;
+  readonly listAccessApps: CloudflareReadMethod;
+  readonly listDnsRecords: CloudflareReadMethod;
+  readonly listIdentityProviders: CloudflareReadMethod;
+  readonly listMcpServers: CloudflareReadMethod;
+  readonly listPortals: CloudflareReadMethod;
+}
+
+export interface CloudflareCanaryPreflightOptions {
+  readonly accountId: string;
+  readonly cloudflare: CloudflarePreflightClient;
+  readonly hostname: string;
+  readonly zoneId: string;
+}
+
+type Capability = {
+  readonly key: string;
+  readonly status: CapabilityStatus;
+};
+
+type Diagnostic = {
+  readonly capability: string;
+  readonly codes: readonly string[];
+  readonly httpStatus: number;
+};
+
+type ProbeValue = {
+  readonly active?: boolean;
+  readonly configured?: boolean;
+  readonly hostnameInZone?: boolean;
+  readonly targetMatches?: boolean;
+};
+
+interface ProbeResult {
+  readonly capability: Capability;
+  readonly diagnostic?: Diagnostic | undefined;
+  readonly value?: ProbeValue | undefined;
+}
+
+type Prerequisite = {
+  readonly key: string;
+  readonly status: PrerequisiteStatus;
+};
+
+export interface CloudflareCanaryPreflightReport {
+  readonly capabilities: readonly Capability[];
+  readonly diagnostics: readonly Diagnostic[];
+  readonly kind: 'cloudflare_canary_preflight';
+  readonly prerequisites: readonly Prerequisite[];
+  readonly ready: boolean;
+  readonly schemaVersion: 1;
+  readonly writesPerformed: false;
+}
+
+interface ZoneTarget {
+  readonly accountId: string;
+  readonly hostname: string;
+  readonly zoneId: string;
+}
+
+interface AccountProbe {
+  readonly arguments?: (hostname: string) => readonly PreflightQuery[];
+  readonly key: string;
+  readonly method: keyof CloudflarePreflightClient;
+  readonly normalize: (value: BoundaryValue) => ProbeValue;
+}
+
+interface ReportInput {
+  readonly prerequisites: readonly Prerequisite[];
+  readonly results: readonly ProbeResult[];
+}
 
 const ZONE_PROBE = Object.freeze({ key: 'zone.read', method: 'getZone' });
-const ACCOUNT_PROBES = Object.freeze([
+const ACCOUNT_PROBES: readonly AccountProbe[] = Object.freeze([
   Object.freeze({
     key: 'access.identity_providers.read',
     method: 'listIdentityProviders',
-    normalize(value) {
+    normalize(value: BoundaryValue) {
       if (!Array.isArray(value)) throw new InvalidProbeResponseError();
       return { configured: value.length > 0 };
     },
@@ -24,7 +120,7 @@ const ACCOUNT_PROBES = Object.freeze([
   listProbe('access.applications.read', 'listAccessApps'),
   Object.freeze({
     ...listProbe('dns.records.read', 'listDnsRecords'),
-    arguments(hostname) {
+    arguments(hostname: string): readonly PreflightQuery[] {
       return [{ 'name.exact': hostname, match: 'all' }];
     },
   }),
@@ -39,7 +135,9 @@ class InvalidProbeResponseError extends Error {}
  * The injected client may expose mutation methods, but this function never
  * looks them up or invokes them.
  */
-export async function runCloudflareCanaryPreflight(options = {}) {
+export async function runCloudflareCanaryPreflight(
+  options: CloudflareCanaryPreflightOptions,
+): Promise<CloudflareCanaryPreflightReport> {
   requireExactObject(
     options,
     ['cloudflare', 'accountId', 'zoneId', 'hostname'],
@@ -49,12 +147,12 @@ export async function runCloudflareCanaryPreflight(options = {}) {
   const hostname = normalizeHostname(options.hostname, 'hostname');
   requireCloudflareId(accountId, 'accountId');
   requireCloudflareId(zoneId, 'zoneId');
-  if (!isObject(cloudflare)) throw new TypeError('cloudflare must be an object');
+  if (!v.is(v.object({}), cloudflare)) throw new TypeError('cloudflare must be an object');
 
   // Validate the complete read surface before issuing the first request. A
   // partially injected client therefore cannot leave a misleading partial run.
   for (const probe of ALL_PROBES) {
-    if (typeof cloudflare[probe.method] !== 'function') {
+    if (!v.safeParse(functionSchema, cloudflare[probe.method]).success) {
       throw new TypeError('cloudflare must implement the complete preflight read surface');
     }
   }
@@ -71,7 +169,8 @@ export async function runCloudflareCanaryPreflight(options = {}) {
   const accountResults = await Promise.all(
     ACCOUNT_PROBES.map((probe) => executeProbe(cloudflare, probe, hostname)),
   );
-  const identityProviders = accountResults[0];
+  const identityProviders = accountResults.at(0);
+  if (!identityProviders) throw new Error('Preflight identity-provider probe is missing');
   const prerequisites = zonePrerequisites(zone, {
     identityProviderStatus:
       identityProviders.capability.status === 'available'
@@ -86,26 +185,25 @@ export async function runCloudflareCanaryPreflight(options = {}) {
   });
 }
 
-async function executeZoneProbe(cloudflare, target) {
+async function executeZoneProbe(
+  cloudflare: CloudflarePreflightClient,
+  target: ZoneTarget,
+): Promise<ProbeResult> {
   try {
-    const raw = await cloudflare.getZone.call(cloudflare);
+    const raw = await cloudflare.getZone();
     if (raw === null) return missingResult('zone.read');
-    if (
-      !isObject(raw) ||
-      typeof raw.id !== 'string' ||
-      !CLOUDFLARE_ID.test(raw.id) ||
-      !isObject(raw.account) ||
-      typeof raw.account.id !== 'string' ||
-      !CLOUDFLARE_ID.test(raw.account.id) ||
-      typeof raw.status !== 'string'
-    ) {
+    const parsed = v.safeParse(zoneResponseSchema, raw);
+    if (!parsed.success
+      || !CLOUDFLARE_ID.test(parsed.output.id)
+      || !CLOUDFLARE_ID.test(parsed.output.account.id)) {
       throw new InvalidProbeResponseError();
     }
-    const zoneName = normalizeHostname(raw.name, 'provider zone name');
+    const zoneResponse = parsed.output;
+    const zoneName = normalizeHostname(zoneResponse.name, 'provider zone name');
     const targetMatches =
-      raw.id.toLowerCase() === target.zoneId.toLowerCase() &&
-      raw.account.id.toLowerCase() === target.accountId.toLowerCase();
-    const active = raw.status === 'active';
+      zoneResponse.id.toLowerCase() === target.zoneId.toLowerCase() &&
+      zoneResponse.account.id.toLowerCase() === target.accountId.toLowerCase();
+    const active = zoneResponse.status === 'active';
     const hostnameInZone =
       targetMatches && active && isStrictSubdomain(target.hostname, zoneName);
     const code = !targetMatches
@@ -124,7 +222,10 @@ async function executeZoneProbe(cloudflare, target) {
           : fixedDiagnostic('zone.read', code),
     };
   } catch (error) {
-    const diagnostic = sanitizeDiagnostic('zone.read', error);
+    const parsedError = v.safeParse(v.instance(Error), error);
+    const diagnostic = parsedError.success
+      ? sanitizeDiagnostic('zone.read', parsedError.output)
+      : fixedDiagnostic('zone.read', 'unexpected_error');
     return {
       capability: Object.freeze({
         key: 'zone.read',
@@ -135,17 +236,24 @@ async function executeZoneProbe(cloudflare, target) {
   }
 }
 
-async function executeProbe(cloudflare, probe, hostname) {
+async function executeProbe(
+  cloudflare: CloudflarePreflightClient,
+  probe: AccountProbe,
+  hostname: string,
+): Promise<ProbeResult> {
   try {
-    const args = typeof probe.arguments === 'function' ? probe.arguments(hostname) : [];
-    const raw = await cloudflare[probe.method].call(cloudflare, ...args);
+    const args = probe.arguments ? probe.arguments(hostname) : [];
+    const raw = await cloudflare[probe.method](...args);
     const value = probe.normalize(raw);
     return {
       capability: Object.freeze({ key: probe.key, status: 'available' }),
       value,
     };
   } catch (error) {
-    const diagnostic = sanitizeDiagnostic(probe.key, error);
+    const parsedError = v.safeParse(v.instance(Error), error);
+    const diagnostic = parsedError.success
+      ? sanitizeDiagnostic(probe.key, parsedError.output)
+      : fixedDiagnostic(probe.key, 'unexpected_error');
     return {
       capability: Object.freeze({
         key: probe.key,
@@ -156,7 +264,7 @@ async function executeProbe(cloudflare, probe, hostname) {
   }
 }
 
-function buildEarlyReport(zone) {
+function buildEarlyReport(zone: ProbeResult): CloudflareCanaryPreflightReport {
   const skipped = ACCOUNT_PROBES.map((probe) => ({
     capability: Object.freeze({ key: probe.key, status: 'skipped' }),
   }));
@@ -166,7 +274,7 @@ function buildEarlyReport(zone) {
   });
 }
 
-function buildReport({ prerequisites, results }) {
+function buildReport({ prerequisites, results }: ReportInput): CloudflareCanaryPreflightReport {
   const capabilities = results.map(({ capability }) => capability);
   const diagnostics = results.flatMap(({ diagnostic }) =>
     diagnostic === undefined ? [] : [diagnostic],
@@ -185,7 +293,10 @@ function buildReport({ prerequisites, results }) {
   });
 }
 
-function zonePrerequisites(zone, { identityProviderStatus }) {
+function zonePrerequisites(
+  zone: ProbeResult,
+  { identityProviderStatus }: { readonly identityProviderStatus: IdentityProviderStatus },
+): Prerequisite[] {
   const available = zone.capability.status === 'available';
   return [
     Object.freeze({
@@ -221,7 +332,7 @@ function zonePrerequisites(zone, { identityProviderStatus }) {
   ];
 }
 
-function sanitizeDiagnostic(capability, error) {
+function sanitizeDiagnostic(capability: string, error: Error): Diagnostic {
   if (error instanceof InvalidProbeResponseError || error instanceof TypeError) {
     return fixedDiagnostic(capability, 'invalid_response');
   }
@@ -239,7 +350,7 @@ function sanitizeDiagnostic(capability, error) {
   return fixedDiagnostic(capability, 'unexpected_error');
 }
 
-function fixedDiagnostic(capability, code, httpStatus = 0) {
+function fixedDiagnostic(capability: string, code: string, httpStatus = 0): Diagnostic {
   return Object.freeze({
     capability,
     httpStatus,
@@ -247,44 +358,46 @@ function fixedDiagnostic(capability, code, httpStatus = 0) {
   });
 }
 
-function missingResult(key) {
+function missingResult(key: string): ProbeResult {
   return {
     capability: Object.freeze({ key, status: 'not_found' }),
     diagnostic: fixedDiagnostic(key, 'not_found', 404),
   };
 }
 
-function isSafeDiagnosticCode(value) {
+function isSafeDiagnosticCode(value: string): boolean {
   return (
-    typeof value === 'string' &&
     (SAFE_PROVIDER_CODE.test(value) || SAFE_INTERNAL_CODES.has(value))
   );
 }
 
-function listProbe(key, method) {
+function listProbe(
+  key: string,
+  method: keyof CloudflarePreflightClient,
+): AccountProbe {
   return Object.freeze({
     key,
     method,
-    normalize(value) {
+    normalize(value: BoundaryValue) {
       if (!Array.isArray(value)) throw new InvalidProbeResponseError();
       return {};
     },
   });
 }
 
-function capabilityFailureStatus(status) {
+function capabilityFailureStatus(status: number): CapabilityStatus {
   if (status === 401 || status === 403) return 'denied';
   if (status === 404) return 'not_found';
   return 'failed';
 }
 
-function normalizeHostname(value, label) {
+function normalizeHostname(value: string, label: string): string {
   if (
-    typeof value !== 'string' ||
+    !v.is(stringSchema, value) ||
     value.length === 0 ||
     value.length > 253 ||
     value.endsWith('.') ||
-    /[\u0000-\u001f\u007f]/.test(value)
+    hasControlCharacters(value)
   ) {
     throw new TypeError(`${label} must be a valid DNS hostname`);
   }
@@ -296,34 +409,43 @@ function normalizeHostname(value, label) {
   return normalized;
 }
 
-function isStrictSubdomain(hostname, zoneName) {
+function isStrictSubdomain(hostname: string, zoneName: string): boolean {
   return hostname !== zoneName && hostname.endsWith(`.${zoneName}`);
 }
 
-function requireCloudflareId(value, label) {
-  if (typeof value !== 'string' || !CLOUDFLARE_ID.test(value)) {
+function requireCloudflareId(value: string, label: string): void {
+  if (!v.is(stringSchema, value) || !CLOUDFLARE_ID.test(value)) {
     throw new TypeError(`${label} must be a 32-character Cloudflare identifier`);
   }
 }
 
-function safeHttpStatus(value) {
-  return Number.isInteger(value) && value >= 0 && value <= 599 ? value : 0;
+function safeHttpStatus(value: number): number {
+  return v.is(numberSchema, value) && Number.isInteger(value) && value >= 0 && value <= 599
+    ? value
+    : 0;
 }
 
-function requireExactObject(value, fields, label) {
-  if (!isObject(value)) throw new TypeError(`${label} must be an object`);
+function requireExactObject(
+  value: CloudflareCanaryPreflightOptions,
+  fields: readonly string[],
+  label: string,
+): void {
+  if (!v.is(v.object({}), value)) throw new TypeError(`${label} must be an object`);
   if (Object.keys(value).some((key) => !fields.includes(key))) {
     throw new TypeError(`${label} contain unsupported fields`);
   }
 }
 
-function freezeReport(report) {
+function freezeReport(report: CloudflareCanaryPreflightReport): CloudflareCanaryPreflightReport {
   Object.freeze(report.prerequisites);
   Object.freeze(report.capabilities);
   Object.freeze(report.diagnostics);
   return Object.freeze(report);
 }
 
-function isObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+function hasControlCharacters(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0);
+    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127);
+  });
 }

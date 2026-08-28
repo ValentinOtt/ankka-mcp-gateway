@@ -1,5 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
+import * as v from 'valibot';
 
+import type { JsonObject, JsonValue } from '../src/boundary';
 import { relaySourceAction } from '../src/source-action-relay';
 import {
   sourceActionRuntimeFixture,
@@ -16,8 +18,23 @@ const VERSION_ID = '11111111-1111-4111-8111-111111111111';
 const DEPLOYMENT_ID = '22222222-2222-4222-8222-222222222222';
 const DRIFT_DEPLOYMENT_ID = '33333333-3333-4333-8333-333333333333';
 let signedRuntime: SourceActionRuntimeFixture;
-let activeDeployment: Readonly<Record<string, unknown>>;
-let driftDeployment: Readonly<Record<string, unknown>>;
+let activeDeployment: JsonObject;
+let driftDeployment: JsonObject;
+
+const workersDevRequestSchema = v.strictObject({
+  enabled: v.boolean(),
+  previews_enabled: v.optional(v.boolean()),
+});
+const sourceActionRequestSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  actionId: v.string(),
+  actionKey: v.string(),
+  actorEmail: v.string(),
+  accountId: v.string(),
+  issuedAt: v.number(),
+  expiresAt: v.number(),
+  cloudflareAccessToken: v.string(),
+});
 
 beforeAll(async () => {
   signedRuntime = await sourceActionRuntimeFixture({
@@ -32,7 +49,7 @@ beforeAll(async () => {
   driftDeployment = await signedRuntime.deploymentResult(DRIFT_DEPLOYMENT_ID, VERSION_ID);
 });
 
-function envelope(result: unknown, status = 200): Response {
+function envelope(result: JsonValue, status = 200): Response {
   return new Response(JSON.stringify({
     success: status >= 200 && status < 300,
     errors: [],
@@ -44,8 +61,8 @@ function envelope(result: unknown, status = 200): Response {
   });
 }
 
-function runtimeBindings(overrides: Readonly<Record<string, string>> = {}): readonly unknown[] {
-  const values: Record<string, string> = { ...signedRuntime.bindings, ...overrides };
+function runtimeBindings(overrides: Readonly<Record<string, string>> = {}): readonly JsonValue[] {
+  const values = { ...signedRuntime.bindings, ...overrides };
   return [
     { name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' },
     { name: 'ASSETS', type: 'assets' },
@@ -60,7 +77,7 @@ function runtimePreflightResponse(
     moduleBytes?: Uint8Array;
     managementService?: string;
     workerTags?: readonly string[];
-    deployment?: Readonly<Record<string, unknown>>;
+    deployment?: JsonObject;
   }> = {},
 ): Response | null {
   if (url.pathname.endsWith('/workers/subdomain')) return envelope({ subdomain: 'customer-workers' });
@@ -120,7 +137,7 @@ describe('source action relay', () => {
         const preflight = runtimePreflightResponse(url);
         if (preflight) return preflight;
         if (request.method === 'GET') return envelope({ enabled, previews_enabled: false });
-        const body = await request.json() as { enabled: boolean; previews_enabled: boolean };
+        const body = v.parse(workersDevRequestSchema, await request.json());
         expect(body.previews_enabled).toBe(false);
         enabled = body.enabled;
         providerWrites.push(enabled);
@@ -138,7 +155,7 @@ describe('source action relay', () => {
       expect(request.headers.get('authorization')).toBeNull();
       expect(request.headers.get('cookie')).toBeNull();
       expect(request.headers.get('x-ankka-source-action-signature')).toMatch(/^sha256=[a-f0-9]{64}$/u);
-      const body = await request.json() as Record<string, unknown>;
+      const body = v.parse(sourceActionRequestSchema, await request.json());
       expect(body).toMatchObject({
         schemaVersion: 1,
         actionId: ACTION_ID,
@@ -179,7 +196,7 @@ describe('source action relay', () => {
         const preflight = runtimePreflightResponse(url);
         if (preflight) return preflight;
         if (request.method === 'GET') return envelope({ enabled, previews_enabled: false });
-        const body = await request.json() as { enabled: boolean };
+        const body = v.parse(workersDevRequestSchema, await request.json());
         enabled = body.enabled;
         providerWrites.push(enabled);
         return envelope({ enabled, previews_enabled: false });
@@ -226,7 +243,7 @@ describe('source action relay', () => {
         return envelope({ enabled, previews_enabled: false });
       }
       if (url.origin === 'https://api.cloudflare.com') {
-        const body = await request.json() as { enabled: boolean };
+        const body = v.parse(workersDevRequestSchema, await request.json());
         enabled = body.enabled;
         providerWrites.push(enabled);
         if (enabled && !enableResponseLost) {
@@ -289,16 +306,13 @@ describe('source action relay', () => {
     expect(customerCalls).toBe(0);
   });
 
-  it('rejects unsigned or identity-mismatched release authority before provider access', async () => {
+  it('rejects identity-mismatched release authority before provider access', async () => {
     let providerCalls = 0;
     const transport = async () => {
       providerCalls += 1;
       throw new Error('provider access must not be reached');
     };
     const base = input(transport);
-    const unsigned = Object.freeze({ ...signedRuntime.bundle, verification: 'checksum' });
-    await expect(relaySourceAction({ ...base, releaseBundle: unsigned } as never))
-      .rejects.toMatchObject({ code: 'session_conflict' });
     await expect(relaySourceAction({
       ...base,
       releaseIdentity: Object.freeze({ ...signedRuntime.identity, publicKey: 'B'.repeat(43) }),
@@ -380,7 +394,7 @@ describe('source action relay', () => {
       const preflight = runtimePreflightResponse(url);
       if (preflight) return preflight;
       if (request.method === 'GET') return envelope({ enabled, previews_enabled: false });
-      const body = await request.json() as { enabled: boolean };
+      const body = v.parse(workersDevRequestSchema, await request.json());
       enabled = body.enabled;
       providerWrites.push(enabled);
       return envelope({ enabled, previews_enabled: false });

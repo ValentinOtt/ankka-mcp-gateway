@@ -10,19 +10,19 @@ const ROOT = new URL('../payload/', import.meta.url);
 const ADMIN_ROOT = new URL('../apps/admin/dist/', import.meta.url);
 const COMPONENTS = Object.freeze({
   admin: null,
-  installer: ['assets/installer-2f74774a.css', 'assets/installer-82169b0d.js', 'index.html'],
+  installer: ['assets/installer-2f74774a.css', 'assets/installer-3e59f085.js', 'index.html'],
   worker: ['index.js'],
   'worker-cleanup': ['index.js'],
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: '62653195e8388a706d9d76bdf8d347cba0fcf0a58895361f2f9e7eca91fc35a6',
-  worker: 'fa95721c42f4eeff630eca911c5e2780224929f15c9d1dcc618f2464e9ba8e97',
-  'worker-cleanup': '6430ac9d2fe6516022d049f305be0d0135115f9f5e6989f502afc79334bdbc55',
+  installer: '1fcb3b3a68e868fdd767f751a7fb1e0d97e71a50e9ba060e737b754398027628',
+  worker: '1594cc4278bfd8ea2bc460066082bb09758aea64e074a4b55e145a73a8473a9d',
+  'worker-cleanup': 'bcdd1a3cabec127e21070611fb8549a6159576069d9055022c1796a3ac013f92',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
 const FROZEN_LIFECYCLE_SHA256 = Object.freeze({
-  'worker-cleanup/index.js': 'be4d56f0ef065b00cdd6a012e39608293fb24a0b5bb2a1ecf8d9885a580ceae9',
+  'worker-cleanup/index.js': '494eab377c7844f35e2bd9210fd950b2bb2731ef905235afd48818f8f74fea69',
   'worker-retirement/index.js': '506e91323d6f6c89398a15799bfcde6cb4d271a5d6bf28a4fbbd422331751bda',
 });
 const CONTENT_TYPES = Object.freeze({
@@ -183,7 +183,7 @@ test('admin and installer HTML use external same-origin assets without inline ex
 
 test('installer assets cover the exact hosted session, plan, deploy, result, and removal contract', async () => {
   const html = await readFile(new URL('installer/index.html', ROOT), 'utf8');
-  const script = await readFile(new URL('installer/assets/installer-82169b0d.js', ROOT), 'utf8');
+  const script = await readFile(new URL('installer/assets/installer-3e59f085.js', ROOT), 'utf8');
   for (const route of ['/', '/gateway', '/review', '/deploy', '/manage', '/oauth/handoff', '/oauth/callback', '/result']) {
     if (route !== '/') assert.match(`${html}\n${script}`, new RegExp(route.replace('/', '\\/'), 'u'));
   }
@@ -228,7 +228,6 @@ test('installer assets cover the exact hosted session, plan, deploy, result, and
 });
 
 test('admin assets provide safe source discovery, signed updates, one-time apply, and WebMCP tools', async () => {
-  const html = await readFile(componentUrl('admin', 'index.html'), 'utf8');
   const script = await componentText('admin', '.js');
   for (const endpoint of [
     '/api/status', '/api/sources', '/api/sources/discover', '/api/source-actions',

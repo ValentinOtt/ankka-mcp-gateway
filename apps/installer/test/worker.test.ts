@@ -9,12 +9,15 @@ import {
 import { openOauthCookie, sha256, sha256Hex } from '../src/crypto';
 import { DeployError } from '../src/errors';
 import { createGatewayDeployWorker } from '../src/index';
+import { boundaryObjectSchema } from '../src/boundary';
+import { canonicalJson } from '../src/canonical-json';
 import {
   computeInstallJournalBindingHash,
   MAX_INSTALL_RECOVERY_RETENTION_MS,
 } from '../src/install-journal';
 import type { FetchTransport } from '../src/oauth';
 import type { InstallExecutor } from '../src/install-executor';
+import type { GatewayDeploySessionNamespace } from '../src/env';
 import { buildStaticDeployPlan, parseDeploySelection, parseStaticDeployPlan, type StaticDeployPlan } from '../src/schema';
 import type { AuthorizedTarget } from '../src/cloudflare-target';
 import { deriveCustomerGatewayExpectedProjection } from '../src/customer-bootstrap-request';
@@ -31,34 +34,98 @@ import {
   manifest,
   NOW,
   releaseProvider,
+  requiredFixture,
   selectionInput,
   verifiedReleaseBundle,
 } from './fixtures';
+import { requestJson, responseJson } from './boundary';
 
 interface BrowserSession {
   cookie: string;
   csrf: string;
 }
 
+const csrfResponseSchema = v.object({ csrf: v.string() });
+const planResponseSchema = v.object({
+  plan: v.object({
+    planId: v.string(),
+    planHash: v.string(),
+    expiresAt: v.string(),
+  }),
+});
+const successfulCompletionSchema = v.strictObject({
+  attemptId: v.string(),
+  code: v.literal('install_complete'),
+  completedAt: v.number(),
+  installationId: v.string(),
+  grantRevocation: v.picklist(['confirmed', 'unconfirmed']),
+  reason: v.null(),
+});
+type SuccessfulCompletion = v.InferOutput<typeof successfulCompletionSchema>;
+const authorizationResponseSchema = v.object({ authorizationUrl: v.string() });
+const authorizationHandoffResponseSchema = v.object({
+  authorizationUrl: v.string(),
+  handoffUrl: v.string(),
+});
+const discoveryReadyResponseSchema = v.object({
+  schemaVersion: v.literal(1),
+  status: v.literal('ready'),
+  actorEmail: v.string(),
+  grantRevocation: v.picklist(['confirmed', 'unconfirmed']),
+  targets: v.array(v.object({
+    accountName: v.string(),
+    zoneName: v.string(),
+    targetIdHash: v.string(),
+  })),
+});
+const deploymentFailureResponseSchema = v.object({
+  deployment: v.object({
+    failure: v.object({ code: v.string(), detail: v.string() }),
+  }),
+});
+const deploymentViewResponseSchema = v.object({
+  recovery: v.nullable(v.object({ status: v.string(), expiresAt: v.string() })),
+  deployment: v.object({
+    status: v.string(),
+    failure: v.nullable(v.object({ code: v.string(), detail: v.string() })),
+    canRetry: v.boolean(),
+    receipt: v.nullable(v.object({
+      receiptId: v.string(),
+      managementUrl: v.nullable(v.string()),
+      portalUrl: v.nullable(v.string()),
+    })),
+    operations: v.array(v.object({
+      id: v.string(),
+      label: v.string(),
+      detail: v.nullable(v.string()),
+      status: v.string(),
+    })),
+  }),
+});
+const renewedPlanResponseSchema = v.object({
+  recovery: v.object({ status: v.string(), expiresAt: v.string() }),
+  plan: v.object({ planId: v.string(), planHash: v.string(), expiresAt: v.string() }),
+});
+
 async function createBrowserSession(
   worker: ReturnType<typeof createGatewayDeployWorker>,
   workerEnv: ReturnType<typeof env>,
 ): Promise<BrowserSession> {
-  const response = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`), workerEnv, {} as ExecutionContext);
-  const payload = await response.json() as { csrf: string };
+  const response = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`), workerEnv, undefined);
+  const payload = await responseJson(response, csrfResponseSchema);
   return {
     cookie: cookiePair(response.headers.get('set-cookie') ?? '', SESSION_COOKIE),
     csrf: payload.csrf,
   };
 }
 
-function mutationHeaders(session: BrowserSession, json = true): HeadersInit {
+function mutationHeaders(session: BrowserSession) {
   return {
     origin: PUBLIC_ORIGIN,
     'sec-fetch-site': 'same-origin',
     'x-csrf-token': session.csrf,
     cookie: session.cookie,
-    ...(json ? { 'content-type': 'application/json' } : {}),
+    'content-type': 'application/json',
   };
 }
 
@@ -67,32 +134,18 @@ async function saveAndPlan(
   workerEnv: ReturnType<typeof env>,
   browser: BrowserSession,
 ) {
-  const saved = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
+  const saved = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
     method: 'PUT',
     headers: mutationHeaders(browser),
     body: JSON.stringify(selectionInput),
-  }), workerEnv, {} as ExecutionContext);
+  }), workerEnv, undefined);
   expect(saved.status).toBe(200);
-  const preview = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
+  const preview = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
     method: 'POST',
-    headers: mutationHeaders(browser, false),
-  }), workerEnv, {} as ExecutionContext);
-  const payload = await preview.json() as {
-    plan: { planId: string; planHash: string; expiresAt: string };
-  };
+    headers: mutationHeaders(browser),
+  }), workerEnv, undefined);
+  const payload = await responseJson(preview, planResponseSchema);
   return { response: preview, plan: payload.plan };
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string' || typeof value === 'number') {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (typeof value === 'object') {
-    const input = value as Record<string, unknown>;
-    return `{${Object.keys(input).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(input[key])}`).join(',')}}`;
-  }
-  throw new TypeError('not canonical');
 }
 
 function browserSessionId(browser: BrowserSession): string {
@@ -126,15 +179,16 @@ async function recoveryFixture(armFirstWrite: boolean): Promise<RecoveryFixture>
   const worker = createGatewayDeployWorker({ now: () => currentTime, releaseProvider });
   const browser = await createBrowserSession(worker, workerEnv);
   const preview = await saveAndPlan(worker, workerEnv, browser);
-  const deploy = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+  const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
     method: 'POST',
     headers: mutationHeaders(browser),
     body: JSON.stringify({ planId: preview.plan.planId, planHash: preview.plan.planHash }),
-  }), workerEnv, {} as ExecutionContext);
+  }), workerEnv, undefined);
   expect(deploy.status).toBe(200);
-  const authorizationUrl = new URL((await deploy.json() as { authorizationUrl: string }).authorizationUrl);
+  const authorization = await responseJson(deploy, authorizationResponseSchema);
+  const authorizationUrl = new URL(authorization.authorizationUrl);
   const state = authorizationUrl.searchParams.get('state');
-  expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+  if (!state || !/^[A-Za-z0-9_-]{43}$/u.test(state)) throw new Error('invalid OAuth state');
   const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
   const sealed = await openOauthCookie(ENCRYPTION_KEY, oauthPair.slice(oauthPair.indexOf('=') + 1));
   if (sealed.schemaVersion !== 3) throw new Error('unexpected OAuth cookie schema');
@@ -143,12 +197,12 @@ async function recoveryFixture(armFirstWrite: boolean): Promise<RecoveryFixture>
   if (!object) throw new Error('missing test Durable Object');
   const consumed = await object.fetch(internalRequest('/consume', 'POST', {
     attemptId: sealed.attemptId,
-    stateHash: await sha256(state as string),
+    stateHash: await sha256(state),
     verifierHash: await sha256(sealed.verifier),
     now: NOW + 1,
   }));
   expect(consumed.status).toBe(200);
-  const consumedBody = await consumed.json() as { plan: unknown };
+  const consumedBody = await responseJson(consumed, boundaryObjectSchema);
   const plan = parseStaticDeployPlan(consumedBody.plan);
   const selection = parseDeploySelection(selectionInput);
   const installationDigest = await sha256Hex(canonicalJson({
@@ -263,7 +317,7 @@ async function recoveryFixture(armFirstWrite: boolean): Promise<RecoveryFixture>
     plan,
     recoverUntil,
     staleOauthPair: oauthPair,
-    staleState: state as string,
+    staleState: state,
     worker,
     workerEnv,
     setNow(value: number) { currentTime = value; },
@@ -272,7 +326,7 @@ async function recoveryFixture(armFirstWrite: boolean): Promise<RecoveryFixture>
 
 function successfulTransport(
   calls: Array<{ url: string; body: string }>,
-  tokenPayload: Record<string, unknown> = {
+  tokenPayload = {
     token_type: 'Bearer',
     access_token: 'access-token-value-never-persist',
     refresh_token: 'refresh-token-value-never-persist',
@@ -320,24 +374,20 @@ function successfulTransport(
 function completionAcceptingNamespace(
   base: FakeDeploySessionNamespace,
   now: () => number,
-  completions: Array<Record<string, unknown>>,
-): DurableObjectNamespace {
+  completions: SuccessfulCompletion[],
+): GatewayDeploySessionNamespace {
   return {
     idFromName: (name: string) => base.idFromName(name),
     get: (id: DurableObjectId) => {
       const delegate = base.get(id);
-      const name = (id as unknown as { name: string }).name;
+      const name = id.name;
+      if (!name) throw new Error('test Durable Object ID has no name');
       return {
         fetch: async (request: Request) => {
           const pathname = new URL(request.url).pathname;
           if (pathname === '/complete') {
-            const completion = await request.json() as Record<string, unknown>;
+            const completion = await requestJson(request, successfulCompletionSchema);
             completions.push(completion);
-            if (
-              completion.code !== 'install_complete' ||
-              typeof completion.installationId !== 'string' ||
-              (completion.grantRevocation !== 'confirmed' && completion.grantRevocation !== 'unconfirmed')
-            ) throw new Error('test completion was not a converged install');
             const state = base.states.get(name);
             if (!state) throw new Error('missing test session state');
             const stored = requireStoredSession(state.storage.values.get('deploy-session-v1'));
@@ -380,9 +430,9 @@ function completionAcceptingNamespace(
           }
           return delegate.fetch(request);
         },
-      } as unknown as DurableObjectStub;
+      };
     },
-  } as unknown as DurableObjectNamespace;
+  };
 }
 
 describe('hosted deploy Worker boundary', () => {
@@ -396,12 +446,12 @@ describe('hosted deploy Worker boundary', () => {
 
   it('creates an opaque __Host session and returns only a dedicated CSRF value', async () => {
     const worker = createGatewayDeployWorker({ now: () => NOW });
-    const response = await worker.fetch!(
+    const response = await worker.fetch(
       new Request(`${PUBLIC_ORIGIN}/api/session`),
       env(),
-      {} as ExecutionContext,
+      undefined,
     );
-    const payload = await response.json() as Record<string, unknown>;
+    const payload = await responseJson(response, boundaryObjectSchema);
     expect(response.status).toBe(200);
     expect(payload.csrf).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(JSON.stringify(payload)).not.toMatch(/accessToken|refreshToken|clientSecret|verifier/iu);
@@ -431,27 +481,27 @@ describe('hosted deploy Worker boundary', () => {
       doubles: [1],
     }]);
 
-    const rejected = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
+    const rejected = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
       method: 'PUT',
       headers: { ...mutationHeaders(browser), 'x-csrf-token': 'A'.repeat(43) },
       body: JSON.stringify(selectionInput),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(rejected.status).toBe(403);
     expect(points).toHaveLength(1);
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const saved = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
+      const saved = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
         method: 'PUT',
         headers: mutationHeaders(browser),
         body: JSON.stringify(selectionInput),
-      }), workerEnv, {} as ExecutionContext);
+      }), workerEnv, undefined);
       expect(saved.status).toBe(200);
     }
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const planned = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
+      const planned = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
         method: 'POST',
-        headers: mutationHeaders(browser, false),
-      }), workerEnv, {} as ExecutionContext);
+        headers: mutationHeaders(browser),
+      }), workerEnv, undefined);
       expect(planned.status).toBe(200);
     }
     expect(points.map((point) => point.indexes?.[0])).toEqual([
@@ -463,7 +513,7 @@ describe('hosted deploy Worker boundary', () => {
 
   it('drops a hosted analytics sink failure without changing session creation', async () => {
     const worker = createGatewayDeployWorker({ now: () => NOW });
-    const response = await worker.fetch!(
+    const response = await worker.fetch(
       new Request(`${PUBLIC_ORIGIN}/api/session`),
       Object.assign(env(), {
         HOSTED_INSTALLER_ANALYTICS: {
@@ -472,7 +522,7 @@ describe('hosted deploy Worker boundary', () => {
         HOSTED_INSTALLER_ANALYTICS_CHANNEL: 'canary',
         HOSTED_INSTALLER_ANALYTICS_RELEASE: 'gateway-v1.2.3',
       }),
-      {} as ExecutionContext,
+      undefined,
     );
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
@@ -484,10 +534,10 @@ describe('hosted deploy Worker boundary', () => {
 
   it('serves only the exact anonymous release channel selected by the reviewed pin', async () => {
     const worker = createGatewayDeployWorker({ now: () => NOW, releaseProvider });
-    const stable = await worker.fetch!(
+    const stable = await worker.fetch(
       new Request(`${PUBLIC_ORIGIN}/api/releases/stable`),
       env(),
-      {} as ExecutionContext,
+      undefined,
     );
     expect(stable.status).toBe(200);
     expect(stable.headers.get('cache-control')).toBe('no-store');
@@ -504,10 +554,10 @@ describe('hosted deploy Worker boundary', () => {
         signature: verifiedReleaseBundle.envelope.signature,
       },
     });
-    const wrongChannel = await worker.fetch!(
+    const wrongChannel = await worker.fetch(
       new Request(`${PUBLIC_ORIGIN}/api/releases/canary`),
       env(),
-      {} as ExecutionContext,
+      undefined,
     );
     expect(wrongChannel.status).toBe(404);
     expect(await wrongChannel.json()).toEqual({ code: 'release_unavailable' });
@@ -517,21 +567,21 @@ describe('hosted deploy Worker boundary', () => {
     const workerEnv = env();
     const worker = createGatewayDeployWorker({ now: () => NOW, releaseProvider });
     const browser = await createBrowserSession(worker, workerEnv);
-    const crossSite = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
+    const crossSite = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
       method: 'PUT',
       headers: {
         ...mutationHeaders(browser),
         origin: 'https://evil.example',
       },
       body: JSON.stringify(selectionInput),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(await crossSite.json()).toEqual({ code: 'origin_invalid' });
 
-    const noCsrf = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
+    const noCsrf = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
       method: 'PUT',
       headers: { origin: PUBLIC_ORIGIN, cookie: browser.cookie, 'content-type': 'application/json' },
       body: JSON.stringify(selectionInput),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(await noCsrf.json()).toEqual({ code: 'csrf_invalid' });
   });
 
@@ -544,25 +594,25 @@ describe('hosted deploy Worker boundary', () => {
       ...workerEnv,
       DEPLOY_SESSION_ENCRYPTION_KEY: btoa('\x09'.repeat(32)),
     };
-    const refreshed = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+    const refreshed = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: browser.cookie },
-    }), rotatedEnv, {} as ExecutionContext);
+    }), rotatedEnv, undefined);
     expect(refreshed.status).toBe(200);
-    const refreshedPayload = await refreshed.json() as { csrf: string };
+    const refreshedPayload = await responseJson(refreshed, csrfResponseSchema);
     expect(refreshedPayload.csrf).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(refreshedPayload.csrf).not.toBe(browser.csrf);
 
-    const stale = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/discovery`, {
+    const stale = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/discovery`, {
       method: 'POST', headers: mutationHeaders(browser), body: '{}',
-    }), rotatedEnv, {} as ExecutionContext);
+    }), rotatedEnv, undefined);
     expect(stale.status).toBe(403);
     expect(await stale.json()).toEqual({ code: 'csrf_invalid' });
 
-    const current = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/discovery`, {
+    const current = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/discovery`, {
       method: 'POST',
       headers: mutationHeaders({ cookie: browser.cookie, csrf: refreshedPayload.csrf }),
       body: '{}',
-    }), rotatedEnv, {} as ExecutionContext);
+    }), rotatedEnv, undefined);
     expect(current.status).toBe(200);
   });
 
@@ -570,14 +620,14 @@ describe('hosted deploy Worker boundary', () => {
     const workerEnv = env();
     const worker = createGatewayDeployWorker({ now: () => NOW, releaseProvider });
     const browser = await createBrowserSession(worker, workerEnv);
-    const response = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
+    const response = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
       method: 'PUT',
       headers: mutationHeaders(browser),
       body: JSON.stringify({
         ...selectionInput,
         basics: { ...selectionInput.basics, adminEmail: '' },
       }),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({
       code: 'bad_request',
@@ -623,26 +673,26 @@ describe('hosted deploy Worker boundary', () => {
     };
     const worker = createGatewayDeployWorker({ now: () => NOW, releaseProvider, transport });
     const browser = await createBrowserSession(worker, workerEnv);
-    const started = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/discovery`, {
+    const started = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/discovery`, {
       method: 'POST',
       headers: mutationHeaders(browser),
       body: '{}',
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(started.status).toBe(200);
-    const startedPayload = await started.json() as { authorizationUrl: string };
+    const startedPayload = await responseJson(started, authorizationResponseSchema);
     const authorization = new URL(startedPayload.authorizationUrl);
     expect(authorization.searchParams.get('scope')).toBe(DISCOVERY_OAUTH_SCOPES.join(' '));
     const oauthPair = cookiePair(started.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
-    const callback = await worker.fetch!(new Request(
+    const callback = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${authorization.searchParams.get('state')}`,
       { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
-    expect(callback.status).toBe(303);
+    ), workerEnv, undefined);
+    expect(callback.status, await callback.clone().text()).toBe(303);
     expect(callback.headers.get('location')).toBe(`${PUBLIC_ORIGIN}/`);
-    const discovered = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/discovery`, {
+    const discovered = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/discovery`, {
       headers: { cookie: browser.cookie },
-    }), workerEnv, {} as ExecutionContext);
-    const payload = await discovered.json() as Record<string, any>;
+    }), workerEnv, undefined);
+    const payload = await responseJson(discovered, discoveryReadyResponseSchema);
     expect(payload).toMatchObject({
       schemaVersion: 1,
       status: 'ready',
@@ -670,13 +720,13 @@ describe('hosted deploy Worker boundary', () => {
     expect(preview.plan.planId).toMatch(/^plan-[a-f0-9]{24}$/u);
     currentTime += 1_000;
 
-    const deploy = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+    const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
       method: 'POST',
       headers: mutationHeaders(browser),
       body: JSON.stringify({ planId: preview.plan.planId, planHash: preview.plan.planHash }),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(deploy.status).toBe(200);
-    const payload = await deploy.json() as { authorizationUrl: string; handoffUrl: string };
+    const payload = await responseJson(deploy, authorizationHandoffResponseSchema);
     const authorization = new URL(payload.authorizationUrl);
     expect(authorization.origin + authorization.pathname).toBe('https://dash.cloudflare.com/oauth2/auth');
     expect(authorization.searchParams.get('redirect_uri')).toBe('https://deploy.ankka.ai/oauth/callback');
@@ -692,7 +742,7 @@ describe('hosted deploy Worker boundary', () => {
     expect(handoff.origin + handoff.pathname).toBe(`${PUBLIC_ORIGIN}/oauth/handoff`);
     expect(handoff.search).toBe('');
     expect(handoff.hash).toBe(`#${sealedValue}`);
-    const exchanged = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/oauth/handoff`, {
+    const exchanged = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/oauth/handoff`, {
       method: 'POST',
       headers: {
         origin: PUBLIC_ORIGIN,
@@ -700,7 +750,7 @@ describe('hosted deploy Worker boundary', () => {
         'content-type': 'application/json',
       },
       body: JSON.stringify({ handoff: handoff.hash.slice(1) }),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(exchanged.status).toBe(200);
     expect(await exchanged.json()).toEqual({ schemaVersion: 1, authorizationUrl: authorization.href });
     expect(exchanged.headers.get('set-cookie')).toContain(`${SESSION_COOKIE}=`);
@@ -721,7 +771,7 @@ describe('hosted deploy Worker boundary', () => {
         executedWithToken = input.accessToken === 'access-token-value-never-persist';
         expect(input.target.actor.email).toBe('owner@example.com');
         expect(input.target.zone.name).toBe('example.com');
-        expect(input.plan.gatewayConfiguration.firstSource!.enabledTools).toEqual([
+        expect(requiredFixture(input.plan.gatewayConfiguration.firstSource ?? undefined, 'first source').enabledTools).toEqual([
           'company_prepare', 'company_search',
         ]);
         expect(input.releaseBundle).toBe(verifiedReleaseBundle);
@@ -755,14 +805,14 @@ describe('hosted deploy Worker boundary', () => {
     const browser = await createBrowserSession(worker, workerEnv);
     browserSessionId = browser.cookie.slice(browser.cookie.indexOf('=') + 1);
     const { plan } = await saveAndPlan(worker, workerEnv, browser);
-    const deploy = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+    const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
       method: 'POST', headers: mutationHeaders(browser),
       body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
-    }), workerEnv, {} as ExecutionContext);
-    const deployPayload = await deploy.json() as { authorizationUrl: string; handoffUrl: string };
+    }), workerEnv, undefined);
+    const deployPayload = await responseJson(deploy, authorizationHandoffResponseSchema);
     const state = new URL(deployPayload.authorizationUrl).searchParams.get('state');
     const handoff = new URL(deployPayload.handoffUrl).hash.slice(1);
-    const exchanged = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/oauth/handoff`, {
+    const exchanged = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/oauth/handoff`, {
       method: 'POST',
       headers: {
         origin: PUBLIC_ORIGIN,
@@ -770,14 +820,14 @@ describe('hosted deploy Worker boundary', () => {
         'content-type': 'application/json',
       },
       body: JSON.stringify({ handoff }),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     const exchangedCookies = exchanged.headers.get('set-cookie') ?? '';
     const handoffSessionPair = cookiePair(exchangedCookies, SESSION_COOKIE);
     const oauthPair = cookiePair(exchangedCookies, OAUTH_COOKIE);
-    const callback = await worker.fetch!(new Request(
+    const callback = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
       { headers: { cookie: `${handoffSessionPair}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
+    ), workerEnv, undefined);
     expect(callback.status).toBe(303);
     expect(callback.headers.get('location')).toBe(`${PUBLIC_ORIGIN}/result`);
     expect(callback.headers.get('set-cookie')).toContain('Max-Age=0');
@@ -785,9 +835,9 @@ describe('hosted deploy Worker boundary', () => {
     expect(calls.filter((call) => call.url.includes('/oauth2/revoke'))).toHaveLength(2);
     expect(namespace.serialized()).not.toMatch(/access-token-value|refresh-token-value|authorization-code-value/iu);
 
-    const result = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+    const result = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: browser.cookie },
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(await result.json()).toMatchObject({
       authorization: { status: 'expired', email: 'owner@example.com' },
       capabilities: { deploy: false, uninstall: false, events: false, signedRelease: true },
@@ -798,10 +848,10 @@ describe('hosted deploy Worker boundary', () => {
       },
     });
 
-    const replay = await worker.fetch!(new Request(
+    const replay = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
       { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
+    ), workerEnv, undefined);
     expect(replay.status).toBe(400);
     expect(await replay.json()).toEqual({ code: 'oauth_state_invalid' });
     expect(replay.headers.get('set-cookie')).toContain('Max-Age=0');
@@ -829,22 +879,22 @@ describe('hosted deploy Worker boundary', () => {
     });
     const browser = await createBrowserSession(worker, workerEnv);
     const { plan } = await saveAndPlan(worker, workerEnv, browser);
-    const deploy = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+    const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
       method: 'POST', headers: mutationHeaders(browser),
       body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
-    }), workerEnv, {} as ExecutionContext);
-    const deployPayload = await deploy.json() as { authorizationUrl: string };
+    }), workerEnv, undefined);
+    const deployPayload = await responseJson(deploy, authorizationResponseSchema);
     const state = new URL(deployPayload.authorizationUrl).searchParams.get('state');
     const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
-    const callback = await worker.fetch!(new Request(
+    const callback = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
       { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
+    ), workerEnv, undefined);
     expect(callback.status).toBe(303);
-    const result = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+    const result = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: browser.cookie },
-    }), workerEnv, {} as ExecutionContext);
-    const session = await result.json() as { deployment: { failure: { code: string; detail: string } } };
+    }), workerEnv, undefined);
+    const session = await responseJson(result, deploymentFailureResponseSchema);
     expect(session.deployment.failure.code).toBe('oauth_exchange_failed');
     expect(session.deployment.failure.detail).toMatch(/Diagnostic: token_endpoint_400_invalid_grant_at_journal_unreadable\./u);
     expect(JSON.stringify(session)).not.toContain('cfoat_should_not_leak');
@@ -884,32 +934,32 @@ describe('hosted deploy Worker boundary', () => {
     });
     const browser = await createBrowserSession(worker, workerEnv);
     const { plan } = await saveAndPlan(worker, workerEnv, browser);
-    const deploy = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+    const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
       method: 'POST', headers: mutationHeaders(browser),
       body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
-    }), workerEnv, {} as ExecutionContext);
-    const deployPayload = await deploy.json() as { authorizationUrl: string };
+    }), workerEnv, undefined);
+    const deployPayload = await responseJson(deploy, authorizationResponseSchema);
     const state = new URL(deployPayload.authorizationUrl).searchParams.get('state');
     const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
-    const callback = await worker.fetch!(new Request(
+    const callback = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
       { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
+    ), workerEnv, undefined);
 
     expect(callback.status).toBe(200);
     expect(callback.headers.get('content-type')).toContain('text/html');
     expect(callback.headers.get('set-cookie')).toContain('Max-Age=0');
     await executorStarted;
-    const running = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+    const running = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: browser.cookie },
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(await running.json()).toMatchObject({ deployment: { status: 'running' } });
 
     releaseExecutor();
     await execution;
-    const completed = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+    const completed = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: browser.cookie },
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(await completed.json()).toMatchObject({
       deployment: { status: 'failed', failure: { code: 'install_mutations_disabled' } },
     });
@@ -933,22 +983,22 @@ describe('hosted deploy Worker boundary', () => {
     });
     const browser = await createBrowserSession(worker, workerEnv);
     const { plan } = await saveAndPlan(worker, workerEnv, browser);
-    const deploy = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+    const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
       method: 'POST', headers: mutationHeaders(browser),
       body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
-    }), workerEnv, {} as ExecutionContext);
-    const deployPayload = await deploy.json() as { authorizationUrl: string };
+    }), workerEnv, undefined);
+    const deployPayload = await responseJson(deploy, authorizationResponseSchema);
     const state = new URL(deployPayload.authorizationUrl).searchParams.get('state');
     const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
-    const callback = await worker.fetch!(new Request(
+    const callback = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
       { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
+    ), workerEnv, undefined);
     expect(callback.status).toBe(303);
-    const result = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+    const result = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: browser.cookie },
-    }), workerEnv, {} as ExecutionContext);
-    const session = await result.json() as { deployment: { failure: { code: string; detail: string } } };
+    }), workerEnv, undefined);
+    const session = await responseJson(result, deploymentFailureResponseSchema);
     expect(session.deployment.failure.code).toBe('internal_error');
     expect(session.deployment.failure.detail).toMatch(/Diagnostic: unclassified_typeerror_at_[a-z0-9_]+\./u);
     expect(JSON.stringify(session)).not.toContain('cfoat_never_surface');
@@ -969,17 +1019,17 @@ describe('hosted deploy Worker boundary', () => {
       });
       const browser = await createBrowserSession(worker, workerEnv);
       const { plan } = await saveAndPlan(worker, workerEnv, browser);
-      const deploy = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+      const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
         method: 'POST', headers: mutationHeaders(browser),
         body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
-      }), workerEnv, {} as ExecutionContext);
-      const deployPayload = await deploy.json() as { authorizationUrl: string };
+      }), workerEnv, undefined);
+      const deployPayload = await responseJson(deploy, authorizationResponseSchema);
       const state = new URL(deployPayload.authorizationUrl).searchParams.get('state');
       const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
-      const callback = await worker.fetch!(new Request(
+      const callback = await worker.fetch(new Request(
         `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value${scopeQuery}&state=${state}`,
         { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
-      ), workerEnv, {} as ExecutionContext);
+      ), workerEnv, undefined);
       expect(callback.status, scopeQuery).toBe(expectedStatus);
       if (expectedStatus === 400) {
         expect(await callback.json()).toEqual({ code: 'callback_invalid' });
@@ -994,7 +1044,7 @@ describe('hosted deploy Worker boundary', () => {
   it('retains a converged install and receipt when automatic grant revocation is unconfirmed', async () => {
     let currentTime = NOW;
     const baseNamespace = new FakeDeploySessionNamespace(() => currentTime);
-    const completions: Array<Record<string, unknown>> = [];
+    const completions: SuccessfulCompletion[] = [];
     const workerEnv = {
       ...env(baseNamespace),
       GATEWAY_DEPLOY_SESSION: completionAcceptingNamespace(
@@ -1015,18 +1065,18 @@ describe('hosted deploy Worker boundary', () => {
     });
     const browser = await createBrowserSession(worker, workerEnv);
     const { plan } = await saveAndPlan(worker, workerEnv, browser);
-    const deploy = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+    const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
       method: 'POST',
       headers: mutationHeaders(browser),
       body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
-    }), workerEnv, {} as ExecutionContext);
-    const deployPayload = await deploy.json() as { authorizationUrl: string };
+    }), workerEnv, undefined);
+    const deployPayload = await responseJson(deploy, authorizationResponseSchema);
     const state = new URL(deployPayload.authorizationUrl).searchParams.get('state');
     const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
-    const callback = await worker.fetch!(new Request(
+    const callback = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
       { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
+    ), workerEnv, undefined);
 
     expect(callback.status).toBe(303);
     expect(callback.headers.get('location')).toBe(`${PUBLIC_ORIGIN}/result`);
@@ -1040,10 +1090,10 @@ describe('hosted deploy Worker boundary', () => {
     }]);
     expect(calls.filter(({ url }) => url.includes('/oauth2/revoke'))).toHaveLength(2);
 
-    const result = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+    const result = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: browser.cookie },
-    }), workerEnv, {} as ExecutionContext);
-    const payload = await result.json() as Record<string, any>;
+    }), workerEnv, undefined);
+    const payload = await responseJson(result, deploymentViewResponseSchema);
     expect(payload.deployment).toMatchObject({
       status: 'succeeded',
       failure: null,
@@ -1064,10 +1114,10 @@ describe('hosted deploy Worker boundary', () => {
     expect(baseNamespace.serialized()).not.toMatch(/access-token-value|refresh-token-value|authorization-code-value/iu);
 
     currentTime = NOW + SESSION_TTL_MS + 1;
-    const retained = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+    const retained = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: browser.cookie },
-    }), workerEnv, {} as ExecutionContext);
-    const retainedPayload = await retained.json() as Record<string, any>;
+    }), workerEnv, undefined);
+    const retainedPayload = await responseJson(retained, deploymentViewResponseSchema);
     expect(retained.status).toBe(200);
     expect(retainedPayload.recovery).toBeNull();
     expect(retainedPayload.deployment).toMatchObject({
@@ -1091,17 +1141,17 @@ describe('hosted deploy Worker boundary', () => {
     });
     const browser = await createBrowserSession(worker, workerEnv);
     const { plan } = await saveAndPlan(worker, workerEnv, browser);
-    const deploy = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+    const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
       method: 'POST', headers: mutationHeaders(browser),
       body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
-    }), workerEnv, {} as ExecutionContext);
-    const payload = await deploy.json() as { authorizationUrl: string };
+    }), workerEnv, undefined);
+    const payload = await responseJson(deploy, authorizationResponseSchema);
     const state = new URL(payload.authorizationUrl).searchParams.get('state');
     const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
-    const callback = await worker.fetch!(new Request(
+    const callback = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
       { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
+    ), workerEnv, undefined);
     expect(callback.status).toBe(303);
     expect(calls.filter((call) => call.url.includes('/oauth2/revoke'))).toHaveLength(2);
     expect(namespace.serialized()).toContain('install_mutations_disabled');
@@ -1118,18 +1168,18 @@ describe('hosted deploy Worker boundary', () => {
     });
     const browser = await createBrowserSession(worker, workerEnv);
     const { plan } = await saveAndPlan(worker, workerEnv, browser);
-    const deploy = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+    const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
       method: 'POST',
       headers: mutationHeaders(browser),
       body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
-    }), workerEnv, {} as ExecutionContext);
-    const payload = await deploy.json() as { authorizationUrl: string };
+    }), workerEnv, undefined);
+    const payload = await responseJson(deploy, authorizationResponseSchema);
     const state = new URL(payload.authorizationUrl).searchParams.get('state');
     const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
-    const callback = await worker.fetch!(new Request(
+    const callback = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
       { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
+    ), workerEnv, undefined);
 
     expect(callback.status).toBe(303);
     expect(calls.filter(({ url }) => url.includes('/oauth2/revoke'))).toHaveLength(2);
@@ -1139,9 +1189,9 @@ describe('hosted deploy Worker boundary', () => {
     );
     expect(stored.result).toEqual({ code: 'oauth_revoke_failed', completedAt: NOW });
 
-    const result = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+    const result = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: browser.cookie },
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(await result.json()).toMatchObject({
       deployment: {
         status: 'failed',
@@ -1187,18 +1237,18 @@ describe('hosted deploy Worker boundary', () => {
     });
     const browser = await createBrowserSession(worker, workerEnv);
     const { plan } = await saveAndPlan(worker, workerEnv, browser);
-    const deploy = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+    const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
       method: 'POST',
       headers: mutationHeaders(browser),
       body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
-    }), workerEnv, {} as ExecutionContext);
-    const payload = await deploy.json() as { authorizationUrl: string };
+    }), workerEnv, undefined);
+    const payload = await responseJson(deploy, authorizationResponseSchema);
     const state = new URL(payload.authorizationUrl).searchParams.get('state');
     const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
-    const callback = await worker.fetch!(new Request(
+    const callback = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
       { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
+    ), workerEnv, undefined);
     expect(callback.status).toBe(303);
     const revocations = calls.filter((call) => call.url.includes('/oauth2/revoke'));
     expect(revocations).toHaveLength(2);
@@ -1216,18 +1266,18 @@ describe('hosted deploy Worker boundary', () => {
     let currentTime = NOW;
     const worker = createGatewayDeployWorker({ now: () => currentTime, releaseProvider });
     const browser = await createBrowserSession(worker, workerEnv);
-    const saved = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
+    const saved = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
       method: 'PUT',
       headers: mutationHeaders(browser),
       body: JSON.stringify(selectionInput),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(saved.status).toBe(200);
     expect(namespace.serialized()).toContain('owner@example.com');
     currentTime = NOW + SESSION_TTL_MS;
-    const deleted = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+    const deleted = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       method: 'DELETE',
-      headers: mutationHeaders(browser, false),
-    }), workerEnv, {} as ExecutionContext);
+      headers: mutationHeaders(browser),
+    }), workerEnv, undefined);
     expect(deleted.status).toBe(204);
     expect(deleted.headers.get('set-cookie')).toContain('Max-Age=0');
     expect(namespace.serialized()).not.toContain('owner@example.com');
@@ -1239,19 +1289,19 @@ describe('hosted deploy Worker boundary', () => {
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => sessionExpiresAt - 1);
     try {
       fixture.setNow(sessionExpiresAt - 1);
-      const before = await fixture.worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+      const before = await fixture.worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
         headers: { cookie: fixture.browser.cookie },
-      }), fixture.workerEnv, {} as ExecutionContext);
+      }), fixture.workerEnv, undefined);
       expect(before.status).toBe(200);
       expect(await before.json()).toMatchObject({ recovery: null, csrf: fixture.browser.csrf });
       expect(before.headers.get('set-cookie')).toBeNull();
 
       fixture.setNow(sessionExpiresAt);
       clock.mockImplementation(() => sessionExpiresAt);
-      const atExpiry = await fixture.worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+      const atExpiry = await fixture.worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
         headers: { cookie: fixture.browser.cookie },
-      }), fixture.workerEnv, {} as ExecutionContext);
-      const payload = await atExpiry.json() as Record<string, unknown>;
+      }), fixture.workerEnv, undefined);
+      const payload = await responseJson(atExpiry, boundaryObjectSchema);
       expect(atExpiry.status).toBe(200);
       expect(payload).toMatchObject({
         csrf: fixture.browser.csrf,
@@ -1289,10 +1339,12 @@ describe('hosted deploy Worker boundary', () => {
       },
     };
     const currentTime = resultUntil - 1;
-    const namespace = {
-      idFromName: (name: string) => ({ name, toString: () => name } as unknown as DurableObjectId),
+    const idNamespace = new FakeDeploySessionNamespace();
+    const namespace: GatewayDeploySessionNamespace = {
+      idFromName: (name: string) => idNamespace.idFromName(name),
       get: (id: DurableObjectId) => {
-        const name = (id as unknown as { name: string }).name;
+        const name = id.name;
+        if (!name) throw new Error('test Durable Object ID has no name');
         return {
           fetch: async (request: Request) => {
             const pathname = new URL(request.url).pathname;
@@ -1326,16 +1378,16 @@ describe('hosted deploy Worker boundary', () => {
               uninstallRecovery: null,
             }), { headers: { 'content-type': 'application/json' } });
           },
-        } as unknown as DurableObjectStub;
+        };
       },
-    } as unknown as DurableObjectNamespace;
+    };
     const workerEnv = { ...env(), GATEWAY_DEPLOY_SESSION: namespace };
     const worker = createGatewayDeployWorker({ now: () => currentTime, releaseProvider });
     const cookie = `${SESSION_COOKIE}=${sessionId}`;
-    const response = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+    const response = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie },
-    }), workerEnv, {} as ExecutionContext);
-    const payload = await response.json() as Record<string, any>;
+    }), workerEnv, undefined);
+    const payload = await responseJson(response, deploymentViewResponseSchema);
     expect(response.status).toBe(200);
     expect(cookiePair(response.headers.get('set-cookie') ?? '', SESSION_COOKIE)).toBe(cookie);
     expect(response.headers.get('set-cookie')).toContain('Max-Age=1');
@@ -1357,10 +1409,10 @@ describe('hosted deploy Worker boundary', () => {
       const emptyBrowser = await createBrowserSession(emptyWorker, emptyEnv);
       const emptyId = browserSessionId(emptyBrowser);
       emptyNow = sessionExpiresAt;
-      const emptyResponse = await emptyWorker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+      const emptyResponse = await emptyWorker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
         headers: { cookie: emptyBrowser.cookie },
-      }), emptyEnv, {} as ExecutionContext);
-      const emptyPayload = await emptyResponse.json() as Record<string, unknown>;
+      }), emptyEnv, undefined);
+      const emptyPayload = await responseJson(emptyResponse, boundaryObjectSchema);
       expect(emptyPayload).toMatchObject({ recovery: null });
       expect(cookiePair(emptyResponse.headers.get('set-cookie') ?? '', SESSION_COOKIE)).not.toBe(emptyBrowser.cookie);
       expect(emptyNamespace.states.get(emptyId)?.storage.values.size).toBe(0);
@@ -1370,9 +1422,9 @@ describe('hosted deploy Worker boundary', () => {
       const preparedId = browserSessionId(prepared.browser);
       prepared.setNow(sessionExpiresAt);
       clock.mockImplementation(() => sessionExpiresAt);
-      const preparedResponse = await prepared.worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+      const preparedResponse = await prepared.worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
         headers: { cookie: prepared.browser.cookie },
-      }), prepared.workerEnv, {} as ExecutionContext);
+      }), prepared.workerEnv, undefined);
       expect(await preparedResponse.json()).toMatchObject({ recovery: null });
       expect(cookiePair(preparedResponse.headers.get('set-cookie') ?? '', SESSION_COOKIE)).not.toBe(prepared.browser.cookie);
       expect(prepared.namespace.states.get(preparedId)?.storage.values.size).toBe(0);
@@ -1388,28 +1440,28 @@ describe('hosted deploy Worker boundary', () => {
     const worker = createGatewayDeployWorker({ now: () => currentTime, releaseProvider });
     const browser = await createBrowserSession(worker, workerEnv);
     const { plan } = await saveAndPlan(worker, workerEnv, browser);
-    const deploy = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+    const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
       method: 'POST',
       headers: mutationHeaders(browser),
       body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
-    }), workerEnv, {} as ExecutionContext);
-    const authorizationUrl = new URL((await deploy.json() as { authorizationUrl: string }).authorizationUrl);
+    }), workerEnv, undefined);
+    const authorizationUrl = new URL((await responseJson(deploy, authorizationResponseSchema)).authorizationUrl);
     const state = authorizationUrl.searchParams.get('state');
     const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
     currentTime = NOW + 1;
     vi.mocked(Date.now).mockReturnValue(currentTime);
-    const denied = await worker.fetch!(new Request(
+    const denied = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?error=access_denied&state=${state}`,
       { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
-    ), workerEnv, {} as ExecutionContext);
-    expect(denied.status).toBe(303);
+    ), workerEnv, undefined);
+    expect(denied.status, await denied.clone().text()).toBe(303);
 
     const oldId = browserSessionId(browser);
     currentTime = NOW + SESSION_TTL_MS;
     vi.mocked(Date.now).mockReturnValue(currentTime);
-    const rotated = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+    const rotated = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: browser.cookie },
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(await rotated.json()).toMatchObject({ recovery: null });
     expect(cookiePair(rotated.headers.get('set-cookie') ?? '', SESSION_COOKIE)).not.toBe(browser.cookie);
     expect(namespace.states.get(oldId)?.storage.values.size).toBe(0);
@@ -1422,32 +1474,32 @@ describe('hosted deploy Worker boundary', () => {
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => recoveryNow);
     try {
       const wrongCookie = `${SESSION_COOKIE}=${'z'.repeat(43)}`;
-      const missing = await fixture.worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
+      const missing = await fixture.worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
         method: 'POST',
-        headers: { ...mutationHeaders(fixture.browser, false), cookie: wrongCookie },
-      }), fixture.workerEnv, {} as ExecutionContext);
+        headers: { ...mutationHeaders(fixture.browser), cookie: wrongCookie },
+      }), fixture.workerEnv, undefined);
       expect(missing.status).toBe(404);
       expect(await missing.json()).toEqual({ code: 'session_invalid' });
 
-      const wrongOrigin = await fixture.worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
+      const wrongOrigin = await fixture.worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
         method: 'POST',
-        headers: { ...mutationHeaders(fixture.browser, false), origin: 'https://evil.example' },
-      }), fixture.workerEnv, {} as ExecutionContext);
+        headers: { ...mutationHeaders(fixture.browser), origin: 'https://evil.example' },
+      }), fixture.workerEnv, undefined);
       expect(wrongOrigin.status).toBe(403);
       expect(await wrongOrigin.json()).toEqual({ code: 'origin_invalid' });
 
-      const wrongCsrf = await fixture.worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
+      const wrongCsrf = await fixture.worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
         method: 'POST',
-        headers: { ...mutationHeaders(fixture.browser, false), 'x-csrf-token': 'x'.repeat(43) },
-      }), fixture.workerEnv, {} as ExecutionContext);
+        headers: { ...mutationHeaders(fixture.browser), 'x-csrf-token': 'x'.repeat(43) },
+      }), fixture.workerEnv, undefined);
       expect(wrongCsrf.status).toBe(403);
       expect(await wrongCsrf.json()).toEqual({ code: 'csrf_invalid' });
 
-      const selectionMutation = await fixture.worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
+      const selectionMutation = await fixture.worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
         method: 'PUT',
         headers: mutationHeaders(fixture.browser),
         body: JSON.stringify(selectionInput),
-      }), fixture.workerEnv, {} as ExecutionContext);
+      }), fixture.workerEnv, undefined);
       expect(selectionMutation.status).toBe(410);
       expect(await selectionMutation.json()).toEqual({ code: 'session_expired' });
     } finally {
@@ -1461,23 +1513,20 @@ describe('hosted deploy Worker boundary', () => {
     fixture.setNow(recoveryNow);
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => recoveryNow);
     try {
-      const staleCallback = await fixture.worker.fetch!(new Request(
+      const staleCallback = await fixture.worker.fetch(new Request(
         `${PUBLIC_ORIGIN}/oauth/callback?error=access_denied&state=${fixture.staleState}`,
         { headers: { cookie: `${fixture.browser.cookie}; ${fixture.staleOauthPair}` } },
-      ), fixture.workerEnv, {} as ExecutionContext);
+      ), fixture.workerEnv, undefined);
       expect(staleCallback.status).toBe(400);
       expect(await staleCallback.json()).toEqual({ code: 'session_invalid' });
       expect(staleCallback.headers.get('set-cookie')).toContain(`${OAUTH_COOKIE}=;`);
 
-      const renewed = await fixture.worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
+      const renewed = await fixture.worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
         method: 'POST',
-        headers: mutationHeaders(fixture.browser, false),
-      }), fixture.workerEnv, {} as ExecutionContext);
+        headers: mutationHeaders(fixture.browser),
+      }), fixture.workerEnv, undefined);
       expect(renewed.status).toBe(200);
-      const renewedPayload = await renewed.json() as {
-        recovery: { status: string; expiresAt: string };
-        plan: { planId: string; planHash: string; expiresAt: string };
-      };
+      const renewedPayload = await responseJson(renewed, renewedPlanResponseSchema);
       expect(renewedPayload.recovery).toEqual({
         status: 'recovery_required',
         expiresAt: new Date(fixture.recoverUntil).toISOString(),
@@ -1486,16 +1535,16 @@ describe('hosted deploy Worker boundary', () => {
       expect(renewedPayload.plan.planHash).toBe(fixture.plan.planHash);
       expect(Date.parse(renewedPayload.plan.expiresAt)).toBe(recoveryNow + 600_000);
 
-      const deploy = await fixture.worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+      const deploy = await fixture.worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
         method: 'POST',
         headers: mutationHeaders(fixture.browser),
         body: JSON.stringify({
           planId: renewedPayload.plan.planId,
           planHash: renewedPayload.plan.planHash,
         }),
-      }), fixture.workerEnv, {} as ExecutionContext);
+      }), fixture.workerEnv, undefined);
       expect(deploy.status).toBe(200);
-      const authorizationUrl = new URL((await deploy.json() as { authorizationUrl: string }).authorizationUrl);
+      const authorizationUrl = new URL((await responseJson(deploy, authorizationResponseSchema)).authorizationUrl);
       const state = authorizationUrl.searchParams.get('state');
       const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
       const sealed = await openOauthCookie(
@@ -1506,10 +1555,10 @@ describe('hosted deploy Worker boundary', () => {
 
       recoveryNow += 1;
       fixture.setNow(recoveryNow);
-      const denied = await fixture.worker.fetch!(new Request(
+      const denied = await fixture.worker.fetch(new Request(
         `${PUBLIC_ORIGIN}/oauth/callback?error=access_denied&state=${state}`,
         { headers: { cookie: `${fixture.browser.cookie}; ${oauthPair}` } },
-      ), fixture.workerEnv, {} as ExecutionContext);
+      ), fixture.workerEnv, undefined);
       expect(denied.status).toBe(303);
       expect(denied.headers.get('location')).toBe(`${PUBLIC_ORIGIN}/result`);
       expect(fixture.namespace.serialized()).not.toMatch(/access-token|refresh-token|client-secret|codeVerifier/iu);
@@ -1522,14 +1571,15 @@ describe('hosted deploy Worker boundary', () => {
     const workerEnv = env();
     const worker = createGatewayDeployWorker({ now: () => NOW });
     const browser = await createBrowserSession(worker, workerEnv);
-    const saved = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
+    const saved = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
       method: 'PUT', headers: mutationHeaders(browser), body: JSON.stringify(selectionInput),
-    }), workerEnv, {} as ExecutionContext);
+    }), workerEnv, undefined);
     expect(saved.status).toBe(200);
-    const preview = await worker.fetch!(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
-      method: 'POST', headers: mutationHeaders(browser, false),
-    }), workerEnv, {} as ExecutionContext);
+    const preview = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
+      method: 'POST', headers: mutationHeaders(browser),
+    }), workerEnv, undefined);
     expect(preview.status).toBe(503);
     expect(await preview.json()).toEqual({ code: 'release_unavailable' });
   });
 });
+import * as v from 'valibot';

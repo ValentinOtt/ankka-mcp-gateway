@@ -72,7 +72,11 @@ describe('confidential Cloudflare OAuth', () => {
     // `input.transport(...)`. Node's fetch ignores the receiver, so the suite
     // must simulate the strict behaviour explicitly.
     const originalFetch = globalThis.fetch;
-    const strictFetch = function (this: unknown, _input: RequestInfo | URL, _init?: RequestInit): Promise<Response> {
+    const strictFetch: typeof fetch = function (
+      this: typeof globalThis | undefined,
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ): Promise<Response> {
       if (this !== undefined && this !== globalThis) {
         throw new TypeError('Illegal invocation: function called with incorrect `this` reference.');
       }
@@ -83,7 +87,7 @@ describe('confidential Cloudflare OAuth', () => {
         scope: REQUIRED_OAUTH_SCOPES.join(' '),
       }), { status: 200 }));
     };
-    globalThis.fetch = strictFetch as typeof fetch;
+    globalThis.fetch = strictFetch;
     try {
       await expect(exchangeAuthorizationCode({
         code: 'authorization-code-value',

@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { GatewayConfigError } from '../src/config.mjs';
+import { GatewayConfigError } from '../src/config.ts';
 import {
   buildGatewayDesiredState,
   buildGatewayPlan,
   GATEWAY_REQUIRED_CAPABILITIES,
-} from '../src/plan.mjs';
+} from '../src/plan.ts';
 
 const FIXED_CAPABILITIES = [
   'identity.discovery',

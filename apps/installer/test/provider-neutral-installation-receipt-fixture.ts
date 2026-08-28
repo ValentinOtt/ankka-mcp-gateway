@@ -1,27 +1,13 @@
 import type {
+  InstallationReceiptResource,
   ReadyInstallationReceipt,
   ReadyInstallationReceiptExpectation,
 } from '../src/provider-neutral-installation-receipt';
+import { canonicalJson } from '../src/canonical-json';
+import { sha256Hex } from '../src/crypto';
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('canonical fixture');
-}
-
-async function checksum(value: unknown): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(canonicalJson(value)),
-  ));
-  return `sha256:${[...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+async function checksum<Value>(value: Value): Promise<string> {
+  return `sha256:${await sha256Hex(canonicalJson(value))}`;
 }
 
 export async function readyInstallationReceiptFixture(
@@ -31,18 +17,30 @@ export async function readyInstallationReceiptFixture(
   const providerIds = expected.resources.map((_resource, index) => `provider-${index}`);
   const sourceApplicationIndex = expected.resources.findIndex(({ kind }) => kind === 'source_access_application');
   const portalApplicationIndex = expected.resources.findIndex(({ kind }) => kind === 'portal_access_application');
-  const resources = expected.resources.map((resource, index) => ({
-    kind: resource.kind,
-    key: resource.key,
-    provider: resource.kind === 'source_access_policy'
-      ? { id: providerIds[index], parentId: providerIds[sourceApplicationIndex] }
-      : resource.kind === 'portal_access_policy'
-        ? { id: providerIds[index], parentId: providerIds[portalApplicationIndex] }
-        : { id: providerIds[index] },
-    desiredHash: resource.desiredHash,
-    marker: resource.marker,
-    ...(resource.identityHash === undefined ? {} : { identityHash: resource.identityHash }),
-  }));
+  const resources = expected.resources.map((resource, index): InstallationReceiptResource => {
+    const providerId = providerIds.at(index);
+    if (providerId === undefined) throw new TypeError('provider ID fixture');
+    const common = {
+      kind: resource.kind,
+      key: resource.key,
+      desiredHash: resource.desiredHash,
+      marker: resource.marker,
+    };
+    if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
+      const parentIndex = resource.kind === 'source_access_policy'
+        ? sourceApplicationIndex
+        : portalApplicationIndex;
+      if (resource.identityHash === undefined) throw new TypeError('policy identity fixture');
+      const parentId = providerIds.at(parentIndex);
+      if (parentId === undefined) throw new TypeError('policy parent ID fixture');
+      return {
+        ...common,
+        provider: { id: providerId, parentId },
+        identityHash: resource.identityHash,
+      };
+    }
+    return { ...common, provider: { id: providerId } };
+  });
   const unsigned = {
     schemaVersion: 1 as const,
     manager: 'ankka-mcp-gateway' as const,
@@ -59,12 +57,12 @@ export async function readyInstallationReceiptFixture(
   return {
     ...unsigned,
     checksum: await checksum(unsigned),
-  } as ReadyInstallationReceipt;
+  };
 }
 
 export async function resealInstallationReceiptFixture(
   value: ReadyInstallationReceipt,
 ): Promise<ReadyInstallationReceipt> {
   const { checksum: _checksum, ...unsigned } = structuredClone(value);
-  return { ...unsigned, checksum: await checksum(unsigned) } as ReadyInstallationReceipt;
+  return { ...unsigned, checksum: await checksum(unsigned) };
 }

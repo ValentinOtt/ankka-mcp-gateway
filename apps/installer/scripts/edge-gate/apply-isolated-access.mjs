@@ -5,6 +5,7 @@
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+import * as v from 'valibot';
 
 import {
   classifyAccessApplicationForHostname,
@@ -23,6 +24,9 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_PAGES = 10;
 const PAGE_SIZE = 100;
 const TIMEOUT_MS = 10_000;
+const FUNCTION_SCHEMA = v.function();
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
 
 export class IsolatedAccessApplyError extends Error {
   constructor(code = 'isolated_access_apply_failed') {
@@ -37,7 +41,7 @@ function fail(code = 'isolated_access_apply_failed') {
 }
 
 function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return v.is(OBJECT_SCHEMA, value) && !Array.isArray(value);
 }
 
 function exactKeys(value, keys) {
@@ -73,15 +77,16 @@ async function providerCall(fetchImpl, token, pathname, init = {}) {
   try {
     let response;
     try {
+      const headers = {
+        accept: 'application/json',
+        authorization: `Bearer ${token}`,
+      };
+      if (init.body !== undefined) headers['content-type'] = 'application/json';
       response = await fetchImpl(`${API}${pathname}`, {
         ...init,
         redirect: 'error',
         signal: controller.signal,
-        headers: {
-          accept: 'application/json',
-          authorization: `Bearer ${token}`,
-          ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
-        },
+        headers,
       });
     } catch {
       fail('provider_unavailable');
@@ -125,7 +130,7 @@ async function readAllApplications(fetchImpl, token, accountId) {
     for (const application of body.result) {
       if (
         !isRecord(application) ||
-        typeof application.id !== 'string' ||
+        !v.is(STRING_SCHEMA, application.id) ||
         application.id.length < 1 ||
         application.id.length > 256 ||
         ids.has(application.id)
@@ -146,7 +151,7 @@ async function accountMemberIdentityProvider(fetchImpl, token, accountId) {
   if (!Array.isArray(body.result)) fail('provider_response_invalid');
   const matches = body.result.filter((idp) => (
     isRecord(idp) &&
-    typeof idp.id === 'string' && idp.id.length > 0 && idp.id.length <= 256 &&
+    v.is(STRING_SCHEMA, idp.id) && idp.id.length > 0 && idp.id.length <= 256 &&
     idp.type === 'cloudflare' &&
     isRecord(idp.config) && idp.config.restrict_to_account_members === true
   ));
@@ -215,9 +220,9 @@ function validateInputs(targetInput, emails, sessionDuration) {
   }
   if (
     !Array.isArray(emails) || emails.length < 1 || emails.length > 16 ||
-    emails.some((email) => typeof email !== 'string' || !EMAIL_PATTERN.test(email)) ||
+    emails.some((email) => !v.is(STRING_SCHEMA, email) || !EMAIL_PATTERN.test(email)) ||
     new Set(emails).size !== emails.length ||
-    typeof sessionDuration !== 'string' || !/^[1-9]\d*(?:m|h|d)$/u.test(sessionDuration)
+    !v.is(STRING_SCHEMA, sessionDuration) || !/^[1-9]\d*(?:m|h|d)$/u.test(sessionDuration)
   ) fail('input_invalid');
   return Object.freeze({
     emails: Object.freeze([...emails].sort()),
@@ -235,14 +240,14 @@ export async function applyIsolatedAccess(input) {
     input.emails,
     input.sessionDuration,
   );
-  if (typeof input.fetchImpl !== 'function' || typeof input.readToken !== 'function') {
+  if (!v.is(FUNCTION_SCHEMA, input.fetchImpl) || !v.is(FUNCTION_SCHEMA, input.readToken)) {
     fail('input_invalid');
   }
   const contract = createIsolatedPrivateAccessContract(target.hostname);
   let token;
   try {
     token = await input.readToken();
-    if (typeof token !== 'string' || !TOKEN_PATTERN.test(token)) fail('token_invalid');
+    if (!v.is(STRING_SCHEMA, token) || !TOKEN_PATTERN.test(token)) fail('token_invalid');
     let applications = await readAllApplications(input.fetchImpl, token, target.accountId);
     const identityProviderId = await accountMemberIdentityProvider(
       input.fetchImpl,

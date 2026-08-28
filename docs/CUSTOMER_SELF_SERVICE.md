@@ -59,21 +59,18 @@ different set.
 
 ## Installation flow
 
-In the current hosted browser flow, the public installer is designed to:
+The public installer is designed to:
 
 1. ask you to sign in with Cloudflare;
 2. discover your eligible accounts and active zones without making changes;
 3. collect the gateway name, two hostnames, and initial administrators;
 4. show the complete secret-free deployment plan;
 5. request a short-lived Cloudflare grant only after you approve that plan;
-6. create and verify the customer management surface and an empty MCP Portal; and
+6. create and verify the customer management surface and empty MCP Portal; and
 7. return the MCP URL and management URL.
 
-The browser flow does not add an upstream MCP source. The signed installation
-contract also supports one explicitly reviewed initial source with an exact
-tool allowlist, but the browser UI does not expose that option. Ordinary
-self-service users add the first source from the customer dashboard after the
-gateway is ready.
+Installation does not add an upstream MCP source. Add the first source from the
+customer dashboard after the gateway is ready.
 
 If discovery finds an existing or conflicting installation, the installer
 stops instead of adopting or overwriting it.
@@ -124,13 +121,11 @@ authorization remains authoritative.
 Updates are never automatic. A customer administrator reviews the signed
 release and approves a new Cloudflare authorization.
 
-An ordinary update persists only Worker code, management assets, and two
-non-secret release-identity text bindings. It preserves Portal configuration,
-Access, DNS, sources, credentials, resource and secret bindings, compatibility
-settings, and Durable Object data. Rollback restores a previous Worker version
-and its release identity without rolling back data. See
-[Gateway updates and rollback](UPDATES.md) for the temporary, authenticated
-action route used during the operation.
+An ordinary update persists only Worker code and management asset changes. It
+preserves Portal configuration, Access, DNS, sources, credentials, and Durable
+Object data. Rollback restores a previous Worker version without rolling back
+data. See [Gateway updates and rollback](UPDATES.md) for the temporary,
+authenticated action route used during the operation.
 
 ## Removing a gateway
 

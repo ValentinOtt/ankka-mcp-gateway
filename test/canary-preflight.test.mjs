@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CloudflareApiError } from '../src/cloudflare-client.mjs';
-import { runCloudflareCanaryPreflight } from '../src/canary-preflight.mjs';
+import { CloudflareApiError } from '../src/cloudflare-client.ts';
+import { runCloudflareCanaryPreflight } from '../src/canary-preflight.ts';
 
 const ACCOUNT_ID = 'a'.repeat(32);
 const ZONE_ID = 'b'.repeat(32);

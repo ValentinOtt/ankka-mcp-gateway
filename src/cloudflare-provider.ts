@@ -1,18 +1,48 @@
-import { createCloudflareClient } from './cloudflare-client.mjs';
-import { readCloudflareObservedState } from './cloudflare-observed.mjs';
-import { buildGatewayDesiredState } from './plan.mjs';
+import * as v from 'valibot';
+
+import {
+  createCloudflareClient,
+  type CloudflareClient,
+  type CloudflareFetch,
+} from './cloudflare-client.ts';
+import {
+  readCloudflareObservedState,
+  type CloudflareObservedStateInput,
+} from './cloudflare-observed.ts';
+import { validateGatewayConfig, type GatewayConfig } from './config.ts';
+import {
+  boundaryObjectSchema,
+  jsonObjectSchema,
+  jsonValueSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+  type JsonObject,
+  type JsonValue,
+} from './json.ts';
+import {
+  buildGatewayDesiredState,
+  type DesiredResource,
+  type GatewayDesiredState,
+  type ResourceKind,
+} from './plan.ts';
 import {
   ownershipMarker,
   validateInstallationReceipt,
-} from './receipt.mjs';
+  type InstallationReceipt,
+  type ReceiptProviderLocator,
+  type ReceiptResource,
+  type ReceiptTarget,
+} from './receipt.ts';
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const RESOURCE_KEY = /^[a-z][a-z0-9-]{0,31}$/;
 const DESIRED_HASH = /^sha256:[0-9a-f]{64}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PORTAL_CNAME_TARGET = 'gateway.agents.cloudflare.com';
-const POLICY_KINDS = new Set(['source_access_policy', 'portal_access_policy']);
-const RESOURCE_KINDS = new Set([
+const stringSchema = v.string();
+const numberSchema = v.number();
+const functionSchema = v.function();
+const resourceKindSchema = v.picklist([
   'mcp_server',
   'source_access_application',
   'source_access_policy',
@@ -21,14 +51,9 @@ const RESOURCE_KINDS = new Set([
   'portal_access_policy',
   'dns_record',
 ]);
-const ACTIONS = new Set(['create', 'update', 'delete']);
-const CLOUDFLARE_MUTATION_METHODS = new Set([
-  'createMcpServer', 'updateMcpServer', 'deleteMcpServer', 'syncMcpServer',
-  'createPortal', 'updatePortal', 'deletePortal',
-  'createAccessApp', 'updateAccessApp', 'deleteAccessApp',
-  'createAppPolicy', 'updateAppPolicy', 'deleteAppPolicy',
-  'createDnsRecord', 'updateDnsRecord', 'deleteDnsRecord',
-]);
+const mutationActionSchema = v.picklist(['create', 'update', 'delete']);
+const codeModeSchema = v.picklist(['off', 'opt_in', 'default_on', 'enforced']);
+const POLICY_KINDS = new Set<ResourceKind>(['source_access_policy', 'portal_access_policy']);
 const SAFE_CODES = new Set([
   'invalid_input',
   'target_mismatch',
@@ -48,9 +73,172 @@ const SAFE_CODES = new Set([
   'provider_read_failed',
   'provider_write_failed',
 ]);
+
+type Delay = (milliseconds: number) => Promise<void>;
+
+interface ResidueInspectionInput {
+  readonly config?: BoundaryValue;
+  readonly receipt?: BoundaryValue;
+  readonly signal?: AbortSignal;
+  readonly target?: BoundaryValue;
+}
+
+export interface CloudflareGatewayProviderOptions {
+  readonly accountId: string;
+  readonly delayImpl?: Delay;
+  readonly discoveryAttempts?: number;
+  readonly discoveryIntervalMs?: number;
+  readonly fetchImpl?: CloudflareFetch;
+  readonly requestTimeoutMs?: number;
+  readonly token: string;
+  readonly zoneId: string;
+}
+
+interface BoundTarget {
+  readonly accountId: string;
+  readonly zoneId: string;
+}
+
+interface PollingOptions {
+  readonly attempts: number;
+  readonly delayImpl: Delay;
+  readonly intervalMs: number;
+}
+
+interface MutationAttempt {
+  submitted: boolean;
+}
+
+type CreateMutationChange = {
+  readonly action: 'create';
+  readonly desired: JsonObject;
+  readonly desiredHash: string;
+  readonly key: string;
+  readonly kind: ResourceKind;
+};
+
+type UpdateMutationChange = {
+  readonly action: 'update';
+  readonly desired: JsonObject;
+  readonly desiredHash: string;
+  readonly key: string;
+  readonly kind: ResourceKind;
+  readonly provider: ReceiptProviderLocator;
+};
+
+type DeleteMutationChange = {
+  readonly action: 'delete';
+  readonly desired?: JsonObject;
+  readonly desiredHash?: string;
+  readonly key: string;
+  readonly kind: ResourceKind;
+  readonly provider: ReceiptProviderLocator;
+};
+
+type MutationChange = CreateMutationChange | DeleteMutationChange | UpdateMutationChange;
+
+interface GatewayMutation {
+  readonly access: BoundaryValue;
+  readonly change: MutationChange;
+  readonly config: GatewayConfig;
+  readonly configInput: JsonValue;
+  readonly marker: string;
+  readonly ownedResource: ReceiptResource | undefined;
+  readonly receipt: InstallationReceipt;
+  readonly target: BoundaryObject;
+}
+
+interface PendingPortalRollbackMutation extends GatewayMutation {
+  readonly change: CreateMutationChange & { readonly kind: 'portal' };
+  readonly expectedPortal: PortalDesired;
+}
+
+interface MutationResult {
+  readonly provider?: ReceiptProviderLocator;
+}
+
+interface PortalRollbackSample {
+  readonly appCandidates: readonly string[];
+  readonly dnsRecords: readonly BoundaryValue[];
+  readonly portal: BoundaryObject | null;
+}
+
+type PortalTool = {
+  readonly enabled: boolean;
+  readonly name: string;
+};
+
+type PortalServer = {
+  readonly default_disabled: true;
+  readonly on_behalf: boolean;
+  readonly server_id: string;
+  readonly updated_prompts: readonly JsonValue[];
+  readonly updated_tools: readonly PortalTool[];
+};
+
+type ServerDesired = {
+  readonly auth_type: 'bearer' | 'oauth' | 'unauthenticated';
+  readonly description: string;
+  readonly hostname: string;
+  readonly name: string;
+  readonly updated_tools: readonly PortalTool[];
+};
+
+type PortalDesired = {
+  readonly code_mode: 'default_on' | 'enforced' | 'off' | 'opt_in';
+  readonly description: string;
+  readonly hostname: string;
+  readonly name: string;
+  readonly secure_web_gateway: false;
+  readonly servers: readonly PortalServer[];
+};
+
+type ManagedOauth = {
+  readonly dynamic_client_registration: {
+    readonly allow_any_on_localhost: true;
+    readonly allow_any_on_loopback: true;
+    readonly enabled: true;
+  };
+  readonly enabled: true;
+  readonly grant: {
+    readonly access_token_lifetime: '15m';
+    readonly session_duration: '336h';
+  };
+};
+
+type PortalAccessApplicationBody = {
+  readonly destinations: readonly [{ readonly type: 'public'; readonly uri: string }];
+  readonly domain: string;
+  readonly name: string;
+  readonly oauth_configuration: ManagedOauth;
+  readonly type: 'mcp_portal';
+};
+
+type PortalAccessApplicationDesired = {
+  readonly body: PortalAccessApplicationBody;
+  readonly portalResourceKey: string;
+};
+
+type SourceAccessApplicationDesired = {
+  readonly sourceResourceKey: string;
+};
+
+type PolicyBody = {
+  readonly decision: 'allow';
+  readonly exclude: readonly JsonValue[];
+  readonly include: readonly { readonly email: { readonly email: string } }[];
+  readonly name: string;
+  readonly require: readonly JsonValue[];
+};
 /** A value-free error suitable for installer output and receipt recovery. */
 export class CloudflareGatewayProviderError extends Error {
-  constructor(code, { mutationOutcome } = {}) {
+  readonly code: string;
+  readonly mutationOutcome?: 'not_submitted';
+
+  constructor(
+    code: string,
+    { mutationOutcome }: { readonly mutationOutcome?: 'not_submitted' | undefined } = {},
+  ) {
     const safeCode = SAFE_CODES.has(code) ? code : 'provider_write_failed';
     super(`Cloudflare gateway provider failed: code=${safeCode}`);
     this.name = 'CloudflareGatewayProviderError';
@@ -70,8 +258,11 @@ export class CloudflareGatewayProviderError extends Error {
  * Bind the provider-neutral reconciler to one explicit Cloudflare account and
  * zone. The token and fetch implementation stay inside the returned closure.
  */
-export function createCloudflareGatewayProvider(options = {}) {
-  if (!isObject(options)) throw new TypeError('provider options must be an object');
+const defaultCloudflareFetch: CloudflareFetch = async (url, init) =>
+  globalThis.fetch(url, init);
+
+export function createCloudflareGatewayProvider(options: CloudflareGatewayProviderOptions) {
+  if (!v.is(v.object({}), options)) throw new TypeError('provider options must be an object');
   rejectUnknownKeys(options, [
     'token',
     'accountId',
@@ -86,7 +277,7 @@ export function createCloudflareGatewayProvider(options = {}) {
     token,
     accountId,
     zoneId,
-    fetchImpl = globalThis.fetch,
+    fetchImpl = defaultCloudflareFetch,
     delayImpl = defaultDelay,
     discoveryAttempts = 30,
     discoveryIntervalMs = 1_000,
@@ -94,11 +285,19 @@ export function createCloudflareGatewayProvider(options = {}) {
   } = options;
   requireId(accountId);
   requireId(zoneId);
-  if (typeof delayImpl !== 'function') throw new TypeError('delayImpl must be a function');
-  if (!Number.isInteger(discoveryAttempts) || discoveryAttempts < 1 || discoveryAttempts > 120) {
+  if (!v.safeParse(functionSchema, delayImpl).success) {
+    throw new TypeError('delayImpl must be a function');
+  }
+  if (!v.is(numberSchema, discoveryAttempts)
+    || !Number.isInteger(discoveryAttempts)
+    || discoveryAttempts < 1
+    || discoveryAttempts > 120) {
     throw new TypeError('discoveryAttempts must be an integer from 1 to 120');
   }
-  if (!Number.isInteger(discoveryIntervalMs) || discoveryIntervalMs < 0 || discoveryIntervalMs > 10_000) {
+  if (!v.is(numberSchema, discoveryIntervalMs)
+    || !Number.isInteger(discoveryIntervalMs)
+    || discoveryIntervalMs < 0
+    || discoveryIntervalMs > 10_000) {
     throw new TypeError('discoveryIntervalMs must be an integer from 0 to 10000');
   }
 
@@ -109,13 +308,17 @@ export function createCloudflareGatewayProvider(options = {}) {
     fetchImpl,
     requestTimeoutMs,
   });
-  const polling = { delayImpl, attempts: discoveryAttempts, intervalMs: discoveryIntervalMs };
+  const polling: PollingOptions = {
+    delayImpl,
+    attempts: discoveryAttempts,
+    intervalMs: discoveryIntervalMs,
+  };
 
-  const readObservedState = (input = {}) =>
+  const readObservedState = (input: Omit<CloudflareObservedStateInput, 'cloudflare'>) =>
     readCloudflareObservedState({ ...input, cloudflare });
 
-  const applyChange = async (input = {}) => {
-    const mutationAttempt = { submitted: false };
+  const applyChange = async (input: BoundaryValue = {}) => {
+    const mutationAttempt: MutationAttempt = { submitted: false };
     const applyCloudflare = trackCloudflareMutationAttempt(cloudflare, mutationAttempt);
     try {
       const mutation = await normalizeMutationInput(input, { accountId, zoneId });
@@ -131,9 +334,12 @@ export function createCloudflareGatewayProvider(options = {}) {
     }
   };
 
-  const inspectCanaryResidue = async (input = {}) => {
+  const inspectCanaryResidue = async (
+    input: BoundaryValue | ResidueInspectionInput = {},
+  ) => {
     try {
-      const signal = normalizeAbortSignal(input?.signal);
+      if (!isResidueInspectionInput(input)) fail('invalid_input');
+      const signal = normalizeAbortSignal(input.signal);
       const residueCloudflare = signal
         ? createCloudflareClient({
           token,
@@ -151,7 +357,7 @@ export function createCloudflareGatewayProvider(options = {}) {
     }
   };
 
-  const inspectPendingPortalCreateRollback = async (input = {}) => {
+  const inspectPendingPortalCreateRollback = async (input: BoundaryValue = {}) => {
     try {
       const mutation = await normalizePendingPortalCreateRollbackInput(
         input,
@@ -163,7 +369,7 @@ export function createCloudflareGatewayProvider(options = {}) {
         await provePendingPortalCreateRollbackQuiet(cloudflare, polling, mutation);
         return Object.freeze({ status: 'already_absent', portalKey: mutation.change.key });
       }
-      assertPendingPortalCreateShape(sample.portal, mutation);
+      assertPendingPortalCreateContract(sample.portal, mutation);
       return Object.freeze({ status: 'ready', portalKey: mutation.change.key });
     } catch (error) {
       if (error instanceof CloudflareGatewayProviderError) throw error;
@@ -171,7 +377,7 @@ export function createCloudflareGatewayProvider(options = {}) {
     }
   };
 
-  const rollbackPendingPortalCreate = async (input = {}) => {
+  const rollbackPendingPortalCreate = async (input: BoundaryValue = {}) => {
     try {
       const mutation = await normalizePendingPortalCreateRollbackInput(
         input,
@@ -187,7 +393,7 @@ export function createCloudflareGatewayProvider(options = {}) {
           deleteRequest: 'not_needed',
         });
       }
-      assertPendingPortalCreateShape(first.portal, mutation);
+      assertPendingPortalCreateContract(first.portal, mutation);
 
       await polling.delayImpl(polling.intervalMs);
       const second = await readPendingPortalCreateRollbackSample(cloudflare, mutation);
@@ -200,7 +406,7 @@ export function createCloudflareGatewayProvider(options = {}) {
           deleteRequest: 'not_needed',
         });
       }
-      assertPendingPortalCreateShape(second.portal, mutation);
+      assertPendingPortalCreateContract(second.portal, mutation);
 
       let deleteRequest = 'confirmed';
       try {
@@ -232,14 +438,18 @@ export function createCloudflareGatewayProvider(options = {}) {
   });
 }
 
-function normalizeApplyMutationResult(change, result) {
+function normalizeApplyMutationResult(
+  change: MutationChange,
+  result: MutationResult | void,
+) {
   const returnsCreatedLocator = change.action === 'create'
     && change.kind === 'portal_access_application';
   if (!returnsCreatedLocator) {
     if (result !== undefined) fail('invalid_provider_response');
     return Object.freeze({ status: 'submitted' });
   }
-  if (!isObject(result)
+  if (result === undefined
+    || !isObject(result)
     || Object.keys(result).sort().join(',') !== 'provider'
     || !isObject(result.provider)
     || Object.keys(result.provider).sort().join(',') !== 'id'
@@ -250,36 +460,56 @@ function normalizeApplyMutationResult(change, result) {
   });
 }
 
-function trackCloudflareMutationAttempt(cloudflare, attempt) {
-  return Object.freeze(Object.fromEntries(
-    Object.entries(cloudflare).map(([name, method]) => [
-      name,
-      CLOUDFLARE_MUTATION_METHODS.has(name)
-        ? (...args) => {
-          attempt.submitted = true;
-          return method(...args);
-        }
-        : method,
-    ]),
-  ));
+function trackCloudflareMutationAttempt(
+  cloudflare: CloudflareClient,
+  attempt: MutationAttempt,
+): CloudflareClient {
+  const submitted = <Arguments extends readonly JsonValue[], Result>(
+    mutation: (...args: Arguments) => Promise<Result>,
+  ) => (...args: Arguments): Promise<Result> => {
+    attempt.submitted = true;
+    return mutation(...args);
+  };
+  return Object.freeze({
+    ...cloudflare,
+    createMcpServer: submitted(cloudflare.createMcpServer),
+    updateMcpServer: submitted(cloudflare.updateMcpServer),
+    deleteMcpServer: submitted(cloudflare.deleteMcpServer),
+    syncMcpServer: submitted(cloudflare.syncMcpServer),
+    createPortal: submitted(cloudflare.createPortal),
+    updatePortal: submitted(cloudflare.updatePortal),
+    deletePortal: submitted(cloudflare.deletePortal),
+    createAccessApp: submitted(cloudflare.createAccessApp),
+    updateAccessApp: submitted(cloudflare.updateAccessApp),
+    deleteAccessApp: submitted(cloudflare.deleteAccessApp),
+    createAppPolicy: submitted(cloudflare.createAppPolicy),
+    updateAppPolicy: submitted(cloudflare.updateAppPolicy),
+    deleteAppPolicy: submitted(cloudflare.deleteAppPolicy),
+    createDnsRecord: submitted(cloudflare.createDnsRecord),
+    updateDnsRecord: submitted(cloudflare.updateDnsRecord),
+    deleteDnsRecord: submitted(cloudflare.deleteDnsRecord),
+  });
 }
 
-async function normalizePendingPortalCreateRollbackInput(input, boundTarget) {
+async function normalizePendingPortalCreateRollbackInput(
+  input: BoundaryValue,
+  boundTarget: BoundTarget,
+): Promise<PendingPortalRollbackMutation> {
   const mutation = await normalizeMutationInput(input, boundTarget);
   if (mutation.change.action !== 'create'
     || mutation.change.kind !== 'portal'
     || mutation.receipt.pending?.type !== 'apply') fail('invalid_input');
-  if (input.target?.zoneName !== mutation.receipt.target.zoneName) fail('target_mismatch');
+  if (mutation.target.zoneName !== mutation.receipt.target.zoneName) fail('target_mismatch');
   if (mutation.receipt.resources.some((resource) =>
     ['portal', 'portal_access_application', 'portal_access_policy', 'dns_record']
       .includes(resource.kind))) {
     fail('ownership_conflict');
   }
 
-  let desiredState;
+  let desiredState: GatewayDesiredState;
   try {
-    desiredState = await buildGatewayDesiredState(mutation.config, {
-      target: input.target,
+    desiredState = await buildGatewayDesiredState(mutation.configInput, {
+      target: mutation.target,
       access: mutation.access,
     });
   } catch {
@@ -295,27 +525,39 @@ async function normalizePendingPortalCreateRollbackInput(input, boundTarget) {
   }
   assertPendingPortalRollbackReceiptTopology(desiredState.resources, mutation.receipt);
 
+  const portalChange: CreateMutationChange & { readonly kind: 'portal' } = {
+    action: 'create',
+    desired: mutation.change.desired,
+    desiredHash: mutation.change.desiredHash,
+    key: mutation.change.key,
+    kind: 'portal',
+  };
   return {
     ...mutation,
+    change: portalChange,
     expectedPortal: normalizePortalDesired(mutation.change.desired, mutation.marker),
   };
 }
 
-function assertPendingPortalRollbackReceiptTopology(desiredResources, receipt) {
+function assertPendingPortalRollbackReceiptTopology(
+  desiredResources: readonly DesiredResource[],
+  receipt: InstallationReceipt,
+): void {
   const portalIndex = desiredResources.findIndex((resource) => resource.kind === 'portal');
   if (portalIndex < 0 || receipt.resources.length !== portalIndex) fail('invalid_input');
   const lowerDesired = desiredResources.slice(0, portalIndex);
   for (const desired of lowerDesired) {
     const matches = receipt.resources.filter((owned) =>
       owned.kind === desired.kind && owned.key === desired.key);
+    const owned = matches[0];
     if (
       matches.length !== 1 ||
-      matches[0].desiredHash !== desired.desiredHash ||
-      matches[0].marker !== ownershipMarker(receipt.installationId, desired.key)
+      owned === undefined ||
+      owned.desiredHash !== desired.desiredHash ||
+      owned.marker !== ownershipMarker(receipt.installationId, desired.key)
     ) {
       fail('invalid_input');
     }
-    const owned = matches[0];
     if (desired.kind === 'mcp_server' && owned.provider.id !== desired.key) {
       fail('invalid_input');
     }
@@ -332,10 +574,12 @@ function assertPendingPortalRollbackReceiptTopology(desiredResources, receipt) {
       const parents = receipt.resources.filter((candidate) =>
         candidate.kind === 'source_access_application' &&
         candidate.key === desired.desired.sourceApplicationResourceKey);
+      const parent = parents[0];
       if (
         parents.length !== 1 ||
-        owned.provider.parentId !== parents[0].provider.id ||
-        owned.identityHash !== desired.desired.allow.identitiesHash
+        parent === undefined ||
+        owned.provider.parentId !== parent.provider.id ||
+        owned.identityHash !== policyIdentityHash(desired.desired)
       ) {
         fail('invalid_input');
       }
@@ -343,7 +587,10 @@ function assertPendingPortalRollbackReceiptTopology(desiredResources, receipt) {
   }
 }
 
-async function readPendingPortalCreateRollbackSample(cloudflare, mutation) {
+async function readPendingPortalCreateRollbackSample(
+  cloudflare: CloudflareClient,
+  mutation: PendingPortalRollbackMutation,
+): Promise<PortalRollbackSample> {
   const portal = await exactRead(
     () => cloudflare.getPortal(mutation.change.key),
     mutation.change.key,
@@ -352,7 +599,7 @@ async function readPendingPortalCreateRollbackSample(cloudflare, mutation) {
   if (!Array.isArray(apps)) fail('invalid_provider_response');
   const appCandidates = apps
     .filter((app) => isPortalAppCandidate(app, mutation.config.gateway.hostname))
-    .map(requireAppId);
+    .map((app) => requireAppId(app).id);
   const dnsRecords = await cloudflare.listDnsRecords({
     'name.exact': mutation.config.gateway.hostname,
     match: 'all',
@@ -361,20 +608,27 @@ async function readPendingPortalCreateRollbackSample(cloudflare, mutation) {
   return { portal, appCandidates, dnsRecords };
 }
 
-function assertNoPendingPortalAppCandidates(sample) {
+function assertNoPendingPortalAppCandidates(sample: PortalRollbackSample): void {
   if (sample.appCandidates.length > 0 || sample.dnsRecords.length > 0) {
     fail('ownership_conflict');
   }
 }
 
-function assertPendingPortalCreateShape(portal, mutation) {
+function assertPendingPortalCreateContract(
+  portal: BoundaryObject,
+  mutation: PendingPortalRollbackMutation,
+): void {
   const expected = mutation.expectedPortal;
   if (!portalMatchesExpected(portal, mutation.change.key, expected)) {
     fail('ownership_conflict');
   }
 }
 
-function portalMatchesExpected(portal, portalId, expected) {
+function portalMatchesExpected(
+  portal: BoundaryObject,
+  portalId: string,
+  expected: PortalDesired,
+): boolean {
   return portal.id === portalId
     && portal.name === expected.name
     && portal.hostname === expected.hostname
@@ -384,7 +638,10 @@ function portalMatchesExpected(portal, portalId, expected) {
     && samePortalServers(portal.servers, expected.servers);
 }
 
-function samePortalServers(liveServers, expectedServers) {
+function samePortalServers(
+  liveServers: BoundaryValue,
+  expectedServers: readonly PortalServer[],
+): boolean {
   if (!Array.isArray(liveServers) || liveServers.length !== expectedServers.length) return false;
   return expectedServers.every((expected) => {
     const matches = liveServers.filter((live) =>
@@ -398,11 +655,16 @@ function samePortalServers(liveServers, expectedServers) {
   });
 }
 
-function sameEnabledPortalTools(liveTools, expectedTools) {
+function sameEnabledPortalTools(
+  liveTools: BoundaryValue,
+  expectedTools: readonly PortalTool[],
+): boolean {
   if (!Array.isArray(liveTools)) return false;
-  const liveEnabled = [];
+  const liveEnabled: string[] = [];
   for (const tool of liveTools) {
-    if (!isObject(tool) || typeof tool.name !== 'string' || typeof tool.enabled !== 'boolean') {
+    if (!isObject(tool)
+      || !v.is(stringSchema, tool.name)
+      || !v.is(v.boolean(), tool.enabled)) {
       return false;
     }
     if (tool.enabled) liveEnabled.push(tool.name);
@@ -413,11 +675,11 @@ function sameEnabledPortalTools(liveTools, expectedTools) {
   return sameTextSet(liveEnabled, expectedEnabled);
 }
 
-function optionalPromptsAreEmpty(value) {
+function optionalPromptsAreEmpty(value: BoundaryValue): boolean {
   return value === undefined || (Array.isArray(value) && value.length === 0);
 }
 
-function sameTextSet(left, right) {
+function sameTextSet(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length
     && new Set(left).size === left.length
     && [...left].sort(compareText).every(
@@ -425,13 +687,17 @@ function sameTextSet(left, right) {
     );
 }
 
-async function provePendingPortalCreateRollbackQuiet(cloudflare, polling, mutation) {
+async function provePendingPortalCreateRollbackQuiet(
+  cloudflare: CloudflareClient,
+  polling: PollingOptions,
+  mutation: PendingPortalRollbackMutation,
+): Promise<void> {
   let everySampleQuiet = true;
   for (let attempt = 0; attempt < polling.attempts; attempt += 1) {
     const sample = await readPendingPortalCreateRollbackSample(cloudflare, mutation);
     assertNoPendingPortalAppCandidates(sample);
     if (sample.portal !== null) {
-      assertPendingPortalCreateShape(sample.portal, mutation);
+      assertPendingPortalCreateContract(sample.portal, mutation);
       everySampleQuiet = false;
     }
     if (attempt + 1 < polling.attempts) await polling.delayImpl(polling.intervalMs);
@@ -439,40 +705,78 @@ async function provePendingPortalCreateRollbackQuiet(cloudflare, polling, mutati
   if (!everySampleQuiet) fail('sync_timeout');
 }
 
-async function normalizeMutationInput(input, boundTarget) {
+async function normalizeMutationInput(
+  input: BoundaryValue,
+  boundTarget: BoundTarget,
+): Promise<GatewayMutation> {
   if (!isObject(input)) fail('invalid_input');
   rejectMutationKeys(input, ['change', 'receipt', 'config', 'target', 'access']);
-  const { change, config, target, access } = input;
+  const { access, change: rawChange, config: rawConfig, target: rawTarget } = input;
   const receipt = await validateReceipt(input.receipt);
-  assertTarget(target, boundTarget, receipt.target);
-  if (!isObject(config) || !isObject(config.gateway) || config.gateway.hostname !== receipt.target.hostname) {
+  assertTarget(rawTarget, boundTarget, receipt.target);
+  if (!isObject(rawTarget)) fail('invalid_input');
+  let configInput: JsonValue;
+  let config: GatewayConfig;
+  try {
+    configInput = v.parse(jsonValueSchema, rawConfig);
+    config = validateGatewayConfig(configInput);
+  } catch {
     fail('invalid_input');
   }
-  if (!isObject(change) || !ACTIONS.has(change.action) || !RESOURCE_KINDS.has(change.kind)) {
+  if (config.gateway.hostname !== receipt.target.hostname) {
+    fail('invalid_input');
+  }
+  if (!isObject(rawChange)) {
     fail('unsupported_change');
   }
-  if (typeof change.key !== 'string' || !RESOURCE_KEY.test(change.key)) fail('invalid_input');
+  const actionResult = v.safeParse(mutationActionSchema, rawChange.action);
+  const kindResult = v.safeParse(resourceKindSchema, rawChange.kind);
+  if (!actionResult.success || !kindResult.success) fail('unsupported_change');
+  const action = actionResult.output;
+  const kind = kindResult.output;
+  if (!v.is(stringSchema, rawChange.key) || !RESOURCE_KEY.test(rawChange.key)) {
+    fail('invalid_input');
+  }
+  const key = rawChange.key;
   if (!receipt.pending
-    || receipt.pending.action !== change.action
-    || receipt.pending.kind !== change.kind
-    || receipt.pending.key !== change.key) fail('invalid_input');
-  if (change.action !== 'delete') {
-    if (!DESIRED_HASH.test(change.desiredHash) || !isObject(change.desired)) fail('invalid_input');
-    if (change.desiredHash !== receipt.pending.expectedDesiredHash) fail('invalid_input');
+    || receipt.pending.action !== action
+    || receipt.pending.kind !== kind
+    || receipt.pending.key !== key) fail('invalid_input');
+
+  let change: MutationChange;
+  let ownedResource: ReceiptResource | undefined;
+  if (action !== 'delete') {
+    if (!v.is(stringSchema, rawChange.desiredHash)
+      || !DESIRED_HASH.test(rawChange.desiredHash)
+      || !isObject(rawChange.desired)) fail('invalid_input');
+    const desired = v.parse(jsonObjectSchema, rawChange.desired);
+    const desiredHash = rawChange.desiredHash;
+    if (desiredHash !== receipt.pending.expectedDesiredHash) fail('invalid_input');
     const computedDesiredHash = await hashCanonical({
       schemaVersion: 1,
-      kind: change.kind,
-      key: change.key,
-      desired: change.desired,
+      kind,
+      key,
+      desired,
     });
-    if (computedDesiredHash !== change.desiredHash) fail('invalid_input');
-    assertDesiredMetadata(change.desired, receipt.installationId);
+    if (computedDesiredHash !== desiredHash) fail('invalid_input');
+    assertDesiredMetadata(desired, receipt.installationId);
+    if (action === 'create') {
+      change = { action, desired, desiredHash, key, kind };
+    } else {
+      const provider = normalizeProviderLocator(kind, rawChange.provider);
+      if ((kind === 'mcp_server' || kind === 'portal') && provider.id !== key) {
+        fail('ownership_conflict');
+      }
+      change = { action, desired, desiredHash, key, kind, provider };
+    }
+  } else {
+    const provider = normalizeProviderLocator(kind, rawChange.provider);
+    if ((kind === 'mcp_server' || kind === 'portal') && provider.id !== key) {
+      fail('ownership_conflict');
+    }
+    change = { action, key, kind, provider };
   }
-  let ownedResource;
   if (change.action !== 'create') {
-    assertProviderLocator(change.kind, change.provider);
-    if ((change.kind === 'mcp_server' || change.kind === 'portal')
-      && change.provider.id !== change.key) fail('ownership_conflict');
     ownedResource = receipt.resources.find((resource) =>
       resource.kind === change.kind
       && resource.key === change.key
@@ -483,14 +787,19 @@ async function normalizeMutationInput(input, boundTarget) {
     change,
     receipt,
     config,
-    target,
+    configInput,
+    target: rawTarget,
     access,
     ownedResource,
     marker: ownershipMarker(receipt.installationId, change.key),
   };
 }
 
-async function dispatchMutation(cloudflare, polling, mutation) {
+async function dispatchMutation(
+  cloudflare: CloudflareClient,
+  polling: PollingOptions,
+  mutation: GatewayMutation,
+): Promise<MutationResult | void> {
   const { change } = mutation;
   if (change.kind === 'mcp_server') return mutateServer(cloudflare, polling, mutation);
   if (change.kind === 'source_access_application') {
@@ -505,7 +814,11 @@ async function dispatchMutation(cloudflare, polling, mutation) {
   fail('unsupported_change');
 }
 
-async function mutateServer(cloudflare, polling, mutation) {
+async function mutateServer(
+  cloudflare: CloudflareClient,
+  polling: PollingOptions,
+  mutation: GatewayMutation,
+): Promise<void> {
   const { change, marker } = mutation;
   if (change.action === 'delete') {
     const live = await exactRead(() => cloudflare.getMcpServer(change.provider.id), change.provider.id);
@@ -568,7 +881,11 @@ async function mutateServer(cloudflare, polling, mutation) {
   });
 }
 
-async function mutateSourceAccessApplication(cloudflare, polling, mutation) {
+async function mutateSourceAccessApplication(
+  cloudflare: CloudflareClient,
+  polling: PollingOptions,
+  mutation: GatewayMutation,
+): Promise<void> {
   const { change, marker } = mutation;
   if (change.action === 'delete') {
     let app = await exactRead(
@@ -607,7 +924,8 @@ async function mutateSourceAccessApplication(cloudflare, polling, mutation) {
 
   const apps = await cloudflare.listAccessApps();
   if (!Array.isArray(apps)) fail('invalid_provider_response');
-  if (apps.some((app) => app?.name === marker || isExactServerApp(app, server.provider.id))) {
+  if (apps.some((app) => (isObject(app) && app.name === marker)
+    || isExactServerApp(app, server.provider.id))) {
     fail('resource_collision');
   }
   const created = await cloudflare.createAccessApp({
@@ -627,7 +945,11 @@ async function mutateSourceAccessApplication(cloudflare, polling, mutation) {
   await assertAccessApplicationPoliciesEmpty(cloudflare, live);
 }
 
-async function mutatePortal(cloudflare, polling, mutation) {
+async function mutatePortal(
+  cloudflare: CloudflareClient,
+  _polling: PollingOptions,
+  mutation: GatewayMutation,
+): Promise<void> {
   const { change, marker } = mutation;
   if (change.action === 'delete') {
     assertPortalApplicationReceiptAbsent(mutation.receipt);
@@ -668,7 +990,11 @@ async function mutatePortal(cloudflare, polling, mutation) {
   await cloudflare.updatePortal(change.provider.id, expected);
 }
 
-async function mutatePortalAccessApplication(cloudflare, polling, mutation) {
+async function mutatePortalAccessApplication(
+  cloudflare: CloudflareClient,
+  polling: PollingOptions,
+  mutation: GatewayMutation,
+): Promise<MutationResult | void> {
   const { change, marker } = mutation;
   if (change.action === 'delete') {
     let app = await exactRead(
@@ -732,7 +1058,7 @@ async function mutatePortalAccessApplication(cloudflare, polling, mutation) {
     });
     const apps = await cloudflare.listAccessApps();
     if (!Array.isArray(apps)) fail('invalid_provider_response');
-    if (apps.some((app) => app?.name === expected.body.name
+    if (apps.some((app) => (isObject(app) && app.name === expected.body.name)
       || isPortalAppCandidate(app, expected.body.domain))) {
       fail('resource_collision');
     }
@@ -752,7 +1078,7 @@ async function mutatePortalAccessApplication(cloudflare, polling, mutation) {
 
   let live = await exactRead(() => cloudflare.getAccessApp(change.provider.id), change.provider.id);
   if (live === null || live.name !== expected.body.name
-    || !portalAccessApplicationShapeMatches(live, expected.body.domain)) {
+    || !portalAccessApplicationContractMatches(live, expected.body.domain)) {
     fail('ownership_conflict');
   }
   await assertPortalAccessApplicationCandidateSet(
@@ -764,7 +1090,7 @@ async function mutatePortalAccessApplication(cloudflare, polling, mutation) {
   await assertPortalAccessApplicationPolicyPhase(cloudflare, mutation, live);
   live = await exactRead(() => cloudflare.getAccessApp(change.provider.id), change.provider.id);
   if (live === null || live.name !== expected.body.name
-    || !portalAccessApplicationShapeMatches(live, expected.body.domain)) {
+    || !portalAccessApplicationContractMatches(live, expected.body.domain)) {
     fail('ownership_conflict');
   }
   await assertReceiptOwnedPortal(cloudflare, mutation, expected.portalResourceKey, {
@@ -774,16 +1100,21 @@ async function mutatePortalAccessApplication(cloudflare, polling, mutation) {
   await cloudflare.updateAccessApp(change.provider.id, expected.body);
 }
 
-async function mutatePolicy(cloudflare, polling, mutation) {
+async function mutatePolicy(
+  cloudflare: CloudflareClient,
+  _polling: PollingOptions,
+  mutation: GatewayMutation,
+): Promise<void> {
   const { change, marker } = mutation;
   if (change.action === 'delete') {
-    const parent = await assertPolicyParent(cloudflare, mutation, change.provider.parentId);
-    const policies = await cloudflare.listAppPolicies(change.provider.parentId);
+    const parentId = requireSafeId(change.provider.parentId);
+    const parent = await assertPolicyParent(cloudflare, mutation, parentId);
+    const policies = await cloudflare.listAppPolicies(parentId);
     assertInlinePolicySet(parent, policies);
     const listed = assertExpectedPolicySet(policies, change.provider.id, marker, { allowAbsent: true });
     if (listed === null) return;
     const live = await exactRead(
-      () => cloudflare.getAppPolicy(change.provider.parentId, change.provider.id),
+      () => cloudflare.getAppPolicy(parentId, change.provider.id),
       change.provider.id,
     );
     if (live === null) fail('ownership_conflict');
@@ -791,21 +1122,21 @@ async function mutatePolicy(cloudflare, polling, mutation) {
     const confirmedParent = await assertPolicyParent(
       cloudflare,
       mutation,
-      change.provider.parentId,
+      parentId,
     );
     if (POLICY_KINDS.has(change.kind)) {
-      const confirmedPolicies = await cloudflare.listAppPolicies(change.provider.parentId);
+      const confirmedPolicies = await cloudflare.listAppPolicies(parentId);
       assertExpectedPolicySet(confirmedPolicies, change.provider.id, marker);
       assertInlinePolicySet(confirmedParent, confirmedPolicies);
     }
-    await cloudflare.deleteAppPolicy(change.provider.parentId, change.provider.id);
+    await cloudflare.deleteAppPolicy(parentId, change.provider.id);
     return;
   }
 
   const body = await normalizePolicyDesired(change.desired, mutation.access, marker);
   const parentId = change.action === 'create'
-    ? await findPolicyParent(cloudflare, polling, mutation)
-    : change.provider.parentId;
+    ? findPolicyParent(mutation)
+    : requireSafeId(change.provider.parentId);
   let parent = await assertPolicyParent(cloudflare, mutation, parentId);
 
   if (change.action === 'create') {
@@ -840,30 +1171,42 @@ async function mutatePolicy(cloudflare, polling, mutation) {
   await cloudflare.updateAppPolicy(parentId, change.provider.id, body);
 }
 
-function assertInlinePolicySet(app, policies) {
+function assertInlinePolicySet(app: BoundaryObject, policies: BoundaryValue): void {
   if (!inlinePoliciesMatchListedPolicies(app, policies)) fail('ownership_conflict');
 }
 
-function assertEmptyPolicySet(policies, marker) {
+function assertEmptyPolicySet(policies: BoundaryValue, marker: string): void {
   if (!Array.isArray(policies)) fail('invalid_provider_response');
   if (policies.length === 0) return;
   if (policies.some((policy) => policy?.name !== marker)) fail('ownership_conflict');
   fail('resource_collision');
 }
 
-function assertExpectedPolicySet(policies, id, marker, { allowAbsent = false } = {}) {
+function assertExpectedPolicySet(
+  policies: BoundaryValue,
+  id: string,
+  marker: string,
+  { allowAbsent = false }: { readonly allowAbsent?: boolean } = {},
+): BoundaryObject | null {
   if (!Array.isArray(policies)) fail('invalid_provider_response');
-  const expected = policies.filter((policy) => policy?.id === id && policy?.name === marker);
-  const unexpected = policies.filter((policy) => policy?.id !== id || policy?.name !== marker);
+  const expected = policies.filter((policy) =>
+    isObject(policy) && policy.id === id && policy.name === marker);
+  const unexpected = policies.filter((policy) =>
+    !isObject(policy) || policy.id !== id || policy.name !== marker);
   if (unexpected.length > 0 || expected.length > 1) fail('ownership_conflict');
   if (expected.length === 0) {
     if (allowAbsent && policies.length === 0) return null;
     fail('ownership_conflict');
   }
-  return expected[0];
+  const match = expected[0];
+  if (match === undefined) fail('ownership_conflict');
+  return match;
 }
 
-async function mutateDns(cloudflare, mutation) {
+async function mutateDns(
+  cloudflare: CloudflareClient,
+  mutation: GatewayMutation,
+): Promise<void> {
   const { change, marker, config } = mutation;
   if (change.action === 'delete') {
     const live = await exactRead(() => cloudflare.getDnsRecord(change.provider.id), change.provider.id);
@@ -874,31 +1217,38 @@ async function mutateDns(cloudflare, mutation) {
     return;
   }
   const body = normalizeDnsDesired(change.desired, marker, config.gateway.hostname);
+  const portalKey = requireResourceKey(change.desired.dependsOnResourceKey);
   if (change.action === 'create') {
-    await assertDnsDependencies(cloudflare, mutation, change.desired.dependsOnResourceKey);
+    await assertDnsDependencies(cloudflare, mutation, portalKey);
     const collisions = await cloudflare.listDnsRecords({
       'name.exact': config.gateway.hostname,
       match: 'all',
     });
     if (!Array.isArray(collisions)) fail('invalid_provider_response');
     if (collisions.length > 0) fail('resource_collision');
-    await assertDnsDependencies(cloudflare, mutation, change.desired.dependsOnResourceKey);
+    await assertDnsDependencies(cloudflare, mutation, portalKey);
     await cloudflare.createDnsRecord(body);
     return;
   }
-  await assertDnsDependencies(cloudflare, mutation, change.desired.dependsOnResourceKey);
+  await assertDnsDependencies(cloudflare, mutation, portalKey);
   const live = await exactRead(() => cloudflare.getDnsRecord(change.provider.id), change.provider.id);
   if (live === null) fail('ownership_conflict');
   assertMarker(live.comment, marker);
   if (normalizeDns(live.name) !== config.gateway.hostname) fail('ownership_conflict');
-  await assertDnsDependencies(cloudflare, mutation, change.desired.dependsOnResourceKey);
+  await assertDnsDependencies(cloudflare, mutation, portalKey);
   await cloudflare.updateDnsRecord(change.provider.id, body);
 }
 
-async function assertDnsDependencies(cloudflare, mutation, portalKey) {
-  let desiredState;
+async function assertDnsDependencies(
+  cloudflare: CloudflareClient,
+  mutation: GatewayMutation,
+  portalKey: string,
+): Promise<void> {
+  if (mutation.change.action === 'delete') fail('invalid_input');
+  const mutationDesired = mutation.change.desired;
+  let desiredState: GatewayDesiredState;
   try {
-    desiredState = await buildGatewayDesiredState(mutation.config, {
+    desiredState = await buildGatewayDesiredState(mutation.configInput, {
       target: mutation.target,
       access: mutation.access,
     });
@@ -916,16 +1266,21 @@ async function assertDnsDependencies(cloudflare, mutation, portalKey) {
     resource.kind === 'portal_access_policy'
       && resource.desired.portalApplicationResourceKey === desiredApplication?.key);
   if (desiredState.installationId !== mutation.receipt.installationId
-    || desiredDns?.desiredHash !== mutation.change.desiredHash
-    || canonicalJson(desiredDns?.desired) !== canonicalJson(mutation.change.desired)
-    || !desiredPortal || !desiredApplication || !desiredPolicy) fail('invalid_input');
+    || desiredDns === undefined
+    || desiredDns.desiredHash !== mutation.change.desiredHash
+    || desiredPortal === undefined
+    || desiredApplication === undefined
+    || desiredPolicy === undefined) fail('invalid_input');
+  if (canonicalJson(desiredDns.desired) !== canonicalJson(mutationDesired)) {
+    fail('invalid_input');
+  }
 
   const receiptPortal = exactReceiptResource(mutation.receipt, desiredPortal);
   const receiptApplication = exactReceiptResource(mutation.receipt, desiredApplication);
   const receiptPolicy = exactReceiptResource(mutation.receipt, desiredPolicy);
   if (receiptPortal.provider.id !== desiredPortal.key
     || receiptPolicy.provider.parentId !== receiptApplication.provider.id
-    || receiptPolicy.identityHash !== desiredPolicy.desired.allow.identitiesHash) {
+    || receiptPolicy.identityHash !== policyIdentityHash(desiredPolicy.desired)) {
     fail('ownership_conflict');
   }
 
@@ -972,37 +1327,47 @@ async function assertDnsDependencies(cloudflare, mutation, portalKey) {
   }
 }
 
-function exactReceiptResource(receipt, desired) {
+function exactReceiptResource(
+  receipt: InstallationReceipt,
+  desired: DesiredResource,
+): ReceiptResource {
   const matches = receipt.resources.filter((resource) =>
     resource.kind === desired.kind
       && resource.key === desired.key
       && resource.desiredHash === desired.desiredHash
       && resource.marker === ownershipMarker(receipt.installationId, desired.key));
   if (matches.length !== 1) fail('ownership_conflict');
-  return matches[0];
+  const match = matches[0];
+  if (match === undefined) fail('ownership_conflict');
+  return match;
 }
 
-function accessPolicyMatches(live, expected) {
+function accessPolicyMatches(live: BoundaryObject, expected: PolicyBody): boolean {
   if (live.name !== expected.name || live.decision !== expected.decision
     || !Array.isArray(live.exclude) || live.exclude.length !== 0
     || !Array.isArray(live.require) || live.require.length !== 0
     || !Array.isArray(live.include) || live.include.length !== expected.include.length) {
     return false;
   }
-  const liveEmails = live.include.map((rule) => rule?.email?.email);
+  const liveEmails = live.include.map(extractPolicyEmail);
   const expectedEmails = expected.include.map((rule) => rule.email.email);
-  return liveEmails.every((email) => typeof email === 'string')
-    && sameTextSet(liveEmails.map((email) => email.trim().toLowerCase()), expectedEmails);
+  return liveEmails.every((email) => email !== null)
+    && sameTextSet(
+      liveEmails.map((email) => email === null ? '' : email.trim().toLowerCase()),
+      expectedEmails,
+    );
 }
 
-function normalizeServerDesired(value, marker) {
+function normalizeServerDesired(value: JsonObject, marker: string): ServerDesired {
   assertExactKeys(value, [
     'metadata', 'sourceId', 'name', 'endpoint', 'capabilityMode', 'secureWebGateway',
     'toolPolicy', 'authentication',
   ]);
   if (value.capabilityMode !== 'read_only' || value.secureWebGateway !== false) fail('invalid_input');
-  if (typeof value.name !== 'string' || value.name.length < 1 || value.name.length > 350) fail('invalid_input');
-  requireHttpsUrl(value.endpoint);
+  const name = requireText(value.name);
+  const endpoint = requireText(value.endpoint);
+  if (name.length < 1 || name.length > 350) fail('invalid_input');
+  requireHttpsUrl(endpoint);
   if (!isObject(value.toolPolicy)) fail('invalid_input');
   assertExactKeys(value.toolPolicy, ['defaultDisabled', 'allowedTools']);
   if (value.toolPolicy.defaultDisabled !== true) fail('invalid_input');
@@ -1020,90 +1385,106 @@ function normalizeServerDesired(value, marker) {
   if (!authType) fail('invalid_input');
   return {
     auth_type: authType,
-    hostname: value.endpoint,
-    name: value.name,
+    hostname: endpoint,
+    name,
     description: marker,
-    updated_tools: tools.map((name) => ({ name, enabled: true })),
+    updated_tools: tools.map((toolName) => ({ name: toolName, enabled: true as const })),
   };
 }
 
-function normalizeSourceAccessApplicationDesired(value) {
+function normalizeSourceAccessApplicationDesired(
+  value: JsonObject,
+): SourceAccessApplicationDesired {
   assertExactKeys(value, ['metadata', 'sourceResourceKey', 'applicationType']);
-  if (!RESOURCE_KEY.test(value.sourceResourceKey) || value.applicationType !== 'mcp') {
-    fail('invalid_input');
-  }
-  return { sourceResourceKey: value.sourceResourceKey };
+  const sourceResourceKey = requireResourceKey(value.sourceResourceKey);
+  if (value.applicationType !== 'mcp') fail('invalid_input');
+  return { sourceResourceKey };
 }
 
-function normalizePortalAccessApplicationDesired(value) {
+function normalizePortalAccessApplicationDesired(
+  value: JsonObject,
+): PortalAccessApplicationDesired {
   assertExactKeys(value, [
     'metadata', 'portalResourceKey', 'name', 'hostname', 'applicationType',
     'destination', 'authentication',
   ]);
-  if (!RESOURCE_KEY.test(value.portalResourceKey)
-    || value.applicationType !== 'mcp_portal'
-    || typeof value.name !== 'string'
-    || value.name.length < 1) fail('invalid_input');
-  requireHostname(value.hostname);
+  const portalResourceKey = requireResourceKey(value.portalResourceKey);
+  const name = requireText(value.name);
+  const hostname = requireText(value.hostname);
+  if (value.applicationType !== 'mcp_portal' || name.length < 1) fail('invalid_input');
+  requireHostname(hostname);
   if (!isObject(value.destination)) fail('invalid_input');
   assertExactKeys(value.destination, ['type', 'uri']);
-  if (value.destination.type !== 'public' || value.destination.uri !== value.hostname) {
+  if (value.destination.type !== 'public' || value.destination.uri !== hostname) {
     fail('invalid_input');
   }
-  if (value.name.length > 350 || /[\u0000-\u001f\u007f]/.test(value.name)) fail('invalid_input');
+  if (name.length > 350 || hasControlCharacter(name)) fail('invalid_input');
   return {
-    portalResourceKey: value.portalResourceKey,
+    portalResourceKey,
     body: {
-      name: value.name,
+      name,
       type: 'mcp_portal',
-      domain: value.hostname,
-      destinations: [{ type: 'public', uri: value.hostname }],
+      domain: hostname,
+      destinations: [{ type: 'public', uri: hostname }],
       oauth_configuration: normalizeManagedOauth(value.authentication),
     },
   };
 }
 
-function normalizePortalDesired(value, marker) {
+function normalizePortalDesired(value: JsonObject, marker: string): PortalDesired {
   assertExactKeys(value, [
     'metadata', 'name', 'hostname', 'capabilityMode', 'codeMode',
     'secureWebGateway', 'sourceMappings',
   ]);
   if (value.capabilityMode !== 'read_only' || value.secureWebGateway !== false) fail('invalid_input');
-  if (typeof value.name !== 'string' || value.name.length < 1 || value.name.length > 350) fail('invalid_input');
-  requireHostname(value.hostname);
-  if (!['off', 'opt_in', 'default_on', 'enforced'].includes(value.codeMode)) fail('invalid_input');
+  const name = requireText(value.name);
+  const hostname = requireText(value.hostname);
+  if (name.length < 1 || name.length > 350) fail('invalid_input');
+  requireHostname(hostname);
+  const codeModeResult = v.safeParse(codeModeSchema, value.codeMode);
+  if (!codeModeResult.success) fail('invalid_input');
+  const codeMode = codeModeResult.output;
   if (!Array.isArray(value.sourceMappings) || value.sourceMappings.length === 0) fail('invalid_input');
-  const seen = new Set();
-  const servers = value.sourceMappings.map((mapping) => {
+  const seen = new Set<string>();
+  const servers: PortalServer[] = value.sourceMappings.map((mapping) => {
     if (!isObject(mapping)) fail('invalid_input');
     assertExactKeys(mapping, ['sourceResourceKey', 'defaultDisabled', 'allowedTools', 'onBehalfOfUser']);
-    if (!RESOURCE_KEY.test(mapping.sourceResourceKey) || seen.has(mapping.sourceResourceKey)) fail('invalid_input');
-    seen.add(mapping.sourceResourceKey);
-    if (mapping.defaultDisabled !== true || typeof mapping.onBehalfOfUser !== 'boolean') fail('invalid_input');
+    const sourceResourceKey = requireResourceKey(mapping.sourceResourceKey);
+    if (seen.has(sourceResourceKey)) fail('invalid_input');
+    seen.add(sourceResourceKey);
+    if (mapping.defaultDisabled !== true || !v.is(v.boolean(), mapping.onBehalfOfUser)) {
+      fail('invalid_input');
+    }
     return {
-      server_id: mapping.sourceResourceKey,
-      default_disabled: true,
+      server_id: sourceResourceKey,
+      default_disabled: true as const,
       on_behalf: mapping.onBehalfOfUser,
       updated_prompts: [],
-      updated_tools: normalizeTools(mapping.allowedTools).map((name) => ({ name, enabled: true })),
+      updated_tools: normalizeTools(mapping.allowedTools)
+        .map((toolName) => ({ name: toolName, enabled: true as const })),
     };
   });
   return {
-    hostname: value.hostname,
-    name: value.name,
-    code_mode: value.codeMode,
+    hostname,
+    name,
+    code_mode: codeMode,
     description: marker,
     secure_web_gateway: false,
     servers,
   };
 }
 
-async function normalizePolicyDesired(value, access, marker) {
+async function normalizePolicyDesired(
+  value: JsonObject,
+  access: BoundaryValue,
+  marker: string,
+): Promise<PolicyBody> {
   assertExactKeys(value, value.portalApplicationResourceKey === undefined
     ? ['metadata', 'sourceApplicationResourceKey', 'defaultAction', 'allow']
     : ['metadata', 'portalApplicationResourceKey', 'defaultAction', 'allow']);
   const parentKey = value.sourceApplicationResourceKey ?? value.portalApplicationResourceKey;
-  if (!RESOURCE_KEY.test(parentKey) || value.defaultAction !== 'deny' || !isObject(value.allow)) {
+  requireResourceKey(parentKey);
+  if (value.defaultAction !== 'deny' || !isObject(value.allow)) {
     fail('invalid_input');
   }
   assertExactKeys(value.allow, ['identitiesRef', 'identityType', 'identityCount', 'identitiesHash']);
@@ -1111,9 +1492,11 @@ async function normalizePolicyDesired(value, access, marker) {
     fail('invalid_input');
   }
   const emails = normalizeEmails(access);
-  if (emails.length !== value.allow.identityCount) fail('access_identity_mismatch');
+  if (!v.is(numberSchema, value.allow.identityCount)
+    || emails.length !== value.allow.identityCount) fail('access_identity_mismatch');
   const hash = await hashCanonical({ emails });
-  if (hash !== value.allow.identitiesHash) fail('access_identity_mismatch');
+  if (!v.is(stringSchema, value.allow.identitiesHash)
+    || hash !== value.allow.identitiesHash) fail('access_identity_mismatch');
   return {
     name: marker,
     decision: 'allow',
@@ -1123,7 +1506,11 @@ async function normalizePolicyDesired(value, access, marker) {
   };
 }
 
-function normalizeDnsDesired(value, marker, hostname) {
+function normalizeDnsDesired(
+  value: JsonObject,
+  marker: string,
+  hostname: string,
+) {
   assertExactKeys(value, [
     'metadata', 'recordType', 'hostname', 'content', 'proxied', 'dependsOnResourceKey',
   ]);
@@ -1131,7 +1518,7 @@ function normalizeDnsDesired(value, marker, hostname) {
     || value.hostname !== hostname
     || value.content !== PORTAL_CNAME_TARGET
     || value.proxied !== true
-    || !RESOURCE_KEY.test(value.dependsOnResourceKey)) fail('invalid_input');
+    || !safeResourceKey(value.dependsOnResourceKey)) fail('invalid_input');
   return {
     type: 'CNAME',
     name: hostname,
@@ -1142,38 +1529,52 @@ function normalizeDnsDesired(value, marker, hostname) {
   };
 }
 
-async function findPolicyParent(cloudflare, polling, mutation) {
-  void cloudflare;
-  void polling;
+function findPolicyParent(mutation: GatewayMutation): string {
   if (mutation.change.kind === 'source_access_policy') {
-    const applicationKey = mutation.change.desired?.sourceApplicationResourceKey;
+    const applicationKey = requireResourceKey(
+      mutation.change.desired?.sourceApplicationResourceKey,
+    );
     const matches = mutation.receipt.resources.filter((resource) =>
       resource.kind === 'source_access_application' && resource.key === applicationKey);
     if (matches.length !== 1) fail('ownership_conflict');
-    return matches[0].provider.id;
+    const match = matches[0];
+    if (match === undefined) fail('ownership_conflict');
+    return match.provider.id;
   }
-  const applicationKey = mutation.change.desired?.portalApplicationResourceKey;
+  const applicationKey = requireResourceKey(
+    mutation.change.desired?.portalApplicationResourceKey,
+  );
   const matches = mutation.receipt.resources.filter((resource) =>
     resource.kind === 'portal_access_application' && resource.key === applicationKey);
   if (matches.length !== 1) fail('ownership_conflict');
-  return matches[0].provider.id;
+  const match = matches[0];
+  if (match === undefined) fail('ownership_conflict');
+  return match.provider.id;
 }
 
-async function assertPolicyParent(cloudflare, mutation, parentId) {
+async function assertPolicyParent(
+  cloudflare: CloudflareClient,
+  mutation: GatewayMutation,
+  parentId: string,
+): Promise<BoundaryObject> {
   const app = await exactRead(() => cloudflare.getAccessApp(parentId), parentId);
   if (app === null) fail('access_app_missing');
   if (mutation.change.kind === 'portal_access_policy') {
-    const desiredApplicationKey = mutation.change.desired?.portalApplicationResourceKey;
+    const desiredApplicationKey = optionalResourceKey(
+      mutation.change.desired?.portalApplicationResourceKey,
+    );
     const receiptApplications = mutation.receipt.resources.filter((resource) =>
       resource.kind === 'portal_access_application'
       && (!desiredApplicationKey || resource.key === desiredApplicationKey)
       && resource.provider.id === parentId);
     if (receiptApplications.length !== 1) fail('ownership_conflict');
+    const receiptApplication = receiptApplications[0];
+    if (receiptApplication === undefined) fail('ownership_conflict');
     await assertPortalAccessApplicationAuthority(
       cloudflare,
       mutation,
       app,
-      ownershipMarker(mutation.receipt.installationId, receiptApplications[0].key),
+      ownershipMarker(mutation.receipt.installationId, receiptApplication.key),
       {
         allowMissingPortal: mutation.change.action === 'delete',
         requireDesired: true,
@@ -1181,29 +1582,38 @@ async function assertPolicyParent(cloudflare, mutation, parentId) {
     );
     return app;
   }
-  const desiredApplicationKey = mutation.change.desired?.sourceApplicationResourceKey;
+  const desiredApplicationKey = optionalResourceKey(
+    mutation.change.desired?.sourceApplicationResourceKey,
+  );
   const receiptApplications = mutation.receipt.resources.filter((resource) =>
     resource.kind === 'source_access_application'
     && (!desiredApplicationKey || resource.key === desiredApplicationKey)
     && resource.provider.id === parentId);
   if (receiptApplications.length !== 1) fail('ownership_conflict');
+  const receiptApplication = receiptApplications[0];
+  if (receiptApplication === undefined) fail('ownership_conflict');
   await assertSourceAccessApplicationAuthority(
     cloudflare,
     mutation,
     app,
-    ownershipMarker(mutation.receipt.installationId, receiptApplications[0].key),
+    ownershipMarker(mutation.receipt.installationId, receiptApplication.key),
     { allowMissingServer: mutation.change.action === 'delete' },
   );
   return app;
 }
 
-async function assertReceiptOwnedServer(cloudflare, mutation, serverKey) {
+async function assertReceiptOwnedServer(
+  cloudflare: CloudflareClient,
+  mutation: GatewayMutation,
+  serverKey: string,
+): Promise<ReceiptResource> {
   const servers = mutation.receipt.resources.filter((resource) =>
     resource.kind === 'mcp_server'
     && resource.key === serverKey
     && resource.provider.id === serverKey);
   if (servers.length !== 1) fail('ownership_conflict');
   const server = servers[0];
+  if (server === undefined) fail('ownership_conflict');
   const live = await exactRead(
     () => cloudflare.getMcpServer(server.provider.id),
     server.provider.id,
@@ -1216,12 +1626,12 @@ async function assertReceiptOwnedServer(cloudflare, mutation, serverKey) {
 }
 
 async function assertSourceAccessApplicationAuthority(
-  cloudflare,
-  mutation,
-  app,
-  marker,
-  { allowMissingServer = false } = {},
-) {
+  cloudflare: CloudflareClient,
+  mutation: GatewayMutation,
+  app: BoundaryObject,
+  marker: string,
+  { allowMissingServer = false }: { readonly allowMissingServer?: boolean } = {},
+): Promise<ReceiptResource | null> {
   if (app?.name !== marker || app?.type !== 'mcp' || !sourceAppHasNoDomain(app)
     || !Array.isArray(app.destinations)
     || app.destinations.length !== 1) fail('ownership_conflict');
@@ -1232,38 +1642,46 @@ async function assertSourceAccessApplicationAuthority(
     || !safeId(destination.mcp_server_id)) {
     fail('ownership_conflict');
   }
+  const serverId = destination.mcp_server_id;
   const servers = mutation.receipt.resources.filter((resource) =>
     resource.kind === 'mcp_server'
-    && resource.provider.id === destination.mcp_server_id
+    && resource.provider.id === serverId
     && resource.provider.id === resource.key);
   if (servers.length === 1) {
+    const server = servers[0];
+    if (server === undefined) fail('ownership_conflict');
     const live = await exactRead(
-      () => cloudflare.getMcpServer(servers[0].provider.id),
-      servers[0].provider.id,
+      () => cloudflare.getMcpServer(server.provider.id),
+      server.provider.id,
     );
     if (live === null) {
-      if (allowMissingServer) return servers[0];
+      if (allowMissingServer) return server;
       fail('ownership_conflict');
     }
-    if (live.description !== ownershipMarker(mutation.receipt.installationId, servers[0].key)) {
+    if (live.description !== ownershipMarker(mutation.receipt.installationId, server.key)) {
       fail('ownership_conflict');
     }
-    return servers[0];
+    return server;
   }
   if (allowMissingServer && servers.length === 0) {
     const live = await exactRead(
-      () => cloudflare.getMcpServer(destination.mcp_server_id),
-      destination.mcp_server_id,
+      () => cloudflare.getMcpServer(serverId),
+      serverId,
     );
     if (live === null) return null;
   }
   fail('ownership_conflict');
 }
 
-async function expectedPortalForApplicationMutation(mutation, portalKey) {
-  let desiredState;
+async function expectedPortalForApplicationMutation(
+  mutation: GatewayMutation,
+  portalKey: string,
+): Promise<PortalDesired> {
+  if (mutation.change.action === 'delete') fail('invalid_input');
+  const mutationDesired = mutation.change.desired;
+  let desiredState: GatewayDesiredState;
   try {
-    desiredState = await buildGatewayDesiredState(mutation.config, {
+    desiredState = await buildGatewayDesiredState(mutation.configInput, {
       target: mutation.target,
       access: mutation.access,
     });
@@ -1275,9 +1693,12 @@ async function expectedPortalForApplicationMutation(mutation, portalKey) {
   const portal = desiredState.resources.find((resource) =>
     resource.kind === 'portal' && resource.key === portalKey);
   if (desiredState.installationId !== mutation.receipt.installationId
-    || application?.desiredHash !== mutation.change.desiredHash
-    || canonicalJson(application?.desired) !== canonicalJson(mutation.change.desired)
-    || !portal) fail('invalid_input');
+    || application === undefined
+    || application.desiredHash !== mutation.change.desiredHash
+    || portal === undefined) fail('invalid_input');
+  if (canonicalJson(application.desired) !== canonicalJson(mutationDesired)) {
+    fail('invalid_input');
+  }
   const receiptPortals = mutation.receipt.resources.filter((resource) =>
     resource.kind === 'portal'
       && resource.key === portal.key
@@ -1292,17 +1713,21 @@ async function expectedPortalForApplicationMutation(mutation, portalKey) {
 }
 
 async function assertReceiptOwnedPortal(
-  cloudflare,
-  mutation,
-  portalKey,
-  { allowMissing = false, expected } = {},
-) {
+  cloudflare: CloudflareClient,
+  mutation: GatewayMutation,
+  portalKey: string,
+  {
+    allowMissing = false,
+    expected,
+  }: { readonly allowMissing?: boolean; readonly expected?: PortalDesired } = {},
+): Promise<ReceiptResource> {
   const portals = mutation.receipt.resources.filter((resource) =>
     resource.kind === 'portal'
     && resource.key === portalKey
     && resource.provider.id === resource.key);
   if (portals.length !== 1) fail('ownership_conflict');
   const portal = portals[0];
+  if (portal === undefined) fail('ownership_conflict');
   const live = await exactRead(() => cloudflare.getPortal(portal.provider.id), portal.provider.id);
   if (live === null) {
     if (allowMissing) return portal;
@@ -1317,14 +1742,17 @@ async function assertReceiptOwnedPortal(
 }
 
 async function assertPortalAccessApplicationAuthority(
-  cloudflare,
-  mutation,
-  app,
-  _marker,
-  { allowMissingPortal = false, requireDesired = false } = {},
-) {
+  cloudflare: CloudflareClient,
+  mutation: GatewayMutation,
+  app: BoundaryObject,
+  _marker: string,
+  {
+    allowMissingPortal = false,
+    requireDesired = false,
+  }: { readonly allowMissingPortal?: boolean; readonly requireDesired?: boolean } = {},
+): Promise<ReceiptResource> {
   if (app?.name !== mutation.config.gateway.name
-    || !portalAccessApplicationShapeMatches(app, mutation.config.gateway.hostname)
+    || !portalAccessApplicationContractMatches(app, mutation.config.gateway.hostname)
     || (requireDesired && !managedOauthMatches(
       app.oauth_configuration,
       expectedManagedOauthConfiguration(),
@@ -1335,45 +1763,58 @@ async function assertPortalAccessApplicationAuthority(
   if (applications.length !== 1) fail('ownership_conflict');
   const portals = mutation.receipt.resources.filter((resource) => resource.kind === 'portal');
   if (portals.length !== 1) fail('ownership_conflict');
-  await assertReceiptOwnedPortal(cloudflare, mutation, portals[0].key, {
+  const portal = portals[0];
+  const application = applications[0];
+  if (portal === undefined || application === undefined) fail('ownership_conflict');
+  await assertReceiptOwnedPortal(cloudflare, mutation, portal.key, {
     allowMissing: allowMissingPortal,
   });
-  return applications[0];
+  return application;
 }
 
 async function assertPortalAccessApplicationCandidateSet(
-  cloudflare,
-  hostname,
-  expectedName,
-  expectedId,
-  { allowAbsent = false } = {},
-) {
+  cloudflare: CloudflareClient,
+  hostname: string,
+  expectedName: string,
+  expectedId: string,
+  { allowAbsent = false }: { readonly allowAbsent?: boolean } = {},
+): Promise<void> {
   const apps = await cloudflare.listAccessApps();
   if (!Array.isArray(apps)) fail('invalid_provider_response');
   const matches = apps
-    .filter((app) => app?.name === expectedName
+    .filter((app) => (isObject(app) && app.name === expectedName)
       || isPortalAppCandidate(app, hostname))
     .map(requireAppId);
   if (allowAbsent) {
     if (matches.length !== 0) fail('ownership_conflict');
     return;
   }
-  if (matches.length !== 1 || matches[0].id !== expectedId) fail('ownership_conflict');
+  const match = matches[0];
+  if (matches.length !== 1 || match === undefined || match.id !== expectedId) {
+    fail('ownership_conflict');
+  }
 }
 
-function assertPortalApplicationReceiptAbsent(receipt) {
+function assertPortalApplicationReceiptAbsent(receipt: InstallationReceipt): void {
   if (receipt.resources.some((resource) => resource.kind === 'portal_access_application')) {
     fail('ownership_conflict');
   }
 }
 
-async function assertNoPortalAccessApplications(cloudflare, hostname) {
+async function assertNoPortalAccessApplications(
+  cloudflare: CloudflareClient,
+  hostname: string,
+): Promise<void> {
   const apps = await cloudflare.listAccessApps();
   if (!Array.isArray(apps)) fail('invalid_provider_response');
   if (apps.some((app) => isPortalAppCandidate(app, hostname))) fail('ownership_conflict');
 }
 
-async function provePortalAccessApplicationBaselineQuiet(cloudflare, polling, hostname) {
+async function provePortalAccessApplicationBaselineQuiet(
+  cloudflare: CloudflareClient,
+  polling: PollingOptions,
+  hostname: string,
+): Promise<void> {
   for (let attempt = 0; attempt < polling.attempts; attempt += 1) {
     const apps = await cloudflare.listAccessApps();
     if (!Array.isArray(apps)) fail('invalid_provider_response');
@@ -1382,8 +1823,11 @@ async function provePortalAccessApplicationBaselineQuiet(cloudflare, polling, ho
   }
 }
 
-async function assertAccessApplicationPoliciesEmpty(cloudflare, app) {
-  const policies = await cloudflare.listAppPolicies(app.id);
+async function assertAccessApplicationPoliciesEmpty(
+  cloudflare: CloudflareClient,
+  app: BoundaryObject,
+): Promise<void> {
+  const policies = await cloudflare.listAppPolicies(requireSafeId(app.id));
   if (!Array.isArray(policies)) fail('invalid_provider_response');
   if (policies.length > 0
     || (Object.hasOwn(app, 'policies')
@@ -1392,38 +1836,50 @@ async function assertAccessApplicationPoliciesEmpty(cloudflare, app) {
   }
 }
 
-async function assertPortalAccessApplicationPolicyPhase(cloudflare, mutation, app) {
-  const policies = await cloudflare.listAppPolicies(app.id);
+async function assertPortalAccessApplicationPolicyPhase(
+  cloudflare: CloudflareClient,
+  mutation: GatewayMutation,
+  app: BoundaryObject,
+): Promise<void> {
+  const appId = requireSafeId(app.id);
+  const policies = await cloudflare.listAppPolicies(appId);
   if (!Array.isArray(policies)) fail('invalid_provider_response');
   const ownedPolicies = mutation.receipt.resources.filter((resource) =>
     resource.kind === 'portal_access_policy'
-      && resource.provider.parentId === app.id);
+      && resource.provider.parentId === appId);
   if (ownedPolicies.length === 0) {
     if (policies.length > 0 || !inlinePoliciesAreEmpty(app)) fail('ownership_conflict');
     return;
   }
   if (ownedPolicies.length !== 1) fail('ownership_conflict');
   const ownedPolicy = ownedPolicies[0];
+  if (ownedPolicy === undefined) fail('ownership_conflict');
   const marker = ownershipMarker(mutation.receipt.installationId, ownedPolicy.key);
   if (ownedPolicy.marker !== marker) fail('ownership_conflict');
   assertExpectedPolicySet(policies, ownedPolicy.provider.id, marker);
   if (!inlinePoliciesMatchListedPolicies(app, policies)) fail('ownership_conflict');
 }
 
-async function assertNoAccessAppBaseline(cloudflare, predicate) {
+async function assertNoAccessAppBaseline(
+  cloudflare: CloudflareClient,
+  predicate: (app: BoundaryValue) => boolean,
+): Promise<void> {
   const apps = await cloudflare.listAccessApps();
   if (!Array.isArray(apps)) fail('invalid_provider_response');
   const matches = apps.filter(predicate).map(requireAppId);
   if (matches.length > 0) fail('resource_collision');
 }
 
-async function assertNoServerAccessApplications(cloudflare, serverId) {
+async function assertNoServerAccessApplications(
+  cloudflare: CloudflareClient,
+  serverId: string,
+): Promise<void> {
   const apps = await cloudflare.listAccessApps();
   if (!Array.isArray(apps)) fail('invalid_provider_response');
   if (apps.some((app) => isExactServerApp(app, serverId))) fail('ownership_conflict');
 }
 
-function normalizeManagedOauth(value) {
+function normalizeManagedOauth(value: BoundaryValue): ManagedOauth {
   if (!isObject(value)) fail('invalid_input');
   assertExactKeys(value, ['mode', 'dynamicClientRegistration', 'grant']);
   if (value.mode !== 'managed_oauth'
@@ -1449,16 +1905,24 @@ function normalizeManagedOauth(value) {
   };
 }
 
-function managedOauthMatches(live, desired) {
-  return live?.enabled === desired.enabled
-    && live?.dynamic_client_registration?.enabled === desired.dynamic_client_registration.enabled
-    && live?.dynamic_client_registration?.allow_any_on_localhost === desired.dynamic_client_registration.allow_any_on_localhost
-    && live?.dynamic_client_registration?.allow_any_on_loopback === desired.dynamic_client_registration.allow_any_on_loopback
-    && live?.grant?.access_token_lifetime === desired.grant.access_token_lifetime
-    && live?.grant?.session_duration === desired.grant.session_duration;
+function managedOauthMatches(live: BoundaryValue, desired: ManagedOauth): boolean {
+  if (!isObject(live)
+    || !isObject(live.dynamic_client_registration)
+    || !isObject(live.grant)) return false;
+  return live.enabled === desired.enabled
+    && live.dynamic_client_registration.enabled === desired.dynamic_client_registration.enabled
+    && live.dynamic_client_registration.allow_any_on_localhost === desired.dynamic_client_registration.allow_any_on_localhost
+    && live.dynamic_client_registration.allow_any_on_loopback === desired.dynamic_client_registration.allow_any_on_loopback
+    && live.grant.access_token_lifetime === desired.grant.access_token_lifetime
+    && live.grant.session_duration === desired.grant.session_duration;
 }
 
-async function waitForServerSync(cloudflare, polling, serverId, expectedTools) {
+async function waitForServerSync(
+  cloudflare: CloudflareClient,
+  polling: PollingOptions,
+  serverId: string,
+  expectedTools: readonly PortalTool[],
+): Promise<void> {
   for (let attempt = 0; attempt < polling.attempts; attempt += 1) {
     const server = await exactRead(() => cloudflare.getMcpServer(serverId), serverId);
     if (server === null) fail('sync_failed');
@@ -1469,7 +1933,11 @@ async function waitForServerSync(cloudflare, polling, serverId, expectedTools) {
   fail('sync_timeout');
 }
 
-async function waitForAccessAppAbsence(cloudflare, polling, appId) {
+async function waitForAccessAppAbsence(
+  cloudflare: CloudflareClient,
+  polling: PollingOptions,
+  appId: string,
+): Promise<void> {
   if (!safeId(appId)) fail('ownership_conflict');
   for (let attempt = 0; attempt < polling.attempts; attempt += 1) {
     const app = await exactRead(() => cloudflare.getAccessApp(appId), appId);
@@ -1479,18 +1947,20 @@ async function waitForAccessAppAbsence(cloudflare, polling, appId) {
   fail('sync_timeout');
 }
 
-async function inspectResidue(cloudflare, input, boundTarget) {
-  if (!isObject(input)) fail('invalid_input');
+async function inspectResidue(
+  cloudflare: CloudflareClient,
+  input: ResidueInspectionInput,
+  boundTarget: BoundTarget,
+): Promise<Readonly<{ ownedResourceCount: number }>> {
   rejectMutationKeys(input, ['config', 'target', 'receipt', 'signal']);
   const receipt = await validateReceipt(input.receipt);
   assertTarget(input.target, boundTarget, receipt.target);
-  if (!isObject(input.config) || input.config?.gateway?.hostname !== receipt.target.hostname) {
-    fail('invalid_input');
-  }
+  const config = normalizeGatewayConfig(input.config);
+  if (config.gateway.hostname !== receipt.target.hostname) fail('invalid_input');
   let ownedResourceCount = 0;
-  const liveReceiptPortalApplicationIds = new Set();
+  const liveReceiptPortalApplicationIds = new Set<string>();
   for (const resource of receipt.resources) {
-    let live;
+    let live: BoundaryObject | null;
     if (resource.kind === 'mcp_server') live = await exactRead(() => cloudflare.getMcpServer(resource.provider.id), resource.provider.id);
     else if (resource.kind === 'source_access_application'
       || resource.kind === 'portal_access_application') {
@@ -1498,7 +1968,13 @@ async function inspectResidue(cloudflare, input, boundTarget) {
     }
     else if (resource.kind === 'portal') live = await exactRead(() => cloudflare.getPortal(resource.provider.id), resource.provider.id);
     else if (resource.kind === 'dns_record') live = await exactRead(() => cloudflare.getDnsRecord(resource.provider.id), resource.provider.id);
-    else live = await exactRead(() => cloudflare.getAppPolicy(resource.provider.parentId, resource.provider.id), resource.provider.id);
+    else {
+      const parentId = requireSafeId(resource.provider.parentId);
+      live = await exactRead(
+        () => cloudflare.getAppPolicy(parentId, resource.provider.id),
+        resource.provider.id,
+      );
+    }
     // Receipt locators are exact existence evidence. Shape and marker checks gate
     // mutations, but must not make live residue disappear from uninstall proof.
     if (live !== null) {
@@ -1511,9 +1987,9 @@ async function inspectResidue(cloudflare, input, boundTarget) {
 
   const apps = await cloudflare.listAccessApps();
   if (!Array.isArray(apps)) fail('invalid_provider_response');
-  const countedBroadIds = new Set(liveReceiptPortalApplicationIds);
+  const countedBroadIds = new Set<string>(liveReceiptPortalApplicationIds);
   for (const candidate of apps.filter((app) =>
-    isPortalAppCandidate(app, input.config.gateway.hostname))) {
+    isPortalAppCandidate(app, config.gateway.hostname))) {
     const app = requireAppId(candidate);
     if (!countedBroadIds.has(app.id)) {
       countedBroadIds.add(app.id);
@@ -1523,24 +1999,34 @@ async function inspectResidue(cloudflare, input, boundTarget) {
   return Object.freeze({ ownedResourceCount });
 }
 
-async function exactRead(reader, expectedId) {
+async function exactRead(
+  reader: () => Promise<BoundaryValue>,
+  expectedId: string,
+): Promise<BoundaryObject | null> {
   const value = await reader();
   if (value === null) return null;
   if (!isObject(value) || value.id !== expectedId) fail('invalid_provider_response');
   return value;
 }
 
-function isExactServerApp(app, serverId) {
+function isExactServerApp(app: BoundaryValue, serverId: string): boolean {
   return safeId(serverId)
-    && app?.type === 'mcp'
+    && isObject(app)
+    && app.type === 'mcp'
     && Array.isArray(app.destinations)
     && app.destinations.some((destination) =>
-      destination?.type === 'via_mcp_server_portal'
+      isObject(destination)
+      && destination.type === 'via_mcp_server_portal'
       && destination.mcp_server_id === serverId);
 }
 
-function isExactSourceAccessApplication(app, serverId, marker) {
-  if (app?.name !== marker || app?.type !== 'mcp' || !sourceAppHasNoDomain(app)
+function isExactSourceAccessApplication(
+  app: BoundaryValue,
+  serverId: string,
+  marker: string,
+): boolean {
+  if (!isObject(app)
+    || app.name !== marker || app.type !== 'mcp' || !sourceAppHasNoDomain(app)
     || !Array.isArray(app.destinations) || app.destinations.length !== 1) return false;
   const destination = app.destinations[0];
   return isObject(destination)
@@ -1549,23 +2035,31 @@ function isExactSourceAccessApplication(app, serverId, marker) {
     && destination.mcp_server_id === serverId;
 }
 
-function sourceAppHasNoDomain(app) {
+function sourceAppHasNoDomain(app: BoundaryObject): boolean {
   return app?.domain === undefined || app.domain === null;
 }
 
-function portalAccessApplicationMatches(app, expected) {
-  return app?.name === expected.name
-    && portalAccessApplicationShapeMatches(app, expected.domain)
+function portalAccessApplicationMatches(
+  app: BoundaryValue,
+  expected: PortalAccessApplicationBody,
+): boolean {
+  return isObject(app)
+    && app.name === expected.name
+    && portalAccessApplicationContractMatches(app, expected.domain)
     && managedOauthMatches(app.oauth_configuration, expected.oauth_configuration);
 }
 
-function portalAccessApplicationPrePolicyMatches(app, expected) {
-  return portalAccessApplicationMatches(app, expected)
+function portalAccessApplicationPrePolicyMatches(
+  app: BoundaryValue,
+  expected: PortalAccessApplicationBody,
+): boolean {
+  return isObject(app)
+    && portalAccessApplicationMatches(app, expected)
     && inlinePoliciesAreEmpty(app);
 }
 
-function portalAccessApplicationShapeMatches(app, hostname) {
-  if (app?.type !== 'mcp_portal' || app.domain !== hostname
+function portalAccessApplicationContractMatches(app: BoundaryValue, hostname: string): boolean {
+  if (!isObject(app) || app.type !== 'mcp_portal' || app.domain !== hostname
     || !Array.isArray(app.destinations) || app.destinations.length !== 1) return false;
   const destination = app.destinations[0];
   return isObject(destination)
@@ -1574,27 +2068,36 @@ function portalAccessApplicationShapeMatches(app, hostname) {
     && destination.uri === hostname;
 }
 
-function inlinePoliciesAreEmpty(app) {
+function inlinePoliciesAreEmpty(app: BoundaryObject): boolean {
   return !Object.hasOwn(app, 'policies')
     || (Array.isArray(app.policies) && app.policies.length === 0);
 }
 
-function inlinePoliciesMatchListedPolicies(app, policies) {
+function inlinePoliciesMatchListedPolicies(
+  app: BoundaryObject,
+  policies: BoundaryValue,
+): boolean {
   if (!Array.isArray(policies)) return false;
   if (!Object.hasOwn(app, 'policies')
     || (Array.isArray(app.policies) && app.policies.length === 0)) return true;
   if (!Array.isArray(app.policies) || app.policies.length !== policies.length) return false;
 
-  const listedById = new Map();
+  const listedById = new Map<string, BoundaryObject>();
   for (const policy of policies) {
-    const id = safeId(policy?.id);
-    if (!id || listedById.has(id)) return false;
+    if (!isObject(policy)) return false;
+    if (!safeId(policy.id)) return false;
+    const id = policy.id;
+    if (listedById.has(id)) return false;
     listedById.set(id, policy);
   }
-  const seen = new Set();
+  const seen = new Set<string>();
   for (const inlinePolicy of app.policies) {
-    const id = safeId(typeof inlinePolicy === 'string' ? inlinePolicy : inlinePolicy?.id);
-    if (!id || seen.has(id) || !listedById.has(id)) return false;
+    const rawId = v.is(stringSchema, inlinePolicy)
+      ? inlinePolicy
+      : isObject(inlinePolicy) ? inlinePolicy.id : undefined;
+    if (!safeId(rawId)) return false;
+    const id = rawId;
+    if (seen.has(id) || !listedById.has(id)) return false;
     if (isObject(inlinePolicy)
       && Object.hasOwn(inlinePolicy, 'name')
       && inlinePolicy.name !== listedById.get(id)?.name) return false;
@@ -1603,7 +2106,7 @@ function inlinePoliciesMatchListedPolicies(app, policies) {
   return seen.size === listedById.size;
 }
 
-function expectedManagedOauthConfiguration() {
+function expectedManagedOauthConfiguration(): ManagedOauth {
   return {
     enabled: true,
     dynamic_client_registration: {
@@ -1615,20 +2118,22 @@ function expectedManagedOauthConfiguration() {
   };
 }
 
-function isPortalAppCandidate(app, hostname) {
-  return app?.type === 'mcp_portal' && (
+function isPortalAppCandidate(app: BoundaryValue, hostname: string): boolean {
+  return isObject(app) && app.type === 'mcp_portal' && (
     app.domain === hostname ||
     (Array.isArray(app.destinations) && app.destinations.some((destination) =>
-      destination?.type === 'public' && destination.uri === hostname))
+      isObject(destination)
+      && destination.type === 'public'
+      && destination.uri === hostname))
   );
 }
 
-function requireAppId(app) {
+function requireAppId(app: BoundaryValue): Readonly<{ id: string }> {
   if (!isObject(app) || !safeId(app.id)) fail('invalid_provider_response');
-  return app;
+  return Object.freeze({ id: app.id });
 }
 
-async function validateReceipt(value) {
+async function validateReceipt(value: BoundaryValue): Promise<InstallationReceipt> {
   try {
     return await validateInstallationReceipt(value);
   } catch {
@@ -1636,7 +2141,11 @@ async function validateReceipt(value) {
   }
 }
 
-function assertTarget(target, bound, receiptTarget) {
+function assertTarget(
+  target: BoundaryValue,
+  bound: BoundTarget,
+  receiptTarget: ReceiptTarget,
+): void {
   if (!isObject(target)
     || target.accountId !== bound.accountId
     || target.zoneId !== bound.zoneId
@@ -1644,29 +2153,36 @@ function assertTarget(target, bound, receiptTarget) {
     || receiptTarget.zoneId !== bound.zoneId) fail('target_mismatch');
 }
 
-function assertDesiredMetadata(desired, installationId) {
+function assertDesiredMetadata(desired: JsonObject, installationId: string): void {
   if (!isObject(desired.metadata)) fail('invalid_input');
   assertExactKeys(desired.metadata, ['manager', 'installationId']);
   if (desired.metadata.manager !== 'ankka-mcp-gateway'
     || desired.metadata.installationId !== installationId) fail('invalid_input');
 }
 
-function assertProviderLocator(kind, provider) {
+function normalizeProviderLocator(
+  kind: ResourceKind,
+  provider: BoundaryValue,
+): ReceiptProviderLocator {
   if (!isObject(provider) || !safeId(provider.id)) fail('invalid_input');
   const expected = POLICY_KINDS.has(kind) ? ['id', 'parentId'] : ['id'];
   assertExactKeys(provider, expected);
   if (POLICY_KINDS.has(kind) && !safeId(provider.parentId)) fail('invalid_input');
+  if (POLICY_KINDS.has(kind)) {
+    return Object.freeze({ id: provider.id, parentId: requireSafeId(provider.parentId) });
+  }
+  return Object.freeze({ id: provider.id });
 }
 
-function assertMarker(actual, expected) {
+function assertMarker(actual: BoundaryValue, expected: string): void {
   if (actual !== expected) fail('ownership_conflict');
 }
 
-function normalizeEmails(access) {
+function normalizeEmails(access: BoundaryValue): string[] {
   if (!isObject(access) || !Array.isArray(access.allowedEmails)) fail('access_identity_mismatch');
-  const values = [];
+  const values: string[] = [];
   for (const raw of access.allowedEmails) {
-    if (typeof raw !== 'string') fail('access_identity_mismatch');
+    if (!v.is(stringSchema, raw)) fail('access_identity_mismatch');
     const email = raw.trim().toLowerCase();
     if (email.length === 0 || email.length > 254 || !EMAIL.test(email)) fail('access_identity_mismatch');
     values.push(email);
@@ -1674,11 +2190,15 @@ function normalizeEmails(access) {
   return [...new Set(values)].sort(compareText);
 }
 
-function normalizeTools(value) {
+function normalizeTools(value: BoundaryValue): string[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > 500) fail('invalid_input');
-  const tools = [];
+  const tools: string[] = [];
   for (const tool of value) {
-    if (typeof tool !== 'string' || tool.length === 0 || tool.length > 128 || tool === '*' || tools.includes(tool)) {
+    if (!v.is(stringSchema, tool)
+      || tool.length === 0
+      || tool.length > 128
+      || tool === '*'
+      || tools.includes(tool)) {
       fail('invalid_input');
     }
     tools.push(tool);
@@ -1686,26 +2206,27 @@ function normalizeTools(value) {
   return [...tools].sort(compareText);
 }
 
-function expectedToolsDiscovered(tools, expectedTools) {
+function expectedToolsDiscovered(
+  tools: BoundaryValue,
+  expectedTools: readonly { readonly name: string }[],
+): boolean {
   if (!Array.isArray(tools)) return false;
-  const names = [];
+  const names: string[] = [];
   for (const tool of tools) {
-    if (!isObject(tool) || typeof tool.name !== 'string' || names.includes(tool.name)) return false;
+    if (!isObject(tool) || !v.is(stringSchema, tool.name) || names.includes(tool.name)) return false;
     names.push(tool.name);
   }
   return expectedTools.every(({ name }) => names.includes(name));
 }
 
-function normalizeAbortSignal(value) {
-  if (value === undefined) return null;
-  if (!isObject(value)
-    || typeof value.aborted !== 'boolean'
-    || typeof value.addEventListener !== 'function'
-    || typeof value.removeEventListener !== 'function') fail('invalid_input');
+function normalizeAbortSignal(value: AbortSignal | undefined): AbortSignal | undefined {
+  if (value === undefined) return undefined;
+  if (!(value instanceof AbortSignal)) fail('invalid_input');
   return value;
 }
 
-function requireHttpsUrl(value) {
+function requireHttpsUrl(value: BoundaryValue): void {
+  if (!v.is(stringSchema, value)) fail('invalid_input');
   try {
     const url = new URL(value);
     if (url.protocol !== 'https:' || url.username || url.password) fail('invalid_input');
@@ -1715,41 +2236,99 @@ function requireHttpsUrl(value) {
   }
 }
 
-function requireHostname(value) {
-  if (typeof value !== 'string' || value !== value.toLowerCase() || value.length > 253
+function requireHostname(value: BoundaryValue): void {
+  if (!v.is(stringSchema, value) || value !== value.toLowerCase() || value.length > 253
     || value.split('.').length < 2
     || !value.split('.').every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) {
     fail('invalid_input');
   }
 }
 
-function requireId(value) {
+function requireId(value: BoundaryValue): void {
   if (!safeId(value)) throw new TypeError('accountId and zoneId must be non-empty identifiers');
 }
 
-function safeId(value) {
-  return typeof value === 'string' && SAFE_ID.test(value);
+function safeId(value: BoundaryValue): value is string {
+  return v.is(stringSchema, value) && SAFE_ID.test(value);
 }
 
-function normalizeDns(value) {
-  return typeof value === 'string' ? value.toLowerCase().replace(/\.$/, '') : '';
+function requireSafeId(value: BoundaryValue): string {
+  if (!safeId(value)) fail('invalid_input');
+  return value;
 }
 
-function sameLocator(left, right) {
+function requireText(value: BoundaryValue): string {
+  if (!v.is(stringSchema, value)) fail('invalid_input');
+  return value;
+}
+
+function safeResourceKey(value: BoundaryValue): value is string {
+  return v.is(stringSchema, value) && RESOURCE_KEY.test(value);
+}
+
+function requireResourceKey(value: BoundaryValue): string {
+  if (!safeResourceKey(value)) fail('invalid_input');
+  return value;
+}
+
+function optionalResourceKey(value: BoundaryValue): string | undefined {
+  return value === undefined ? undefined : requireResourceKey(value);
+}
+
+function policyIdentityHash(value: JsonObject): string {
+  if (!isObject(value.allow) || !v.is(stringSchema, value.allow.identitiesHash)) {
+    fail('invalid_input');
+  }
+  return value.allow.identitiesHash;
+}
+
+function extractPolicyEmail(rule: BoundaryValue): string | null {
+  if (!isObject(rule) || !isObject(rule.email) || !v.is(stringSchema, rule.email.email)) {
+    return null;
+  }
+  return rule.email.email;
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint !== undefined && (codePoint <= 31 || codePoint === 127)) return true;
+  }
+  return false;
+}
+
+function normalizeGatewayConfig(value: BoundaryValue): GatewayConfig {
+  try {
+    return validateGatewayConfig(v.parse(jsonValueSchema, value));
+  } catch {
+    fail('invalid_input');
+  }
+}
+
+function normalizeDns(value: BoundaryValue): string {
+  return v.is(stringSchema, value) ? value.toLowerCase().replace(/\.$/, '') : '';
+}
+
+function sameLocator(left: ReceiptProviderLocator, right: ReceiptProviderLocator): boolean {
   return left?.id === right?.id && (left?.parentId ?? '') === (right?.parentId ?? '');
 }
 
-function rejectUnknownKeys(value, allowed) {
+type KeyBearingInput = BoundaryObject | CloudflareGatewayProviderOptions | ResidueInspectionInput;
+type ObjectCandidate = BoundaryValue
+  | MutationResult
+  | ResidueInspectionInput;
+
+function rejectUnknownKeys(value: KeyBearingInput, allowed: readonly string[]): void {
   if (Object.keys(value).some((key) => !allowed.includes(key))) {
     throw new TypeError('provider options contain unsupported fields');
   }
 }
 
-function rejectMutationKeys(value, allowed) {
+function rejectMutationKeys(value: KeyBearingInput, allowed: readonly string[]): void {
   if (Object.keys(value).some((key) => !allowed.includes(key))) fail('invalid_input');
 }
 
-function assertExactKeys(value, expected) {
+function assertExactKeys(value: BoundaryValue, expected: readonly string[]): void {
   if (!isObject(value)) fail('invalid_input');
   const actual = Object.keys(value).sort(compareText);
   const sortedExpected = [...expected].sort(compareText);
@@ -1757,7 +2336,7 @@ function assertExactKeys(value, expected) {
     || actual.some((key, index) => key !== sortedExpected[index])) fail('invalid_input');
 }
 
-async function hashCanonical(value) {
+async function hashCanonical(value: JsonValue): Promise<string> {
   const bytes = new TextEncoder().encode(canonicalJson(value));
   const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
   return `sha256:${[...new Uint8Array(digest)]
@@ -1765,27 +2344,36 @@ async function hashCanonical(value) {
     .join('')}`;
 }
 
-function canonicalJson(value) {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
+function canonicalJson(value: JsonValue): string {
+  if (value === null || v.is(v.union([v.boolean(), v.string()]), value)) {
+    return JSON.stringify(value);
+  }
+  if (v.is(numberSchema, value) && Number.isFinite(value)) return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isObject(value)) return `{${Object.keys(value).sort(compareText)
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  if (isObject(value)) return `{${Object.entries(value).sort(([left], [right]) =>
+    compareText(left, right))
+    .map(([key, nested]) => `${JSON.stringify(key)}:${canonicalJson(nested)}`).join(',')}}`;
   fail('invalid_input');
 }
 
-function defaultDelay(milliseconds) {
+function defaultDelay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function compareText(left, right) {
+function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function isObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+function isObject(value: ObjectCandidate): value is BoundaryObject {
+  return v.is(boundaryObjectSchema, value);
 }
 
-function fail(code) {
+function isResidueInspectionInput(
+  value: BoundaryValue | ResidueInspectionInput,
+): value is ResidueInspectionInput {
+  return v.is(v.object({}), value);
+}
+
+function fail(code: string): never {
   throw new CloudflareGatewayProviderError(code);
 }

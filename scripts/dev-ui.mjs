@@ -74,4 +74,4 @@ stop()
 if (!requestedStop) {
   console.error(`${firstExit.label} preview stopped unexpectedly.`)
 }
-process.exitCode = requestedStop ? 0 : typeof firstExit.code === 'number' ? firstExit.code : 1
+process.exitCode = requestedStop ? 0 : Number.isInteger(firstExit.code) ? firstExit.code : 1

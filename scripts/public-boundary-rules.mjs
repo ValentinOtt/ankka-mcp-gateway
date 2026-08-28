@@ -1,3 +1,8 @@
+import * as v from 'valibot';
+
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
+
 export const forbiddenNames = Object.freeze([
   /^\.env(?:\.|$)/u,
   /^\.dev\.vars(?:\.|$)/u,
@@ -141,11 +146,11 @@ export function generatedReleaseArtifactLabel(text) {
 
   if (
     value.schemaVersion === 2 &&
-    typeof value.manifest === 'string' &&
-    typeof value.signature === 'string' &&
-    typeof value.signatureContext === 'string' &&
-    typeof value.keyId === 'string' &&
-    typeof value.channel === 'string'
+    v.is(STRING_SCHEMA, value.manifest) &&
+    v.is(STRING_SCHEMA, value.signature) &&
+    v.is(STRING_SCHEMA, value.signatureContext) &&
+    v.is(STRING_SCHEMA, value.keyId) &&
+    v.is(STRING_SCHEMA, value.channel)
   ) return 'generated signed release envelope';
 
   if (
@@ -153,7 +158,7 @@ export function generatedReleaseArtifactLabel(text) {
     isRelease(value.release) &&
     isCommit(value.sourceCommit) &&
     isRecord(value.artifact) &&
-    typeof value.artifact.treeSha256 === 'string' &&
+    v.is(STRING_SCHEMA, value.artifact.treeSha256) &&
     isRecord(value.components) &&
     isRecord(value.cloudflare) &&
     Array.isArray(value.oauthScopeIds)
@@ -165,7 +170,7 @@ export function generatedReleaseArtifactLabel(text) {
     Array.isArray(value.objects) &&
     Number.isSafeInteger(value.objectCount) &&
     isRecord(value.immutability) &&
-    typeof value.prefix === 'string'
+    v.is(STRING_SCHEMA, value.prefix)
   ) return 'generated R2 publication plan';
 
   if (
@@ -173,18 +178,18 @@ export function generatedReleaseArtifactLabel(text) {
     isRelease(value.release) &&
     isCommit(value.sourceCommit) &&
     Array.isArray(value.assets) &&
-    typeof value.repository === 'string' &&
-    typeof value.tag === 'string' &&
-    typeof value.title === 'string'
+    v.is(STRING_SCHEMA, value.repository) &&
+    v.is(STRING_SCHEMA, value.tag) &&
+    v.is(STRING_SCHEMA, value.title)
   ) return 'generated GitHub release plan';
 
   if (
     value.schemaVersion === 1 &&
     isRelease(value.release) &&
     isCommit(value.sourceCommit) &&
-    typeof value.publicKey === 'string' &&
+    v.is(STRING_SCHEMA, value.publicKey) &&
     value.signatureAlgorithm === 'ed25519' &&
-    typeof value.releaseEnvelopeSha256 === 'string'
+    v.is(STRING_SCHEMA, value.releaseEnvelopeSha256)
   ) return 'generated release verification record';
 
   if (
@@ -198,10 +203,10 @@ export function generatedReleaseArtifactLabel(text) {
   if (
     value.schemaVersion === 1 &&
     isRelease(value.release) &&
-    typeof value.accountId === 'string' &&
-    typeof value.bucketName === 'string' &&
-    typeof value.objectPlanSha256 === 'string' &&
-    typeof value.releaseEnvelopeSha256 === 'string'
+    v.is(STRING_SCHEMA, value.accountId) &&
+    v.is(STRING_SCHEMA, value.bucketName) &&
+    v.is(STRING_SCHEMA, value.objectPlanSha256) &&
+    v.is(STRING_SCHEMA, value.releaseEnvelopeSha256)
   ) return 'generated publication receipt';
 
   return null;
@@ -237,13 +242,13 @@ function safeCredentialPlaceholder(value) {
 }
 
 function isRecord(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  return v.is(OBJECT_SCHEMA, value) && !Array.isArray(value);
 }
 
 function isRelease(value) {
-  return typeof value === 'string' && /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(value);
+  return v.is(STRING_SCHEMA, value) && /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(value);
 }
 
 function isCommit(value) {
-  return typeof value === 'string' && /^[a-f0-9]{40}$/u.test(value);
+  return v.is(STRING_SCHEMA, value) && /^[a-f0-9]{40}$/u.test(value);
 }

@@ -99,7 +99,7 @@ test('generates deterministic create-only CycloneDX bytes from the exact clean s
       entry.name === 'cdx:npm:package:development' && entry.value === 'true')), false);
   assert.deepEqual(
     parsed.components.map((component) => component['bom-ref']),
-    [...parsed.components.map((component) => component['bom-ref'])].sort(),
+    parsed.components.map((component) => component['bom-ref']).sort(),
   );
   await assert.rejects(
     generateReleaseSbom({

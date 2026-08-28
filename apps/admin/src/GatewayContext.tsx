@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import * as v from 'valibot'
 import {
   type GatewayAdminApi,
   type GatewayStatus,
@@ -53,8 +54,8 @@ interface GatewayProviderProps extends PropsWithChildren {
 const GatewayContext = createContext<GatewayContextValue | null>(null)
 const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'The gateway request failed.'
+function errorMessage(cause: Error | null): string {
+  return cause?.message ?? 'The gateway request failed.'
 }
 
 function unavailableUpdate(): RuntimeUpdate {
@@ -91,7 +92,8 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     setError(null)
     try { return await operation() }
     catch (requestError) {
-      setError(errorMessage(requestError))
+      const parsed = v.safeParse(v.instance(Error), requestError)
+      setError(errorMessage(parsed.success ? parsed.output : null))
       throw requestError
     } finally { setBusyCount((count) => Math.max(0, count - 1)) }
   }, [])
@@ -127,7 +129,8 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       setHasLoaded(true)
       await refreshUpdate()
     } catch (requestError) {
-      setError(errorMessage(requestError))
+      const parsed = v.safeParse(v.instance(Error), requestError)
+      setError(errorMessage(parsed.success ? parsed.output : null))
     } finally { setIsLoading(false) }
   }, [refreshUpdate])
 

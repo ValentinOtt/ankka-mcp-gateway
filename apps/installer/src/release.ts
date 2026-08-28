@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 import { base64UrlDecode, base64UrlEncode } from './crypto';
 import { DeployError } from './errors';
 import {
@@ -15,6 +17,20 @@ export interface ReleaseEnvironment {
 export const RELEASE_ENVELOPE_SCHEMA_VERSION = 2 as const;
 export const RELEASE_SIGNATURE_CONTEXT = 'ankka-mcp-gateway-release-envelope-v2' as const;
 const RELEASE_CHANNEL_PATTERN = /^(?:canary|stable)$/u;
+const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
+const SIGNATURE_PATTERN = /^[A-Za-z0-9_-]{86}$/u;
+const signedReleaseEnvelopeSchema = v.strictObject({
+  channel: v.string(),
+  keyId: v.string(),
+  manifest: v.string(),
+  schemaVersion: v.literal(RELEASE_ENVELOPE_SCHEMA_VERSION),
+  signature: v.string(),
+  signatureContext: v.literal(RELEASE_SIGNATURE_CONTEXT),
+});
+const releasePayloadFileSchema = v.strictObject({
+  bytes: v.instance(Uint8Array),
+  path: v.string(),
+});
 
 export interface VerifiedRelease {
   readonly verification: 'ed25519';
@@ -87,12 +103,6 @@ function invalid(): never {
   throw new DeployError(503, 'release_invalid');
 }
 
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
 export function releaseSignatureCanonicalJson(
   channel: string,
   keyId: string,
@@ -100,8 +110,8 @@ export function releaseSignatureCanonicalJson(
 ): string {
   if (
     !RELEASE_CHANNEL_PATTERN.test(channel) ||
-    !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(keyId) ||
-    typeof manifest !== 'string' || manifest.length === 0
+    !KEY_ID_PATTERN.test(keyId) ||
+    manifest.length === 0
   ) invalid();
   return canonicalJson({
     channel,
@@ -114,31 +124,23 @@ export function releaseSignatureCanonicalJson(
 
 function parseEnvelope(serialized: string, expectedChannel: string): ParsedEnvelope {
   if (!RELEASE_CHANNEL_PATTERN.test(expectedChannel)) invalid();
-  let input: unknown;
+  let value: v.InferOutput<typeof signedReleaseEnvelopeSchema>;
   try {
-    input = JSON.parse(serialized);
+    const result = v.safeParse(signedReleaseEnvelopeSchema, JSON.parse(serialized));
+    if (!result.success) invalid();
+    value = result.output;
   } catch {
     invalid();
   }
-  if (!input || typeof input !== 'object' || Array.isArray(input)) invalid();
-  const value = input as Record<string, unknown>;
   try {
     if (canonicalJson(value) !== serialized) invalid();
   } catch {
     invalid();
   }
   if (
-    !exactKeys(value, [
-      'channel', 'keyId', 'manifest', 'schemaVersion', 'signature', 'signatureContext',
-    ]) ||
-    value.schemaVersion !== RELEASE_ENVELOPE_SCHEMA_VERSION ||
     value.channel !== expectedChannel ||
-    typeof value.keyId !== 'string' ||
-    !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(value.keyId) ||
-    typeof value.manifest !== 'string' ||
-    typeof value.signature !== 'string' ||
-    !/^[A-Za-z0-9_-]{86}$/u.test(value.signature) ||
-    value.signatureContext !== RELEASE_SIGNATURE_CONTEXT
+    !KEY_ID_PATTERN.test(value.keyId) ||
+    !SIGNATURE_PATTERN.test(value.signature)
   ) invalid();
   return Object.freeze({
     schemaVersion: RELEASE_ENVELOPE_SCHEMA_VERSION,
@@ -151,12 +153,15 @@ function parseEnvelope(serialized: string, expectedChannel: string): ParsedEnvel
   });
 }
 
-async function sha256Hex(value: Uint8Array | string): Promise<string> {
-  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const owned = new Uint8Array(bytes.byteLength);
   owned.set(bytes);
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', owned));
   return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function sha256HexText(value: string): Promise<string> {
+  return sha256Hex(new TextEncoder().encode(value));
 }
 
 function allFileRecords(manifest: ReleaseManifest): ReleaseFileRecord[] {
@@ -177,10 +182,10 @@ export async function verifyReleaseManifestDigests(manifest: ReleaseManifest): P
     'workerCleanup',
     'workerRetirement',
   ] as const) {
-    const expected = await sha256Hex(canonicalJson(manifest.components[component].files));
+    const expected = await sha256HexText(canonicalJson(manifest.components[component].files));
     if (expected !== manifest.components[component].treeSha256) invalid();
   }
-  const expectedArtifactTree = await sha256Hex(canonicalJson(allFileRecords(manifest)));
+  const expectedArtifactTree = await sha256HexText(canonicalJson(allFileRecords(manifest)));
   if (expectedArtifactTree !== manifest.artifact.treeSha256) invalid();
 }
 
@@ -189,19 +194,15 @@ export async function verifyReleasePayload(
   payload: readonly ReleasePayloadFile[],
 ): Promise<void> {
   await verifyReleaseManifestDigests(manifest);
-  if (!Array.isArray(payload) || payload.length !== manifest.artifact.fileCount) invalid();
+  const parsed = v.safeParse(v.array(releasePayloadFileSchema), payload);
+  if (!parsed.success || parsed.output.length !== manifest.artifact.fileCount) invalid();
 
   const supplied = new Map<string, Uint8Array>();
-  for (const entry of payload as readonly unknown[]) {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) invalid();
-    const value = entry as Record<string, unknown>;
-    if (!exactKeys(value, ['bytes', 'path']) || typeof value.path !== 'string' || !(value.bytes instanceof Uint8Array)) {
-      invalid();
-    }
-    if (supplied.has(value.path)) invalid();
-    const owned = new Uint8Array(value.bytes.byteLength);
-    owned.set(value.bytes);
-    supplied.set(value.path, owned);
+  for (const entry of parsed.output) {
+    if (supplied.has(entry.path)) invalid();
+    const owned = new Uint8Array(entry.bytes.byteLength);
+    owned.set(entry.bytes);
+    supplied.set(entry.path, owned);
   }
 
   let totalBytes = 0;

@@ -109,9 +109,9 @@ export function recordHostedInstallerAnalytics(
       !OUTCOME_SET.has(outcome) ||
       !FLOW_SET.has(flow) ||
       !ALLOWED_TUPLES.has(`${event}\0${outcome}\0${flow}`) ||
-      typeof release !== 'string' ||
+      release === undefined ||
       !RELEASE.test(release) ||
-      typeof channel !== 'string' ||
+      channel === undefined ||
       !CHANNEL.test(channel)
     ) return;
     sink.dataset?.writeDataPoint({

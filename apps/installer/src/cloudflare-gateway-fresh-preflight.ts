@@ -1,3 +1,6 @@
+import * as v from 'valibot';
+
+import { boundaryValueSchema, type BoundaryValue } from './boundary';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 import { sha256Hex } from './crypto';
 import {
@@ -45,6 +48,100 @@ const ATTESTATION_TTL_MS = 30_000;
 const MAX_ATTESTATION_TTL_MS = 60_000;
 const PORTAL_CNAME_TARGET = 'gateway.agents.cloudflare.com';
 
+function safeText(value: string, maxLength: number): boolean {
+  return value.length > 0 && value.length <= maxLength && ![...value].some((character) => {
+    const codePoint = character.codePointAt(0);
+    return codePoint === undefined || codePoint <= 0x1f || codePoint === 0x7f;
+  });
+}
+
+const nonnegativeIntegerSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
+const timeoutSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(1), v.maxValue(MAX_TIMEOUT_MS));
+const providerIdSchema = v.pipe(v.string(), v.regex(SAFE_PROVIDER_ID));
+const existingGatewaySchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  installationId: v.pipe(v.string(), v.regex(INSTALLATION_ID)),
+  name: v.pipe(v.string(), v.check((value) => safeText(value, 80))),
+  managementHostname: v.string(),
+  portalHostname: v.string(),
+  workerName: v.pipe(v.string(), v.regex(/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)),
+});
+const providerEnvelopeSchema = v.strictObject({
+  result: boundaryValueSchema,
+  result_info: v.optional(boundaryValueSchema),
+  success: v.boolean(),
+  errors: v.optional(v.array(boundaryValueSchema)),
+  messages: v.optional(v.array(boundaryValueSchema)),
+});
+const listPageSchema = v.strictObject({
+  result: v.array(boundaryValueSchema),
+  result_info: v.strictObject({
+    count: nonnegativeIntegerSchema,
+    page: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+    per_page: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+    total_count: v.optional(nonnegativeIntegerSchema),
+    total_pages: v.optional(nonnegativeIntegerSchema),
+  }),
+  success: v.literal(true),
+  errors: v.optional(v.array(boundaryValueSchema)),
+  messages: v.optional(v.array(boundaryValueSchema)),
+});
+const mcpServerSchema = v.looseObject({
+  id: providerIdSchema,
+  hostname: v.string(),
+  name: v.optional(v.nullable(v.string())),
+  description: v.optional(v.nullable(v.string())),
+});
+const destinationContainerSchema = v.looseObject({ type: v.string() });
+const viaMcpDestinationSchema = v.strictObject({
+  type: v.literal('via_mcp_server_portal'),
+  mcp_server_id: providerIdSchema,
+});
+const publicDestinationSchema = v.strictObject({ type: v.literal('public'), uri: v.string() });
+const viaMcpDestinationFieldsSchema = v.looseObject({
+  type: v.literal('via_mcp_server_portal'),
+  mcp_server_id: providerIdSchema,
+});
+const publicDestinationFieldsSchema = v.looseObject({ type: v.literal('public'), uri: v.string() });
+const accessApplicationSchema = v.looseObject({
+  id: providerIdSchema,
+  type: v.string(),
+  name: v.string(),
+  domain: v.optional(v.nullable(v.string())),
+  destinations: v.optional(v.array(boundaryValueSchema)),
+});
+const portalSchema = v.looseObject({
+  id: providerIdSchema,
+  hostname: v.string(),
+  name: v.optional(v.nullable(v.string())),
+  description: v.optional(v.nullable(v.string())),
+});
+const dnsRecordSchema = v.looseObject({
+  id: providerIdSchema,
+  name: v.string(),
+  type: v.string(),
+  content: v.string(),
+  proxied: v.boolean(),
+  comment: v.optional(v.nullable(v.string())),
+});
+const attestationSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('customer_gateway_fresh_preflight'),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  zoneId: v.pipe(v.string(), v.regex(ZONE_ID)),
+  planId: v.pipe(v.string(), v.regex(PLAN_ID)),
+  planHash: v.pipe(v.string(), v.regex(HASH)),
+  installationId: v.pipe(v.string(), v.regex(INSTALLATION_ID)),
+  configurationHash: v.pipe(v.string(), v.regex(HASH)),
+  desiredHash: v.pipe(v.string(), v.regex(HASH)),
+  releaseId: v.pipe(v.string(), v.regex(RELEASE_ID)),
+  releaseArtifactSha256: v.pipe(v.string(), v.regex(BARE_HASH)),
+  zeroCandidateKinds: v.array(v.picklist(RESOURCE_KINDS)),
+  checkedAt: nonnegativeIntegerSchema,
+  expiresAt: nonnegativeIntegerSchema,
+  attestationHash: v.pipe(v.string(), v.regex(HASH)),
+});
+
 export type CustomerGatewayFreshPreflightStage =
   | 'validate'
   | 'mcp_server_list'
@@ -77,18 +174,16 @@ export interface ExistingAnkkaGatewaySummary {
   readonly workerName: string;
 }
 
-export function parseExistingAnkkaGatewaySummary(value: unknown): ExistingAnkkaGatewaySummary | null {
-  const input = isRecord(value) ? value : null;
-  const managementHostname = normalizeHostname(input?.managementHostname);
-  const portalHostname = normalizeHostname(input?.portalHostname);
-  if (!input || !exactKeys(input, [
-    'schemaVersion', 'installationId', 'name', 'managementHostname', 'portalHostname', 'workerName',
-  ]) || input.schemaVersion !== 1 || typeof input.installationId !== 'string' ||
-    !INSTALLATION_ID.test(input.installationId) || !safeText(input.name, 80) ||
+export function parseExistingAnkkaGatewaySummary<Input>(value: Input): ExistingAnkkaGatewaySummary | null {
+  const result = v.safeParse(existingGatewaySchema, value);
+  if (!result.success) return null;
+  const input = result.output;
+  const managementHostname = normalizeHostname(input.managementHostname);
+  const portalHostname = normalizeHostname(input.portalHostname);
+  if (
     managementHostname === null || portalHostname === null ||
     managementHostname !== input.managementHostname || portalHostname !== input.portalHostname ||
-    managementHostname === portalHostname || typeof input.workerName !== 'string' ||
-    !/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(input.workerName)) return null;
+    managementHostname === portalHostname) return null;
   return Object.freeze({
     schemaVersion: 1,
     installationId: input.installationId,
@@ -152,7 +247,7 @@ interface PreflightCall {
 }
 
 interface ProviderPage {
-  readonly values: readonly unknown[];
+  readonly values: readonly BoundaryValue[];
   readonly count: number;
   readonly page: number;
   readonly perPage: number;
@@ -178,7 +273,7 @@ interface ParsedDestination {
   readonly type: string;
   readonly mcpServerId: string | null;
   readonly uri: string | null;
-  readonly exactShape: boolean;
+  readonly matchesReviewedContract: boolean;
 }
 
 interface ParsedPortal {
@@ -207,28 +302,8 @@ function fail(
   throw new CustomerGatewayFreshPreflightError(code, stage, existingGateway);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort(compareText);
-  const sortedExpected = [...expected].sort(compareText);
-  return actual.length === sortedExpected.length &&
-    actual.every((key, index) => key === sortedExpected[index]);
-}
-
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function safeText(value: unknown, maxLength: number): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= maxLength &&
-    !/[\u0000-\u001f\u007f]/u.test(value);
-}
-
-function normalizeHostname(value: unknown): string | null {
-  if (typeof value !== 'string' || value.length < 3 || value.length > 253) return null;
+function normalizeHostname(value: string): string | null {
+  if (value.length < 3 || value.length > 253) return null;
   const normalized = value.toLowerCase().replace(/\.$/u, '');
   const labels = normalized.split('.');
   if (labels.length < 2 || labels.some((label) => label.length > 63 || !DNS_LABEL.test(label))) {
@@ -237,8 +312,8 @@ function normalizeHostname(value: unknown): string | null {
   return normalized;
 }
 
-function normalizeHttpsEndpoint(value: unknown): string | null {
-  if (typeof value !== 'string' || value.length > 2048) return null;
+function normalizeHttpsEndpoint(value: string): string | null {
+  if (value.length > 2048) return null;
   try {
     const url = new URL(value);
     if (
@@ -251,18 +326,18 @@ function normalizeHttpsEndpoint(value: unknown): string | null {
   }
 }
 
-function requireTimeout(value: unknown): number {
+function requireTimeout<Value>(value: Value): number {
   const timeout = value === undefined ? DEFAULT_TIMEOUT_MS : value;
-  if (!Number.isSafeInteger(timeout) || (timeout as number) < 1 || (timeout as number) > MAX_TIMEOUT_MS) {
+  const result = v.safeParse(timeoutSchema, timeout);
+  if (!result.success) {
     fail('invalid_input', 'validate');
   }
-  return timeout as number;
+  return result.output;
 }
 
 function requireCall(input: CustomerGatewayFreshPreflightInput): PreflightCall {
   if (
-    !isRecord(input) || typeof input.transport !== 'function' ||
-    typeof input.accessToken !== 'string' || !ACCESS_TOKEN.test(input.accessToken)
+    !v.is(v.function(), input.transport) || !ACCESS_TOKEN.test(input.accessToken)
   ) fail('invalid_input', 'validate');
   return Object.freeze({
     accessToken: input.accessToken,
@@ -271,7 +346,7 @@ function requireCall(input: CustomerGatewayFreshPreflightInput): PreflightCall {
   });
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+async function readBoundedJson(response: Response): Promise<BoundaryValue> {
   const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
   if (contentType !== 'application/json') throw new ProviderReadFailure();
   const declared = response.headers.get('content-length');
@@ -305,7 +380,12 @@ async function readBoundedJson(response: Response): Promise<unknown> {
       offset += chunk.byteLength;
     }
     try {
-      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
+      const parsed = v.safeParse(
+        boundaryValueSchema,
+        JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)),
+      );
+      if (!parsed.success) throw new ProviderReadFailure();
+      return parsed.output;
     } finally {
       bytes.fill(0);
     }
@@ -321,7 +401,7 @@ async function performListRequest(
   call: PreflightCall,
   stage: CustomerGatewayFreshPreflightStage,
   url: URL,
-): Promise<unknown> {
+): Promise<BoundaryValue> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -364,67 +444,35 @@ async function performListRequest(
   }
 }
 
-/**
- * The AI Controls endpoints (`/access/ai-controls/mcp/*`) omit the classic v4
- * `errors` and `messages` keys on success (observed live 2026-08-23); the
- * classic endpoints include them. Both keys are therefore optional and are
- * validated only when present.
- */
-function envelopeKeysAllowed(value: Record<string, unknown>, required: readonly string[]): boolean {
-  const optional = new Set(['errors', 'messages']);
-  const keys = Object.keys(value);
-  return required.every((key) => keys.includes(key)) &&
-    keys.every((key) => required.includes(key) || optional.has(key)) &&
-    (!Object.hasOwn(value, 'messages') || Array.isArray(value.messages)) &&
-    (!Object.hasOwn(value, 'errors') || Array.isArray(value.errors));
-}
-
-function isProviderRejection(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const keys = Object.hasOwn(value, 'result_info')
-    ? ['result', 'result_info', 'success']
-    : ['result', 'success'];
-  return envelopeKeysAllowed(value, keys) && value.success === false && value.result === null &&
-    Array.isArray(value.errors) && value.errors.length > 0 &&
-    value.errors.every((entry) => isRecord(entry));
+function isProviderRejection(value: BoundaryValue): boolean {
+  const result = v.safeParse(providerEnvelopeSchema, value);
+  return result.success && result.output.success === false && result.output.result === null &&
+    result.output.errors !== undefined && result.output.errors.length > 0 &&
+    result.output.errors.every((entry) => v.is(v.looseObject({}), entry));
 }
 
 function parseListPage(
-  value: unknown,
+  value: BoundaryValue,
   expectedPage: number,
   stage: CustomerGatewayFreshPreflightStage,
 ): ProviderPage {
+  const result = v.safeParse(listPageSchema, value);
+  if (!result.success || (result.output.errors?.length ?? 0) !== 0 ||
+      (result.output.messages?.length ?? 0) !== 0) fail('provider_mismatch', stage);
+  const pageValues = result.output.result;
+  const info = result.output.result_info;
   if (
-    !isRecord(value) ||
-    !envelopeKeysAllowed(value, ['result', 'result_info', 'success']) ||
-    value.success !== true ||
-    (Object.hasOwn(value, 'errors') && (value.errors as unknown[]).length !== 0) ||
-    (Object.hasOwn(value, 'messages') && (value.messages as unknown[]).length !== 0) ||
-    !Array.isArray(value.result) || !isRecord(value.result_info)
+    info.count !== pageValues.length || info.page !== expectedPage || info.per_page !== PAGE_SIZE
   ) fail('provider_mismatch', stage);
-  const info = value.result_info;
-  const allowedInfoKeys = new Set(['count', 'page', 'per_page', 'total_count', 'total_pages']);
-  if (
-    Object.keys(info).some((key) => !allowedInfoKeys.has(key)) ||
-    !Object.hasOwn(info, 'count') || !Object.hasOwn(info, 'page') ||
-    !Object.hasOwn(info, 'per_page') ||
-    !Number.isSafeInteger(info.count) || info.count !== value.result.length ||
-    !Number.isSafeInteger(info.page) || info.page !== expectedPage ||
-    !Number.isSafeInteger(info.per_page) || info.per_page !== PAGE_SIZE
-  ) fail('provider_mismatch', stage);
-  const totalCount = Object.hasOwn(info, 'total_count') ? info.total_count : null;
-  const totalPages = Object.hasOwn(info, 'total_pages') ? info.total_pages : null;
-  if (
-    (totalCount !== null && (!Number.isSafeInteger(totalCount) || (totalCount as number) < 0)) ||
-    (totalPages !== null && (!Number.isSafeInteger(totalPages) || (totalPages as number) < 0))
-  ) fail('provider_mismatch', stage);
+  const totalCount = info.total_count ?? null;
+  const totalPages = info.total_pages ?? null;
   return Object.freeze({
-    values: Object.freeze([...value.result]),
-    count: info.count as number,
-    page: info.page as number,
-    perPage: info.per_page as number,
-    totalCount: totalCount as number | null,
-    totalPages: totalPages as number | null,
+    values: Object.freeze([...pageValues]),
+    count: info.count,
+    page: info.page,
+    perPage: info.per_page,
+    totalCount,
+    totalPages,
   });
 }
 
@@ -433,8 +481,8 @@ async function collectPaginated(
   stage: CustomerGatewayFreshPreflightStage,
   urlForPage: (page: number) => URL,
   totalCountMatchesQuery: boolean,
-): Promise<readonly unknown[]> {
-  const values: unknown[] = [];
+): Promise<readonly BoundaryValue[]> {
+  const values: BoundaryValue[] = [];
   let expectedTotalCount: number | null = null;
   let expectedTotalPages: number | null = null;
   for (let pageNumber = 1; pageNumber <= MAX_LIST_PAGES; pageNumber += 1) {
@@ -503,49 +551,47 @@ function dnsListUrl(zoneId: string, hostname: string, page: number): URL {
   return url;
 }
 
-function parseMcpServer(value: unknown): ParsedMcpServer | null {
-  if (!isRecord(value) || typeof value.id !== 'string' || !SAFE_PROVIDER_ID.test(value.id)) {
-    return null;
-  }
-  const endpoint = normalizeHttpsEndpoint(value.hostname);
-  const description = value.description ?? null;
+function parseMcpServer(value: BoundaryValue): ParsedMcpServer | null {
+  const result = v.safeParse(mcpServerSchema, value);
+  if (!result.success) return null;
+  const endpoint = normalizeHttpsEndpoint(result.output.hostname);
+  const description = result.output.description ?? null;
   if (
     endpoint === null ||
-    (Object.hasOwn(value, 'name') && value.name !== null && !safeText(value.name, 350)) ||
+    (result.output.name !== undefined && result.output.name !== null && !safeText(result.output.name, 350)) ||
     (description !== null && !safeText(description, 350))
   ) return null;
-  return Object.freeze({ id: value.id, endpoint, description: description as string | null });
+  return Object.freeze({ id: result.output.id, endpoint, description });
 }
 
-function parseDestination(value: unknown): ParsedDestination | null {
-  if (!isRecord(value) || !safeText(value.type, 128)) return null;
+function parseDestination(value: BoundaryValue): ParsedDestination | null {
+  const container = v.safeParse(destinationContainerSchema, value);
+  if (!container.success || !safeText(container.output.type, 128)) return null;
   let mcpServerId: string | null = null;
   let uri: string | null = null;
-  let exactShape = false;
-  if (value.type === 'via_mcp_server_portal') {
-    if (typeof value.mcp_server_id !== 'string' || !SAFE_PROVIDER_ID.test(value.mcp_server_id)) {
-      return null;
-    }
-    mcpServerId = value.mcp_server_id;
-    exactShape = exactKeys(value, ['type', 'mcp_server_id']);
+  let matchesReviewedContract = false;
+  if (container.output.type === 'via_mcp_server_portal') {
+    const destination = v.safeParse(viaMcpDestinationFieldsSchema, value);
+    if (!destination.success) return null;
+    mcpServerId = destination.output.mcp_server_id;
+    matchesReviewedContract = v.safeParse(viaMcpDestinationSchema, value).success;
   }
-  if (value.type === 'public') {
-    if (!safeText(value.uri, 2048)) return null;
-    uri = value.uri;
-    exactShape = exactKeys(value, ['type', 'uri']);
+  if (container.output.type === 'public') {
+    const destination = v.safeParse(publicDestinationFieldsSchema, value);
+    if (!destination.success || !safeText(destination.output.uri, 2048)) return null;
+    uri = destination.output.uri;
+    matchesReviewedContract = v.safeParse(publicDestinationSchema, value).success;
   }
-  return Object.freeze({ type: value.type, mcpServerId, uri, exactShape });
+  return Object.freeze({ type: container.output.type, mcpServerId, uri, matchesReviewedContract });
 }
 
-function parseAccessApplication(value: unknown): ParsedAccessApplication | null {
-  if (
-    !isRecord(value) || typeof value.id !== 'string' || !SAFE_PROVIDER_ID.test(value.id) ||
-    !safeText(value.type, 128) || !safeText(value.name, 350)
-  ) return null;
-  const domain = value.domain ?? null;
+function parseAccessApplication(value: BoundaryValue): ParsedAccessApplication | null {
+  const result = v.safeParse(accessApplicationSchema, value);
+  if (!result.success || !safeText(result.output.type, 128) || !safeText(result.output.name, 350)) return null;
+  const domain = result.output.domain ?? null;
   if (domain !== null && !safeText(domain, 2048)) return null;
-  const rawDestinations = value.destinations ?? [];
-  if (!Array.isArray(rawDestinations) || rawDestinations.length > 64) return null;
+  const rawDestinations = result.output.destinations ?? [];
+  if (rawDestinations.length > 64) return null;
   const destinations: ParsedDestination[] = [];
   for (const destination of rawDestinations) {
     const parsed = parseDestination(destination);
@@ -553,56 +599,54 @@ function parseAccessApplication(value: unknown): ParsedAccessApplication | null 
     destinations.push(parsed);
   }
   return Object.freeze({
-    id: value.id,
-    type: value.type,
-    name: value.name,
-    domain: domain as string | null,
+    id: result.output.id,
+    type: result.output.type,
+    name: result.output.name,
+    domain,
     destinations: Object.freeze(destinations),
   });
 }
 
-function parsePortal(value: unknown): ParsedPortal | null {
-  if (!isRecord(value) || typeof value.id !== 'string' || !SAFE_PROVIDER_ID.test(value.id)) {
-    return null;
-  }
-  const hostname = normalizeHostname(value.hostname);
-  const name = value.name ?? null;
-  const description = value.description ?? null;
+function parsePortal(value: BoundaryValue): ParsedPortal | null {
+  const result = v.safeParse(portalSchema, value);
+  if (!result.success) return null;
+  const hostname = normalizeHostname(result.output.hostname);
+  const name = result.output.name ?? null;
+  const description = result.output.description ?? null;
   if (
     hostname === null || (name !== null && !safeText(name, 350)) ||
     (description !== null && !safeText(description, 350))
   ) return null;
   return Object.freeze({
-    id: value.id,
+    id: result.output.id,
     hostname,
-    name: name as string | null,
-    description: description as string | null,
+    name,
+    description,
   });
 }
 
-function parseDnsRecord(value: unknown): ParsedDnsRecord | null {
-  if (!isRecord(value) || typeof value.id !== 'string' || !SAFE_PROVIDER_ID.test(value.id)) {
-    return null;
-  }
-  const name = normalizeHostname(value.name);
-  const comment = value.comment ?? null;
+function parseDnsRecord(value: BoundaryValue): ParsedDnsRecord | null {
+  const result = v.safeParse(dnsRecordSchema, value);
+  if (!result.success) return null;
+  const name = normalizeHostname(result.output.name);
+  const comment = result.output.comment ?? null;
   if (
-    name === null || !safeText(value.type, 32) || !safeText(value.content, 2048) ||
-    typeof value.proxied !== 'boolean' || (comment !== null && !safeText(comment, 350))
+    name === null || !safeText(result.output.type, 32) || !safeText(result.output.content, 2048) ||
+    (comment !== null && !safeText(comment, 350))
   ) return null;
   return Object.freeze({
-    id: value.id,
+    id: result.output.id,
     name,
-    type: value.type,
-    content: value.content,
-    proxied: value.proxied,
-    comment: comment as string | null,
+    type: result.output.type,
+    content: result.output.content,
+    proxied: result.output.proxied,
+    comment,
   });
 }
 
 function parseUnique<T extends { readonly id: string }>(
-  values: readonly unknown[],
-  parser: (value: unknown) => T | null,
+  values: readonly BoundaryValue[],
+  parser: (value: BoundaryValue) => T | null,
   stage: CustomerGatewayFreshPreflightStage,
 ): readonly T[] {
   const parsed: T[] = [];
@@ -696,16 +740,19 @@ async function assertZeroCandidates(
   const portalApplications = applications.filter((application) =>
     application.name === portalApplication.name && application.type === 'mcp_portal' &&
     application.domain === portalApplication.hostname && application.destinations.length === 1 &&
-    application.destinations[0]?.exactShape === true &&
+    application.destinations[0]?.matchesReviewedContract === true &&
     application.destinations[0].type === 'public' &&
     application.destinations[0].uri === portalApplication.hostname);
   const managementApplications = applications.filter((application) =>
     application.type === 'self_hosted' &&
     managementOwnershipMarkerFromName(application.name, desiredPortal.name) !== null &&
     application.domain === managementHostname && application.destinations.length === 0);
-  const detectedManagementMarker = managementApplications.length === 1
-    ? managementOwnershipMarkerFromName(managementApplications[0].name, desiredPortal.name)
-    : null;
+  const managementApplication = managementApplications.length === 1
+    ? managementApplications.at(0)
+    : undefined;
+  const detectedManagementMarker = managementApplication === undefined
+    ? null
+    : managementOwnershipMarkerFromName(managementApplication.name, desiredPortal.name);
   const dnsOwnershipMarker = `acg:v1:${projection.expected.installationId}:${projection.candidates.dnsRecord.key}`;
   const matchingDnsRecords = dnsRecords.filter((record) =>
     record.name === projection.candidates.dnsRecord.hostname && record.type === 'CNAME' &&
@@ -762,7 +809,7 @@ function attestationWithoutHash(value: CustomerGatewayFreshPreflightAttestation)
   return unsigned;
 }
 
-async function attestationHash(value: unknown): Promise<string> {
+async function attestationHash<Value>(value: Value): Promise<string> {
   return `sha256:${await sha256Hex(canonicalCustomerBootstrapJson(value))}`;
 }
 
@@ -798,14 +845,14 @@ export async function preflightFreshCustomerGateway(
   await assertZeroCandidates(call, projection, managementHostname);
 
   const checkedAt = input.nowMs ?? Date.now();
-  if (!Number.isSafeInteger(checkedAt) || checkedAt < 0 || projection.plan.planId.length === 0) {
+  if (!v.is(nonnegativeIntegerSchema, checkedAt) || projection.plan.planId.length === 0) {
     fail('invalid_input', 'attest');
   }
   const expiresAt = Math.min(checkedAt + ATTESTATION_TTL_MS, projection.plan.expiresAt);
-  if (!Number.isSafeInteger(expiresAt) || expiresAt <= checkedAt) fail('invalid_input', 'attest');
+  if (!v.is(nonnegativeIntegerSchema, expiresAt) || expiresAt <= checkedAt) fail('invalid_input', 'attest');
   const unsigned = Object.freeze({
-    schemaVersion: 1 as const,
-    kind: 'customer_gateway_fresh_preflight' as const,
+    schemaVersion: 1,
+    kind: 'customer_gateway_fresh_preflight',
     accountId: projection.target.accountId,
     zoneId: projection.target.zoneId,
     planId: projection.plan.planId,
@@ -823,66 +870,37 @@ export async function preflightFreshCustomerGateway(
 }
 
 /** Pure, provider-I/O-free parser for journal persistence and cross-binding. */
-export async function parseCustomerGatewayFreshPreflightAttestation(
-  value: unknown,
+export async function parseCustomerGatewayFreshPreflightAttestation<Input>(
+  value: Input,
 ): Promise<CustomerGatewayFreshPreflightAttestation | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion',
-    'kind',
-    'accountId',
-    'zoneId',
-    'planId',
-    'planHash',
-    'installationId',
-    'configurationHash',
-    'desiredHash',
-    'releaseId',
-    'releaseArtifactSha256',
-    'zeroCandidateKinds',
-    'checkedAt',
-    'expiresAt',
-    'attestationHash',
-  ])) return null;
-  const candidateKinds = Array.isArray(value.zeroCandidateKinds)
-    ? value.zeroCandidateKinds as GatewayResourceKind[]
-    : [];
+  const parsed = v.safeParse(attestationSchema, value);
+  if (!parsed.success) return null;
+  const input = parsed.output;
+  const candidateKinds = input.zeroCandidateKinds;
   const validCandidateKinds = [RESOURCE_KINDS, PORTAL_RESOURCE_KINDS].some((expected) =>
     candidateKinds.length === expected.length &&
     candidateKinds.every((kind, index) => kind === expected[index]));
   if (
-    value.schemaVersion !== 1 || value.kind !== 'customer_gateway_fresh_preflight' ||
-    typeof value.accountId !== 'string' || !ACCOUNT_ID.test(value.accountId) ||
-    typeof value.zoneId !== 'string' || !ZONE_ID.test(value.zoneId) ||
-    typeof value.planId !== 'string' || !PLAN_ID.test(value.planId) ||
-    typeof value.planHash !== 'string' || !HASH.test(value.planHash) ||
-    typeof value.installationId !== 'string' || !INSTALLATION_ID.test(value.installationId) ||
-    typeof value.configurationHash !== 'string' || !HASH.test(value.configurationHash) ||
-    typeof value.desiredHash !== 'string' || !HASH.test(value.desiredHash) ||
-    typeof value.releaseId !== 'string' || !RELEASE_ID.test(value.releaseId) ||
-    typeof value.releaseArtifactSha256 !== 'string' || !BARE_HASH.test(value.releaseArtifactSha256) ||
     !validCandidateKinds ||
-    !Number.isSafeInteger(value.checkedAt) || (value.checkedAt as number) < 0 ||
-    !Number.isSafeInteger(value.expiresAt) ||
-    (value.expiresAt as number) <= (value.checkedAt as number) ||
-    (value.expiresAt as number) - (value.checkedAt as number) > MAX_ATTESTATION_TTL_MS ||
-    typeof value.attestationHash !== 'string' || !HASH.test(value.attestationHash)
+    input.expiresAt <= input.checkedAt ||
+    input.expiresAt - input.checkedAt > MAX_ATTESTATION_TTL_MS
   ) return null;
   const candidate: CustomerGatewayFreshPreflightAttestation = Object.freeze({
     schemaVersion: 1,
     kind: 'customer_gateway_fresh_preflight',
-    accountId: value.accountId,
-    zoneId: value.zoneId,
-    planId: value.planId,
-    planHash: value.planHash,
-    installationId: value.installationId,
-    configurationHash: value.configurationHash,
-    desiredHash: value.desiredHash,
-    releaseId: value.releaseId,
-    releaseArtifactSha256: value.releaseArtifactSha256,
+    accountId: input.accountId,
+    zoneId: input.zoneId,
+    planId: input.planId,
+    planHash: input.planHash,
+    installationId: input.installationId,
+    configurationHash: input.configurationHash,
+    desiredHash: input.desiredHash,
+    releaseId: input.releaseId,
+    releaseArtifactSha256: input.releaseArtifactSha256,
     zeroCandidateKinds: Object.freeze([...candidateKinds]),
-    checkedAt: value.checkedAt as number,
-    expiresAt: value.expiresAt as number,
-    attestationHash: value.attestationHash,
+    checkedAt: input.checkedAt,
+    expiresAt: input.expiresAt,
+    attestationHash: input.attestationHash,
   });
   if (await attestationHash(attestationWithoutHash(candidate)) !== candidate.attestationHash) {
     return null;

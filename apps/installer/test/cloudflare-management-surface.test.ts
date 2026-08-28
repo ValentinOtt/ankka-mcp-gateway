@@ -1,3 +1,5 @@
+import type { BoundaryValue, JsonValue } from '../src/boundary';
+
 import {
   CloudflareManagementError,
   attachManagementCustomDomain,
@@ -28,7 +30,7 @@ import {
   type CloudflareManagementTransport,
 } from '../src/cloudflare-management-surface';
 import { buildStaticDeployPlan, parseDeploySelection } from '../src/schema';
-import { manifest, NOW, selectionInput } from './fixtures';
+import { manifest, NOW, requiredFixture, selectionInput } from './fixtures';
 
 const ACCOUNT_ID = 'a'.repeat(32);
 const ZONE_ID = 'b'.repeat(32);
@@ -66,22 +68,29 @@ interface RecordedTransport {
   readonly requests: ManagementRequest[];
 }
 
-function success(result: unknown, resultInfo?: unknown, status = 200): Response {
-  return Response.json({
+function success(result: BoundaryValue, resultInfo?: BoundaryValue, status = 200): Response {
+  const body = {
     errors: [],
     messages: [],
     result,
-    ...(resultInfo === undefined ? {} : { result_info: resultInfo }),
     success: true,
-  }, { status });
+  };
+  return resultInfo === undefined
+    ? Response.json(body, { status })
+    : Response.json({ ...body, result_info: resultInfo }, { status });
+}
+
+interface ResultInfoOverrides {
+  readonly provider_note?: string;
+  readonly total_pages?: number;
 }
 
 function page(
-  result: readonly unknown[],
+  result: readonly JsonValue[],
   pageNumber: number,
   totalCount: number,
   perPage: number,
-  extra: Record<string, unknown> = {},
+  extra: ResultInfoOverrides = {},
 ): Response {
   return success(result, {
     count: result.length,
@@ -106,8 +115,8 @@ function recorded(response: Response | ResponseFactory): RecordedTransport {
   return {
     requests,
     transport: async (request) => {
-      requests.push(request.clone() as unknown as ManagementRequest);
-      return typeof response === 'function' ? await response(request) : response.clone();
+      requests.push(new Request(request));
+      return response instanceof Response ? response.clone() : await response(request);
     },
   };
 }
@@ -118,7 +127,7 @@ function sequenced(steps: readonly (Response | ResponseFactory)[]): RecordedTran
     const step = steps[index];
     index += 1;
     if (!step) throw new Error('unexpected provider request');
-    return typeof step === 'function' ? await step(request) : step.clone();
+    return step instanceof Response ? step.clone() : await step(request);
   });
 }
 
@@ -134,7 +143,7 @@ function applicationSpec() {
   } as const;
 }
 
-function exactApplication(id = APP_ID, aud = AUD): Record<string, unknown> {
+function exactApplication(id = APP_ID, aud = AUD) {
   return {
     allow_authenticate_via_warp: false,
     allowed_idps: [IDP_ONE, IDP_TWO],
@@ -153,7 +162,7 @@ function policySpec() {
   return { accountId: ACCOUNT_ID, applicationId: APP_ID, plan: PLAN } as const;
 }
 
-function exactPolicy(id = POLICY_ID): Record<string, unknown> {
+function exactPolicy(id = POLICY_ID) {
   return {
     approval_required: false,
     decision: 'allow',
@@ -175,7 +184,7 @@ function domainSpec() {
   return { accountId: ACCOUNT_ID, plan: PLAN, zoneId: ZONE_ID } as const;
 }
 
-function exactDomain(id = DOMAIN_ID): Record<string, unknown> {
+function exactDomain(id = DOMAIN_ID) {
   return {
     cert_id: '9fdf92c8-64c2-4a3d-b1af-e15304961145',
     environment: 'production',
@@ -188,13 +197,13 @@ function exactDomain(id = DOMAIN_ID): Record<string, unknown> {
 }
 
 function expectManagementError(
-  error: unknown,
+  error: CloudflareManagementError,
   expected: Pick<CloudflareManagementError, 'code' | 'stage' | 'outcome'>,
 ): boolean {
   expect(error).toBeInstanceOf(CloudflareManagementError);
   expect(error).toMatchObject({ ...expected, canRetry: false });
-  expect((error as Error).message).toBe(expected.code);
-  expect((error as Error).message).not.toContain(ACCESS_TOKEN);
+  expect(error.message).toBe(expected.code);
+  expect(error.message).not.toContain(ACCESS_TOKEN);
   return true;
 }
 
@@ -219,8 +228,9 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(subdomain.transport),
       accountId: ACCOUNT_ID,
     })).resolves.toEqual({ accountId: ACCOUNT_ID, subdomain: 'acme-workers' });
-    expect(subdomain.requests[0].method).toBe('GET');
-    expect(subdomain.requests[0].url).toBe(
+    const subdomainRequest = requiredFixture(subdomain.requests.at(0), 'subdomain request');
+    expect(subdomainRequest.method).toBe('GET');
+    expect(subdomainRequest.url).toBe(
       `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/workers/subdomain`,
     );
 
@@ -228,7 +238,7 @@ describe('Cloudflare management-surface prerequisite', () => {
     await expect(getAccountWorkersSubdomain({
       ...call(malformed.transport),
       accountId: ACCOUNT_ID,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'provider_mismatch',
       stage: 'account_worker_subdomain_get',
       outcome: 'rejected',
@@ -255,7 +265,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       { id: IDP_TWO, name: 'One-time PIN', readOnly: false, type: 'onetimepin' },
     ]);
     expect(provider.requests).toHaveLength(2);
-    expect(new URL(provider.requests[1].url).searchParams.get('page')).toBe('2');
+    expect(new URL(requiredFixture(provider.requests.at(1), 'second provider request').url).searchParams.get('page')).toBe('2');
   });
 
   it('accepts the account-default Cloudflare identity provider, which is listed with an empty name', async () => {
@@ -302,7 +312,7 @@ describe('Cloudflare management-surface prerequisite', () => {
     await expect(listAccessIdentityProviders({
       ...call(provider.transport),
       accountId: ACCOUNT_ID,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'provider_unknown',
       stage: 'identity_provider_list',
       outcome: 'unknown',
@@ -360,7 +370,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(transport),
       accountId: ACCOUNT_ID,
       plan: driftedPlan,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'invalid_input',
       stage: 'management_app_baseline',
       outcome: 'not_sent',
@@ -381,13 +391,13 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...domainSpec(),
     })).resolves.toEqual({ clear: true });
     expect(domain.requests).toHaveLength(3);
-    expect(Object.fromEntries(new URL(domain.requests[0].url).searchParams)).toEqual({
+    expect(Object.fromEntries(new URL(requiredFixture(domain.requests.at(0), 'domain request').url).searchParams)).toEqual({
       hostname: MANAGEMENT_HOSTNAME,
       page: '1',
       per_page: '100',
     });
-    expect(new URL(domain.requests[1].url).pathname).toBe(`/client/v4/zones/${ZONE_ID}/dns_records`);
-    expect(new URL(domain.requests[2].url).pathname).toBe(`/client/v4/zones/${ZONE_ID}/workers/routes`);
+    expect(new URL(requiredFixture(domain.requests.at(1), 'DNS request').url).pathname).toBe(`/client/v4/zones/${ZONE_ID}/dns_records`);
+    expect(new URL(requiredFixture(domain.requests.at(2), 'route request').url).pathname).toBe(`/client/v4/zones/${ZONE_ID}/workers/routes`);
   });
 
   it('requires the persisted app intent, sends it exactly, and returns the exact locator', async () => {
@@ -399,8 +409,9 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...spec,
       intent,
     })).resolves.toEqual({ applicationId: APP_ID, aud: AUD });
-    expect(provider.requests[0].method).toBe('POST');
-    await expect(provider.requests[0].json()).resolves.toEqual(intent.request);
+    const createRequest = requiredFixture(provider.requests.at(0), 'application create request');
+    expect(createRequest.method).toBe('POST');
+    await expect(createRequest.json()).resolves.toEqual(intent.request);
 
     let calls = 0;
     const altered = { ...intent, request: { ...intent.request, name: 'altered' } };
@@ -408,7 +419,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(async () => { calls += 1; return success({}); }),
       ...spec,
       intent: altered,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'invalid_input',
       stage: 'management_app_create',
       outcome: 'not_sent',
@@ -432,7 +443,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(unexpected.transport),
       ...spec,
       intent,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'provider_unknown',
       stage: 'management_app_create',
       outcome: 'unknown',
@@ -446,7 +457,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(async () => { throw new Error(`hidden ${ACCESS_TOKEN}`); }),
       ...spec,
       intent,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'provider_unknown',
       stage: 'management_app_create',
       outcome: 'unknown',
@@ -470,7 +481,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(ambiguous.transport),
       ...spec,
       intent,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'provider_ambiguous',
       stage: 'management_app_recover',
       outcome: 'rejected',
@@ -486,7 +497,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...spec,
       intent,
     })).resolves.toEqual({ policyId: POLICY_ID });
-    await expect(create.requests[0].json()).resolves.toEqual(intent.request);
+    await expect(requiredFixture(create.requests.at(0), 'policy create request').json()).resolves.toEqual(intent.request);
 
     const recover = recorded(success([exactPolicy()]));
     await expect(recoverManagementAdminAllowPolicy({
@@ -506,7 +517,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(foreign.transport),
       ...spec,
       intent,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'provider_ambiguous',
       stage: 'admin_policy_recover',
       outcome: 'rejected',
@@ -520,7 +531,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(recorded(success([])).transport),
       ...appSpec,
       intent: appIntent,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'provider_unknown',
       stage: 'management_app_recover',
       outcome: 'unknown',
@@ -529,7 +540,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(recorded(success([{ ...exactApplication(), name: 'foreign' }])).transport),
       ...appSpec,
       intent: appIntent,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'provider_mismatch',
       stage: 'management_app_recover',
       outcome: 'rejected',
@@ -540,7 +551,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(recorded(success([{ ...exactDomain(), service: 'foreign-worker' }])).transport),
       ...customSpec,
       intent: prepareManagementCustomDomainIntent(customSpec),
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'provider_mismatch',
       stage: 'management_domain_recover',
       outcome: 'rejected',
@@ -559,7 +570,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(transport),
       ...policy,
       intent: { ...policyIntent, applicationId: OTHER_APP_ID },
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'invalid_input',
       stage: 'admin_policy_create',
       outcome: 'not_sent',
@@ -571,7 +582,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(transport),
       ...domain,
       intent: { ...domainIntent, zoneId: '9'.repeat(32) },
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'invalid_input',
       stage: 'management_domain_attach',
       outcome: 'not_sent',
@@ -621,7 +632,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(recorded(success({ ...live, approval_required: true })).transport),
       ...spec,
       policyId: POLICY_ID,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'late_drift',
       stage: 'admin_policy_get',
       outcome: 'rejected',
@@ -667,13 +678,13 @@ describe('Cloudflare management-surface prerequisite', () => {
     expect(provider.requests.map((request) => request.method)).toEqual([
       'GET', 'GET', 'GET', 'GET', 'GET', 'GET', 'PUT',
     ]);
-    expect(new URL(provider.requests[0].url).pathname).toBe('/client/v4/accounts/' + ACCOUNT_ID + '/workers/domains');
-    const dnsUrl = new URL(provider.requests[1].url);
+    expect(new URL(requiredFixture(provider.requests.at(0), 'domain list request').url).pathname).toBe('/client/v4/accounts/' + ACCOUNT_ID + '/workers/domains');
+    const dnsUrl = new URL(requiredFixture(provider.requests.at(1), 'DNS list request').url);
     expect(dnsUrl.pathname).toBe(`/client/v4/zones/${ZONE_ID}/dns_records`);
     expect(dnsUrl.searchParams.get('name.exact')).toBe(MANAGEMENT_HOSTNAME);
-    expect(new URL(provider.requests[2].url).pathname).toBe(`/client/v4/zones/${ZONE_ID}/workers/routes`);
-    expect(new URL(provider.requests[5].url).pathname).toBe(`/client/v4/zones/${ZONE_ID}/dns_records`);
-    await expect(provider.requests[6].json()).resolves.toEqual(intent.request);
+    expect(new URL(requiredFixture(provider.requests.at(2), 'route list request').url).pathname).toBe(`/client/v4/zones/${ZONE_ID}/workers/routes`);
+    expect(new URL(requiredFixture(provider.requests.at(5), 'final DNS list request').url).pathname).toBe(`/client/v4/zones/${ZONE_ID}/dns_records`);
+    await expect(requiredFixture(provider.requests.at(6), 'domain attach request').json()).resolves.toEqual(intent.request);
   });
 
   it.each([
@@ -690,7 +701,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(provider.transport),
       ...spec,
       intent: prepareManagementCustomDomainIntent(spec),
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code,
       stage,
       outcome: 'rejected',
@@ -711,7 +722,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(lateDomain.transport),
       ...spec,
       intent,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'fresh_baseline_collision',
       stage: 'management_domain_baseline',
       outcome: 'rejected',
@@ -730,7 +741,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(lateDns.transport),
       ...spec,
       intent,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'dns_collision',
       stage: 'management_domain_dns_collision',
       outcome: 'rejected',
@@ -759,7 +770,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...call(ambiguous.transport),
       ...spec,
       intent,
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'provider_ambiguous',
       stage: 'management_domain_recover',
       outcome: 'rejected',
@@ -790,7 +801,7 @@ describe('Cloudflare management-surface prerequisite', () => {
       }),
       ...spec,
       intent: prepareManagementAccessApplicationIntent(spec),
-    })).rejects.toSatisfy((error: unknown) => expectManagementError(error, {
+    })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'provider_unknown',
       stage: 'management_app_create',
       outcome: 'unknown',

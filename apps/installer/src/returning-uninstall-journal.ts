@@ -1,3 +1,6 @@
+import * as v from 'valibot';
+
+import { boundaryValueSchema, jsonValueSchema, type BoundaryValue, type JsonValue } from './boundary';
 import { sha256Hex } from './crypto';
 import { DeployError } from './errors';
 import {
@@ -32,11 +35,58 @@ export const RETURNING_UNINSTALL_ACTION_ORDER = Object.freeze([
 export type ReturningUninstallActionName = (typeof RETURNING_UNINSTALL_ACTION_ORDER)[number];
 export type ReturningUninstallActionPhase = 'prepared' | 'send_armed' | 'submitted' | 'verified';
 
+const safeIntegerSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
+const actionNameSchema = v.picklist(RETURNING_UNINSTALL_ACTION_ORDER);
+const actionPhaseSchema = v.picklist(['prepared', 'send_armed', 'submitted', 'verified']);
+const storedActionSchema = v.strictObject({
+  name: actionNameSchema,
+  phase: actionPhaseSchema,
+  record: jsonValueSchema,
+  locator: v.nullable(jsonValueSchema),
+  preparedAt: safeIntegerSchema,
+  sendArmedAt: v.nullable(safeIntegerSchema),
+  submittedAt: v.nullable(safeIntegerSchema),
+  verifiedAt: v.nullable(safeIntegerSchema),
+});
+const storedApprovalSchema = v.strictObject({
+  authorization: v.picklist(['customer_action', 'hosted_recovery']),
+  attemptId: v.string(),
+  approvedAt: safeIntegerSchema,
+  actionId: v.string(),
+  actorEmail: v.string(),
+  actionProofHash: v.string(),
+  planCreatedAt: safeIntegerSchema,
+  planExpiresAt: safeIntegerSchema,
+  accountId: v.string(),
+  zoneId: v.string(),
+});
+const storedLeaseSchema = v.strictObject({
+  attemptId: v.string(),
+  acquiredAt: safeIntegerSchema,
+  expiresAt: safeIntegerSchema,
+});
+const storedJournalSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  revision: safeIntegerSchema,
+  createdAt: safeIntegerSchema,
+  updatedAt: safeIntegerSchema,
+  recoverUntil: safeIntegerSchema,
+  installationId: v.string(),
+  plan: boundaryValueSchema,
+  authority: boundaryValueSchema,
+  bindingHash: v.string(),
+  approvalHistory: v.array(storedApprovalSchema),
+  lease: v.nullable(storedLeaseSchema),
+  actions: v.array(storedActionSchema),
+});
+
+type StoredReturningUninstallAction = v.InferOutput<typeof storedActionSchema>;
+
 export interface ReturningUninstallJournalAction {
   readonly name: ReturningUninstallActionName;
   readonly phase: ReturningUninstallActionPhase;
-  readonly record: unknown;
-  readonly locator: unknown | null;
+  readonly record: JsonValue;
+  readonly locator: JsonValue | null;
   readonly preparedAt: number;
   readonly sendArmedAt: number | null;
   readonly submittedAt: number | null;
@@ -75,39 +125,16 @@ export interface ReturningUninstallJournal {
   readonly actions: readonly ReturningUninstallJournalAction[];
 }
 
-function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
-    Object.getPrototypeOf(value) === Object.prototype;
-}
-
-function exact(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
-function safeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-function plain(value: unknown, active = new WeakSet<object>(), budget = { remaining: 40_000 }): boolean {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (typeof value !== 'object' || --budget.remaining < 0 || active.has(value)) return false;
-  active.add(value);
-  const valid = Array.isArray(value)
-    ? Object.getPrototypeOf(value) === Array.prototype && value.every((item) => plain(item, active, budget))
-    : record(value) && Object.values(value).every((item) => plain(item, active, budget));
-  active.delete(value);
-  return valid;
-}
-
-function safePayload(value: unknown): boolean {
-  if (!plain(value)) return false;
+function parseSafePayload<Input>(value: Input): JsonValue | undefined {
   try {
-    assertSecretFree(value);
-    return new TextEncoder().encode(canonicalJson(value)).byteLength <= MAX_ACTION_BYTES;
-  } catch { return false; }
+    const parsed = v.safeParse(jsonValueSchema, value);
+    if (!parsed.success) return undefined;
+    assertSecretFree(parsed.output);
+    if (new TextEncoder().encode(canonicalJson(parsed.output)).byteLength > MAX_ACTION_BYTES) return undefined;
+    return parsed.output;
+  } catch {
+    return undefined;
+  }
 }
 
 async function bindingHash(plan: ReturningUninstallPlan, authority: ReturningUninstallImportedAuthority): Promise<string> {
@@ -120,7 +147,7 @@ async function bindingHash(plan: ReturningUninstallPlan, authority: ReturningUni
   }))}`;
 }
 
-function stableAuthority(value: ReturningUninstallImportedAuthority): unknown {
+function stableAuthority(value: ReturningUninstallImportedAuthority) {
   return {
     schemaVersion: value.schemaVersion,
     installationId: value.installationId,
@@ -136,51 +163,50 @@ function invalid(code: 'session_invalid' | 'session_conflict' = 'session_invalid
   throw new DeployError(status, code);
 }
 
-async function parseAction(value: unknown, index: number, updatedAt: number): Promise<ReturningUninstallJournalAction> {
-  if (!record(value) || !exact(value, [
-    'name', 'phase', 'record', 'locator', 'preparedAt', 'sendArmedAt', 'submittedAt', 'verifiedAt',
-  ]) || value.name !== RETURNING_UNINSTALL_ACTION_ORDER[index] ||
-    !['prepared', 'send_armed', 'submitted', 'verified'].includes(String(value.phase)) ||
-    !safePayload(value.record) || (value.locator !== null && !safePayload(value.locator)) ||
-    !safeInteger(value.preparedAt) || value.preparedAt > updatedAt ||
-    (value.sendArmedAt !== null && (!safeInteger(value.sendArmedAt) || value.sendArmedAt < value.preparedAt ||
-      value.sendArmedAt > updatedAt)) ||
-    (value.submittedAt !== null && (!safeInteger(value.submittedAt) ||
-      value.submittedAt < (value.sendArmedAt as number) || value.submittedAt > updatedAt)) ||
-    (value.verifiedAt !== null && (!safeInteger(value.verifiedAt) ||
-      value.verifiedAt < (value.submittedAt as number) || value.verifiedAt > updatedAt))) invalid();
-  const phase = value.phase as ReturningUninstallActionPhase;
-  if ((phase === 'prepared' && (value.sendArmedAt !== null || value.submittedAt !== null ||
+async function parseAction(
+  value: StoredReturningUninstallAction,
+  index: number,
+  updatedAt: number,
+): Promise<ReturningUninstallJournalAction> {
+  const actionRecord = parseSafePayload(value.record);
+  const locator = value.locator === null ? null : parseSafePayload(value.locator);
+  if (value.name !== RETURNING_UNINSTALL_ACTION_ORDER[index] || actionRecord === undefined ||
+    locator === undefined || value.preparedAt > updatedAt ||
+    (value.sendArmedAt !== null && (value.sendArmedAt < value.preparedAt || value.sendArmedAt > updatedAt)) ||
+    (value.submittedAt !== null && (value.sendArmedAt === null ||
+      value.submittedAt < value.sendArmedAt || value.submittedAt > updatedAt)) ||
+    (value.verifiedAt !== null && (value.submittedAt === null ||
+      value.verifiedAt < value.submittedAt || value.verifiedAt > updatedAt))) invalid();
+  if ((value.phase === 'prepared' && (value.sendArmedAt !== null || value.submittedAt !== null ||
       value.verifiedAt !== null || value.locator !== null)) ||
-    (phase === 'send_armed' && (value.sendArmedAt === null || value.submittedAt !== null ||
+    (value.phase === 'send_armed' && (value.sendArmedAt === null || value.submittedAt !== null ||
       value.verifiedAt !== null || value.locator !== null)) ||
-    (phase === 'submitted' && (value.sendArmedAt === null || value.submittedAt === null ||
+    (value.phase === 'submitted' && (value.sendArmedAt === null || value.submittedAt === null ||
       value.verifiedAt !== null || value.locator === null)) ||
-    (phase === 'verified' && (value.sendArmedAt === null || value.submittedAt === null ||
+    (value.phase === 'verified' && (value.sendArmedAt === null || value.submittedAt === null ||
       value.verifiedAt === null || value.locator === null))) invalid();
   return Object.freeze({
-    name: value.name as ReturningUninstallActionName,
-    phase,
-    record: structuredClone(value.record),
-    locator: value.locator === null ? null : structuredClone(value.locator),
+    name: value.name,
+    phase: value.phase,
+    record: structuredClone(actionRecord),
+    locator: locator === null ? null : structuredClone(locator),
     preparedAt: value.preparedAt,
-    sendArmedAt: value.sendArmedAt as number | null,
-    submittedAt: value.submittedAt as number | null,
-    verifiedAt: value.verifiedAt as number | null,
+    sendArmedAt: value.sendArmedAt,
+    submittedAt: value.submittedAt,
+    verifiedAt: value.verifiedAt,
   });
 }
 
-export async function requireReturningUninstallJournal(value: unknown): Promise<ReturningUninstallJournal> {
-  if (!record(value) || !exact(value, [
-    'schemaVersion', 'revision', 'createdAt', 'updatedAt', 'recoverUntil', 'installationId',
-    'plan', 'authority', 'bindingHash', 'approvalHistory', 'lease', 'actions',
-  ]) || value.schemaVersion !== 1 || !safeInteger(value.revision) || !safeInteger(value.createdAt) ||
-    !safeInteger(value.updatedAt) || value.updatedAt < value.createdAt || !safeInteger(value.recoverUntil) ||
+export async function requireReturningUninstallJournal<Input>(input: Input): Promise<ReturningUninstallJournal> {
+  const parsed = v.safeParse(storedJournalSchema, input);
+  if (!parsed.success) invalid();
+  const value = parsed.output;
+  if (value.updatedAt < value.createdAt ||
     value.recoverUntil <= value.createdAt ||
     value.recoverUntil - value.createdAt > MAX_RETURNING_UNINSTALL_RECOVERY_RETENTION_MS ||
-    typeof value.bindingHash !== 'string' || !HASH.test(value.bindingHash) ||
-    !Array.isArray(value.approvalHistory) || value.approvalHistory.length < 1 || value.approvalHistory.length > 16 ||
-    !Array.isArray(value.actions) || value.actions.length < 1 ||
+    !HASH.test(value.bindingHash) ||
+    value.approvalHistory.length < 1 || value.approvalHistory.length > 16 ||
+    value.actions.length < 1 ||
     value.actions.length > RETURNING_UNINSTALL_ACTION_ORDER.length) invalid();
   const plan = await parseReturningUninstallPlan(value.plan).catch(() => null);
   const authority = await requireReturningUninstallImportedAuthority(value.authority).catch(() => null);
@@ -195,15 +221,7 @@ export async function requireReturningUninstallJournal(value: unknown): Promise<
     }) || value.bindingHash !== await bindingHash(plan, authority)) invalid();
   const approvals: ReturningUninstallJournalApproval[] = [];
   for (const raw of value.approvalHistory) {
-    if (!record(raw) || !exact(raw, [
-      'authorization', 'attemptId', 'approvedAt', 'actionId', 'actorEmail', 'actionProofHash',
-      'planCreatedAt', 'planExpiresAt', 'accountId', 'zoneId',
-    ]) ||
-      (raw.authorization !== 'customer_action' && raw.authorization !== 'hosted_recovery') ||
-      typeof raw.attemptId !== 'string' || !ATTEMPT_ID.test(raw.attemptId) || !safeInteger(raw.approvedAt) ||
-      typeof raw.actionId !== 'string' || typeof raw.actorEmail !== 'string' ||
-      typeof raw.actionProofHash !== 'string' || !HASH.test(raw.actionProofHash) ||
-      !safeInteger(raw.planCreatedAt) || !safeInteger(raw.planExpiresAt) ||
+    if (!ATTEMPT_ID.test(raw.attemptId) || !HASH.test(raw.actionProofHash) ||
       raw.planExpiresAt <= raw.planCreatedAt || raw.planExpiresAt > value.recoverUntil ||
       raw.approvedAt < raw.planCreatedAt || raw.approvedAt >= raw.planExpiresAt ||
       raw.accountId !== authority.runtime.accountId || raw.zoneId !== authority.runtime.zoneId) invalid();
@@ -228,10 +246,7 @@ export async function requireReturningUninstallJournal(value: unknown): Promise<
   let lease: ReturningUninstallJournal['lease'] = null;
   if (value.lease !== null) {
     const rawLease = value.lease;
-    if (!record(rawLease) || !exact(rawLease, ['attemptId', 'acquiredAt', 'expiresAt']) ||
-      typeof rawLease.attemptId !== 'string' ||
-      !approvals.some((approval) => approval.attemptId === rawLease.attemptId) ||
-      !safeInteger(rawLease.acquiredAt) || !safeInteger(rawLease.expiresAt) ||
+    if (!approvals.some((approval) => approval.attemptId === rawLease.attemptId) ||
       rawLease.expiresAt <= rawLease.acquiredAt || rawLease.expiresAt > value.recoverUntil ||
       rawLease.expiresAt > (approvals.find((approval) => approval.attemptId === rawLease.attemptId)?.planExpiresAt ?? 0) ||
       rawLease.expiresAt - rawLease.acquiredAt > MAX_RETURNING_UNINSTALL_LEASE_MS) invalid();
@@ -241,10 +256,10 @@ export async function requireReturningUninstallJournal(value: unknown): Promise<
       expiresAt: rawLease.expiresAt,
     });
   }
-  const actions = await Promise.all(value.actions.map((action, index) => parseAction(action, index, value.updatedAt as number)));
+  const actions = await Promise.all(value.actions.map((action, index) => parseAction(action, index, value.updatedAt)));
   if (actions.slice(0, -1).some((action) => action.phase !== 'verified')) invalid();
   const imported = actions[0];
-  if (imported.name !== 'authority_import' || imported.phase !== 'verified' ||
+  if (imported === undefined || imported.name !== 'authority_import' || imported.phase !== 'verified' ||
     canonicalJson(imported.record) !== canonicalJson({
       schemaVersion: 1,
       authorityHash: authority.authorityHash,
@@ -282,9 +297,9 @@ export async function createReturningUninstallJournal(input: {
   readonly zoneId: string;
   readonly recoverUntil: number;
 }): Promise<ReturningUninstallJournal> {
-  if (!safeInteger(input.now) || !ATTEMPT_ID.test(input.attemptId) || input.accountId !== input.authority.runtime.accountId ||
+  if (!v.is(safeIntegerSchema, input.now) || !ATTEMPT_ID.test(input.attemptId) || input.accountId !== input.authority.runtime.accountId ||
     input.zoneId !== input.authority.runtime.zoneId || input.approvedAt > input.now || input.now >= input.plan.expiresAt ||
-    !safeInteger(input.recoverUntil) || input.recoverUntil <= input.plan.expiresAt ||
+    !v.is(safeIntegerSchema, input.recoverUntil) || input.recoverUntil <= input.plan.expiresAt ||
     input.recoverUntil - input.now > MAX_RETURNING_UNINSTALL_RECOVERY_RETENTION_MS) {
     invalid('session_conflict', 409);
   }
@@ -334,14 +349,14 @@ export async function createReturningUninstallJournal(input: {
 }
 
 function cas(journal: ReturningUninstallJournal, expectedRevision: number, attemptId: string, now: number): void {
-  if (journal.revision !== expectedRevision || !ATTEMPT_ID.test(attemptId) || !safeInteger(now) ||
+  if (journal.revision !== expectedRevision || !ATTEMPT_ID.test(attemptId) || !v.is(safeIntegerSchema, now) ||
     now < journal.updatedAt || now >= journal.recoverUntil ||
     !journal.approvalHistory.some((approval) => approval.attemptId === attemptId)) {
     invalid('session_conflict', 409);
   }
 }
 
-function updated(journal: ReturningUninstallJournal, patch: Partial<ReturningUninstallJournal>): unknown {
+function updated(journal: ReturningUninstallJournal, patch: Partial<ReturningUninstallJournal>) {
   return { ...journal, revision: journal.revision + 1, ...patch };
 }
 
@@ -358,7 +373,7 @@ export async function appendReturningUninstallApproval(
 ): Promise<ReturningUninstallJournal> {
   if (journal.revision !== input.expectedRevision || !ATTEMPT_ID.test(input.attemptId) ||
     journal.approvalHistory.some((approval) => approval.attemptId === input.attemptId) ||
-    !safeInteger(input.approvedAt) || !safeInteger(input.now) || input.approvedAt > input.now ||
+    !v.is(safeIntegerSchema, input.approvedAt) || !v.is(safeIntegerSchema, input.now) || input.approvedAt > input.now ||
     input.now < journal.updatedAt || input.now >= journal.recoverUntil || input.now >= input.plan.expiresAt ||
     input.approvedAt < input.plan.createdAt || input.approvedAt >= input.plan.expiresAt ||
     input.plan.planId !== journal.plan.planId || input.plan.planHash !== journal.plan.planHash ||
@@ -402,7 +417,7 @@ export async function appendReturningUninstallHostedRecoveryApproval(
   const gatewayRemoval = journal.actions.find((action) => action.name === 'customer_gateway_remove');
   if (journal.revision !== input.expectedRevision || !ATTEMPT_ID.test(input.attemptId) ||
     journal.approvalHistory.some((approval) => approval.attemptId === input.attemptId) ||
-    !safeInteger(input.approvedAt) || !safeInteger(input.now) || input.approvedAt > input.now ||
+    !v.is(safeIntegerSchema, input.approvedAt) || !v.is(safeIntegerSchema, input.now) || input.approvedAt > input.now ||
     input.now < journal.updatedAt || input.now >= journal.recoverUntil || input.now >= input.plan.expiresAt ||
     input.approvedAt < input.plan.createdAt || input.approvedAt >= input.plan.expiresAt ||
     input.plan.planId !== journal.plan.planId || input.plan.planHash !== journal.plan.planHash ||
@@ -435,7 +450,7 @@ export async function acquireReturningUninstallLease(
 ): Promise<ReturningUninstallJournal> {
   cas(journal, input.expectedRevision, input.attemptId, input.now);
   const approval = journal.approvalHistory.find((candidate) => candidate.attemptId === input.attemptId);
-  if (!approval || !safeInteger(input.expiresAt) || input.expiresAt <= input.now ||
+  if (!approval || !v.is(safeIntegerSchema, input.expiresAt) || input.expiresAt <= input.now ||
     input.expiresAt > journal.recoverUntil || input.expiresAt > approval.planExpiresAt ||
     input.expiresAt - input.now > MAX_RETURNING_UNINSTALL_LEASE_MS ||
     (journal.lease && journal.lease.expiresAt > input.now && journal.lease.attemptId !== input.attemptId)) {
@@ -464,12 +479,13 @@ export async function prepareReturningUninstallAction(
   journal: ReturningUninstallJournal,
   input: {
     readonly expectedRevision: number; readonly attemptId: string; readonly now: number;
-    readonly name: ReturningUninstallActionName; readonly record: unknown;
+    readonly name: ReturningUninstallActionName; readonly record: BoundaryValue;
   },
 ): Promise<ReturningUninstallJournal> {
   cas(journal, input.expectedRevision, input.attemptId, input.now);
   active(journal, input.attemptId, input.now);
-  if (input.name !== RETURNING_UNINSTALL_ACTION_ORDER[journal.actions.length] || !safePayload(input.record)) {
+  const actionRecord = parseSafePayload(input.record);
+  if (input.name !== RETURNING_UNINSTALL_ACTION_ORDER[journal.actions.length] || actionRecord === undefined) {
     invalid('session_conflict', 409);
   }
   return requireReturningUninstallJournal(updated(journal, {
@@ -477,7 +493,7 @@ export async function prepareReturningUninstallAction(
     actions: Object.freeze([...journal.actions, Object.freeze({
       name: input.name,
       phase: 'prepared' as const,
-      record: structuredClone(input.record),
+      record: structuredClone(actionRecord),
       locator: null,
       preparedAt: input.now,
       sendArmedAt: null,
@@ -491,7 +507,7 @@ async function transition(
   journal: ReturningUninstallJournal,
   input: {
     readonly expectedRevision: number; readonly attemptId: string; readonly now: number;
-    readonly name: ReturningUninstallActionName; readonly locator?: unknown;
+    readonly name: ReturningUninstallActionName; readonly locator?: BoundaryValue;
   },
   from: ReturningUninstallActionPhase,
   to: ReturningUninstallActionPhase,
@@ -499,17 +515,30 @@ async function transition(
   cas(journal, input.expectedRevision, input.attemptId, input.now);
   active(journal, input.attemptId, input.now);
   const current = journal.actions.at(-1);
+  const locator = input.locator === undefined ? undefined : parseSafePayload(input.locator);
   if (!current || current.name !== input.name || current.phase !== from ||
-    ((to === 'submitted' || to === 'verified') && !safePayload(input.locator)) ||
-    (to === 'verified' && canonicalJson(current.locator) !== canonicalJson(input.locator))) {
+    ((to === 'submitted' || to === 'verified') && locator === undefined) ||
+    (to === 'verified' && canonicalJson(current.locator) !== canonicalJson(locator))) {
     invalid('session_conflict', 409);
   }
+  let sendArmedAt = current.sendArmedAt;
+  let submittedAt = current.submittedAt;
+  let verifiedAt = current.verifiedAt;
+  let actionLocator = current.locator;
+  if (to === 'send_armed') sendArmedAt = input.now;
+  if (to === 'submitted') {
+    if (locator === undefined) invalid('session_conflict', 409);
+    submittedAt = input.now;
+    actionLocator = structuredClone(locator);
+  }
+  if (to === 'verified') verifiedAt = input.now;
   const action = Object.freeze({
     ...current,
     phase: to,
-    ...(to === 'send_armed' ? { sendArmedAt: input.now } : {}),
-    ...(to === 'submitted' ? { submittedAt: input.now, locator: structuredClone(input.locator) } : {}),
-    ...(to === 'verified' ? { verifiedAt: input.now } : {}),
+    locator: actionLocator,
+    sendArmedAt,
+    submittedAt,
+    verifiedAt,
   });
   return requireReturningUninstallJournal(updated(journal, {
     updatedAt: input.now,
@@ -524,10 +553,10 @@ export const armReturningUninstallAction = (
 
 export const submitReturningUninstallAction = (
   journal: ReturningUninstallJournal,
-  input: { readonly expectedRevision: number; readonly attemptId: string; readonly now: number; readonly name: ReturningUninstallActionName; readonly locator: unknown },
+  input: { readonly expectedRevision: number; readonly attemptId: string; readonly now: number; readonly name: ReturningUninstallActionName; readonly locator: BoundaryValue },
 ): Promise<ReturningUninstallJournal> => transition(journal, input, 'send_armed', 'submitted');
 
 export const verifyReturningUninstallAction = (
   journal: ReturningUninstallJournal,
-  input: { readonly expectedRevision: number; readonly attemptId: string; readonly now: number; readonly name: ReturningUninstallActionName; readonly locator: unknown },
+  input: { readonly expectedRevision: number; readonly attemptId: string; readonly now: number; readonly name: ReturningUninstallActionName; readonly locator: BoundaryValue },
 ): Promise<ReturningUninstallJournal> => transition(journal, input, 'submitted', 'verified');

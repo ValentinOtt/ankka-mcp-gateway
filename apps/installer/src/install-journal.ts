@@ -1,3 +1,12 @@
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  boundaryValueSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+} from './boundary';
+import { canonicalJson } from './canonical-json';
 import type { AuthorizedTarget } from './cloudflare-target';
 import {
   parseWorkerVersionRecoveryRecord,
@@ -46,11 +55,283 @@ const INSTALLATION_ID = /^acg-[a-f0-9]{24}$/u;
 const CUSTOMER_PLAN_ID = /^plan-[a-f0-9]{24}$/u;
 const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const SAFE_ACTOR_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$/u;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 const MAX_IDENTITY_PROVIDERS = 64;
 const MAX_LEASE_ATTEMPTS = 16;
 const MAX_APPROVALS = 16;
 const MAX_BOOTSTRAP_ATTEMPTS = 8;
+
+const safeIntegerSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
+const sha256Schema = v.pipe(v.string(), v.regex(SHA256));
+const prefixedSha256Schema = v.pipe(v.string(), v.regex(PREFIXED_SHA256));
+const providerIdSchema = v.pipe(v.string(), v.regex(PROVIDER_ID));
+const attemptIdSchema = v.pipe(v.string(), v.regex(ATTEMPT_ID));
+const installationIdSchema = v.pipe(v.string(), v.regex(INSTALLATION_ID));
+const installActionPhaseSchema = v.picklist(['prepared', 'send_armed', 'submitted', 'verified']);
+const releasePinSchema = v.strictObject({
+  verification: v.literal('ed25519'),
+  keyId: v.pipe(v.string(), v.regex(KEY_ID)),
+  release: v.pipe(v.string(), v.regex(RELEASE)),
+  artifactSha256: sha256Schema,
+});
+const authorizedTargetSchema = v.strictObject({
+  actor: v.strictObject({
+    id: v.pipe(v.string(), v.regex(SAFE_ACTOR_ID)),
+    email: v.string(),
+  }),
+  account: v.strictObject({
+    id: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+    name: v.pipe(v.string(), v.minLength(1), v.maxLength(256)),
+  }),
+  zone: v.strictObject({
+    id: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+    name: v.string(),
+    status: v.literal('active'),
+  }),
+});
+const workerCreateRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('worker_create'),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
+  requestHash: sha256Schema,
+  correlationTag: v.pipe(v.string(), v.regex(/^ankka-worker-sha256:[a-f0-9]{64}$/u)),
+});
+const applicationCreateRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('management_access_application_create'),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  planId: v.string(),
+  planHash: v.string(),
+  ownershipMarker: v.string(),
+  allowedIdentityProviderIds: v.pipe(v.array(providerIdSchema), v.minLength(1), v.maxLength(MAX_IDENTITY_PROVIDERS)),
+  intentHash: sha256Schema,
+});
+const policyCreateRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('management_admin_policy_create'),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  planId: v.string(),
+  planHash: v.string(),
+  ownershipMarker: v.string(),
+  applicationId: providerIdSchema,
+  intentHash: sha256Schema,
+});
+const workerVersionCreateRecordShellSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('worker_version_create'),
+  phase: v.picklist(['provision', 'bootstrap', 'clean']),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
+  workerId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+  releaseContract: boundaryValueSchema,
+  assets: boundaryValueSchema,
+  plainTextBindingHashes: boundaryValueSchema,
+  modules: boundaryValueSchema,
+});
+const workerDeploymentCreateRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('worker_deployment_create'),
+  phase: v.picklist(['provision', 'bootstrap', 'clean']),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
+  workerId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  versionId: v.pipe(v.string(), v.regex(UUID)),
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+});
+const bootstrapSubdomainRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('bootstrap_subdomain'),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
+  enabled: v.boolean(),
+  requestHash: sha256Schema,
+});
+const cycleSubdomainMutationSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  approvalAttemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  enabled: v.boolean(),
+  requestHash: sha256Schema,
+  phase: installActionPhaseSchema,
+  locator: v.nullable(v.strictObject({ enabled: v.boolean(), previewsEnabled: v.literal(false) })),
+  preparedAt: safeIntegerSchema,
+  sendArmedAt: v.nullable(safeIntegerSchema),
+  submittedAt: v.nullable(safeIntegerSchema),
+  verifiedAt: v.nullable(safeIntegerSchema),
+});
+const bootstrapAttemptSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  approvalAttemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  requestId: v.pipe(v.string(), v.regex(REQUEST_ID)),
+  issuedAt: safeIntegerSchema,
+  expiresAt: safeIntegerSchema,
+  claimHash: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
+  enable: cycleSubdomainMutationSchema,
+  disable: v.nullable(cycleSubdomainMutationSchema),
+  phase: installActionPhaseSchema,
+  locator: v.nullable(boundaryValueSchema),
+  preparedAt: safeIntegerSchema,
+  sendArmedAt: v.nullable(safeIntegerSchema),
+  submittedAt: v.nullable(safeIntegerSchema),
+  verifiedAt: v.nullable(safeIntegerSchema),
+});
+const bootstrapSubmitRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('customer_bootstrap_submit'),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  zoneId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  zoneName: v.string(),
+  accountWorkersSubdomain: v.pipe(v.string(), v.regex(HOST_LABEL)),
+  installationId: v.pipe(v.string(), v.regex(INSTALLATION_ID)),
+  configurationHash: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
+  desiredHash: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
+  attempts: v.pipe(v.array(bootstrapAttemptSchema), v.minLength(1), v.maxLength(MAX_BOOTSTRAP_ATTEMPTS)),
+});
+const managementCustomDomainRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('management_custom_domain_attach'),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  zoneId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  planId: v.string(),
+  planHash: v.string(),
+  ownershipMarker: v.string(),
+  intentHash: sha256Schema,
+});
+const finalConvergenceRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('final_convergence'),
+  convergenceHash: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
+});
+const workerLocatorSchema = v.strictObject({
+  kind: v.literal('worker'),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
+  workerId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+});
+const freshPreflightLocatorSchema = v.strictObject({ attestationHash: prefixedSha256Schema });
+const applicationLocatorSchema = v.strictObject({
+  applicationId: providerIdSchema,
+  aud: v.pipe(v.string(), v.regex(ACCESS_AUD)),
+});
+const policyLocatorSchema = v.strictObject({ policyId: providerIdSchema });
+const versionLocatorSchema = v.strictObject({
+  kind: v.literal('version'),
+  phase: v.picklist(['provision', 'bootstrap', 'clean']),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
+  workerId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  versionId: v.pipe(v.string(), v.regex(UUID)),
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+  namespaceId: v.optional(v.pipe(v.string(), v.regex(ACCOUNT_ID))),
+});
+const deploymentLocatorSchema = v.strictObject({
+  kind: v.literal('deployment'),
+  phase: v.picklist(['provision', 'bootstrap', 'clean']),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
+  workerId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  versionId: v.pipe(v.string(), v.regex(UUID)),
+  deploymentId: v.pipe(v.string(), v.regex(UUID)),
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+});
+const subdomainLocatorSchema = v.strictObject({ enabled: v.boolean(), previewsEnabled: v.literal(false) });
+const bootstrapRecoveryLocatorSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('recovery_required'),
+  reason: v.picklist([
+    'bootstrap_recovery_required',
+    'bootstrap_requires_repair',
+    'bootstrap_request_mismatch',
+  ]),
+  canRetry: v.literal(false),
+});
+const bootstrapReadyLocatorSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('ready'),
+  installationId: v.pipe(v.string(), v.regex(INSTALLATION_ID)),
+  approvedPlanId: v.pipe(v.string(), v.regex(CUSTOMER_PLAN_ID)),
+  configurationHash: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
+  desiredHash: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
+  settingsRevision: v.literal(1),
+  release: v.strictObject({ id: v.string(), artifactSha256: v.pipe(v.string(), v.regex(PREFIXED_SHA256)) }),
+  gateway: v.strictObject({ hostname: v.string(), mcpUrl: v.string() }),
+  receipt: v.strictObject({
+    revision: safeIntegerSchema,
+    resourceCount: v.union([v.literal(4), v.literal(7)]),
+    evidence: boundaryValueSchema,
+  }),
+  applyInvoked: v.boolean(),
+  resumed: v.boolean(),
+});
+const domainLocatorSchema = v.strictObject({
+  domainId: v.pipe(v.string(), v.regex(/^(?:[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})$/u)),
+});
+const installJournalLeaseSchema = v.strictObject({
+  attemptId: attemptIdSchema,
+  acquiredAt: safeIntegerSchema,
+  expiresAt: safeIntegerSchema,
+});
+const installJournalApprovalSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  attemptId: attemptIdSchema,
+  approvedAt: safeIntegerSchema,
+  recordedAt: safeIntegerSchema,
+  planId: v.string(),
+  planHash: v.string(),
+  planExpiresAt: safeIntegerSchema,
+  managementOwnershipMarker: v.string(),
+});
+const installJournalActionSchema = v.strictObject({
+  name: v.lazy(() => installActionNameSchema),
+  phase: installActionPhaseSchema,
+  record: boundaryValueSchema,
+  locator: boundaryValueSchema,
+  preparedAt: safeIntegerSchema,
+  sendArmedAt: v.nullable(safeIntegerSchema),
+  submittedAt: v.nullable(safeIntegerSchema),
+  verifiedAt: v.nullable(safeIntegerSchema),
+});
+const installJournalSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  revision: safeIntegerSchema,
+  createdAt: safeIntegerSchema,
+  updatedAt: safeIntegerSchema,
+  sessionExpiresAt: safeIntegerSchema,
+  recoverUntil: safeIntegerSchema,
+  selection: boundaryValueSchema,
+  plan: boundaryValueSchema,
+  releasePin: boundaryValueSchema,
+  target: boundaryValueSchema,
+  installationId: installationIdSchema,
+  bindingHash: prefixedSha256Schema,
+  approvalHistory: v.pipe(v.array(installJournalApprovalSchema), v.minLength(1), v.maxLength(MAX_APPROVALS)),
+  lease: v.nullable(installJournalLeaseSchema),
+  leaseAttemptIds: v.pipe(v.array(attemptIdSchema), v.maxLength(MAX_LEASE_ATTEMPTS)),
+  actions: v.pipe(v.array(installJournalActionSchema), v.maxLength(15)),
+});
+const createInstallJournalSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  now: safeIntegerSchema,
+  recoverUntil: safeIntegerSchema,
+  selection: boundaryValueSchema,
+  plan: boundaryValueSchema,
+  releasePin: boundaryValueSchema,
+  target: boundaryValueSchema,
+  installationId: installationIdSchema,
+  bindingHash: prefixedSha256Schema,
+  gatewayFreshPreflight: boundaryValueSchema,
+});
+const appendCustomerBootstrapAttemptSchema = v.strictObject({
+  requestId: v.pipe(v.string(), v.regex(REQUEST_ID)),
+  issuedAt: safeIntegerSchema,
+  expiresAt: safeIntegerSchema,
+  claimHash: prefixedSha256Schema,
+  enableRequestHash: sha256Schema,
+});
 
 export const MAX_INSTALL_RECOVERY_RETENTION_MS = 24 * 60 * 60 * 1_000;
 export const MAX_INSTALL_LEASE_MS = 5 * 60 * 1_000;
@@ -72,6 +353,18 @@ export const INSTALL_ACTION_ORDER = Object.freeze([
   'management_custom_domain_attach',
   'final_convergence',
 ] as const);
+
+const installActionNameSchema = v.picklist(INSTALL_ACTION_ORDER);
+const publicInstallProgressSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  revision: safeIntegerSchema,
+  updatedAt: safeIntegerSchema,
+  actions: v.pipe(v.array(v.strictObject({
+    name: installActionNameSchema,
+    phase: installActionPhaseSchema,
+    updatedAt: safeIntegerSchema,
+  })), v.maxLength(INSTALL_ACTION_ORDER.length)),
+});
 
 export type InstallActionName = (typeof INSTALL_ACTION_ORDER)[number];
 export type InstallActionPhase = 'prepared' | 'send_armed' | 'submitted' | 'verified';
@@ -427,32 +720,27 @@ export function publicInstallProgress(journal: InstallJournal | null): PublicIns
   });
 }
 
-export function parsePublicInstallProgress(value: unknown): PublicInstallProgress | null {
+export function parsePublicInstallProgress<Input>(value: Input): PublicInstallProgress | null {
   if (value === null) return null;
-  if (!isRecord(value) || !exactKeys(value, ['schemaVersion', 'revision', 'updatedAt', 'actions']) ||
-    value.schemaVersion !== 1 || !safeInteger(value.revision) || !safeInteger(value.updatedAt) ||
-    !Array.isArray(value.actions) || value.actions.length > INSTALL_ACTION_ORDER.length) {
-    invalid();
-  }
+  const candidate = v.safeParse(publicInstallProgressSchema, value);
+  if (!candidate.success) invalid();
   const actions: PublicInstallProgressAction[] = [];
-  for (let index = 0; index < value.actions.length; index += 1) {
-    const action = value.actions[index];
-    if (!isRecord(action) || !exactKeys(action, ['name', 'phase', 'updatedAt']) ||
-      action.name !== INSTALL_ACTION_ORDER[index] ||
-      !['prepared', 'send_armed', 'submitted', 'verified'].includes(action.phase as string) ||
-      !safeInteger(action.updatedAt) || action.updatedAt > value.updatedAt) {
+  for (let index = 0; index < candidate.output.actions.length; index += 1) {
+    const action = candidate.output.actions[index];
+    if (!action || action.name !== INSTALL_ACTION_ORDER[index] ||
+      action.updatedAt > candidate.output.updatedAt) {
       invalid();
     }
     actions.push(Object.freeze({
-      name: action.name as InstallActionName,
-      phase: action.phase as InstallActionPhase,
+      name: action.name,
+      phase: action.phase,
       updatedAt: action.updatedAt,
     }));
   }
   return Object.freeze({
     schemaVersion: 1,
-    revision: value.revision,
-    updatedAt: value.updatedAt,
+    revision: candidate.output.revision,
+    updatedAt: candidate.output.updatedAt,
     actions: Object.freeze(actions),
   });
 }
@@ -558,27 +846,17 @@ function conflict(): never {
   throw new DeployError(409, 'session_conflict');
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+function isRecord<Value>(value: Value): value is Value & BoundaryObject {
+  return v.is(boundaryObjectSchema, value);
 }
 
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+function exactKeys<Value extends object>(value: Value, expected: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   const sorted = [...expected].sort();
   return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]);
 }
 
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isRecord(value) && Object.getPrototypeOf(value) === Object.prototype) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('canonical_json_invalid');
-}
-
-function exactJson(left: unknown, right: unknown): boolean {
+function exactJson<Left, Right>(left: Left, right: Right): boolean {
   try {
     return canonicalJson(left) === canonicalJson(right);
   } catch {
@@ -615,17 +893,13 @@ export function activeInstallJournalPlan(journal: InstallJournal): StaticDeployP
   return Object.freeze({ ...journal.plan, expiresAt: approval.planExpiresAt });
 }
 
-function safeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+function safeInteger<Value>(value: Value): value is Value & number {
+  return v.is(safeIntegerSchema, value);
 }
 
-function safeText(value: unknown, maximum: number): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= maximum && !CONTROL_CHARACTER.test(value);
-}
-
-function forbiddenJournalShape(value: unknown): boolean {
+function containsForbiddenJournalData<Value>(value: Value): boolean {
   if (value instanceof Uint8Array || value instanceof ArrayBuffer || value instanceof Blob) return true;
-  if (Array.isArray(value)) return value.some(forbiddenJournalShape);
+  if (Array.isArray(value)) return value.some(containsForbiddenJournalData);
   if (!isRecord(value)) return false;
   for (const [key, child] of Object.entries(value)) {
     const normalized = key.toLowerCase().replaceAll('-', '').replaceAll('_', '');
@@ -638,48 +912,37 @@ function forbiddenJournalShape(value: unknown): boolean {
       normalized === 'body' || normalized === 'request' || normalized === 'response' ||
       normalized === 'providerbody' || normalized === 'privatekey'
     ) return true;
-    if (forbiddenJournalShape(child)) return true;
+    if (containsForbiddenJournalData(child)) return true;
   }
   return false;
 }
 
-function releasePin(value: unknown): InstallReleasePin | null {
-  if (!isRecord(value) || !exactKeys(value, ['verification', 'keyId', 'release', 'artifactSha256'])) return null;
-  if (
-    value.verification !== 'ed25519' || typeof value.keyId !== 'string' || !KEY_ID.test(value.keyId) ||
-    typeof value.release !== 'string' || !RELEASE.test(value.release) ||
-    typeof value.artifactSha256 !== 'string' || !SHA256.test(value.artifactSha256)
-  ) return null;
+function releasePin<Value>(value: Value): InstallReleasePin | null {
+  const candidate = v.safeParse(releasePinSchema, value);
+  if (!candidate.success) return null;
   return Object.freeze({
     verification: 'ed25519',
-    keyId: value.keyId,
-    release: value.release,
-    artifactSha256: value.artifactSha256,
+    keyId: candidate.output.keyId,
+    release: candidate.output.release,
+    artifactSha256: candidate.output.artifactSha256,
   });
 }
 
-function authorizedTarget(value: unknown, selection: DeploySelection): AuthorizedTarget | null {
-  if (!isRecord(value) || !exactKeys(value, ['actor', 'account', 'zone'])) return null;
-  const { actor, account, zone } = value;
-  if (
-    !isRecord(actor) || !exactKeys(actor, ['id', 'email']) ||
-    typeof actor.id !== 'string' || !SAFE_ACTOR_ID.test(actor.id) || actor.email !== selection.basics.adminEmail ||
-    !isRecord(account) || !exactKeys(account, ['id', 'name']) ||
-    typeof account.id !== 'string' || !ACCOUNT_ID.test(account.id) || !safeText(account.name, 256) ||
-    !isRecord(zone) || !exactKeys(zone, ['id', 'name', 'status']) ||
-    typeof zone.id !== 'string' || !ACCOUNT_ID.test(zone.id) ||
-    zone.name !== selection.basics.zoneName || zone.status !== 'active'
-  ) return null;
+function authorizedTarget<Value>(value: Value, selection: DeploySelection): AuthorizedTarget | null {
+  const candidate = v.safeParse(authorizedTargetSchema, value);
+  if (!candidate.success || candidate.output.actor.email !== selection.basics.adminEmail ||
+    candidate.output.zone.name !== selection.basics.zoneName) return null;
   return Object.freeze({
-    actor: Object.freeze({ id: actor.id, email: actor.email as string }),
-    account: Object.freeze({ id: account.id, name: account.name }),
-    zone: Object.freeze({ id: zone.id, name: zone.name as string, status: 'active' }),
+    actor: Object.freeze({ id: candidate.output.actor.id, email: candidate.output.actor.email }),
+    account: Object.freeze({ id: candidate.output.account.id, name: candidate.output.account.name }),
+    zone: Object.freeze({ id: candidate.output.zone.id, name: candidate.output.zone.name, status: 'active' }),
   });
 }
 
 function managementWorkerName(plan: StaticDeployPlan): string | null {
   const values = plan.managementResources.filter((resource) => resource.kind === 'management_worker');
-  return values.length === 1 && WORKER_NAME.test(values[0].name) ? values[0].name : null;
+  const worker = values.at(0);
+  return values.length === 1 && worker !== undefined && WORKER_NAME.test(worker.name) ? worker.name : null;
 }
 
 async function stableInstallationId(selection: DeploySelection, target: AuthorizedTarget): Promise<string> {
@@ -724,8 +987,8 @@ function expectedPhase(name: InstallActionName): 'provision' | 'bootstrap' | 'cl
   return null;
 }
 
-async function parseFreshPreflightRecord(
-  value: unknown,
+async function parseFreshPreflightRecord<Input>(
+  value: Input,
   journal: InstallJournal,
 ): Promise<GatewayFreshPreflightRecord | null> {
   const parsed = await parseCustomerGatewayFreshPreflightAttestation(value);
@@ -759,15 +1022,14 @@ async function parseFreshPreflightRecord(
   return parsed;
 }
 
-async function parseWorkerRecord(value: unknown, journal: InstallJournal): Promise<WorkerCreateRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'kind', 'accountId', 'workerName', 'requestHash', 'correlationTag',
-  ])) return null;
+async function parseWorkerRecord<Input>(value: Input, journal: InstallJournal): Promise<WorkerCreateRecord | null> {
+  const candidate = v.safeParse(workerCreateRecordSchema, value);
+  if (!candidate.success) return null;
+  const record = candidate.output;
   const workerName = managementWorkerName(journal.plan);
   if (
-    value.schemaVersion !== 1 || value.kind !== 'worker_create' || value.accountId !== journal.target.account.id ||
-    value.workerName !== workerName || typeof value.requestHash !== 'string' || !SHA256.test(value.requestHash) ||
-    value.correlationTag !== `ankka-worker-sha256:${value.requestHash}`
+    record.accountId !== journal.target.account.id || record.workerName !== workerName ||
+    record.correlationTag !== `ankka-worker-sha256:${record.requestHash}`
   ) return null;
   const core = {
     logpush: false,
@@ -777,41 +1039,41 @@ async function parseWorkerRecord(value: unknown, journal: InstallJournal): Promi
     tags: ['ankka-mcp-gateway'],
     tail_consumers: [],
   };
-  if (await sha256Hex(canonicalJson(core)) !== value.requestHash) return null;
+  if (await sha256Hex(canonicalJson(core)) !== record.requestHash) return null;
   return Object.freeze({
     schemaVersion: 1,
     kind: 'worker_create',
-    accountId: value.accountId,
-    workerName: value.workerName as string,
-    requestHash: value.requestHash,
-    correlationTag: value.correlationTag as string,
+    accountId: record.accountId,
+    workerName: record.workerName,
+    requestHash: record.requestHash,
+    correlationTag: record.correlationTag,
   });
 }
 
-function canonicalProviderIds(value: unknown): readonly string[] | null {
-  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_IDENTITY_PROVIDERS) return null;
-  const ids = value.map((id) => typeof id === 'string' && PROVIDER_ID.test(id) ? id : '');
-  if (ids.some((id) => id === '')) return null;
-  const sorted = [...ids].sort();
+function canonicalProviderIds<Value>(value: Value): readonly string[] | null {
+  const candidate = v.safeParse(
+    v.pipe(v.array(providerIdSchema), v.minLength(1), v.maxLength(MAX_IDENTITY_PROVIDERS)),
+    value,
+  );
+  if (!candidate.success) return null;
+  const sorted = [...candidate.output].sort();
   if (sorted.some((id, index) => index > 0 && id === sorted[index - 1])) return null;
-  if (!ids.every((id, index) => id === sorted[index])) return null;
+  if (!candidate.output.every((id, index) => id === sorted[index])) return null;
   return Object.freeze(sorted);
 }
 
-async function parseApplicationRecord(
-  value: unknown,
+async function parseApplicationRecord<Input>(
+  value: Input,
   journal: InstallJournal,
 ): Promise<ManagementAccessApplicationCreateRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'kind', 'accountId', 'planId', 'planHash', 'ownershipMarker',
-    'allowedIdentityProviderIds', 'intentHash',
-  ])) return null;
-  const ids = canonicalProviderIds(value.allowedIdentityProviderIds);
+  const candidate = v.safeParse(applicationCreateRecordSchema, value);
+  if (!candidate.success) return null;
+  const record = candidate.output;
+  const ids = canonicalProviderIds(record.allowedIdentityProviderIds);
   if (
-    value.schemaVersion !== 1 || value.kind !== 'management_access_application_create' ||
-    value.accountId !== journal.target.account.id || value.planId !== journal.plan.planId ||
-    value.planHash !== journal.plan.planHash || value.ownershipMarker !== managementOwnershipMarker(journal.plan) ||
-    !ids || typeof value.intentHash !== 'string' || !SHA256.test(value.intentHash)
+    record.accountId !== journal.target.account.id || record.planId !== journal.plan.planId ||
+    record.planHash !== journal.plan.planHash || record.ownershipMarker !== managementOwnershipMarker(journal.plan) ||
+    !ids
   ) return null;
   try {
     const intent = prepareManagementAccessApplicationIntent({
@@ -819,37 +1081,36 @@ async function parseApplicationRecord(
       plan: journal.plan,
       allowedIdentityProviderIds: ids,
     });
-    if (await sha256Hex(canonicalJson(intent)) !== value.intentHash) return null;
+    if (await sha256Hex(canonicalJson(intent)) !== record.intentHash) return null;
   } catch {
     return null;
   }
   return Object.freeze({
     schemaVersion: 1,
     kind: 'management_access_application_create',
-    accountId: value.accountId,
-    planId: value.planId as string,
-    planHash: value.planHash as string,
-    ownershipMarker: value.ownershipMarker as string,
+    accountId: record.accountId,
+    planId: record.planId,
+    planHash: record.planHash,
+    ownershipMarker: record.ownershipMarker,
     allowedIdentityProviderIds: ids,
-    intentHash: value.intentHash,
+    intentHash: record.intentHash,
   });
 }
 
-async function parsePolicyRecord(
-  value: unknown,
+async function parsePolicyRecord<Input>(
+  value: Input,
   journal: InstallJournal,
 ): Promise<ManagementAdminPolicyCreateRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'kind', 'accountId', 'planId', 'planHash', 'ownershipMarker', 'applicationId', 'intentHash',
-  ])) return null;
+  const candidate = v.safeParse(policyCreateRecordSchema, value);
+  if (!candidate.success) return null;
+  const record = candidate.output;
   const application = verifiedLocator(journal, 'management_access_application_create');
   const applicationId = application && 'applicationId' in application ? application.applicationId : null;
   if (applicationId === null) return null;
   if (
-    value.schemaVersion !== 1 || value.kind !== 'management_admin_policy_create' ||
-    value.accountId !== journal.target.account.id || value.planId !== journal.plan.planId ||
-    value.planHash !== journal.plan.planHash || value.ownershipMarker !== managementOwnershipMarker(journal.plan) ||
-    value.applicationId !== applicationId || typeof value.intentHash !== 'string' || !SHA256.test(value.intentHash)
+    record.accountId !== journal.target.account.id || record.planId !== journal.plan.planId ||
+    record.planHash !== journal.plan.planHash || record.ownershipMarker !== managementOwnershipMarker(journal.plan) ||
+    record.applicationId !== applicationId
   ) return null;
   try {
     const intent = prepareManagementAdminPolicyIntent({
@@ -857,19 +1118,19 @@ async function parsePolicyRecord(
       applicationId,
       plan: journal.plan,
     });
-    if (await sha256Hex(canonicalJson(intent)) !== value.intentHash) return null;
+    if (await sha256Hex(canonicalJson(intent)) !== record.intentHash) return null;
   } catch {
     return null;
   }
   return Object.freeze({
     schemaVersion: 1,
     kind: 'management_admin_policy_create',
-    accountId: value.accountId,
-    planId: value.planId as string,
-    planHash: value.planHash as string,
-    ownershipMarker: value.ownershipMarker as string,
+    accountId: record.accountId,
+    planId: record.planId,
+    planHash: record.planHash,
+    ownershipMarker: record.ownershipMarker,
     applicationId,
-    intentHash: value.intentHash,
+    intentHash: record.intentHash,
   });
 }
 
@@ -880,32 +1141,30 @@ function workerLocator(journal: InstallJournal): WorkerLocator | null {
 
 async function parseVersionRecord(
   name: InstallActionName,
-  value: unknown,
+  value: BoundaryValue,
   journal: InstallJournal,
 ): Promise<WorkerVersionCreateRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'kind', 'phase', 'accountId', 'workerName', 'workerId', 'requestHash',
-    'correlationTag', 'releaseContract', 'assets', 'plainTextBindingHashes', 'modules',
-  ])) return null;
+  const candidate = v.safeParse(workerVersionCreateRecordShellSchema, value);
+  if (!candidate.success) return null;
+  const record = candidate.output;
   const phase = expectedPhase(name);
   const worker = workerLocator(journal);
   if (
-    !phase || value.schemaVersion !== 1 || value.kind !== 'worker_version_create' || value.phase !== phase ||
-    value.accountId !== journal.target.account.id || value.workerName !== managementWorkerName(journal.plan) ||
-    value.workerId !== worker?.workerId
+    !phase || record.phase !== phase || record.accountId !== journal.target.account.id ||
+    record.workerName !== managementWorkerName(journal.plan) || record.workerId !== worker?.workerId
   ) return null;
   const parsed = await parseWorkerVersionRecoveryRecord({
     kind: 'version_recovery',
-    phase: value.phase,
-    accountId: value.accountId,
-    workerName: value.workerName,
-    workerId: value.workerId,
-    requestHash: value.requestHash,
-    correlationTag: value.correlationTag,
-    releaseContract: value.releaseContract,
-    assets: value.assets,
-    plainTextBindingHashes: value.plainTextBindingHashes,
-    modules: value.modules,
+    phase: record.phase,
+    accountId: record.accountId,
+    workerName: record.workerName,
+    workerId: record.workerId,
+    requestHash: record.requestHash,
+    correlationTag: record.correlationTag,
+    releaseContract: record.releaseContract,
+    assets: record.assets,
+    plainTextBindingHashes: record.plainTextBindingHashes,
+    modules: record.modules,
   });
   if (!parsed) return null;
   return Object.freeze({
@@ -939,58 +1198,56 @@ function versionLocator(
 
 async function parseDeploymentRecord(
   name: InstallActionName,
-  value: unknown,
+  value: BoundaryValue,
   journal: InstallJournal,
 ): Promise<WorkerDeploymentCreateRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'kind', 'phase', 'accountId', 'workerName', 'workerId', 'versionId', 'requestHash', 'correlationTag',
-  ])) return null;
+  const candidate = v.safeParse(workerDeploymentCreateRecordSchema, value);
+  if (!candidate.success) return null;
+  const record = candidate.output;
   const phase = expectedPhase(name);
   const version = phase ? versionLocator(journal, phase) : null;
   if (
-    !phase || value.schemaVersion !== 1 || value.kind !== 'worker_deployment_create' || value.phase !== phase ||
-    value.accountId !== journal.target.account.id || value.workerName !== version?.workerName ||
-    value.workerId !== version?.workerId || value.versionId !== version?.versionId ||
-    typeof value.requestHash !== 'string' || !SHA256.test(value.requestHash) ||
-    value.correlationTag !== `ankka-deploy-${phase}-sha256:${value.requestHash}`
+    !phase || record.phase !== phase || record.accountId !== journal.target.account.id ||
+    record.workerName !== version?.workerName || record.workerId !== version?.workerId ||
+    record.versionId !== version?.versionId ||
+    record.correlationTag !== `ankka-deploy-${phase}-sha256:${record.requestHash}`
   ) return null;
-  const core = { strategy: 'percentage', versions: [{ percentage: 100, version_id: value.versionId }] };
-  if (await sha256Hex(canonicalJson(core)) !== value.requestHash) return null;
+  const core = { strategy: 'percentage', versions: [{ percentage: 100, version_id: record.versionId }] };
+  if (await sha256Hex(canonicalJson(core)) !== record.requestHash) return null;
   return Object.freeze({
     schemaVersion: 1,
     kind: 'worker_deployment_create',
     phase,
-    accountId: value.accountId,
-    workerName: value.workerName as string,
-    workerId: value.workerId as string,
-    versionId: value.versionId as string,
-    requestHash: value.requestHash,
-    correlationTag: value.correlationTag as string,
+    accountId: record.accountId,
+    workerName: record.workerName,
+    workerId: record.workerId,
+    versionId: record.versionId,
+    requestHash: record.requestHash,
+    correlationTag: record.correlationTag,
   });
 }
 
 async function parseSubdomainRecord(
   name: InstallActionName,
-  value: unknown,
+  value: BoundaryValue,
   journal: InstallJournal,
 ): Promise<BootstrapSubdomainRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'kind', 'accountId', 'workerName', 'enabled', 'requestHash',
-  ])) return null;
+  const candidate = v.safeParse(bootstrapSubdomainRecordSchema, value);
+  if (!candidate.success) return null;
+  const record = candidate.output;
   const enabled = name === 'bootstrap_subdomain_enable' ? true : name === 'bootstrap_subdomain_disable' ? false : null;
   if (
-    enabled === null || value.schemaVersion !== 1 || value.kind !== 'bootstrap_subdomain' ||
-    value.accountId !== journal.target.account.id || value.workerName !== managementWorkerName(journal.plan) ||
-    value.enabled !== enabled || typeof value.requestHash !== 'string' || !SHA256.test(value.requestHash) ||
-    await sha256Hex(canonicalJson({ enabled, previews_enabled: false })) !== value.requestHash
+    enabled === null || record.accountId !== journal.target.account.id ||
+    record.workerName !== managementWorkerName(journal.plan) || record.enabled !== enabled ||
+    await sha256Hex(canonicalJson({ enabled, previews_enabled: false })) !== record.requestHash
   ) return null;
   return Object.freeze({
     schemaVersion: 1,
     kind: 'bootstrap_subdomain',
-    accountId: value.accountId,
-    workerName: value.workerName as string,
+    accountId: record.accountId,
+    workerName: record.workerName,
     enabled,
-    requestHash: value.requestHash,
+    requestHash: record.requestHash,
   });
 }
 
@@ -1014,107 +1271,94 @@ async function bootstrapClaimHash(
 }
 
 async function parseCycleSubdomainMutation(
-  value: unknown,
+  value: BoundaryValue,
   enabled: boolean,
   journal: InstallJournal,
 ): Promise<CustomerBootstrapCycleSubdomainMutation | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'approvalAttemptId', 'enabled', 'requestHash', 'phase', 'locator', 'preparedAt',
-    'sendArmedAt', 'submittedAt', 'verifiedAt',
-  ])) return null;
-  const phase = value.phase as InstallActionPhase;
-  const approval = typeof value.approvalAttemptId === 'string'
-    ? journal.approvalHistory.find((entry) => entry.attemptId === value.approvalAttemptId)
-    : null;
+  const candidate = v.safeParse(cycleSubdomainMutationSchema, value);
+  if (!candidate.success) return null;
+  const mutation = candidate.output;
+  const phase = mutation.phase;
+  const approval = journal.approvalHistory.find((entry) => entry.attemptId === mutation.approvalAttemptId);
   const armed = phase !== 'prepared';
   const submitted = phase === 'submitted' || phase === 'verified';
   const verified = phase === 'verified';
   if (
-    value.schemaVersion !== 1 || !approval || value.enabled !== enabled ||
-    typeof value.requestHash !== 'string' || !SHA256.test(value.requestHash) ||
-    await sha256Hex(canonicalJson({ enabled, previews_enabled: false })) !== value.requestHash ||
-    !['prepared', 'send_armed', 'submitted', 'verified'].includes(String(value.phase)) ||
-    !safeInteger(value.preparedAt) || value.preparedAt < approval.approvedAt || value.preparedAt > journal.updatedAt ||
-    (armed !== safeInteger(value.sendArmedAt)) ||
-    (submitted !== safeInteger(value.submittedAt)) ||
-    (verified !== safeInteger(value.verifiedAt)) ||
-    (armed && (value.sendArmedAt as number) < value.preparedAt) ||
-    (submitted && (value.submittedAt as number) < (value.sendArmedAt as number)) ||
-    (verified && (value.verifiedAt as number) < (value.submittedAt as number)) ||
-    [value.sendArmedAt, value.submittedAt, value.verifiedAt].some(
-      (time) => typeof time === 'number' && time > journal.updatedAt,
+    !approval || mutation.enabled !== enabled ||
+    await sha256Hex(canonicalJson({ enabled, previews_enabled: false })) !== mutation.requestHash ||
+    mutation.preparedAt < approval.approvedAt || mutation.preparedAt > journal.updatedAt ||
+    (armed !== (mutation.sendArmedAt !== null)) ||
+    (submitted !== (mutation.submittedAt !== null)) ||
+    (verified !== (mutation.verifiedAt !== null)) ||
+    (mutation.sendArmedAt !== null && mutation.sendArmedAt < mutation.preparedAt) ||
+    (mutation.submittedAt !== null && mutation.sendArmedAt !== null &&
+      mutation.submittedAt < mutation.sendArmedAt) ||
+    (mutation.verifiedAt !== null && mutation.submittedAt !== null &&
+      mutation.verifiedAt < mutation.submittedAt) ||
+    [mutation.sendArmedAt, mutation.submittedAt, mutation.verifiedAt].some(
+      (time) => time !== null && time > journal.updatedAt,
     )
   ) return null;
   let locator: BootstrapSubdomainLocator | null = null;
   if (submitted) {
-    if (!isRecord(value.locator) || !exactKeys(value.locator, ['enabled', 'previewsEnabled']) ||
-      value.locator.enabled !== enabled || value.locator.previewsEnabled !== false) return null;
+    if (!mutation.locator || mutation.locator.enabled !== enabled) return null;
     locator = Object.freeze({ enabled, previewsEnabled: false });
-  } else if (value.locator !== null) return null;
+  } else if (mutation.locator !== null) return null;
   return Object.freeze({
     schemaVersion: 1,
     approvalAttemptId: approval.attemptId,
     enabled,
-    requestHash: value.requestHash,
+    requestHash: mutation.requestHash,
     phase,
     locator,
-    preparedAt: value.preparedAt,
-    sendArmedAt: armed ? value.sendArmedAt as number : null,
-    submittedAt: submitted ? value.submittedAt as number : null,
-    verifiedAt: verified ? value.verifiedAt as number : null,
+    preparedAt: mutation.preparedAt,
+    sendArmedAt: mutation.sendArmedAt,
+    submittedAt: mutation.submittedAt,
+    verifiedAt: mutation.verifiedAt,
   });
 }
 
-async function parseBootstrapRecord(value: unknown, journal: InstallJournal): Promise<CustomerBootstrapSubmitRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'kind', 'accountId', 'zoneId', 'zoneName', 'accountWorkersSubdomain',
-    'installationId', 'configurationHash', 'desiredHash', 'attempts',
-  ])) return null;
+async function parseBootstrapRecord<Input>(
+  value: Input,
+  journal: InstallJournal,
+): Promise<CustomerBootstrapSubmitRecord | null> {
+  const candidate = v.safeParse(bootstrapSubmitRecordSchema, value);
+  if (!candidate.success) return null;
+  const record = candidate.output;
   const preflight = actionByName(journal, 'gateway_fresh_preflight');
   if (
-    value.schemaVersion !== 1 || value.kind !== 'customer_bootstrap_submit' ||
-    value.accountId !== journal.target.account.id || value.zoneId !== journal.target.zone.id ||
-    value.zoneName !== journal.target.zone.name || typeof value.accountWorkersSubdomain !== 'string' ||
-    !HOST_LABEL.test(value.accountWorkersSubdomain) || value.installationId !== journal.installationId ||
-    typeof value.configurationHash !== 'string' || !PREFIXED_SHA256.test(value.configurationHash) ||
-    typeof value.desiredHash !== 'string' || !PREFIXED_SHA256.test(value.desiredHash) ||
+    record.accountId !== journal.target.account.id || record.zoneId !== journal.target.zone.id ||
+    record.zoneName !== journal.target.zone.name || record.installationId !== journal.installationId ||
     preflight?.phase !== 'verified' || preflight.record.kind !== 'customer_gateway_fresh_preflight' ||
-    value.configurationHash !== preflight.record.configurationHash || value.desiredHash !== preflight.record.desiredHash ||
-    !Array.isArray(value.attempts) || value.attempts.length < 1 || value.attempts.length > MAX_BOOTSTRAP_ATTEMPTS
+    record.configurationHash !== preflight.record.configurationHash || record.desiredHash !== preflight.record.desiredHash
   ) return null;
   const semantic = Object.freeze({
     schemaVersion: 1,
     kind: 'customer_bootstrap_submit' as const,
-    accountId: value.accountId,
-    zoneId: value.zoneId as string,
-    zoneName: value.zoneName as string,
-    accountWorkersSubdomain: value.accountWorkersSubdomain,
-    installationId: value.installationId as string,
-    configurationHash: value.configurationHash,
-    desiredHash: value.desiredHash,
+    accountId: record.accountId,
+    zoneId: record.zoneId,
+    zoneName: record.zoneName,
+    accountWorkersSubdomain: record.accountWorkersSubdomain,
+    installationId: record.installationId,
+    configurationHash: record.configurationHash,
+    desiredHash: record.desiredHash,
   });
   const attempts: CustomerBootstrapRequestAttempt[] = [];
-  for (let index = 0; index < value.attempts.length; index += 1) {
-    const input = value.attempts[index];
-    if (!isRecord(input) || !exactKeys(input, [
-      'schemaVersion', 'approvalAttemptId', 'requestId', 'issuedAt', 'expiresAt', 'claimHash',
-      'enable', 'disable', 'phase', 'locator', 'preparedAt', 'sendArmedAt', 'submittedAt', 'verifiedAt',
-    ])) return null;
+  for (let index = 0; index < record.attempts.length; index += 1) {
+    const input = record.attempts[index];
+    if (!input) return null;
     const approval = journal.approvalHistory.find((entry) => entry.attemptId === input.approvalAttemptId);
     const prior = attempts[index - 1];
     const enable = await parseCycleSubdomainMutation(input.enable, true, journal);
     const disable = input.disable === null ? null : await parseCycleSubdomainMutation(input.disable, false, journal);
     if (
-      input.schemaVersion !== 1 || typeof input.approvalAttemptId !== 'string' || !approval || !enable ||
+      !approval || !enable ||
       enable.approvalAttemptId !== input.approvalAttemptId ||
       attempts.some((attempt) => attempt.approvalAttemptId === input.approvalAttemptId) ||
-      typeof input.requestId !== 'string' || !REQUEST_ID.test(input.requestId) ||
       attempts.some((attempt) => attempt.requestId === input.requestId) ||
-      !safeInteger(input.issuedAt) || !safeInteger(input.expiresAt) || input.expiresAt <= input.issuedAt ||
+      input.expiresAt <= input.issuedAt ||
       input.expiresAt - input.issuedAt > 5 * 60 || input.expiresAt > Math.floor(approval.planExpiresAt / 1_000) ||
-      typeof input.claimHash !== 'string' || !PREFIXED_SHA256.test(input.claimHash) ||
-      !['prepared', 'send_armed', 'submitted', 'verified'].includes(String(input.phase)) ||
-      !safeInteger(input.preparedAt) || input.preparedAt < approval.approvedAt || input.preparedAt > journal.updatedAt ||
+      input.preparedAt < approval.approvedAt || input.preparedAt > journal.updatedAt ||
       (prior && input.preparedAt < Math.max(
         prior.preparedAt,
         prior.sendArmedAt ?? 0,
@@ -1125,7 +1369,7 @@ async function parseBootstrapRecord(value: unknown, journal: InstallJournal): Pr
       (input.phase !== 'prepared' && enable.phase !== 'verified') ||
       (input.disable !== null && (
         !disable || enable.phase !== 'verified' ||
-        disable.preparedAt < (enable.verifiedAt as number)
+        enable.verifiedAt === null || disable.preparedAt < enable.verifiedAt
       ))
     ) return null;
     if (index === 0) {
@@ -1138,21 +1382,21 @@ async function parseBootstrapRecord(value: unknown, journal: InstallJournal): Pr
         enable.submittedAt !== topEnable.submittedAt || enable.verifiedAt !== topEnable.verifiedAt
       ) return null;
     }
-    const phase = input.phase as InstallActionPhase;
+    const phase = input.phase;
     const armed = phase !== 'prepared';
     const submitted = phase === 'submitted' || phase === 'verified';
     const verified = phase === 'verified';
     if (
-      (armed !== safeInteger(input.sendArmedAt)) ||
-      (submitted !== safeInteger(input.submittedAt)) ||
-      (verified !== safeInteger(input.verifiedAt)) ||
-      (armed && (input.sendArmedAt as number) < input.preparedAt) ||
-      (submitted && (input.submittedAt as number) < (input.sendArmedAt as number)) ||
-      (verified && (input.verifiedAt as number) < (input.submittedAt as number)) ||
+      (armed !== (input.sendArmedAt !== null)) ||
+      (submitted !== (input.submittedAt !== null)) ||
+      (verified !== (input.verifiedAt !== null)) ||
+      (input.sendArmedAt !== null && input.sendArmedAt < input.preparedAt) ||
+      (input.submittedAt !== null && input.sendArmedAt !== null && input.submittedAt < input.sendArmedAt) ||
+      (input.verifiedAt !== null && input.submittedAt !== null && input.verifiedAt < input.submittedAt) ||
       [input.sendArmedAt, input.submittedAt, input.verifiedAt].some(
-        (time) => typeof time === 'number' && time > journal.updatedAt,
+        (time) => time !== null && time > journal.updatedAt,
       ) ||
-      await bootstrapClaimHash(semantic, input as unknown as CustomerBootstrapRequestAttempt) !== input.claimHash
+      await bootstrapClaimHash(semantic, input) !== input.claimHash
     ) return null;
     let locator: CustomerBootstrapLocator | null = null;
     if (submitted) {
@@ -1171,9 +1415,9 @@ async function parseBootstrapRecord(value: unknown, journal: InstallJournal): Pr
       phase,
       locator,
       preparedAt: input.preparedAt,
-      sendArmedAt: armed ? input.sendArmedAt as number : null,
-      submittedAt: submitted ? input.submittedAt as number : null,
-      verifiedAt: verified ? input.verifiedAt as number : null,
+      sendArmedAt: input.sendArmedAt,
+      submittedAt: input.submittedAt,
+      verifiedAt: input.verifiedAt,
     }));
   }
   return Object.freeze({
@@ -1183,18 +1427,16 @@ async function parseBootstrapRecord(value: unknown, journal: InstallJournal): Pr
 }
 
 async function parseDomainRecord(
-  value: unknown,
+  value: BoundaryValue,
   journal: InstallJournal,
 ): Promise<ManagementCustomDomainAttachRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'kind', 'accountId', 'zoneId', 'planId', 'planHash', 'ownershipMarker', 'intentHash',
-  ])) return null;
+  const candidate = v.safeParse(managementCustomDomainRecordSchema, value);
+  if (!candidate.success) return null;
+  const record = candidate.output;
   if (
-    value.schemaVersion !== 1 || value.kind !== 'management_custom_domain_attach' ||
-    value.accountId !== journal.target.account.id || value.zoneId !== journal.target.zone.id ||
-    value.planId !== journal.plan.planId || value.planHash !== journal.plan.planHash ||
-    value.ownershipMarker !== managementOwnershipMarker(journal.plan) ||
-    typeof value.intentHash !== 'string' || !SHA256.test(value.intentHash)
+    record.accountId !== journal.target.account.id || record.zoneId !== journal.target.zone.id ||
+    record.planId !== journal.plan.planId || record.planHash !== journal.plan.planHash ||
+    record.ownershipMarker !== managementOwnershipMarker(journal.plan)
   ) return null;
   try {
     const intent = prepareManagementCustomDomainIntent({
@@ -1202,23 +1444,25 @@ async function parseDomainRecord(
       zoneId: journal.target.zone.id,
       plan: journal.plan,
     });
-    if (await sha256Hex(canonicalJson(intent)) !== value.intentHash) return null;
+    if (await sha256Hex(canonicalJson(intent)) !== record.intentHash) return null;
   } catch {
     return null;
   }
   return Object.freeze({
     schemaVersion: 1,
     kind: 'management_custom_domain_attach',
-    accountId: value.accountId,
-    zoneId: value.zoneId as string,
-    planId: value.planId as string,
-    planHash: value.planHash as string,
-    ownershipMarker: value.ownershipMarker as string,
-    intentHash: value.intentHash,
+    accountId: record.accountId,
+    zoneId: record.zoneId,
+    planId: record.planId,
+    planHash: record.planHash,
+    ownershipMarker: record.ownershipMarker,
+    intentHash: record.intentHash,
   });
 }
 
-function finalProjection(journal: InstallJournal): Record<string, unknown> | null {
+type FinalConvergenceProjection = Omit<FinalConvergenceLocator, 'schemaVersion' | 'status' | 'convergenceHash'>;
+
+function finalProjection(journal: InstallJournal): FinalConvergenceProjection | null {
   const worker = verifiedLocator(journal, 'worker_create');
   const application = verifiedLocator(journal, 'management_access_application_create');
   const policy = verifiedLocator(journal, 'management_admin_policy_create');
@@ -1241,7 +1485,7 @@ function finalProjection(journal: InstallJournal): Record<string, unknown> | nul
     !cleanDeployment || !('kind' in cleanDeployment) || cleanDeployment.kind !== 'deployment' ||
     !domain || !('domainId' in domain)
   ) return null;
-  if (bootstrapVersion.namespaceId !== cleanVersion.namespaceId) return null;
+  if (!bootstrapVersion.namespaceId || bootstrapVersion.namespaceId !== cleanVersion.namespaceId) return null;
   return {
     adminStateNamespaceId: bootstrapVersion.namespaceId,
     bindingHash: journal.bindingHash,
@@ -1290,12 +1534,12 @@ export async function prepareFinalConvergenceRecordAndLocator(journal: InstallJo
     kind: 'final_convergence',
     convergenceHash,
   });
-  const locator = Object.freeze({
+  const locator: FinalConvergenceLocator = Object.freeze({
     schemaVersion: 1,
     status: 'converged',
     convergenceHash,
     ...projection,
-  }) as FinalConvergenceLocator;
+  });
   const existing = journal.actions[finalIndex];
   if (existing && (
     existing.name !== 'final_convergence' || !exactJson(existing.record, record) ||
@@ -1306,170 +1550,159 @@ export async function prepareFinalConvergenceRecordAndLocator(journal: InstallJo
   return Object.freeze({ record, locator });
 }
 
-async function parseFinalRecord(value: unknown, journal: InstallJournal): Promise<FinalConvergenceRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, ['schemaVersion', 'kind', 'convergenceHash'])) return null;
+async function parseFinalRecord(value: BoundaryValue, journal: InstallJournal): Promise<FinalConvergenceRecord | null> {
+  const candidate = v.safeParse(finalConvergenceRecordSchema, value);
+  if (!candidate.success) return null;
   const expected = await expectedConvergenceHash(journal);
-  if (
-    value.schemaVersion !== 1 || value.kind !== 'final_convergence' ||
-    typeof value.convergenceHash !== 'string' || value.convergenceHash !== expected
-  ) return null;
-  return Object.freeze({ schemaVersion: 1, kind: 'final_convergence', convergenceHash: value.convergenceHash });
+  if (candidate.output.convergenceHash !== expected) return null;
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: 'final_convergence',
+    convergenceHash: candidate.output.convergenceHash,
+  });
 }
 
-async function parseActionRecord(
+async function parseActionRecord<Input>(
   name: InstallActionName,
-  value: unknown,
+  value: Input,
   journal: InstallJournal,
 ): Promise<InstallActionRecord | null> {
-  if (forbiddenJournalShape(value)) return null;
-  if (name === 'gateway_fresh_preflight') return parseFreshPreflightRecord(value, journal);
-  if (name === 'worker_create') return parseWorkerRecord(value, journal);
-  if (name === 'management_access_application_create') return parseApplicationRecord(value, journal);
-  if (name === 'management_admin_policy_create') return parsePolicyRecord(value, journal);
+  if (containsForbiddenJournalData(value)) return null;
+  const candidate = v.safeParse(boundaryValueSchema, value);
+  if (!candidate.success) return null;
+  const record = candidate.output;
+  if (name === 'gateway_fresh_preflight') return parseFreshPreflightRecord(record, journal);
+  if (name === 'worker_create') return parseWorkerRecord(record, journal);
+  if (name === 'management_access_application_create') return parseApplicationRecord(record, journal);
+  if (name === 'management_admin_policy_create') return parsePolicyRecord(record, journal);
   if (
     name === 'provision_worker_version_create' || name === 'bootstrap_worker_version_create' ||
     name === 'clean_worker_version_create'
   ) {
-    return parseVersionRecord(name, value, journal);
+    return parseVersionRecord(name, record, journal);
   }
   if (
     name === 'provision_worker_deployment_create' || name === 'bootstrap_worker_deployment_create' ||
     name === 'clean_worker_deployment_create'
   ) {
-    return parseDeploymentRecord(name, value, journal);
+    return parseDeploymentRecord(name, record, journal);
   }
   if (name === 'bootstrap_subdomain_enable' || name === 'bootstrap_subdomain_disable') {
-    return parseSubdomainRecord(name, value, journal);
+    return parseSubdomainRecord(name, record, journal);
   }
-  if (name === 'customer_bootstrap_submit') return parseBootstrapRecord(value, journal);
-  if (name === 'management_custom_domain_attach') return parseDomainRecord(value, journal);
-  if (name === 'final_convergence') return parseFinalRecord(value, journal);
+  if (name === 'customer_bootstrap_submit') return parseBootstrapRecord(record, journal);
+  if (name === 'management_custom_domain_attach') return parseDomainRecord(record, journal);
+  if (name === 'final_convergence') return parseFinalRecord(record, journal);
   return null;
 }
 
-function parseWorkerLocator(value: unknown, record: WorkerCreateRecord): WorkerLocator | null {
-  if (!isRecord(value) || !exactKeys(value, ['kind', 'accountId', 'workerName', 'workerId'])) return null;
+function parseWorkerLocator<Input>(value: Input, record: WorkerCreateRecord): WorkerLocator | null {
+  const candidate = v.safeParse(workerLocatorSchema, value);
+  if (!candidate.success) return null;
   if (
-    value.kind !== 'worker' || value.accountId !== record.accountId || value.workerName !== record.workerName ||
-    typeof value.workerId !== 'string' || !ACCOUNT_ID.test(value.workerId)
+    candidate.output.accountId !== record.accountId || candidate.output.workerName !== record.workerName
   ) return null;
-  return Object.freeze({ kind: 'worker', accountId: record.accountId, workerName: record.workerName, workerId: value.workerId });
+  return Object.freeze({
+    kind: 'worker',
+    accountId: record.accountId,
+    workerName: record.workerName,
+    workerId: candidate.output.workerId,
+  });
 }
 
-function parseFreshPreflightLocator(
-  value: unknown,
+function parseFreshPreflightLocator<Input>(
+  value: Input,
   record: GatewayFreshPreflightRecord,
 ): GatewayFreshPreflightLocator | null {
   if (
-    !isRecord(value) || !exactKeys(value, ['attestationHash']) ||
-    value.attestationHash !== record.attestationHash
+    !v.is(freshPreflightLocatorSchema, value) || value.attestationHash !== record.attestationHash
   ) return null;
   return Object.freeze({ attestationHash: record.attestationHash });
 }
 
-function parseApplicationLocator(value: unknown): ManagementAccessApplicationLocator | null {
-  if (!isRecord(value) || !exactKeys(value, ['applicationId', 'aud'])) return null;
-  if (
-    typeof value.applicationId !== 'string' || !PROVIDER_ID.test(value.applicationId) ||
-    typeof value.aud !== 'string' || !ACCESS_AUD.test(value.aud)
-  ) return null;
-  return Object.freeze({ applicationId: value.applicationId, aud: value.aud });
+function parseApplicationLocator<Input>(value: Input): ManagementAccessApplicationLocator | null {
+  const candidate = v.safeParse(applicationLocatorSchema, value);
+  return candidate.success ? Object.freeze(candidate.output) : null;
 }
 
-function parsePolicyLocator(value: unknown): ManagementAdminPolicyLocator | null {
-  if (!isRecord(value) || !exactKeys(value, ['policyId']) || typeof value.policyId !== 'string' || !PROVIDER_ID.test(value.policyId)) {
-    return null;
+function parsePolicyLocator<Input>(value: Input): ManagementAdminPolicyLocator | null {
+  const candidate = v.safeParse(policyLocatorSchema, value);
+  return candidate.success ? Object.freeze(candidate.output) : null;
+}
+
+function parseVersionLocator<Input>(value: Input, record: WorkerVersionCreateRecord): WorkerVersionLocator | null {
+  const candidate = v.safeParse(versionLocatorSchema, value);
+  if (!candidate.success) return null;
+  const locator = candidate.output;
+  if (
+    locator.phase !== record.phase || locator.accountId !== record.accountId ||
+    locator.workerName !== record.workerName || locator.workerId !== record.workerId ||
+    (record.phase === 'provision' ? locator.namespaceId !== undefined : locator.namespaceId === undefined) ||
+    locator.requestHash !== record.requestHash || locator.correlationTag !== record.correlationTag
+  ) return null;
+  if (record.phase === 'provision') {
+    return Object.freeze({
+      kind: 'version', phase: record.phase, accountId: record.accountId, workerName: record.workerName,
+      workerId: record.workerId, versionId: locator.versionId, requestHash: record.requestHash,
+      correlationTag: record.correlationTag,
+    });
   }
-  return Object.freeze({ policyId: value.policyId });
-}
-
-function parseVersionLocator(value: unknown, record: WorkerVersionCreateRecord): WorkerVersionLocator | null {
-  // The provision version precedes the deployment that provisions the
-  // Durable Object namespace, so its locator carries no namespaceId.
-  const expectedKeys = record.phase === 'provision'
-    ? ['kind', 'phase', 'accountId', 'workerName', 'workerId', 'versionId', 'requestHash', 'correlationTag']
-    : ['kind', 'phase', 'accountId', 'workerName', 'workerId', 'versionId', 'requestHash', 'correlationTag', 'namespaceId'];
-  if (!isRecord(value) || !exactKeys(value, expectedKeys)) return null;
-  if (
-    value.kind !== 'version' || value.phase !== record.phase || value.accountId !== record.accountId ||
-    value.workerName !== record.workerName || value.workerId !== record.workerId ||
-    typeof value.versionId !== 'string' || !UUID.test(value.versionId) ||
-    (record.phase !== 'provision' &&
-      (typeof value.namespaceId !== 'string' || !ACCOUNT_ID.test(value.namespaceId))) ||
-    value.requestHash !== record.requestHash || value.correlationTag !== record.correlationTag
-  ) return null;
+  if (!locator.namespaceId) return null;
   return Object.freeze({
     kind: 'version', phase: record.phase, accountId: record.accountId, workerName: record.workerName,
-    workerId: record.workerId, versionId: value.versionId, requestHash: record.requestHash,
+    workerId: record.workerId, versionId: locator.versionId, requestHash: record.requestHash,
     correlationTag: record.correlationTag,
-    ...(record.phase === 'provision' ? {} : { namespaceId: value.namespaceId as string }),
+    namespaceId: locator.namespaceId,
   });
 }
 
-function parseDeploymentLocator(value: unknown, record: WorkerDeploymentCreateRecord): WorkerDeploymentLocator | null {
-  if (!isRecord(value) || !exactKeys(value, [
-    'kind', 'phase', 'accountId', 'workerName', 'workerId', 'versionId', 'deploymentId', 'requestHash', 'correlationTag',
-  ])) return null;
+function parseDeploymentLocator<Input>(value: Input, record: WorkerDeploymentCreateRecord): WorkerDeploymentLocator | null {
+  const candidate = v.safeParse(deploymentLocatorSchema, value);
+  if (!candidate.success) return null;
+  const locator = candidate.output;
   if (
-    value.kind !== 'deployment' || value.phase !== record.phase || value.accountId !== record.accountId ||
-    value.workerName !== record.workerName || value.workerId !== record.workerId || value.versionId !== record.versionId ||
-    typeof value.deploymentId !== 'string' || !UUID.test(value.deploymentId) ||
-    value.requestHash !== record.requestHash || value.correlationTag !== record.correlationTag
+    locator.phase !== record.phase || locator.accountId !== record.accountId ||
+    locator.workerName !== record.workerName || locator.workerId !== record.workerId ||
+    locator.versionId !== record.versionId || locator.requestHash !== record.requestHash ||
+    locator.correlationTag !== record.correlationTag
   ) return null;
   return Object.freeze({
     kind: 'deployment', phase: record.phase, accountId: record.accountId, workerName: record.workerName,
-    workerId: record.workerId, versionId: record.versionId, deploymentId: value.deploymentId,
+    workerId: record.workerId, versionId: record.versionId, deploymentId: locator.deploymentId,
     requestHash: record.requestHash, correlationTag: record.correlationTag,
   });
 }
 
-function parseSubdomainLocator(value: unknown, record: BootstrapSubdomainRecord): BootstrapSubdomainLocator | null {
-  if (!isRecord(value) || !exactKeys(value, ['enabled', 'previewsEnabled'])) return null;
-  if (value.enabled !== record.enabled || value.previewsEnabled !== false) return null;
+function parseSubdomainLocator<Input>(value: Input, record: BootstrapSubdomainRecord): BootstrapSubdomainLocator | null {
+  const candidate = v.safeParse(subdomainLocatorSchema, value);
+  if (!candidate.success || candidate.output.enabled !== record.enabled) return null;
   return Object.freeze({ enabled: record.enabled, previewsEnabled: false });
 }
 
-async function parseBootstrapLocator(
-  value: unknown,
+async function parseBootstrapLocator<Input>(
+  value: Input,
   record: Omit<CustomerBootstrapSubmitRecord, 'attempts'>,
   journal: InstallJournal,
 ): Promise<CustomerBootstrapLocator | null> {
-  if (!isRecord(value)) return null;
-  if (value.status === 'recovery_required') {
-    if (
-      !exactKeys(value, ['schemaVersion', 'status', 'reason', 'canRetry']) || value.schemaVersion !== 1 ||
-      !['bootstrap_recovery_required', 'bootstrap_requires_repair', 'bootstrap_request_mismatch'].includes(String(value.reason)) ||
-      value.canRetry !== false
-    ) return null;
-    const reason = value.reason as
-      | 'bootstrap_recovery_required'
-      | 'bootstrap_requires_repair'
-      | 'bootstrap_request_mismatch';
+  const recovery = v.safeParse(bootstrapRecoveryLocatorSchema, value);
+  if (recovery.success) {
     return Object.freeze({
       schemaVersion: 1,
       status: 'recovery_required',
-      reason,
+      reason: recovery.output.reason,
       canRetry: false,
     });
   }
-  if (!exactKeys(value, [
-    'schemaVersion', 'status', 'installationId', 'approvedPlanId', 'configurationHash', 'desiredHash',
-    'settingsRevision', 'release', 'gateway', 'receipt', 'applyInvoked', 'resumed',
-  ])) return null;
+  const candidate = v.safeParse(bootstrapReadyLocatorSchema, value);
+  if (!candidate.success) return null;
+  const locator = candidate.output;
   if (
-    value.schemaVersion !== 1 || value.status !== 'ready' || value.installationId !== journal.installationId ||
-    typeof value.approvedPlanId !== 'string' || !CUSTOMER_PLAN_ID.test(value.approvedPlanId) ||
-    value.configurationHash !== record.configurationHash || value.desiredHash !== record.desiredHash ||
-    value.settingsRevision !== 1 || !isRecord(value.release) || !exactKeys(value.release, ['id', 'artifactSha256']) ||
-    value.release.id !== journal.releasePin.release ||
-    value.release.artifactSha256 !== `sha256:${journal.releasePin.artifactSha256}` ||
-    !isRecord(value.gateway) || !exactKeys(value.gateway, ['hostname', 'mcpUrl']) ||
-    value.gateway.hostname !== journal.selection.basics.portalHostname ||
-    value.gateway.mcpUrl !== `https://${journal.selection.basics.portalHostname}/mcp` ||
-    !isRecord(value.receipt) || !exactKeys(value.receipt, ['revision', 'resourceCount', 'evidence']) ||
-    !safeInteger(value.receipt.revision) ||
-    value.receipt.resourceCount !== journal.plan.gatewayResources.length ||
-    typeof value.applyInvoked !== 'boolean' || typeof value.resumed !== 'boolean'
+    locator.installationId !== journal.installationId || locator.configurationHash !== record.configurationHash ||
+    locator.desiredHash !== record.desiredHash || locator.release.id !== journal.releasePin.release ||
+    locator.release.artifactSha256 !== `sha256:${journal.releasePin.artifactSha256}` ||
+    locator.gateway.hostname !== journal.selection.basics.portalHostname ||
+    locator.gateway.mcpUrl !== `https://${journal.selection.basics.portalHostname}/mcp` ||
+    locator.receipt.resourceCount !== journal.plan.gatewayResources.length
   ) return null;
   let expectation: Awaited<ReturnType<typeof deriveCustomerGatewayInstallationReceiptExpectation>>;
   try {
@@ -1485,13 +1718,13 @@ async function parseBootstrapLocator(
   } catch {
     return null;
   }
-  const evidence = await parseReadyInstallationReceipt(value.receipt.evidence, expectation);
-  if (!evidence || evidence.revision !== value.receipt.revision) return null;
+  const evidence = await parseReadyInstallationReceipt(locator.receipt.evidence, expectation);
+  if (!evidence || evidence.revision !== locator.receipt.revision) return null;
   return Object.freeze({
     schemaVersion: 1,
     status: 'ready',
     installationId: journal.installationId,
-    approvedPlanId: value.approvedPlanId,
+    approvedPlanId: locator.approvedPlanId,
     configurationHash: record.configurationHash,
     desiredHash: record.desiredHash,
     settingsRevision: 1,
@@ -1499,28 +1732,23 @@ async function parseBootstrapLocator(
       id: journal.releasePin.release,
       artifactSha256: `sha256:${journal.releasePin.artifactSha256}`,
     }),
-    gateway: Object.freeze({ hostname: value.gateway.hostname as string, mcpUrl: value.gateway.mcpUrl as string }),
+    gateway: Object.freeze({ hostname: locator.gateway.hostname, mcpUrl: locator.gateway.mcpUrl }),
     receipt: Object.freeze({
-      revision: value.receipt.revision,
-      resourceCount: journal.plan.gatewayResources.length as 4 | 7,
+      revision: locator.receipt.revision,
+      resourceCount: locator.receipt.resourceCount,
       evidence,
     }),
-    applyInvoked: value.applyInvoked,
-    resumed: value.resumed,
+    applyInvoked: locator.applyInvoked,
+    resumed: locator.resumed,
   });
 }
 
-function parseDomainLocator(value: unknown): ManagementCustomDomainLocator | null {
-  // Worker custom-domain ids are 40 lowercase hex characters (live 2026-08-23).
-  const CUSTOM_DOMAIN_ID = /^[a-f0-9]{40}$/u;
-  if (
-    !isRecord(value) || !exactKeys(value, ['domainId']) || typeof value.domainId !== 'string' ||
-    !(PROVIDER_ID.test(value.domainId) || CUSTOM_DOMAIN_ID.test(value.domainId))
-  ) return null;
-  return Object.freeze({ domainId: value.domainId });
+function parseDomainLocator<Input>(value: Input): ManagementCustomDomainLocator | null {
+  const candidate = v.safeParse(domainLocatorSchema, value);
+  return candidate.success ? Object.freeze(candidate.output) : null;
 }
 
-async function parseFinalLocator(value: unknown, record: FinalConvergenceRecord, journal: InstallJournal): Promise<FinalConvergenceLocator | null> {
+async function parseFinalLocator<Input>(value: Input, record: FinalConvergenceRecord, journal: InstallJournal): Promise<FinalConvergenceLocator | null> {
   if (!isRecord(value) || !exactKeys(value, [
     'schemaVersion', 'status', 'convergenceHash', 'installationId', 'bindingHash', 'workerId',
     'managementApplicationId', 'managementAccessAud', 'managementPolicyId', 'bootstrapVersionId',
@@ -1534,23 +1762,23 @@ async function parseFinalLocator(value: unknown, record: FinalConvergenceRecord,
     !projection || value.schemaVersion !== 1 || value.status !== 'converged' ||
     value.convergenceHash !== record.convergenceHash || value.convergenceHash !== expectedHash
   ) return null;
-  const expected = projection ? {
+  const expected: FinalConvergenceLocator | null = projection ? {
     schemaVersion: 1,
     status: 'converged',
     convergenceHash: expectedHash,
     ...projection,
   } : null;
   if (!expected || !exactJson(value, expected)) return null;
-  return Object.freeze(expected) as FinalConvergenceLocator;
+  return Object.freeze(expected);
 }
 
-async function parseActionLocator(
+async function parseActionLocator<Input>(
   name: InstallActionName,
-  value: unknown,
+  value: Input,
   record: InstallActionRecord,
   journal: InstallJournal,
 ): Promise<InstallActionLocator | null> {
-  if (forbiddenJournalShape(value)) return null;
+  if (containsForbiddenJournalData(value)) return null;
   if (name === 'gateway_fresh_preflight' && record.kind === 'customer_gateway_fresh_preflight') {
     return parseFreshPreflightLocator(value, record);
   }
@@ -1655,42 +1883,53 @@ function bootstrapActionSummary(record: CustomerBootstrapSubmitRecord): {
   });
 }
 
-function parseLease(value: unknown, recoverUntil: number): InstallJournalLease | null | undefined {
+function parseLease<Input>(value: Input, recoverUntil: number): InstallJournalLease | null | undefined {
   if (value === null) return null;
-  if (!isRecord(value) || !exactKeys(value, ['attemptId', 'acquiredAt', 'expiresAt'])) return undefined;
+  const candidate = v.safeParse(installJournalLeaseSchema, value);
+  if (!candidate.success) return undefined;
+  const lease = candidate.output;
   if (
-    typeof value.attemptId !== 'string' || !ATTEMPT_ID.test(value.attemptId) ||
-    !safeInteger(value.acquiredAt) || !safeInteger(value.expiresAt) || value.expiresAt <= value.acquiredAt ||
-    value.expiresAt - value.acquiredAt > MAX_INSTALL_LEASE_MS || value.expiresAt > recoverUntil
+    lease.expiresAt <= lease.acquiredAt || lease.expiresAt - lease.acquiredAt > MAX_INSTALL_LEASE_MS ||
+    lease.expiresAt > recoverUntil
   ) return undefined;
-  return Object.freeze({ attemptId: value.attemptId, acquiredAt: value.acquiredAt, expiresAt: value.expiresAt });
+  return Object.freeze({ attemptId: lease.attemptId, acquiredAt: lease.acquiredAt, expiresAt: lease.expiresAt });
 }
 
-function parseApprovalHistory(
-  value: unknown,
+function parseApprovalHistory<Input>(
+  value: Input,
   plan: StaticDeployPlan,
   createdAt: number,
   updatedAt: number,
   recoverUntil: number,
 ): readonly InstallJournalApproval[] | null {
-  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_APPROVALS) return null;
+  const candidate = v.safeParse(
+    v.pipe(v.array(installJournalApprovalSchema), v.minLength(1), v.maxLength(MAX_APPROVALS)),
+    value,
+  );
+  if (!candidate.success) return null;
   const approvals: InstallJournalApproval[] = [];
-  for (let index = 0; index < value.length; index += 1) {
-    const entry = value[index];
-    if (!isRecord(entry) || !exactKeys(entry, [
-      'schemaVersion', 'attemptId', 'approvedAt', 'recordedAt', 'planId', 'planHash',
-      'planExpiresAt', 'managementOwnershipMarker',
-    ])) return null;
+  for (let index = 0; index < candidate.output.length; index += 1) {
+    const entry = candidate.output[index];
+    if (!entry) return null;
     const previous = approvals[index - 1];
+    let invalidRecordedAt: boolean;
+    let invalidPlanExpiry: boolean;
+    if (index === 0) {
+      invalidRecordedAt = entry.recordedAt !== createdAt;
+      invalidPlanExpiry = entry.planExpiresAt !== plan.expiresAt;
+    } else {
+      if (previous === undefined) return null;
+      invalidRecordedAt = entry.recordedAt < previous.recordedAt;
+      invalidPlanExpiry = entry.planExpiresAt <= previous.planExpiresAt;
+    }
     if (
-      entry.schemaVersion !== 1 || typeof entry.attemptId !== 'string' || !ATTEMPT_ID.test(entry.attemptId) ||
       approvals.some((approval) => approval.attemptId === entry.attemptId) ||
-      !safeInteger(entry.approvedAt) || !safeInteger(entry.recordedAt) || entry.approvedAt > entry.recordedAt ||
-      entry.recordedAt > updatedAt || (index === 0 ? entry.recordedAt !== createdAt : entry.recordedAt < previous.recordedAt) ||
+      entry.approvedAt > entry.recordedAt ||
+      entry.recordedAt > updatedAt || invalidRecordedAt ||
       entry.planId !== plan.planId || entry.planHash !== plan.planHash ||
       entry.managementOwnershipMarker !== plan.managementOwnershipMarker ||
-      !safeInteger(entry.planExpiresAt) || entry.planExpiresAt <= entry.approvedAt || entry.planExpiresAt > recoverUntil ||
-      (index === 0 ? entry.planExpiresAt !== plan.expiresAt : entry.planExpiresAt <= previous.planExpiresAt)
+      entry.planExpiresAt <= entry.approvedAt || entry.planExpiresAt > recoverUntil ||
+      invalidPlanExpiry
     ) return null;
     approvals.push(Object.freeze({
       schemaVersion: 1,
@@ -1706,92 +1945,85 @@ function parseApprovalHistory(
   return Object.freeze(approvals);
 }
 
-async function parseJournal(value: unknown): Promise<InstallJournal | null> {
-  if (forbiddenJournalShape(value)) return null;
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'revision', 'createdAt', 'updatedAt', 'sessionExpiresAt', 'recoverUntil', 'selection', 'plan',
-    'releasePin', 'target', 'installationId', 'bindingHash', 'approvalHistory', 'lease', 'leaseAttemptIds', 'actions',
-  ])) return null;
+async function parseJournal<Input>(value: Input): Promise<InstallJournal | null> {
+  if (containsForbiddenJournalData(value)) return null;
+  const candidate = v.safeParse(installJournalSchema, value);
+  if (!candidate.success) return null;
+  const journalInput = candidate.output;
   if (
-    value.schemaVersion !== 1 || !safeInteger(value.revision) || !safeInteger(value.createdAt) ||
-    !safeInteger(value.updatedAt) || !safeInteger(value.sessionExpiresAt) || !safeInteger(value.recoverUntil) ||
-    value.updatedAt < value.createdAt || value.updatedAt > value.recoverUntil ||
-    value.sessionExpiresAt <= value.createdAt || value.recoverUntil <= value.sessionExpiresAt ||
-    value.recoverUntil > value.sessionExpiresAt + MAX_INSTALL_RECOVERY_RETENTION_MS
+    journalInput.updatedAt < journalInput.createdAt || journalInput.updatedAt > journalInput.recoverUntil ||
+    journalInput.sessionExpiresAt <= journalInput.createdAt || journalInput.recoverUntil <= journalInput.sessionExpiresAt ||
+    journalInput.recoverUntil > journalInput.sessionExpiresAt + MAX_INSTALL_RECOVERY_RETENTION_MS
   ) return null;
   let selection: DeploySelection;
   let plan: StaticDeployPlan;
   try {
-    selection = parseDeploySelection(value.selection);
-    plan = parseStaticDeployPlan(value.plan);
+    selection = parseDeploySelection(journalInput.selection);
+    plan = parseStaticDeployPlan(journalInput.plan);
   } catch {
     return null;
   }
-  const pin = releasePin(value.releasePin);
-  const target = authorizedTarget(value.target, selection);
+  const pin = releasePin(journalInput.releasePin);
+  const target = authorizedTarget(journalInput.target, selection);
   if (
     !pin || !target || pin.release !== plan.releaseId || pin.artifactSha256 !== plan.releaseArtifactSha256 ||
-    typeof value.installationId !== 'string' || !INSTALLATION_ID.test(value.installationId) ||
-    value.installationId !== await stableInstallationId(selection, target) ||
-    typeof value.bindingHash !== 'string' || !PREFIXED_SHA256.test(value.bindingHash)
+    journalInput.installationId !== await stableInstallationId(selection, target)
   ) return null;
   const expectedBinding = await computeInstallJournalBindingHash({
-    selection, plan, releasePin: pin, target, installationId: value.installationId,
+    selection, plan, releasePin: pin, target, installationId: journalInput.installationId,
   });
-  if (value.bindingHash !== expectedBinding) return null;
+  if (journalInput.bindingHash !== expectedBinding) return null;
   const approvals = parseApprovalHistory(
-    value.approvalHistory,
+    journalInput.approvalHistory,
     plan,
-    value.createdAt,
-    value.updatedAt,
-    value.recoverUntil,
+    journalInput.createdAt,
+    journalInput.updatedAt,
+    journalInput.recoverUntil,
   );
   if (!approvals) return null;
-  const lease = parseLease(value.lease, value.recoverUntil);
-  if (lease === undefined || !Array.isArray(value.leaseAttemptIds) || value.leaseAttemptIds.length > MAX_LEASE_ATTEMPTS) return null;
+  const lease = parseLease(journalInput.lease, journalInput.recoverUntil);
+  if (lease === undefined) return null;
   const attempts: string[] = [];
-  for (const attempt of value.leaseAttemptIds) {
-    if (typeof attempt !== 'string' || !ATTEMPT_ID.test(attempt) || attempts.includes(attempt)) return null;
+  for (const attempt of journalInput.leaseAttemptIds) {
+    if (attempts.includes(attempt)) return null;
     attempts.push(attempt);
   }
   if (lease && !attempts.includes(lease.attemptId)) return null;
-  if (!Array.isArray(value.actions) || value.actions.length > INSTALL_ACTION_ORDER.length) return null;
+  if (journalInput.actions.length > INSTALL_ACTION_ORDER.length) return null;
   const partial: InstallJournal = {
     schemaVersion: 1,
-    revision: value.revision,
-    createdAt: value.createdAt,
-    updatedAt: value.updatedAt,
-    sessionExpiresAt: value.sessionExpiresAt,
-    recoverUntil: value.recoverUntil,
+    revision: journalInput.revision,
+    createdAt: journalInput.createdAt,
+    updatedAt: journalInput.updatedAt,
+    sessionExpiresAt: journalInput.sessionExpiresAt,
+    recoverUntil: journalInput.recoverUntil,
     selection,
     plan,
     releasePin: pin,
     target,
-    installationId: value.installationId,
-    bindingHash: value.bindingHash,
+    installationId: journalInput.installationId,
+    bindingHash: journalInput.bindingHash,
     approvalHistory: approvals,
     lease,
     leaseAttemptIds: Object.freeze(attempts),
     actions: Object.freeze([]),
   };
   const actions: InstallJournalAction[] = [];
-  let lastPreparedAt = value.createdAt;
-  for (let index = 0; index < value.actions.length; index += 1) {
-    const input = value.actions[index];
-    if (!isRecord(input) || !exactKeys(input, [
-      'name', 'phase', 'record', 'locator', 'preparedAt', 'sendArmedAt', 'submittedAt', 'verifiedAt',
-    ])) return null;
+  let lastPreparedAt = journalInput.createdAt;
+  for (let index = 0; index < journalInput.actions.length; index += 1) {
+    const input = journalInput.actions[index];
+    if (!input) return null;
     const name = INSTALL_ACTION_ORDER[index];
-    if (input.name !== name || !['prepared', 'send_armed', 'submitted', 'verified'].includes(String(input.phase))) return null;
-    const context = { ...partial, actions: Object.freeze([...actions]) } as InstallJournal;
+    if (input.name !== name) return null;
+    const context: InstallJournal = { ...partial, actions: Object.freeze([...actions]) };
     if (!actionPrerequisites(context, name)) return null;
     const record = await parseActionRecord(name, input.record, context);
-    if (!record || !safeInteger(input.preparedAt) || input.preparedAt < lastPreparedAt || input.preparedAt > value.updatedAt) return null;
+    if (!record || input.preparedAt < lastPreparedAt || input.preparedAt > journalInput.updatedAt) return null;
     if (
       name === 'gateway_fresh_preflight' && (
         record.kind !== 'customer_gateway_fresh_preflight' || input.phase !== 'verified' ||
-        input.preparedAt !== value.createdAt || input.sendArmedAt !== value.createdAt ||
-        input.submittedAt !== value.createdAt || input.verifiedAt !== value.createdAt
+        input.preparedAt !== journalInput.createdAt || input.sendArmedAt !== journalInput.createdAt ||
+        input.submittedAt !== journalInput.createdAt || input.verifiedAt !== journalInput.createdAt
       )
     ) return null;
     if (name === 'customer_bootstrap_submit' && record.kind === 'customer_bootstrap_submit') {
@@ -1805,19 +2037,19 @@ async function parseJournal(value: unknown): Promise<InstallJournal | null> {
       lastPreparedAt = input.preparedAt;
       continue;
     }
-    const phase = input.phase as InstallActionPhase;
+    const phase = input.phase;
     const armedRequired = phase !== 'prepared';
     const submittedRequired = phase === 'submitted' || phase === 'verified';
     const verifiedRequired = phase === 'verified';
     if (
-      (armedRequired !== safeInteger(input.sendArmedAt)) ||
-      (submittedRequired !== safeInteger(input.submittedAt)) ||
-      (verifiedRequired !== safeInteger(input.verifiedAt)) ||
-      (armedRequired && (input.sendArmedAt as number) < input.preparedAt) ||
-      (submittedRequired && (input.submittedAt as number) < (input.sendArmedAt as number)) ||
-      (verifiedRequired && (input.verifiedAt as number) < (input.submittedAt as number)) ||
+      (armedRequired !== (input.sendArmedAt !== null)) ||
+      (submittedRequired !== (input.submittedAt !== null)) ||
+      (verifiedRequired !== (input.verifiedAt !== null)) ||
+      (input.sendArmedAt !== null && input.sendArmedAt < input.preparedAt) ||
+      (input.submittedAt !== null && input.sendArmedAt !== null && input.submittedAt < input.sendArmedAt) ||
+      (input.verifiedAt !== null && input.submittedAt !== null && input.verifiedAt < input.submittedAt) ||
       [input.sendArmedAt, input.submittedAt, input.verifiedAt].some(
-        (time) => typeof time === 'number' && time > (value.updatedAt as number),
+        (time) => time !== null && time > journalInput.updatedAt,
       )
     ) return null;
     let locator: InstallActionLocator | null = null;
@@ -1833,9 +2065,9 @@ async function parseJournal(value: unknown): Promise<InstallJournal | null> {
       record,
       locator,
       preparedAt: input.preparedAt,
-      sendArmedAt: armedRequired ? input.sendArmedAt as number : null,
-      submittedAt: submittedRequired ? input.submittedAt as number : null,
-      verifiedAt: verifiedRequired ? input.verifiedAt as number : null,
+      sendArmedAt: input.sendArmedAt,
+      submittedAt: input.submittedAt,
+      verifiedAt: input.verifiedAt,
     });
     actions.push(action);
     lastPreparedAt = input.preparedAt;
@@ -1876,67 +2108,65 @@ async function parseJournal(value: unknown): Promise<InstallJournal | null> {
   return parsed;
 }
 
-export async function requireInstallJournal(value: unknown): Promise<InstallJournal> {
+export async function requireInstallJournal<Input>(value: Input): Promise<InstallJournal> {
   const parsed = await parseJournal(value);
   if (!parsed) invalid();
   return parsed;
 }
 
-export async function createInstallJournal(
-  value: unknown,
+export async function createInstallJournal<Input>(
+  value: Input,
   sessionSelection: DeploySelection,
   sessionPlan: StaticDeployPlan,
   sessionExpiresAt: number,
   approval: { readonly attemptId: string; readonly approvedAt: number },
 ): Promise<InstallJournal> {
-  if (forbiddenJournalShape(value) || !isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'now', 'recoverUntil', 'selection', 'plan', 'releasePin', 'target', 'installationId', 'bindingHash',
-    'gatewayFreshPreflight',
-  ])) invalid(400);
+  if (containsForbiddenJournalData(value)) invalid(400);
+  const candidate = v.safeParse(createInstallJournalSchema, value);
+  if (!candidate.success) invalid(400);
+  const journalInput = candidate.output;
   let selection: DeploySelection;
   let plan: StaticDeployPlan;
   try {
-    selection = parseDeploySelection(value.selection);
-    plan = parseStaticDeployPlan(value.plan);
+    selection = parseDeploySelection(journalInput.selection);
+    plan = parseStaticDeployPlan(journalInput.plan);
   } catch {
     invalid(400);
   }
-  const pin = releasePin(value.releasePin);
-  const target = authorizedTarget(value.target, selection);
+  const pin = releasePin(journalInput.releasePin);
+  const target = authorizedTarget(journalInput.target, selection);
   if (
-    value.schemaVersion !== 1 || !safeInteger(value.now) || value.now >= sessionExpiresAt || value.now >= plan.expiresAt ||
-    typeof approval.attemptId !== 'string' || !ATTEMPT_ID.test(approval.attemptId) ||
-    !safeInteger(approval.approvedAt) || approval.approvedAt > value.now || approval.approvedAt >= plan.expiresAt ||
-    !safeInteger(value.recoverUntil) || value.recoverUntil <= sessionExpiresAt ||
-    value.recoverUntil > sessionExpiresAt + MAX_INSTALL_RECOVERY_RETENTION_MS ||
+    journalInput.now >= sessionExpiresAt || journalInput.now >= plan.expiresAt ||
+    !ATTEMPT_ID.test(approval.attemptId) ||
+    !safeInteger(approval.approvedAt) || approval.approvedAt > journalInput.now || approval.approvedAt >= plan.expiresAt ||
+    journalInput.recoverUntil <= sessionExpiresAt ||
+    journalInput.recoverUntil > sessionExpiresAt + MAX_INSTALL_RECOVERY_RETENTION_MS ||
     !exactJson(selection, sessionSelection) || !exactJson(plan, sessionPlan) || !pin || !target ||
     pin.release !== plan.releaseId || pin.artifactSha256 !== plan.releaseArtifactSha256 ||
-    typeof value.installationId !== 'string' || !INSTALLATION_ID.test(value.installationId) ||
-    value.installationId !== await stableInstallationId(selection, target) ||
-    typeof value.bindingHash !== 'string' || !PREFIXED_SHA256.test(value.bindingHash)
+    journalInput.installationId !== await stableInstallationId(selection, target)
   ) invalid(400);
   const expectedBinding = await computeInstallJournalBindingHash({
-    selection, plan, releasePin: pin, target, installationId: value.installationId,
+    selection, plan, releasePin: pin, target, installationId: journalInput.installationId,
   });
-  if (value.bindingHash !== expectedBinding) invalid(400);
+  if (journalInput.bindingHash !== expectedBinding) invalid(400);
   const base: InstallJournal = {
     schemaVersion: 1,
     revision: 0,
-    createdAt: value.now,
-    updatedAt: value.now,
+    createdAt: journalInput.now,
+    updatedAt: journalInput.now,
     sessionExpiresAt,
-    recoverUntil: value.recoverUntil,
+    recoverUntil: journalInput.recoverUntil,
     selection,
     plan,
     releasePin: pin,
     target,
-    installationId: value.installationId,
-    bindingHash: value.bindingHash,
+    installationId: journalInput.installationId,
+    bindingHash: journalInput.bindingHash,
     approvalHistory: Object.freeze([Object.freeze({
       schemaVersion: 1,
       attemptId: approval.attemptId,
       approvedAt: approval.approvedAt,
-      recordedAt: value.now,
+      recordedAt: journalInput.now,
       planId: plan.planId,
       planHash: plan.planHash,
       planExpiresAt: plan.expiresAt,
@@ -1946,17 +2176,17 @@ export async function createInstallJournal(
     leaseAttemptIds: Object.freeze([]),
     actions: Object.freeze([]),
   };
-  const preflight = await parseFreshPreflightRecord(value.gatewayFreshPreflight, base);
+  const preflight = await parseFreshPreflightRecord(journalInput.gatewayFreshPreflight, base);
   if (!preflight) invalid(400);
   const action: InstallJournalAction = Object.freeze({
     name: 'gateway_fresh_preflight',
     phase: 'verified',
     record: preflight,
     locator: Object.freeze({ attestationHash: preflight.attestationHash }),
-    preparedAt: value.now,
-    sendArmedAt: value.now,
-    submittedAt: value.now,
-    verifiedAt: value.now,
+    preparedAt: journalInput.now,
+    sendArmedAt: journalInput.now,
+    submittedAt: journalInput.now,
+    verifiedAt: journalInput.now,
   });
   const journal = Object.freeze({ ...base, actions: Object.freeze([action]) });
   try {
@@ -1970,7 +2200,7 @@ export async function createInstallJournal(
 function revisionCas(journal: InstallJournal, input: InstallJournalCasInput): void {
   if (
     !safeInteger(input.expectedRevision) || input.expectedRevision !== journal.revision ||
-    typeof input.attemptId !== 'string' || !ATTEMPT_ID.test(input.attemptId) ||
+    !ATTEMPT_ID.test(input.attemptId) ||
     !safeInteger(input.now) || input.now < journal.updatedAt || input.now >= journal.recoverUntil
   ) conflict();
 }
@@ -2087,7 +2317,7 @@ export async function prepareInstallJournalAction(
       : [];
     const attempt = attempts[attempts.length - 1];
     if (
-      bootstrapRecord && existingDisable?.phase === 'verified' && attempts.length > 1 && attempt &&
+      bootstrap !== undefined && bootstrapRecord && existingDisable?.phase === 'verified' && attempts.length > 1 && attempt &&
       attempt.enable.phase === 'verified' && attempt.disable === null
     ) {
       const parsed = await parseActionRecord(input.action, input.record, journal);
@@ -2116,16 +2346,17 @@ export async function prepareInstallJournalAction(
     }
   }
   if (!INSTALL_ACTION_ORDER.includes(input.action) || !actionPrerequisites(journal, input.action)) conflict();
-  const recordContext = input.action === 'customer_bootstrap_submit'
-    ? { ...journal, updatedAt: input.now } as InstallJournal
+  const recordContext: InstallJournal = input.action === 'customer_bootstrap_submit'
+    ? { ...journal, updatedAt: input.now }
     : journal;
   const record = await parseActionRecord(input.action, input.record, recordContext);
   if (!record) invalid(400);
   if (input.action === 'customer_bootstrap_submit' && record.kind === 'customer_bootstrap_submit') {
     const summary = bootstrapActionSummary(record);
+    const firstAttempt = record.attempts.at(0);
     if (
       record.attempts.length !== 1 || summary.phase !== 'prepared' || summary.preparedAt !== input.now ||
-      record.attempts[0].approvalAttemptId !== input.attemptId
+      firstAttempt === undefined || firstAttempt.approvalAttemptId !== input.attemptId
     ) invalid(400);
     return Object.freeze({
       ...journal,
@@ -2225,7 +2456,7 @@ export function armInstallJournalAction(
     // CAS authorizes the current recovery lease. The nested mutation remains pinned
     // to the approval that created it while that lease settles its journal phases.
     if (
-      bootstrapRecord && attempts.length > 1 && attempt?.enable.phase === 'prepared'
+      bootstrap !== undefined && bootstrapRecord && attempts.length > 1 && attempt?.enable.phase === 'prepared'
     ) {
       attempts[attempts.length - 1] = Object.freeze({
         ...attempt,
@@ -2248,7 +2479,7 @@ export function armInstallJournalAction(
       : [];
     const attempt = attempts[attempts.length - 1];
     if (
-      bootstrapRecord && attempt?.disable?.phase === 'prepared' &&
+      bootstrap !== undefined && bootstrapRecord && attempt?.disable?.phase === 'prepared' &&
       attempt.disable.approvalAttemptId === input.attemptId
     ) {
       attempts[attempts.length - 1] = Object.freeze({
@@ -2320,13 +2551,15 @@ export async function submitInstallJournalAction(
       : [];
     const attempt = attempts[attempts.length - 1];
     if (
-      bootstrapRecord && attempts.length > 1 && attempt?.enable.phase === 'send_armed'
+      bootstrap !== undefined && bootstrapRecord && attempts.length > 1 && attempt?.enable.phase === 'send_armed'
     ) {
+      const workerName = managementWorkerName(journal.plan);
+      if (!workerName) invalid(400);
       const locator = parseSubdomainLocator(input.locator, {
         schemaVersion: 1,
         kind: 'bootstrap_subdomain',
         accountId: journal.target.account.id,
-        workerName: managementWorkerName(journal.plan) as string,
+        workerName,
         enabled: true,
         requestHash: attempt.enable.requestHash,
       });
@@ -2352,14 +2585,16 @@ export async function submitInstallJournalAction(
       : [];
     const attempt = attempts[attempts.length - 1];
     if (
-      bootstrapRecord && attempt?.disable?.phase === 'send_armed' &&
+      bootstrap !== undefined && bootstrapRecord && attempt?.disable?.phase === 'send_armed' &&
       attempt.disable.approvalAttemptId === input.attemptId
     ) {
+      const workerName = managementWorkerName(journal.plan);
+      if (!workerName) invalid(400);
       const locator = parseSubdomainLocator(input.locator, {
         schemaVersion: 1,
         kind: 'bootstrap_subdomain',
         accountId: journal.target.account.id,
-        workerName: managementWorkerName(journal.plan) as string,
+        workerName,
         enabled: false,
         requestHash: attempt.disable.requestHash,
       });
@@ -2434,7 +2669,7 @@ export function verifyInstallJournalAction(
       : [];
     const attempt = attempts[attempts.length - 1];
     if (
-      bootstrapRecord && attempts.length > 1 && attempt?.enable.phase === 'submitted' &&
+      bootstrap !== undefined && bootstrapRecord && attempts.length > 1 && attempt?.enable.phase === 'submitted' &&
       attempt.enable.locator?.enabled === true
     ) {
       attempts[attempts.length - 1] = Object.freeze({
@@ -2458,7 +2693,7 @@ export function verifyInstallJournalAction(
       : [];
     const attempt = attempts[attempts.length - 1];
     if (
-      bootstrapRecord && attempt?.disable?.phase === 'submitted' && attempt.disable.locator?.enabled === false &&
+      bootstrap !== undefined && bootstrapRecord && attempt?.disable?.phase === 'submitted' && attempt.disable.locator?.enabled === false &&
       attempt.disable.approvalAttemptId === input.attemptId
     ) {
       attempts[attempts.length - 1] = Object.freeze({
@@ -2523,29 +2758,28 @@ export async function appendCustomerBootstrapAttempt(
   const action = journal.actions[index];
   if (
     !action || action.record.kind !== 'customer_bootstrap_submit' || action.phase === 'verified' ||
-    action.record.attempts.length >= MAX_BOOTSTRAP_ATTEMPTS ||
-    !isRecord(input.attempt) || !exactKeys(input.attempt, [
-      'requestId', 'issuedAt', 'expiresAt', 'claimHash', 'enableRequestHash',
-    ])
+    action.record.attempts.length >= MAX_BOOTSTRAP_ATTEMPTS
   ) conflict();
-  const attemptInput = input.attempt as Record<string, unknown>;
+  const attemptCandidate = v.safeParse(appendCustomerBootstrapAttemptSchema, input.attempt);
+  if (!attemptCandidate.success) conflict();
+  const attemptInput = attemptCandidate.output;
   if (
     action.record.attempts.some((attempt) => attempt.approvalAttemptId === input.attemptId) ||
     action.record.attempts.some((attempt) => attempt.requestId === attemptInput.requestId)
   ) conflict();
-  const nextAttempt = {
-    schemaVersion: 1 as const,
+  const nextAttempt: CustomerBootstrapRequestAttempt = {
+    schemaVersion: 1,
     approvalAttemptId: input.attemptId,
     requestId: attemptInput.requestId,
     issuedAt: attemptInput.issuedAt,
     expiresAt: attemptInput.expiresAt,
     claimHash: attemptInput.claimHash,
     enable: {
-      schemaVersion: 1 as const,
+      schemaVersion: 1,
       approvalAttemptId: input.attemptId,
       enabled: true,
       requestHash: attemptInput.enableRequestHash,
-      phase: 'prepared' as const,
+      phase: 'prepared',
       locator: null,
       preparedAt: input.now,
       sendArmedAt: null,
@@ -2553,18 +2787,18 @@ export async function appendCustomerBootstrapAttempt(
       verifiedAt: null,
     },
     disable: null,
-    phase: 'prepared' as const,
+    phase: 'prepared',
     locator: null,
     preparedAt: input.now,
     sendArmedAt: null,
     submittedAt: null,
     verifiedAt: null,
   };
-  const candidate = {
+  const candidate: CustomerBootstrapSubmitRecord = {
     ...action.record,
     attempts: [...action.record.attempts, nextAttempt],
   };
-  const context = { ...journal, updatedAt: input.now } as InstallJournal;
+  const context: InstallJournal = { ...journal, updatedAt: input.now };
   const record = await parseBootstrapRecord(candidate, context);
   if (!record) invalid(400);
   return replaceAction(journal, index, {

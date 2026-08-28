@@ -1,3 +1,9 @@
+import * as v from 'valibot';
+
+import {
+  boundaryValueSchema,
+  type BoundaryValue,
+} from './boundary';
 import { DeployError, isDeployErrorCode } from './errors';
 import { assertSecretFree } from './schema';
 import {
@@ -18,6 +24,11 @@ import {
 
 const INTERNAL_ORIGIN = 'https://gateway-deploy-session.internal';
 const MAX_INTERNAL_RESPONSE_BYTES = 4 * 1024 * 1024;
+const errorResponseSchema = v.strictObject({
+  error: v.strictObject({ code: v.string() }),
+});
+const journalResponseSchema = v.strictObject({ journal: boundaryValueSchema });
+const discardResponseSchema = v.strictObject({ discarded: v.literal(true) });
 
 export interface UninstallJournalFetcher {
   fetch(request: Request): Promise<Response>;
@@ -62,61 +73,55 @@ export interface UninstallJournalDiscardAcknowledgement {
   readonly discarded: true;
 }
 
-export interface UninstallJournalPort {
-  initialize(input: InitializeUninstallJournalPortInput): Promise<UninstallJournal>;
-  read(): Promise<UninstallJournal>;
-  appendApproval(input: AppendUninstallJournalApprovalPortInput): Promise<UninstallJournal>;
-  acquireLease(input: AcquireUninstallJournalLeaseInput): Promise<UninstallJournal>;
-  releaseLease(input: UninstallJournalCasInput): Promise<UninstallJournal>;
-  refreshPreflight(input: RefreshUninstallJournalPreflightPortInput): Promise<UninstallJournal>;
+export interface UninstallJournalPort<Journal = UninstallJournal> {
+  initialize(input: InitializeUninstallJournalPortInput): Promise<Journal>;
+  read(): Promise<Journal>;
+  appendApproval(input: AppendUninstallJournalApprovalPortInput): Promise<Journal>;
+  acquireLease(input: AcquireUninstallJournalLeaseInput): Promise<Journal>;
+  releaseLease(input: UninstallJournalCasInput): Promise<Journal>;
+  refreshPreflight(input: RefreshUninstallJournalPreflightPortInput): Promise<Journal>;
   discardPreflight(input: UninstallJournalCasInput): Promise<UninstallJournalDiscardAcknowledgement>;
-  appendManagementPreflight(input: AppendUninstallManagementPreflightInput): Promise<UninstallJournal>;
-  appendManagementDeleteAttempt(input: AppendUninstallManagementDeleteAttemptInput): Promise<UninstallJournal>;
+  appendManagementPreflight(input: AppendUninstallManagementPreflightInput): Promise<Journal>;
+  appendManagementDeleteAttempt(input: AppendUninstallManagementDeleteAttemptInput): Promise<Journal>;
   recordManagementDeleteRecovery(
     input: RecordUninstallManagementDeleteRecoveryInput,
-  ): Promise<UninstallJournal>;
-  prepareAction(input: PrepareUninstallJournalActionInput): Promise<UninstallJournal>;
-  replacePreparedAction(input: PrepareUninstallJournalActionInput): Promise<UninstallJournal>;
-  attachWorkerVersionRecovery(input: AttachUninstallWorkerVersionRecoveryPortInput): Promise<UninstallJournal>;
-  armAction(input: TransitionUninstallJournalActionInput): Promise<UninstallJournal>;
-  recordActionSubmitted(input: SubmitUninstallJournalActionPortInput): Promise<UninstallJournal>;
-  verifyAction(input: SubmitUninstallJournalActionPortInput): Promise<UninstallJournal>;
-  appendCustomerRemoveCycle(input: AppendCustomerGatewayRemoveAttemptInput): Promise<UninstallJournal>;
+  ): Promise<Journal>;
+  prepareAction(input: PrepareUninstallJournalActionInput): Promise<Journal>;
+  replacePreparedAction(input: PrepareUninstallJournalActionInput): Promise<Journal>;
+  attachWorkerVersionRecovery(input: AttachUninstallWorkerVersionRecoveryPortInput): Promise<Journal>;
+  armAction(input: TransitionUninstallJournalActionInput): Promise<Journal>;
+  recordActionSubmitted(input: SubmitUninstallJournalActionPortInput): Promise<Journal>;
+  verifyAction(input: SubmitUninstallJournalActionPortInput): Promise<Journal>;
+  appendCustomerRemoveCycle(input: AppendCustomerGatewayRemoveAttemptInput): Promise<Journal>;
   replacePreparedCustomerRemoveCycle(
     input: AppendCustomerGatewayRemoveAttemptInput,
-  ): Promise<UninstallJournal>;
-  prepareCustomerWorkersDevDisable(input: UninstallJournalCasInput): Promise<UninstallJournal>;
-  replacePreparedCustomerWorkersDevDisable(input: UninstallJournalCasInput): Promise<UninstallJournal>;
-  armCustomerWorkersDev(input: CustomerGatewayWorkersDevTransitionPortInput): Promise<UninstallJournal>;
+  ): Promise<Journal>;
+  prepareCustomerWorkersDevDisable(input: UninstallJournalCasInput): Promise<Journal>;
+  replacePreparedCustomerWorkersDevDisable(input: UninstallJournalCasInput): Promise<Journal>;
+  armCustomerWorkersDev(input: CustomerGatewayWorkersDevTransitionPortInput): Promise<Journal>;
   recordCustomerWorkersDevSubmitted(
     input: CustomerGatewayWorkersDevSubmissionPortInput,
-  ): Promise<UninstallJournal>;
-  verifyCustomerWorkersDev(input: CustomerGatewayWorkersDevTransitionPortInput): Promise<UninstallJournal>;
+  ): Promise<Journal>;
+  verifyCustomerWorkersDev(input: CustomerGatewayWorkersDevTransitionPortInput): Promise<Journal>;
   recordCustomerWorkersDevNotApplied(
     input: CustomerGatewayWorkersDevSubmissionPortInput,
-  ): Promise<UninstallJournal>;
-  armCustomerRemoveRequest(input: UninstallJournalCasInput): Promise<UninstallJournal>;
+  ): Promise<Journal>;
+  armCustomerRemoveRequest(input: UninstallJournalCasInput): Promise<Journal>;
   recordCustomerRemoveRequestSubmitted(
     input: CustomerGatewayRemoveRequestSubmissionPortInput,
-  ): Promise<UninstallJournal>;
-  verifyCustomerRemoveRequest(input: UninstallJournalCasInput): Promise<UninstallJournal>;
+  ): Promise<Journal>;
+  verifyCustomerRemoveRequest(input: UninstallJournalCasInput): Promise<Journal>;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+export interface UninstallJournalPortDependencies<Journal> {
+  parseJournal(value: BoundaryValue): Promise<Journal>;
 }
 
 function invalidInternalResponse(status = 500): never {
   throw new DeployError(status, 'session_invalid');
 }
 
-function assertResponseSecretFree(value: unknown): void {
+function assertResponseSecretFree(value: BoundaryValue): void {
   try {
     assertSecretFree(value);
   } catch {
@@ -124,7 +129,7 @@ function assertResponseSecretFree(value: unknown): void {
   }
 }
 
-async function boundedJson(response: Response): Promise<unknown> {
+async function boundedJson(response: Response): Promise<BoundaryValue> {
   const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
   if (contentType !== 'application/json') invalidInternalResponse();
 
@@ -168,9 +173,14 @@ async function boundedJson(response: Response): Promise<unknown> {
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  let parsed: unknown;
+  let parsed: BoundaryValue;
   try {
-    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
+    const result = v.safeParse(
+      boundaryValueSchema,
+      JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)),
+    );
+    if (!result.success) invalidInternalResponse();
+    parsed = result.output;
   } catch {
     invalidInternalResponse();
   }
@@ -178,22 +188,24 @@ async function boundedJson(response: Response): Promise<unknown> {
   return parsed;
 }
 
-function errorFromResponse(response: Response, body: unknown): DeployError {
-  if (
-    isRecord(body) && exactKeys(body, ['error']) && isRecord(body.error) &&
-    exactKeys(body.error, ['code']) && isDeployErrorCode(body.error.code)
-  ) {
-    return new DeployError(response.status, body.error.code);
+function errorFromResponse(response: Response, body: BoundaryValue): DeployError {
+  const result = v.safeParse(errorResponseSchema, body);
+  if (result.success && isDeployErrorCode(result.output.error.code)) {
+    return new DeployError(response.status, result.output.error.code);
   }
   return new DeployError(response.status, 'session_invalid');
 }
 
-async function journalResponse(response: Response): Promise<UninstallJournal> {
+async function journalResponse<Journal>(
+  response: Response,
+  dependencies: UninstallJournalPortDependencies<Journal>,
+): Promise<Journal> {
   const body = await boundedJson(response);
   if (!response.ok) throw errorFromResponse(response, body);
-  if (!isRecord(body) || !exactKeys(body, ['journal'])) invalidInternalResponse();
+  const result = v.safeParse(journalResponseSchema, body);
+  if (!result.success) invalidInternalResponse();
   try {
-    return await requireUninstallJournal(body.journal);
+    return await dependencies.parseJournal(result.output.journal);
   } catch {
     invalidInternalResponse();
   }
@@ -202,37 +214,45 @@ async function journalResponse(response: Response): Promise<UninstallJournal> {
 async function discardResponse(response: Response): Promise<UninstallJournalDiscardAcknowledgement> {
   const body = await boundedJson(response);
   if (!response.ok) throw errorFromResponse(response, body);
-  if (!isRecord(body) || !exactKeys(body, ['discarded']) || body.discarded !== true) {
-    invalidInternalResponse();
-  }
+  if (!v.safeParse(discardResponseSchema, body).success) invalidInternalResponse();
   return Object.freeze({ discarded: true });
 }
 
-function internalRequest(path: string, method: 'GET' | 'POST', body?: unknown): Request {
+function internalRequest<Body>(path: string, method: 'GET' | 'POST', body?: Body): Request {
   let encoded: string | undefined;
   if (body !== undefined) {
     try {
       assertSecretFree(body);
       const candidate = JSON.stringify(body);
-      if (typeof candidate !== 'string') throw new TypeError('body_not_serializable');
+      if (candidate === undefined) throw new TypeError('body_not_serializable');
       // JSON serialization can invoke user-defined toJSON methods or getters.
       // Re-scan the exact bytes crossing the same-DO boundary so those hooks
       // cannot introduce a credential-shaped field after the first scan.
-      assertSecretFree(JSON.parse(candidate) as unknown);
+      const rescanned = v.safeParse(boundaryValueSchema, JSON.parse(candidate));
+      if (!rescanned.success) throw new TypeError('body_not_serializable');
+      assertSecretFree(rescanned.output);
       encoded = candidate;
     } catch {
       throw new DeployError(400, 'bad_request');
     }
   }
-  return new Request(new URL(path, INTERNAL_ORIGIN), {
-    method,
-    headers: encoded === undefined ? undefined : { 'content-type': 'application/json' },
-    body: encoded,
-  });
+  const requestInit: RequestInit = { method };
+  if (encoded !== undefined) {
+    requestInit.headers = { 'content-type': 'application/json' };
+    requestInit.body = encoded;
+  }
+  return new Request(new URL(path, INTERNAL_ORIGIN), requestInit);
 }
 
-export function createUninstallJournalPort(fetcher: UninstallJournalFetcher): UninstallJournalPort {
-  const response = async (path: string, method: 'GET' | 'POST', body?: unknown): Promise<Response> => {
+export function createUninstallJournalPortWithDependencies<Journal>(
+  fetcher: UninstallJournalFetcher,
+  dependencies: UninstallJournalPortDependencies<Journal>,
+): UninstallJournalPort<Journal> {
+  const response = async <Body>(
+    path: string,
+    method: 'GET' | 'POST',
+    body?: Body,
+  ): Promise<Response> => {
     try {
       return await fetcher.fetch(internalRequest(path, method, body));
     } catch (error) {
@@ -240,8 +260,12 @@ export function createUninstallJournalPort(fetcher: UninstallJournalFetcher): Un
       throw new DeployError(500, 'session_invalid');
     }
   };
-  const journal = async (path: string, method: 'GET' | 'POST', body?: unknown): Promise<UninstallJournal> => {
-    return journalResponse(await response(path, method, body));
+  const journal = async <Body>(
+    path: string,
+    method: 'GET' | 'POST',
+    body?: Body,
+  ): Promise<Journal> => {
+    return journalResponse(await response(path, method, body), dependencies);
   };
 
   return Object.freeze({
@@ -298,5 +322,11 @@ export function createUninstallJournalPort(fetcher: UninstallJournalFetcher): Un
       journal('/uninstall-journal/customer-remove/request/submitted', 'POST', input),
     verifyCustomerRemoveRequest: (input: UninstallJournalCasInput) =>
       journal('/uninstall-journal/customer-remove/request/verified', 'POST', input),
+  });
+}
+
+export function createUninstallJournalPort(fetcher: UninstallJournalFetcher): UninstallJournalPort {
+  return createUninstallJournalPortWithDependencies(fetcher, {
+    parseJournal: requireUninstallJournal,
   });
 }

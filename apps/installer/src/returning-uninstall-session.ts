@@ -1,10 +1,13 @@
+import * as v from 'valibot';
+
+import { boundaryValueSchema } from './boundary';
 import { DeployError, isDeployErrorCode, type DeployErrorCode } from './errors';
+import { MAX_RETURNING_UNINSTALL_RECOVERY_RETENTION_MS } from './returning-uninstall-journal';
 import {
   parseReturningUninstallPlan,
   type ReturningUninstallPlan,
 } from './returning-uninstall-plan';
 import { assertSecretFree } from './schema';
-import { MAX_RETURNING_UNINSTALL_RECOVERY_RETENTION_MS } from './returning-uninstall-journal';
 
 const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u;
 const HASH = /^[A-Za-z0-9_-]{43}$/u;
@@ -12,8 +15,64 @@ const ACCOUNT_ID = /^[a-f0-9]{32}$/u;
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u;
+const ATTEMPT_ID = /^att_[A-Za-z0-9_-]{32}$/u;
+const FAILURE_REASON = /^[a-z][a-z0-9_]{0,159}$/u;
 
 export type ReturningUninstallStatus = 'planned' | 'authorizing' | 'removing' | 'failed' | 'removed';
+
+const safeNonnegativeIntegerSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
+const statusSchema = v.picklist(['planned', 'authorizing', 'removing', 'failed', 'removed']);
+const actionSchema = v.strictObject({
+  actionId: v.pipe(v.string(), v.regex(ACTION_ID)),
+  actionKeyHash: v.pipe(v.string(), v.regex(HASH)),
+  actorEmail: v.pipe(v.string(), v.regex(EMAIL)),
+  accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
+  workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
+  workersSubdomain: v.pipe(v.string(), v.regex(DNS_LABEL)),
+  managementOrigin: v.string(),
+  expiresAt: safeNonnegativeIntegerSchema,
+});
+const oauthAttemptSchema = v.strictObject({
+  purpose: v.picklist(['customer_action', 'hosted_recovery']),
+  attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  stateHash: v.pipe(v.string(), v.regex(HASH)),
+  verifierHash: v.pipe(v.string(), v.regex(HASH)),
+  expiresAt: safeNonnegativeIntegerSchema,
+  usedAt: v.nullable(safeNonnegativeIntegerSchema),
+});
+const successfulResultSchema = v.strictObject({
+  code: v.literal('returning_uninstall_complete'),
+  completedAt: safeNonnegativeIntegerSchema,
+  installationId: v.string(),
+  grantRevocation: v.picklist(['confirmed', 'unconfirmed']),
+});
+const failedResultSchema = v.strictObject({
+  code: v.string(),
+  completedAt: safeNonnegativeIntegerSchema,
+  reason: v.optional(v.string()),
+});
+const storedSessionSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: statusSchema,
+  createdAt: safeNonnegativeIntegerSchema,
+  updatedAt: safeNonnegativeIntegerSchema,
+  recoverUntil: safeNonnegativeIntegerSchema,
+  plan: boundaryValueSchema,
+  action: actionSchema,
+  oauthAttempt: v.nullable(oauthAttemptSchema),
+  result: v.nullable(boundaryValueSchema),
+});
+const publicSessionSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: statusSchema,
+  updatedAt: safeNonnegativeIntegerSchema,
+  recoverUntil: safeNonnegativeIntegerSchema,
+  recoveryAvailable: v.boolean(),
+  plan: boundaryValueSchema,
+  result: v.nullable(boundaryValueSchema),
+});
+
+type ParsedAction = v.InferOutput<typeof actionSchema>;
 
 export interface ReturningUninstallActionAuthority {
   readonly actionId: string;
@@ -35,6 +94,23 @@ export interface ReturningUninstallOauthAttempt {
   readonly usedAt: number | null;
 }
 
+export interface SuccessfulReturningUninstallResult {
+  readonly code: 'returning_uninstall_complete';
+  readonly completedAt: number;
+  readonly installationId: string;
+  readonly grantRevocation: 'confirmed' | 'unconfirmed';
+}
+
+export interface FailedReturningUninstallResult {
+  readonly code: DeployErrorCode;
+  readonly completedAt: number;
+  readonly reason?: string;
+}
+
+export type ReturningUninstallResult =
+  | SuccessfulReturningUninstallResult
+  | FailedReturningUninstallResult;
+
 export interface StoredReturningUninstall {
   readonly schemaVersion: 1;
   readonly status: ReturningUninstallStatus;
@@ -44,16 +120,7 @@ export interface StoredReturningUninstall {
   readonly plan: ReturningUninstallPlan;
   readonly action: ReturningUninstallActionAuthority;
   readonly oauthAttempt: ReturningUninstallOauthAttempt | null;
-  readonly result: null | {
-    readonly code: 'returning_uninstall_complete';
-    readonly completedAt: number;
-    readonly installationId: string;
-    readonly grantRevocation: 'confirmed' | 'unconfirmed';
-  } | {
-    readonly code: DeployErrorCode;
-    readonly completedAt: number;
-    readonly reason?: string;
-  };
+  readonly result: ReturningUninstallResult | null;
 }
 
 export interface PublicReturningUninstall {
@@ -63,130 +130,85 @@ export interface PublicReturningUninstall {
   readonly recoverUntil: number;
   readonly recoveryAvailable: boolean;
   readonly plan: ReturningUninstallPlan;
-  readonly result: StoredReturningUninstall['result'];
+  readonly result: ReturningUninstallResult | null;
 }
 
-function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
-    Object.getPrototypeOf(value) === Object.prototype;
-}
-
-function exact(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
-function managementOrigin(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
+function validManagementOrigin(value: string): boolean {
   try {
     const url = new URL(value);
     return url.protocol === 'https:' && !url.username && !url.password && !url.port &&
       url.pathname === '/' && !url.search && !url.hash;
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
-function action(value: unknown): ReturningUninstallActionAuthority | null {
-  if (!record(value) || !exact(value, [
-    'actionId', 'actionKeyHash', 'actorEmail', 'accountId', 'workerName',
-    'workersSubdomain', 'managementOrigin', 'expiresAt',
-  ]) || typeof value.actionId !== 'string' || !ACTION_ID.test(value.actionId) ||
-    typeof value.actionKeyHash !== 'string' || !HASH.test(value.actionKeyHash) ||
-    typeof value.actorEmail !== 'string' || value.actorEmail !== value.actorEmail.toLowerCase() ||
-    !EMAIL.test(value.actorEmail) || typeof value.accountId !== 'string' || !ACCOUNT_ID.test(value.accountId) ||
-    typeof value.workerName !== 'string' || !WORKER_NAME.test(value.workerName) ||
-    typeof value.workersSubdomain !== 'string' || !DNS_LABEL.test(value.workersSubdomain) ||
-    !managementOrigin(value.managementOrigin) || !Number.isSafeInteger(value.expiresAt)) return null;
-  return Object.freeze({
-    actionId: value.actionId,
-    actionKeyHash: value.actionKeyHash,
-    actorEmail: value.actorEmail,
-    accountId: value.accountId,
-    workerName: value.workerName,
-    workersSubdomain: value.workersSubdomain,
-    managementOrigin: value.managementOrigin,
-    expiresAt: value.expiresAt as number,
-  });
+function parseAction(value: ParsedAction): ReturningUninstallActionAuthority | null {
+  if (value.actorEmail !== value.actorEmail.toLowerCase() || !validManagementOrigin(value.managementOrigin)) {
+    return null;
+  }
+  return Object.freeze(value);
 }
 
-export async function requireStoredReturningUninstall(value: unknown): Promise<StoredReturningUninstall> {
-  if (!record(value) || !exact(value, [
-    'schemaVersion', 'status', 'createdAt', 'updatedAt', 'recoverUntil', 'plan', 'action', 'oauthAttempt', 'result',
-  ]) || value.schemaVersion !== 1 || !['planned', 'authorizing', 'removing', 'failed', 'removed'].includes(
-    String(value.status),
-  ) || !Number.isSafeInteger(value.createdAt) || !Number.isSafeInteger(value.updatedAt) ||
-    (value.updatedAt as number) < (value.createdAt as number) || !Number.isSafeInteger(value.recoverUntil) ||
-    (value.recoverUntil as number) <= (value.createdAt as number) ||
-    (value.recoverUntil as number) - (value.createdAt as number) > MAX_RETURNING_UNINSTALL_RECOVERY_RETENTION_MS ||
-    (value.recoverUntil as number) < (record(value.plan) && Number.isSafeInteger(value.plan.expiresAt)
-      ? value.plan.expiresAt as number : Number.MAX_SAFE_INTEGER)) throw new DeployError(500, 'session_invalid');
-  const plan = await parseReturningUninstallPlan(value.plan).catch(() => null);
-  const parsedAction = action(value.action);
-  if (!plan || !parsedAction || parsedAction.expiresAt !== plan.expiresAt ||
-    parsedAction.expiresAt > (value.recoverUntil as number) ||
-    parsedAction.workerName !== plan.gateway.workerName ||
-    parsedAction.managementOrigin !== `https://${plan.gateway.managementHostname}`) {
-    throw new DeployError(500, 'session_invalid');
+function parseResult<Input>(
+  value: Input,
+  plan: ReturningUninstallPlan,
+): ReturningUninstallResult | null {
+  const success = v.safeParse(successfulResultSchema, value);
+  if (success.success) {
+    if (success.output.installationId !== plan.gateway.installationId) return null;
+    return Object.freeze(success.output);
   }
-  let oauthAttempt: ReturningUninstallOauthAttempt | null = null;
-  if (value.oauthAttempt !== null) {
-    if (!record(value.oauthAttempt) || !exact(value.oauthAttempt, [
-      'purpose', 'attemptId', 'stateHash', 'verifierHash', 'expiresAt', 'usedAt',
-    ]) || (value.oauthAttempt.purpose !== 'customer_action' && value.oauthAttempt.purpose !== 'hosted_recovery') ||
-      typeof value.oauthAttempt.attemptId !== 'string' ||
-      !/^att_[A-Za-z0-9_-]{32}$/u.test(value.oauthAttempt.attemptId) ||
-      typeof value.oauthAttempt.stateHash !== 'string' || !HASH.test(value.oauthAttempt.stateHash) ||
-      typeof value.oauthAttempt.verifierHash !== 'string' || !HASH.test(value.oauthAttempt.verifierHash) ||
-      !Number.isSafeInteger(value.oauthAttempt.expiresAt) ||
-      (value.oauthAttempt.usedAt !== null && !Number.isSafeInteger(value.oauthAttempt.usedAt))) {
-      throw new DeployError(500, 'session_invalid');
-    }
-    oauthAttempt = Object.freeze({
-      purpose: value.oauthAttempt.purpose,
-      attemptId: value.oauthAttempt.attemptId,
-      stateHash: value.oauthAttempt.stateHash,
-      verifierHash: value.oauthAttempt.verifierHash,
-      expiresAt: value.oauthAttempt.expiresAt as number,
-      usedAt: value.oauthAttempt.usedAt as number | null,
-    });
-  }
-  let result: StoredReturningUninstall['result'] = null;
-  if (value.result !== null) {
-    if (!record(value.result)) throw new DeployError(500, 'session_invalid');
-    const resultValue = value.result;
-    const success = resultValue.code === 'returning_uninstall_complete';
-    if (!exact(resultValue, success
-      ? ['code', 'completedAt', 'installationId', 'grantRevocation']
-      : resultValue.reason === undefined ? ['code', 'completedAt'] : ['code', 'completedAt', 'reason']) ||
-      (!success && !isDeployErrorCode(resultValue.code)) || !Number.isSafeInteger(resultValue.completedAt) ||
-      (success && (resultValue.installationId !== plan.gateway.installationId ||
-        (resultValue.grantRevocation !== 'confirmed' && resultValue.grantRevocation !== 'unconfirmed'))) ||
-      (!success && resultValue.reason !== undefined && (typeof resultValue.reason !== 'string' ||
-        !/^[a-z][a-z0-9_]{0,159}$/u.test(resultValue.reason)))) {
-      throw new DeployError(500, 'session_invalid');
-    }
-    result = Object.freeze({ ...resultValue }) as StoredReturningUninstall['result'];
-  }
-  const status = value.status as ReturningUninstallStatus;
+  const failure = v.safeParse(failedResultSchema, value);
+  if (!failure.success || !isDeployErrorCode(failure.output.code) ||
+      (failure.output.reason !== undefined && !FAILURE_REASON.test(failure.output.reason))) return null;
+  return failure.output.reason === undefined
+    ? Object.freeze({ code: failure.output.code, completedAt: failure.output.completedAt })
+    : Object.freeze({
+        code: failure.output.code,
+        completedAt: failure.output.completedAt,
+        reason: failure.output.reason,
+      });
+}
+
+function invalid(): never {
+  throw new DeployError(500, 'session_invalid');
+}
+
+export async function requireStoredReturningUninstall<Input>(input: Input): Promise<StoredReturningUninstall> {
+  const storedResult = v.safeParse(storedSessionSchema, input);
+  if (!storedResult.success) invalid();
+  const stored = storedResult.output;
+  if (stored.updatedAt < stored.createdAt || stored.recoverUntil <= stored.createdAt ||
+      stored.recoverUntil - stored.createdAt > MAX_RETURNING_UNINSTALL_RECOVERY_RETENTION_MS) invalid();
+  const plan = await parseReturningUninstallPlan(stored.plan).catch(() => null);
+  const action = parseAction(stored.action);
+  if (!plan || !action || plan.expiresAt > stored.recoverUntil || action.expiresAt !== plan.expiresAt ||
+      action.workerName !== plan.gateway.workerName ||
+      action.managementOrigin !== `https://${plan.gateway.managementHostname}`) invalid();
+
+  const oauthAttempt = stored.oauthAttempt === null ? null : Object.freeze(stored.oauthAttempt);
+  const result = stored.result === null ? null : parseResult(stored.result, plan);
+  if (stored.result !== null && result === null) invalid();
   if (
-    (status === 'planned' && (oauthAttempt !== null || result !== null)) ||
-    (status === 'authorizing' && (!oauthAttempt || oauthAttempt.usedAt !== null || result !== null)) ||
-    (status === 'removing' && (!oauthAttempt || oauthAttempt.usedAt === null || result !== null)) ||
-    (status === 'removed' && (!oauthAttempt || oauthAttempt.usedAt === null ||
+    (stored.status === 'planned' && (oauthAttempt !== null || result !== null)) ||
+    (stored.status === 'authorizing' && (!oauthAttempt || oauthAttempt.usedAt !== null || result !== null)) ||
+    (stored.status === 'removing' && (!oauthAttempt || oauthAttempt.usedAt === null || result !== null)) ||
+    (stored.status === 'removed' && (!oauthAttempt || oauthAttempt.usedAt === null ||
       result?.code !== 'returning_uninstall_complete')) ||
-    (status === 'failed' && (!oauthAttempt || oauthAttempt.usedAt === null || !result ||
+    (stored.status === 'failed' && (!oauthAttempt || oauthAttempt.usedAt === null || !result ||
       result.code === 'returning_uninstall_complete')) ||
     (oauthAttempt && oauthAttempt.expiresAt > plan.expiresAt) ||
-    (result && result.completedAt < (oauthAttempt?.usedAt ?? value.createdAt as number))
-  ) throw new DeployError(500, 'session_invalid');
+    (result && result.completedAt < (oauthAttempt?.usedAt ?? stored.createdAt))
+  ) invalid();
   const parsed = Object.freeze({
-    schemaVersion: 1 as const,
-    status,
-    createdAt: value.createdAt as number,
-    updatedAt: value.updatedAt as number,
-    recoverUntil: value.recoverUntil as number,
+    schemaVersion: 1,
+    status: stored.status,
+    createdAt: stored.createdAt,
+    updatedAt: stored.updatedAt,
+    recoverUntil: stored.recoverUntil,
     plan,
-    action: parsedAction,
+    action,
     oauthAttempt,
     result,
   });
@@ -209,50 +231,26 @@ export function publicReturningUninstall(
   });
 }
 
-export async function parsePublicReturningUninstall(
-  value: unknown,
+export async function parsePublicReturningUninstall<Input>(
+  input: Input,
 ): Promise<PublicReturningUninstall | null> {
-  if (value === null) return null;
-  if (!record(value) || !exact(value, [
-    'schemaVersion', 'status', 'updatedAt', 'recoverUntil', 'recoveryAvailable', 'plan', 'result',
-  ]) ||
-    value.schemaVersion !== 1 || !['planned', 'authorizing', 'removing', 'failed', 'removed'].includes(
-    String(value.status),
-    ) || !Number.isSafeInteger(value.updatedAt) || !Number.isSafeInteger(value.recoverUntil) ||
-    typeof value.recoveryAvailable !== 'boolean') {
-    throw new DeployError(500, 'session_invalid');
-  }
-  const plan = await parseReturningUninstallPlan(value.plan).catch(() => null);
-  if (!plan) throw new DeployError(500, 'session_invalid');
-  let result: StoredReturningUninstall['result'] = null;
-  if (value.result !== null) {
-    if (!record(value.result)) throw new DeployError(500, 'session_invalid');
-    const resultValue = value.result;
-    const success = resultValue.code === 'returning_uninstall_complete';
-    if (!exact(resultValue, success
-      ? ['code', 'completedAt', 'installationId', 'grantRevocation']
-      : resultValue.reason === undefined ? ['code', 'completedAt'] : ['code', 'completedAt', 'reason']) ||
-      (!success && !isDeployErrorCode(resultValue.code)) || !Number.isSafeInteger(resultValue.completedAt) ||
-      (success && (resultValue.installationId !== plan.gateway.installationId ||
-        (resultValue.grantRevocation !== 'confirmed' && resultValue.grantRevocation !== 'unconfirmed'))) ||
-      (!success && resultValue.reason !== undefined && (typeof resultValue.reason !== 'string' ||
-        !/^[a-z][a-z0-9_]{0,159}$/u.test(resultValue.reason)))) {
-      throw new DeployError(500, 'session_invalid');
-    }
-    result = Object.freeze({ ...resultValue }) as StoredReturningUninstall['result'];
-  }
-  const status = value.status as ReturningUninstallStatus;
-  if ((status === 'removed') !== (result?.code === 'returning_uninstall_complete') ||
-    (status === 'failed') !== Boolean(result && result.code !== 'returning_uninstall_complete') ||
-    (['planned', 'authorizing', 'removing'].includes(status) && result !== null)) {
-    throw new DeployError(500, 'session_invalid');
-  }
+  if (input === null) return null;
+  const publicResult = v.safeParse(publicSessionSchema, input);
+  if (!publicResult.success) invalid();
+  const stored = publicResult.output;
+  const plan = await parseReturningUninstallPlan(stored.plan).catch(() => null);
+  if (!plan) invalid();
+  const result = stored.result === null ? null : parseResult(stored.result, plan);
+  if (stored.result !== null && result === null) invalid();
+  if ((stored.status === 'removed') !== (result?.code === 'returning_uninstall_complete') ||
+      (stored.status === 'failed') !== Boolean(result && result.code !== 'returning_uninstall_complete') ||
+      (['planned', 'authorizing', 'removing'].includes(stored.status) && result !== null)) invalid();
   return Object.freeze({
     schemaVersion: 1,
-    status,
-    updatedAt: value.updatedAt as number,
-    recoverUntil: value.recoverUntil as number,
-    recoveryAvailable: value.recoveryAvailable,
+    status: stored.status,
+    updatedAt: stored.updatedAt,
+    recoverUntil: stored.recoverUntil,
+    recoveryAvailable: stored.recoveryAvailable,
     plan,
     result,
   });

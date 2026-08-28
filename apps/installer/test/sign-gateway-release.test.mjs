@@ -306,7 +306,7 @@ describe('offline gateway release signing and R2 object plan', () => {
     const input = await releaseFixture();
     try {
       const { prepared, seed, key } = await prepare(input);
-      expect([...seed]).toEqual(new Array(32).fill(0));
+      expect([...seed]).toEqual(Array.from({ length: 32 }, () => 0));
       expect(prepared).toMatchObject({
         schemaVersion: 1,
         release: RELEASE,
@@ -401,7 +401,7 @@ describe('offline gateway release signing and R2 object plan', () => {
       expect(prepared.objectPlan.objects.every((entry) => entry.key !== 'r2-object-plan.json')).toBe(true);
       expect(prepared.objectPlan.objects.every((entry) => entry.sourcePath.startsWith('objects/ankka-mcp-gateway/releases/'))).toBe(true);
       expect(prepared.objectPlan.objects.map((entry) => entry.key)).toEqual(
-        [...prepared.objectPlan.objects.map((entry) => entry.key)].sort(),
+        prepared.objectPlan.objects.map((entry) => entry.key).sort(),
       );
       expect(canonicalJson(prepared.objectPlan)).toBe(prepared.objectPlanCanonicalJson);
     } finally {
@@ -423,7 +423,7 @@ describe('offline gateway release signing and R2 object plan', () => {
         release: RELEASE,
         releaseDirectory: input.releaseDirectory,
       })).rejects.toMatchObject({ code: 'release_signing_failed', message: 'Release signing failed' });
-      expect([...seed]).toEqual(new Array(32).fill(0));
+      expect([...seed]).toEqual(Array.from({ length: 32 }, () => 0));
     } finally {
       await input.cleanup();
     }
@@ -462,7 +462,7 @@ describe('offline gateway release signing and R2 object plan', () => {
         release: RELEASE,
         releaseDirectory: input.releaseDirectory,
       })).rejects.toMatchObject({ code: 'release_signing_failed' });
-      expect([...seed]).toEqual(new Array(32).fill(0));
+      expect([...seed]).toEqual(Array.from({ length: 32 }, () => 0));
     } finally {
       await input.cleanup();
     }
@@ -507,7 +507,7 @@ describe('offline gateway release signing and R2 object plan', () => {
       }).catch((caught) => caught);
       expect(error).toMatchObject({ code: 'release_signing_failed', message: 'Release signing failed' });
       expect(error.message).not.toContain(secret);
-      expect([...seed]).toEqual(new Array(32).fill(0));
+      expect([...seed]).toEqual(Array.from({ length: 32 }, () => 0));
     } finally {
       await input.cleanup();
     }
@@ -545,7 +545,7 @@ describe('offline gateway release signing and R2 object plan', () => {
         release: RELEASE,
         releaseDirectory: input.releaseDirectory,
       })).rejects.toMatchObject({ code: 'release_signing_failed' });
-      expect([...unsupportedChannelSeed]).toEqual(new Array(32).fill(0));
+      expect([...unsupportedChannelSeed]).toEqual(Array.from({ length: 32 }, () => 0));
 
       const seed = Buffer.from(key.seed);
       await expect(prepareSignedReleasePublishPlan({
@@ -557,7 +557,7 @@ describe('offline gateway release signing and R2 object plan', () => {
         releaseDirectory: input.releaseDirectory,
         upload: true,
       })).rejects.toMatchObject({ code: 'release_signing_failed' });
-      expect([...seed]).toEqual(new Array(32).fill(0));
+      expect([...seed]).toEqual(Array.from({ length: 32 }, () => 0));
     } finally {
       await input.cleanup();
     }
@@ -588,7 +588,7 @@ describe('offline gateway release signing and R2 object plan', () => {
       expect(stderr.read()).toBe('');
       expect(canonicalJson(JSON.parse(stdout.read().trim()))).toBe(stdout.read().trim());
       await expect(lstat(output)).rejects.toMatchObject({ code: 'ENOENT' });
-      expect([...stdinSeed]).toEqual(new Array(32).fill(0));
+      expect([...stdinSeed]).toEqual(Array.from({ length: 32 }, () => 0));
     } finally {
       await input.cleanup();
     }

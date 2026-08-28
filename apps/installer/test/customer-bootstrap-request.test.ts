@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import * as v from 'valibot';
 
 import {
   CustomerBootstrapRequestError,
@@ -11,10 +12,12 @@ import {
 import type {
   AccountWorkersSubdomain,
   CustomerBootstrapReadyResult,
+  CustomerBootstrapResult,
   PreparedCustomerBootstrapClaim,
   SubmitCustomerBootstrapInput,
 } from '../src/customer-bootstrap-request';
-import { base64UrlEncode } from '../src/crypto';
+import { boundaryObjectSchema, type JsonValue } from '../src/boundary';
+import { base64UrlDecode, base64UrlEncode } from '../src/crypto';
 import { buildStaticDeployPlan, parseDeploySelection } from '../src/schema';
 import type { StaticDeployPlan } from '../src/schema';
 import type { AuthorizedTarget } from '../src/cloudflare-target';
@@ -81,7 +84,7 @@ async function input(
 }
 
 function response(
-  body: unknown,
+  body: CustomerBootstrapResult | JsonValue,
   status = 200,
   url = BOOTSTRAP_URL,
 ): Response {
@@ -165,7 +168,7 @@ async function publicVerifierCompatible(request: Request): Promise<{
   expect([...request.headers.keys()].some((name) => name.startsWith('sec-fetch-'))).toBe(false);
   const rawBody = await request.text();
   expect(request.headers.get('x-ankka-bootstrap-signature')).toBe(await hmac(rawBody));
-  const body = JSON.parse(rawBody) as Record<string, unknown>;
+  const body = v.parse(boundaryObjectSchema, JSON.parse(rawBody));
   expect(rawBody).toBe(canonicalCustomerBootstrapJson(body));
   expect(Object.keys(body).sort()).toEqual([
     'schemaVersion',
@@ -182,25 +185,33 @@ async function publicVerifierCompatible(request: Request): Promise<{
   expect(body.requestId).toMatch(/^[A-Za-z0-9_-]{22}$/u);
   expect(body.issuedAt).toBe(Math.floor(NOW / 1000));
   expect(body.expiresAt).toBe(Math.floor(NOW / 1000) + 300);
-  expect((body.expiresAt as number) - (body.issuedAt as number)).toBeLessThanOrEqual(300);
+  const issuedAt = v.parse(v.number(), body.issuedAt);
+  const expiresAt = v.parse(v.number(), body.expiresAt);
+  expect(expiresAt - issuedAt).toBeLessThanOrEqual(300);
   expect(body.cloudflareAccessToken).toBe(TOKEN);
   const { cloudflareAccessToken, ...claim } = body;
+  const requestId = v.parse(v.string(), body.requestId);
+  const requestBytes = base64UrlDecode(requestId);
+  const expectedClaim = await prepareCustomerBootstrapClaim(await input({
+    randomBytes: () => requestBytes,
+  }));
+  expect(claim).toEqual(expectedClaim);
   return {
-    claim: claim as unknown as PreparedCustomerBootstrapClaim,
+    claim: expectedClaim,
     rawBody,
-    token: cloudflareAccessToken as string,
+    token: v.parse(v.string(), cloudflareAccessToken),
   };
 }
 
 function expectError(
-  error: unknown,
+  error: CustomerBootstrapRequestError,
   code: CustomerBootstrapRequestError['code'],
   stage: CustomerBootstrapRequestError['stage'],
   outcome: CustomerBootstrapRequestError['outcome'],
 ): void {
   expect(error).toBeInstanceOf(CustomerBootstrapRequestError);
   expect(error).toMatchObject({ code, stage, outcome, canRetry: false });
-  expect((error as Error).message).toBe(code);
+  expect(error.message).toBe(code);
 }
 
 describe('hosted customer bootstrap request', () => {
@@ -291,7 +302,7 @@ describe('hosted customer bootstrap request', () => {
     await expect(submitCustomerBootstrap(await input({
       plan: stalePlan,
       transport: staleTransport,
-    }))).rejects.toSatisfy((error: unknown) => {
+    }))).rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
       expectError(error, 'request_expired', 'validate', 'not_sent');
       return true;
     });
@@ -300,7 +311,7 @@ describe('hosted customer bootstrap request', () => {
     const invalidRandom = vi.fn(() => new Uint8Array(15));
     await expect(prepareCustomerBootstrapClaim(await input({
       randomBytes: invalidRandom,
-    }))).rejects.toSatisfy((error: unknown) => {
+    }))).rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
       expectError(error, 'invalid_input', 'claim', 'not_sent');
       return true;
     });
@@ -313,7 +324,7 @@ describe('hosted customer bootstrap request', () => {
     await expect(submitCustomerBootstrap(await input({
       plan: changedPlan,
       transport: noCall,
-    }))).rejects.toSatisfy((error: unknown) => {
+    }))).rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
       expectError(error, 'plan_mismatch', 'validate', 'not_sent');
       return true;
     });
@@ -325,7 +336,7 @@ describe('hosted customer bootstrap request', () => {
     await expect(submitCustomerBootstrap(await input({
       release: otherRelease,
       transport: noCall,
-    }))).rejects.toSatisfy((error: unknown) => {
+    }))).rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
       expectError(error, 'plan_mismatch', 'validate', 'not_sent');
       return true;
     });
@@ -336,7 +347,7 @@ describe('hosted customer bootstrap request', () => {
     });
     await expect(submitCustomerBootstrap(await input({
       transport: mismatchedResponse,
-    }))).rejects.toSatisfy((error: unknown) => {
+    }))).rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
       expectError(error, 'response_invalid', 'response', 'unknown');
       return true;
     });
@@ -354,10 +365,10 @@ describe('hosted customer bootstrap request', () => {
       { accountId: target.account.id, subdomain: 'tenant?next=1' },
       { accountId: target.account.id, subdomain: 'tenant', origin: BOOTSTRAP_ORIGIN },
     ]) {
-      await expect(submitCustomerBootstrap(await input({
-        accountWorkersSubdomain: accountWorkersSubdomain as AccountWorkersSubdomain,
-        transport: noCall,
-      }))).rejects.toSatisfy((error: unknown) => {
+      await expect(submitCustomerBootstrap({
+        ...await input({ transport: noCall }),
+        accountWorkersSubdomain,
+      })).rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
         expectError(error, 'origin_invalid', 'validate', 'not_sent');
         return true;
       });
@@ -378,10 +389,10 @@ describe('hosted customer bootstrap request', () => {
         },
       },
     });
-    await expect(submitCustomerBootstrap(await input({
-      accountWorkersSubdomain: accessorSubdomain as AccountWorkersSubdomain,
-      transport: noCall,
-    }))).rejects.toSatisfy((error: unknown) => {
+    await expect(submitCustomerBootstrap({
+      ...await input({ transport: noCall }),
+      accountWorkersSubdomain: accessorSubdomain,
+    })).rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
       expectError(error, 'origin_invalid', 'validate', 'not_sent');
       return true;
     });
@@ -393,7 +404,7 @@ describe('hosted customer bootstrap request', () => {
       headers: { location: 'https://attacker.example/collect' },
     }));
     await expect(submitCustomerBootstrap(await input({ transport: redirect })))
-      .rejects.toSatisfy((error: unknown) => {
+      .rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
         expectError(error, 'outcome_unknown', 'response', 'unknown');
         return true;
       });
@@ -403,7 +414,7 @@ describe('hosted customer bootstrap request', () => {
       return response(await ready(claim), 200, 'https://attacker.example/result');
     });
     await expect(submitCustomerBootstrap(await input({ transport: crossOrigin })))
-      .rejects.toSatisfy((error: unknown) => {
+      .rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
         expectError(error, 'outcome_unknown', 'response', 'unknown');
         return true;
       });
@@ -423,7 +434,7 @@ describe('hosted customer bootstrap request', () => {
     await expect(submitCustomerBootstrap(await input({
       target: accessorTarget,
       transport: noCall,
-    }))).rejects.toSatisfy((error: unknown) => {
+    }))).rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
       expectError(error, 'invalid_input', 'validate', 'not_sent');
       return true;
     });
@@ -438,7 +449,7 @@ describe('hosted customer bootstrap request', () => {
     );
     if (!reviewedWorker) throw new Error('missing management worker fixture');
     reviewedWorker.name = 'attacker-worker';
-    const accessorPlan = structuredClone(plan) as StaticDeployPlan;
+    const accessorPlan = structuredClone(plan);
     let resourceReads = 0;
     Object.defineProperty(accessorPlan, 'managementResources', {
       enumerable: true,
@@ -454,7 +465,7 @@ describe('hosted customer bootstrap request', () => {
     await expect(submitCustomerBootstrap(await input({
       plan: accessorPlan,
       transport,
-    }))).rejects.toSatisfy((error: unknown) => {
+    }))).rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
       expectError(error, 'plan_mismatch', 'validate', 'not_sent');
       return true;
     });
@@ -494,7 +505,10 @@ describe('hosted customer bootstrap request', () => {
   });
 
   it('bounds time and response size and reports every post-submit uncertainty without retrying', async () => {
-    const observed: { signal?: AbortSignal } = {};
+    interface ObservedRequest {
+      signal?: AbortSignal;
+    }
+    const observed: ObservedRequest = {};
     const hanging = vi.fn((request: Request) => {
       observed.signal = request.signal;
       return new Promise<Response>(() => undefined);
@@ -502,7 +516,7 @@ describe('hosted customer bootstrap request', () => {
     await expect(submitCustomerBootstrap(await input({
       transport: hanging,
       timeoutMs: 5,
-    }))).rejects.toSatisfy((error: unknown) => {
+    }))).rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
       expectError(error, 'outcome_unknown', 'submit', 'unknown');
       return true;
     });
@@ -514,7 +528,7 @@ describe('hosted customer bootstrap request', () => {
       headers: { 'content-type': 'application/json' },
     }));
     await expect(submitCustomerBootstrap(await input({ transport: oversized })))
-      .rejects.toSatisfy((error: unknown) => {
+      .rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
         expectError(error, 'response_invalid', 'response', 'unknown');
         return true;
       });
@@ -541,7 +555,7 @@ describe('hosted customer bootstrap request', () => {
       retryable: true,
     }, 409));
     await expect(submitCustomerBootstrap(await input({ transport: arbitrary })))
-      .rejects.toSatisfy((error: unknown) => {
+      .rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
         expectError(error, 'bootstrap_rejected', 'response', 'rejected');
         expect(JSON.stringify(error)).not.toContain(TOKEN);
         expect(JSON.stringify(error)).not.toContain(NONCE);
@@ -557,7 +571,7 @@ describe('hosted customer bootstrap request', () => {
       throw new Error(`network failed ${TOKEN} ${NONCE}`);
     });
     await expect(submitCustomerBootstrap(await input({ transport })))
-      .rejects.toSatisfy((error: unknown) => {
+      .rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
         expectError(error, 'outcome_unknown', 'submit', 'unknown');
         const serialized = JSON.stringify(error);
         expect(serialized).not.toContain(TOKEN);
@@ -573,7 +587,7 @@ describe('hosted customer bootstrap request', () => {
     await expect(submitCustomerBootstrap(await input({
       bootstrapNonce: badNonce,
       transport: noCall,
-    }))).rejects.toSatisfy((error: unknown) => {
+    }))).rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
       expectError(error, 'invalid_input', 'validate', 'not_sent');
       return true;
     });

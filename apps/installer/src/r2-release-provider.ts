@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 import { DeployError } from './errors';
 import {
   parseExactReleaseBundleIdentity,
@@ -27,16 +29,51 @@ const MAX_ENVELOPE_BYTES = (2 * MAX_CANONICAL_MANIFEST_BYTES) + 4_096;
 const RELEASE_BUCKET_ROOT = 'ankka-mcp-gateway/releases';
 const ENVELOPE_FILENAME = 'release-envelope.json';
 const ENVELOPE_CONTENT_TYPE = 'application/json; charset=utf-8';
+const releaseEnvelopeIndexSchema = v.strictObject({
+  channel: v.string(),
+  keyId: v.string(),
+  manifest: v.string(),
+  schemaVersion: v.literal(RELEASE_ENVELOPE_SCHEMA_VERSION),
+  signature: v.string(),
+  signatureContext: v.literal(RELEASE_SIGNATURE_CONTEXT),
+});
 
 export type PinnedR2Release = ExactReleaseBundleIdentity;
 
+export interface R2ReleaseReadObject {
+  readonly key: string;
+  readonly size: number;
+  readonly httpMetadata?: { readonly contentType?: string };
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+
+export type R2ReleaseReadPage =
+  | {
+      readonly objects: readonly { readonly key: string; readonly size: number }[];
+      readonly truncated: false;
+    }
+  | {
+      readonly objects: readonly { readonly key: string; readonly size: number }[];
+      readonly truncated: true;
+      readonly cursor: string;
+    };
+
+export interface R2ReleaseReadBucket {
+  get(key: string): Promise<R2ReleaseReadObject | null>;
+  list(options: {
+    readonly prefix: string;
+    readonly limit: number;
+    readonly cursor?: string;
+  }): Promise<R2ReleaseReadPage>;
+}
+
 export interface R2ReleaseBundleProvider {
-  loadVerifiedReleaseBundle(bucket: R2Bucket): Promise<VerifiedReleaseBundle>;
+  loadVerifiedReleaseBundle(bucket: R2ReleaseReadBucket): Promise<VerifiedReleaseBundle>;
 }
 
 export interface R2ExactReleaseBundleProvider {
   loadVerifiedReleaseBundleForIdentity(
-    bucket: R2Bucket,
+    bucket: R2ReleaseReadBucket,
     identity: ExactReleaseBundleIdentity,
   ): Promise<VerifiedReleaseBundle>;
 }
@@ -67,16 +104,6 @@ function unavailable(): never {
   throw new DeployError(503, 'release_unavailable');
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
 function parsePin(input: PinnedR2Release): Readonly<PinnedR2Release> {
   return parseExactReleaseBundleIdentity(input);
 }
@@ -100,12 +127,12 @@ function allFileRecords(manifest: ReleaseManifest): readonly ReleaseFileRecord[]
 }
 
 async function readObject(
-  bucket: R2Bucket,
+  bucket: R2ReleaseReadBucket,
   key: string,
   maximumBytes: number,
   expectedBytes?: number,
 ): Promise<ReadObject | null> {
-  let object: R2ObjectBody | null;
+  let object: R2ReleaseReadObject | null;
   try {
     object = await bucket.get(key);
   } catch {
@@ -147,21 +174,18 @@ function decodeUtf8(bytes: Uint8Array): string {
 }
 
 function parseEnvelopeIndex(serialized: string, pin: PinnedR2Release): ParsedEnvelopeIndex {
-  let input: unknown;
+  let input: v.InferOutput<typeof releaseEnvelopeIndexSchema>;
   try {
-    input = JSON.parse(serialized);
+    const result = v.safeParse(releaseEnvelopeIndexSchema, JSON.parse(serialized));
+    if (!result.success) invalid();
+    input = result.output;
   } catch {
     invalid();
   }
-  if (!isRecord(input) || !exactKeys(input, [
-    'channel', 'keyId', 'manifest', 'schemaVersion', 'signature', 'signatureContext',
-  ])) invalid();
   if (
-    input.schemaVersion !== RELEASE_ENVELOPE_SCHEMA_VERSION ||
     input.channel !== pin.channel ||
     input.keyId !== pin.keyId ||
-    typeof input.manifest !== 'string' ||
-    typeof input.signature !== 'string' ||
+    input.schemaVersion !== RELEASE_ENVELOPE_SCHEMA_VERSION ||
     input.signatureContext !== RELEASE_SIGNATURE_CONTEXT
   ) invalid();
   const manifest = parseCanonicalReleaseManifest(input.manifest);
@@ -186,7 +210,7 @@ function parseEnvelopeIndex(serialized: string, pin: PinnedR2Release): ParsedEnv
 }
 
 async function exactPrefixObjects(
-  bucket: R2Bucket,
+  bucket: R2ReleaseReadBucket,
   prefix: string,
 ): Promise<ReadonlyMap<string, number>> {
   const objects = new Map<string, number>();
@@ -196,17 +220,17 @@ async function exactPrefixObjects(
   while (true) {
     pageCount += 1;
     if (pageCount > MAX_LIST_PAGES) invalid();
-    let page: R2Objects;
+    let page: R2ReleaseReadPage;
     try {
-      page = await bucket.list({ prefix, limit: LIST_PAGE_SIZE, ...(cursor ? { cursor } : {}) });
+      const options = cursor === undefined
+        ? { prefix, limit: LIST_PAGE_SIZE }
+        : { prefix, limit: LIST_PAGE_SIZE, cursor };
+      page = await bucket.list(options);
     } catch {
       unavailable();
     }
-    if (!page || !Array.isArray(page.objects) || typeof page.truncated !== 'boolean') invalid();
     for (const object of page.objects) {
       if (
-        !object ||
-        typeof object.key !== 'string' ||
         !object.key.startsWith(prefix) ||
         !Number.isSafeInteger(object.size) ||
         object.size < 0 ||
@@ -216,15 +240,16 @@ async function exactPrefixObjects(
       if (objects.size > MAX_RELEASE_OBJECT_COUNT + 1) invalid();
     }
     if (!page.truncated) break;
+    const nextCursor = page.cursor;
     if (
-      typeof page.cursor !== 'string' ||
-      page.cursor.length === 0 ||
-      page.cursor.length > 4_096 ||
-      cursors.has(page.cursor) ||
+      nextCursor === undefined ||
+      nextCursor.length === 0 ||
+      nextCursor.length > 4_096 ||
+      cursors.has(nextCursor) ||
       page.objects.length === 0
     ) invalid();
-    cursors.add(page.cursor);
-    cursor = page.cursor;
+    cursors.add(nextCursor);
+    cursor = nextCursor;
   }
   return objects;
 }
@@ -274,8 +299,11 @@ export class PinnedR2ReleaseBundleProvider implements R2ReleaseBundleProvider {
     this.#pin = parsePin(pin);
   }
 
-  async loadVerifiedReleaseBundle(bucket: R2Bucket): Promise<VerifiedReleaseBundle> {
-    if (!bucket || typeof bucket.get !== 'function' || typeof bucket.list !== 'function') unavailable();
+  static fromCandidate<Input>(pin: Input): PinnedR2ReleaseBundleProvider {
+    return new PinnedR2ReleaseBundleProvider(parseExactReleaseBundleIdentity(pin));
+  }
+
+  async loadVerifiedReleaseBundle(bucket: R2ReleaseReadBucket): Promise<VerifiedReleaseBundle> {
     const prefix = releasePrefix(this.#pin);
     const expectedEnvelopeKey = envelopeKey(this.#pin);
     const envelope = await readObject(bucket, expectedEnvelopeKey, MAX_ENVELOPE_BYTES);
@@ -338,7 +366,7 @@ export class PinnedR2ReleaseBundleProvider implements R2ReleaseBundleProvider {
  */
 export class ExactR2ReleaseBundleProvider implements R2ExactReleaseBundleProvider {
   loadVerifiedReleaseBundleForIdentity(
-    bucket: R2Bucket,
+    bucket: R2ReleaseReadBucket,
     identity: ExactReleaseBundleIdentity,
   ): Promise<VerifiedReleaseBundle> {
     return new PinnedR2ReleaseBundleProvider(identity).loadVerifiedReleaseBundle(bucket);

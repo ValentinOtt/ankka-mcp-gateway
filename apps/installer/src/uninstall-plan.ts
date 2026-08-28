@@ -1,3 +1,12 @@
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  boundaryValueSchema,
+  jsonValueSchema,
+  type BoundaryValue,
+} from './boundary';
+import { canonicalJson } from './canonical-json';
 import type { RequiredOauthScope } from './constants';
 import { sha256Hex } from './crypto';
 import { DeployError } from './errors';
@@ -7,9 +16,9 @@ import {
   requireInstallJournal,
   type InstallJournal,
 } from './install-journal';
+import { deepFreezePlainData, isPlainDataTree } from './plain-data';
 import { assertSecretFree } from './schema';
 
-const SAFE_INTEGER_MAX = Number.MAX_SAFE_INTEGER;
 const PLAN_ID = /^uninstall-plan-[a-f0-9]{24}$/u;
 const PREFIXED_SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -19,7 +28,6 @@ const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const OWNERSHIP_MARKER = /^acg-[a-f0-9]{24}$/u;
 const TOOL_NAME = /^[A-Za-z0-9_.:/-]{1,128}$/u;
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 const EMAIL_LIKE = /(?:^|[^A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:$|[^A-Za-z0-9.-])/u;
 
 export const MAX_STATIC_UNINSTALL_PLAN_TTL_MS = 10 * 60 * 1_000;
@@ -227,69 +235,51 @@ export interface StaticUninstallPlan {
 
 type StaticUninstallSemantic = Omit<StaticUninstallPlan, 'planId' | 'planHash' | 'createdAt' | 'expiresAt'>;
 
+const safeNonnegativeIntegerSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
+const hostnameSchema = v.pipe(v.string(), v.check(validHostname));
+const publicNameSchema = v.pipe(v.string(), v.check((value) => validPublicName(value, 80)));
+const sourceSchema = v.strictObject({
+  name: publicNameSchema,
+  hostname: hostnameSchema,
+  enabledTools: v.pipe(
+    v.array(v.pipe(v.string(), v.regex(TOOL_NAME))),
+    v.minLength(1),
+    v.maxLength(64),
+  ),
+});
+const gatewaySchema = v.strictObject({
+  name: publicNameSchema,
+  zoneName: hostnameSchema,
+  managementHostname: hostnameSchema,
+  portalHostname: hostnameSchema,
+  workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
+});
+const releaseSchema = v.strictObject({
+  id: v.pipe(v.string(), v.regex(RELEASE)),
+  aggregateSha256: v.pipe(v.string(), v.regex(SHA256)),
+});
+const staticUninstallPlanSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  planId: v.pipe(v.string(), v.regex(PLAN_ID)),
+  planHash: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
+  createdAt: safeNonnegativeIntegerSchema,
+  expiresAt: safeNonnegativeIntegerSchema,
+  writesPerformed: v.literal(false),
+  installationId: v.pipe(v.string(), v.regex(INSTALLATION_ID)),
+  authorityHash: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
+  requiredScopes: v.array(v.string()),
+  gateway: gatewaySchema,
+  source: v.nullable(sourceSchema),
+  release: releaseSchema,
+  steps: v.array(jsonValueSchema),
+  providerNotice: v.literal(STATIC_UNINSTALL_PROVIDER_NOTICE),
+});
+
 function invalid(status = 400, code: 'bad_request' | 'session_conflict' | 'session_invalid' = 'bad_request'): never {
   throw new DeployError(status, code);
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
-    Object.getPrototypeOf(value) === Object.prototype;
-}
-
-function dataTree(
-  value: unknown,
-  active = new WeakSet<object>(),
-  validated = new WeakSet<object>(),
-): boolean {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (typeof value !== 'object') return false;
-  if (validated.has(value)) return true;
-  if (active.has(value)) return false;
-  active.add(value);
-  const array = Array.isArray(value);
-  let valid = !((array && Object.getPrototypeOf(value) !== Array.prototype) ||
-    (!array && Object.getPrototypeOf(value) !== Object.prototype));
-  const keys = Reflect.ownKeys(value);
-  if (keys.some((key) => typeof key === 'symbol')) valid = false;
-  if (valid && array) {
-    if (!keys.includes('length') || keys.length !== value.length + 1) valid = false;
-    for (let index = 0; index < value.length; index += 1) {
-      if (!Object.hasOwn(value, String(index))) valid = false;
-    }
-  }
-  for (const key of valid ? keys : []) {
-    if (array && key === 'length') continue;
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable ||
-      !dataTree(descriptor.value, active, validated)) {
-      valid = false;
-      break;
-    }
-  }
-  active.delete(value);
-  if (valid) validated.add(value);
-  return valid;
-}
-
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const sorted = [...expected].sort();
-  return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]);
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isPlainRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) =>
-      `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('canonical_uninstall_plan');
-}
-
-function canonicalEqual(left: unknown, right: unknown): boolean {
+function canonicalEqual<Left, Right>(left: Left, right: Right): boolean {
   try {
     return canonicalJson(left) === canonicalJson(right);
   } catch {
@@ -297,28 +287,21 @@ function canonicalEqual(left: unknown, right: unknown): boolean {
   }
 }
 
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
-    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
-    Object.freeze(value);
-  }
-  return value;
-}
-
-function safeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= SAFE_INTEGER_MAX;
-}
-
-function validHostname(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length < 3 || value.length > 253 || value !== value.toLowerCase() ||
+function validHostname(value: string): boolean {
+  if (value.length < 3 || value.length > 253 || value !== value.toLowerCase() ||
     value.endsWith('.') || value.includes('..')) return false;
   const labels = value.split('.');
   return labels.length >= 2 && labels.every((label) => DNS_LABEL.test(label));
 }
 
-function validPublicName(value: unknown, maximum = 128): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= maximum &&
-    value.trim() === value && !CONTROL_CHARACTER.test(value) && !/[<>{}\\]/u.test(value) &&
+function unsafePublicNameCharacter(character: string): boolean {
+  const codePoint = character.codePointAt(0);
+  return codePoint === undefined || codePoint <= 0x1f || codePoint === 0x7f || '<>{}\\'.includes(character);
+}
+
+function validPublicName(value: string, maximum = 128): boolean {
+  return value.length > 0 && value.length <= maximum && value.trim() === value &&
+    ![...value].some(unsafePublicNameCharacter) &&
     !value.includes('@') && !EMAIL_LIKE.test(` ${value} `);
 }
 
@@ -326,17 +309,15 @@ function publicName(value: string, fallback: string): string {
   return validPublicName(value) ? value : fallback;
 }
 
-function canonicalTools(value: unknown): readonly string[] | null {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 64 ||
-    !value.every((tool) => typeof tool === 'string' && TOOL_NAME.test(tool))) return null;
-  const tools = [...value] as string[];
+function canonicalTools(value: readonly string[]): readonly string[] | null {
+  const tools = [...value];
   const sorted = [...tools].sort();
   if (new Set(tools).size !== tools.length || !tools.every((tool, index) => tool === sorted[index])) return null;
   return Object.freeze(tools);
 }
 
-function exactScopes(value: unknown): value is readonly RequiredOauthScope[] {
-  return Array.isArray(value) && value.length === STATIC_UNINSTALL_OAUTH_SCOPES.length &&
+function exactScopes(value: readonly string[]): boolean {
+  return value.length === STATIC_UNINSTALL_OAUTH_SCOPES.length &&
     value.every((scope, index) => scope === STATIC_UNINSTALL_OAUTH_SCOPES[index]);
 }
 
@@ -345,17 +326,21 @@ function resourceSummaries(
   portalHostname: string,
   source: StaticUninstallPlan['source'],
 ): readonly StaticUninstallGatewayResourceSummary[] {
-  return deepFreeze([
-    ...(source === null ? [] : [
+  const resources: StaticUninstallGatewayResourceSummary[] = [];
+  if (source !== null) {
+    resources.push(
       { kind: 'mcp_server', name: source.name, hostname: source.hostname },
       { kind: 'source_access_application', name: `${source.name} source`, hostname: source.hostname },
       { kind: 'source_access_policy', name: `${source.name} users`, hostname: source.hostname },
-    ] as StaticUninstallGatewayResourceSummary[]),
+    );
+  }
+  resources.push(
     { kind: 'portal', name: gatewayName, hostname: portalHostname },
     { kind: 'portal_access_application', name: `${gatewayName} portal`, hostname: portalHostname },
     { kind: 'portal_access_policy', name: `${gatewayName} portal users`, hostname: portalHostname },
     { kind: 'dns_record', name: portalHostname, hostname: portalHostname },
-  ] as StaticUninstallGatewayResourceSummary[]);
+  );
+  return deepFreezePlainData(resources);
 }
 
 function ownershipMarkerFromWorker(workerName: string): string | null {
@@ -383,7 +368,7 @@ function stepsFor(input: {
   if (!marker || input.workerName !== `ankka-gateway-${gatewaySlug(input.gatewayName)}-${marker}`) {
     return invalid(500, 'session_invalid');
   }
-  return deepFreeze([
+  const steps: StaticUninstallStep[] = [
     {
       order: 1,
       kind: 'temporary_cleanup_workers_dev_bridge',
@@ -448,7 +433,8 @@ function stepsFor(input: {
       scope: STATIC_UNINSTALL_RESIDUE_SCOPE,
       advancedCertificate: 'provider_retained_out_of_scope_manual',
     },
-  ] as StaticUninstallStep[]);
+  ];
+  return deepFreezePlainData(steps);
 }
 
 function semanticFromFields(input: {
@@ -462,7 +448,7 @@ function semanticFromFields(input: {
   readonly steps: readonly StaticUninstallStep[];
   readonly providerNotice: typeof STATIC_UNINSTALL_PROVIDER_NOTICE;
 }): StaticUninstallSemantic {
-  return deepFreeze({
+  return deepFreezePlainData({
     schemaVersion: 1,
     writesPerformed: input.writesPerformed,
     installationId: input.installationId,
@@ -476,8 +462,10 @@ function semanticFromFields(input: {
   });
 }
 
-function publicBoundary(value: unknown): void {
-  assertSecretFree(value);
+function publicBoundary<Value>(value: Value): void {
+  const parsed = v.safeParse(boundaryValueSchema, value);
+  if (!parsed.success) invalid(500, 'session_invalid');
+  assertSecretFree(parsed.output);
   const forbiddenKeys = new Set([
     'accountId',
     'zoneId',
@@ -492,72 +480,21 @@ function publicBoundary(value: unknown): void {
     'bindingHash',
     'managementAccessAud',
   ]);
-  const visit = (item: unknown): void => {
-    if (typeof item === 'string' && (item.includes('@') || EMAIL_LIKE.test(` ${item} `))) {
+  const visit = (item: BoundaryValue): void => {
+    if (v.is(v.string(), item) && (item.includes('@') || EMAIL_LIKE.test(` ${item} `))) {
       invalid(500, 'session_invalid');
     }
     if (Array.isArray(item)) {
       for (const child of item) visit(child);
       return;
     }
-    if (!isPlainRecord(item)) return;
+    if (!v.is(boundaryObjectSchema, item)) return;
     for (const [key, child] of Object.entries(item)) {
       if (forbiddenKeys.has(key)) invalid(500, 'session_invalid');
       visit(child);
     }
   };
-  visit(value);
-}
-
-function validatedPublicCore(input: Record<string, unknown>): {
-  readonly installationId: string;
-  readonly authorityHash: string;
-  readonly gateway: StaticUninstallPlan['gateway'];
-  readonly source: StaticUninstallPlan['source'];
-  readonly release: StaticUninstallPlan['release'];
-} {
-  if (typeof input.installationId !== 'string' || !INSTALLATION_ID.test(input.installationId) ||
-    typeof input.authorityHash !== 'string' || !PREFIXED_SHA256.test(input.authorityHash) ||
-    !isPlainRecord(input.gateway) || !exactKeys(input.gateway, [
-      'name', 'zoneName', 'managementHostname', 'portalHostname', 'workerName',
-    ]) || !validPublicName(input.gateway.name, 80) || !validHostname(input.gateway.zoneName) ||
-    !validHostname(input.gateway.managementHostname) || !validHostname(input.gateway.portalHostname) ||
-    input.gateway.managementHostname === input.gateway.portalHostname ||
-    !input.gateway.managementHostname.endsWith(`.${input.gateway.zoneName}`) ||
-    !input.gateway.portalHostname.endsWith(`.${input.gateway.zoneName}`) ||
-    typeof input.gateway.workerName !== 'string' || !WORKER_NAME.test(input.gateway.workerName) ||
-    (input.source !== null && (
-      !isPlainRecord(input.source) || !exactKeys(input.source, ['name', 'hostname', 'enabledTools']) ||
-      !validPublicName(input.source.name, 80) || !validHostname(input.source.hostname)
-    )) ||
-    !isPlainRecord(input.release) || !exactKeys(input.release, ['id', 'aggregateSha256']) ||
-    typeof input.release.id !== 'string' || !RELEASE.test(input.release.id) ||
-    typeof input.release.aggregateSha256 !== 'string' || !SHA256.test(input.release.aggregateSha256)) {
-    return invalid();
-  }
-  const tools = input.source === null ? null : canonicalTools(input.source.enabledTools);
-  if (input.source !== null && !tools) return invalid();
-  const marker = ownershipMarkerFromWorker(input.gateway.workerName);
-  if (!marker || input.gateway.workerName !== `ankka-gateway-${gatewaySlug(input.gateway.name)}-${marker}`) {
-    return invalid();
-  }
-  return deepFreeze({
-    installationId: input.installationId,
-    authorityHash: input.authorityHash,
-    gateway: {
-      name: input.gateway.name,
-      zoneName: input.gateway.zoneName,
-      managementHostname: input.gateway.managementHostname,
-      portalHostname: input.gateway.portalHostname,
-      workerName: input.gateway.workerName,
-    },
-    source: input.source === null ? null : {
-      name: input.source.name as string,
-      hostname: input.source.hostname as string,
-      enabledTools: tools as readonly string[],
-    },
-    release: { id: input.release.id, aggregateSha256: input.release.aggregateSha256 },
-  });
+  visit(parsed.output);
 }
 
 function immutableSemantic(plan: StaticUninstallPlan): StaticUninstallSemantic {
@@ -574,20 +511,38 @@ function immutableSemantic(plan: StaticUninstallPlan): StaticUninstallSemantic {
   });
 }
 
-export async function parseStaticUninstallPlan(value: unknown): Promise<StaticUninstallPlan> {
-  if (!dataTree(value) || !isPlainRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'planId', 'planHash', 'createdAt', 'expiresAt', 'writesPerformed', 'installationId',
-    'authorityHash',
-    'requiredScopes', 'gateway', 'source', 'release', 'steps', 'providerNotice',
-  ]) || value.schemaVersion !== 1 || typeof value.planId !== 'string' || !PLAN_ID.test(value.planId) ||
-    typeof value.planHash !== 'string' || !PREFIXED_SHA256.test(value.planHash) ||
-    !safeInteger(value.createdAt) || !safeInteger(value.expiresAt) || value.createdAt <= 0 ||
-    value.expiresAt <= value.createdAt || value.expiresAt - value.createdAt > MAX_STATIC_UNINSTALL_PLAN_TTL_MS ||
-    value.writesPerformed !== false || !exactScopes(value.requiredScopes) ||
-    value.providerNotice !== STATIC_UNINSTALL_PROVIDER_NOTICE || !Array.isArray(value.steps)) {
+export async function parseStaticUninstallPlan<Input>(input: Input): Promise<StaticUninstallPlan> {
+  if (!isPlainDataTree(input)) return invalid();
+  const result = v.safeParse(staticUninstallPlanSchema, input);
+  if (!result.success) return invalid();
+  const value = result.output;
+  if (value.createdAt <= 0 || value.expiresAt <= value.createdAt ||
+      value.expiresAt - value.createdAt > MAX_STATIC_UNINSTALL_PLAN_TTL_MS ||
+      !exactScopes(value.requiredScopes) ||
+      value.gateway.managementHostname === value.gateway.portalHostname ||
+      !value.gateway.managementHostname.endsWith(`.${value.gateway.zoneName}`) ||
+      !value.gateway.portalHostname.endsWith(`.${value.gateway.zoneName}`)) return invalid();
+  const tools = value.source === null ? null : canonicalTools(value.source.enabledTools);
+  const marker = ownershipMarkerFromWorker(value.gateway.workerName);
+  if (!marker || value.gateway.workerName !== `ankka-gateway-${gatewaySlug(value.gateway.name)}-${marker}`) {
     return invalid();
   }
-  const core = validatedPublicCore(value);
+  let source: StaticUninstallPlan['source'] = null;
+  if (value.source !== null) {
+    if (tools === null) return invalid();
+    source = {
+      name: value.source.name,
+      hostname: value.source.hostname,
+      enabledTools: tools,
+    };
+  }
+  const core = deepFreezePlainData({
+    installationId: value.installationId,
+    authorityHash: value.authorityHash,
+    gateway: { ...value.gateway },
+    source,
+    release: { ...value.release },
+  });
   const expectedSteps = stepsFor({
     gatewayName: core.gateway.name,
     managementHostname: core.gateway.managementHostname,
@@ -611,7 +566,7 @@ export async function parseStaticUninstallPlan(value: unknown): Promise<StaticUn
   if (value.planId !== `uninstall-plan-${digest.slice(0, 24)}` || value.planHash !== `sha256:${digest}`) {
     return invalid();
   }
-  const parsed = deepFreeze({
+  const parsed = deepFreezePlainData({
     ...semantic,
     planId: value.planId,
     planHash: value.planHash,
@@ -631,16 +586,17 @@ function exactFinalConvergence(
     canonicalEqual(action.record, rebuilt.record) && canonicalEqual(action.locator, rebuilt.locator));
 }
 
-export async function buildStaticUninstallPlan(
-  installJournalInput: unknown,
+export async function buildStaticUninstallPlan<Input>(
+  installJournalInput: Input,
   createdAt: number,
   expiresAt: number,
 ): Promise<StaticUninstallPlan> {
-  if (!dataTree(installJournalInput)) return invalid();
+  if (!isPlainDataTree(installJournalInput)) return invalid();
   const journal = await requireInstallJournal(installJournalInput);
   if (!isCompleteInstallJournal(journal)) return invalid(409, 'session_conflict');
   const rebuilt = await prepareFinalConvergenceRecordAndLocator(journal);
-  if (!exactFinalConvergence(journal, rebuilt) || !safeInteger(createdAt) || !safeInteger(expiresAt) ||
+  if (!exactFinalConvergence(journal, rebuilt) || !v.is(safeNonnegativeIntegerSchema, createdAt) ||
+    !v.is(safeNonnegativeIntegerSchema, expiresAt) ||
     createdAt < journal.updatedAt || createdAt >= journal.recoverUntil || expiresAt <= createdAt ||
     expiresAt - createdAt > MAX_STATIC_UNINSTALL_PLAN_TTL_MS || expiresAt > journal.recoverUntil) {
     return invalid(409, 'session_conflict');
@@ -648,7 +604,7 @@ export async function buildStaticUninstallPlan(
   const worker = journal.plan.managementResources.find((resource) => resource.kind === 'management_worker');
   if (!worker || !WORKER_NAME.test(worker.name)) return invalid(500, 'session_invalid');
   const firstSource = journal.plan.gatewayConfiguration.firstSource;
-  const gateway = deepFreeze({
+  const gateway = deepFreezePlainData({
     name: journal.plan.gatewayConfiguration.gatewayName,
     zoneName: journal.plan.gatewayConfiguration.zoneName,
     managementHostname: journal.plan.gatewayConfiguration.managementHostname,
@@ -658,7 +614,7 @@ export async function buildStaticUninstallPlan(
   let source: StaticUninstallPlan['source'] = null;
   if (firstSource !== null) {
     try {
-      source = deepFreeze({
+      source = deepFreezePlainData({
         name: publicName(firstSource.name, 'Configured source'),
         hostname: new URL(firstSource.url).hostname,
         enabledTools: [...firstSource.enabledTools],
@@ -667,7 +623,7 @@ export async function buildStaticUninstallPlan(
       return invalid(500, 'session_invalid');
     }
   }
-  const release = deepFreeze({
+  const release = deepFreezePlainData({
     id: journal.releasePin.release,
     aggregateSha256: journal.releasePin.artifactSha256,
   });
@@ -706,9 +662,9 @@ export async function buildStaticUninstallPlan(
   });
 }
 
-export async function isRecoveryEquivalentUninstallPlan(
-  baseline: unknown,
-  candidate: unknown,
+export async function isRecoveryEquivalentUninstallPlan<Baseline, Candidate>(
+  baseline: Baseline,
+  candidate: Candidate,
 ): Promise<boolean> {
   try {
     const parsedBaseline = await parseStaticUninstallPlan(baseline);

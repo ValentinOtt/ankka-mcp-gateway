@@ -134,7 +134,6 @@ const KEY_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const PUBLIC_KEY = /^[A-Za-z0-9_-]{43}$/u;
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const VERSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
-const CONTROL = /[\u0000-\u001f\u007f]/u;
 const PUBLIC_HEADERS = Object.freeze({
   'cache-control': 'no-store',
   'content-type': 'application/json; charset=utf-8',
@@ -144,13 +143,56 @@ const PUBLIC_HEADERS = Object.freeze({
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
 });
+const OBJECT_TAG = Object.prototype.toString;
+const FUNCTION_SOURCE = Function.prototype.toString;
+
+function hasPrimitiveTag(value, tag) {
+  return Object(value) !== value && OBJECT_TAG.call(value) === tag;
+}
+
+function isText(value) {
+  return hasPrimitiveTag(value, '[object String]');
+}
+
+function hasControlCharacter(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return true;
+  }
+  return false;
+}
+
+function isFiniteNumber(value) {
+  return hasPrimitiveTag(value, '[object Number]') && Number.isFinite(value);
+}
+
+function isBoolean(value) {
+  return hasPrimitiveTag(value, '[object Boolean]');
+}
+
+function isReference(value) {
+  return value !== null && value !== undefined && Object(value) === value;
+}
+
+function isCallable(value) {
+  try {
+    FUNCTION_SOURCE.call(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isObjectReference(value) {
+  return isReference(value) && !isCallable(value);
+}
 
 function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function isRecord(value) {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (value === null || !isObjectReference(value) || Array.isArray(value)) return false;
   try {
     if (Object.getPrototypeOf(value) !== Object.prototype) return false;
     const descriptors = Object.getOwnPropertyDescriptors(value);
@@ -170,10 +212,8 @@ function exactKeys(value, expected) {
 }
 
 function isPlainData(value, seen = new Set()) {
-  if (value === null || ['boolean', 'number', 'string'].includes(typeof value)) {
-    return typeof value !== 'number' || Number.isFinite(value);
-  }
-  if (typeof value !== 'object' || seen.has(value)) return false;
+  if (value === null || isBoolean(value) || isText(value) || isFiniteNumber(value)) return true;
+  if (!isObjectReference(value) || seen.has(value)) return false;
   seen.add(value);
   if (Array.isArray(value)) return value.every((entry) => isPlainData(entry, seen));
   if (!isRecord(value)) return false;
@@ -181,10 +221,10 @@ function isPlainData(value, seen = new Set()) {
 }
 
 function canonicalJson(value) {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+  if (value === null || isBoolean(value) || isText(value)) {
     return JSON.stringify(value);
   }
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
+  if (isFiniteNumber(value)) return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (isRecord(value)) {
     return `{${Object.keys(value)
@@ -202,7 +242,7 @@ function base64UrlEncode(bytes) {
 }
 
 function base64UrlDecode(value) {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]*$/u.test(value)) return null;
+  if (!isText(value) || !/^[A-Za-z0-9_-]*$/u.test(value)) return null;
   try {
     const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
     const binary = atob(padded);
@@ -222,7 +262,7 @@ function randomBase64Url(byteLength) {
 async function sha256(value) {
   const digest = new Uint8Array(await crypto.subtle.digest(
     'SHA-256',
-    new TextEncoder().encode(typeof value === 'string' ? value : canonicalJson(value)),
+    new TextEncoder().encode(isText(value) ? value : canonicalJson(value)),
   ));
   const result = `sha256:${[...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
   digest.fill(0);
@@ -254,7 +294,7 @@ function recovery(reason) {
 
 function hostname(value) {
   if (
-    typeof value !== 'string' || value.length > 253 || value !== value.toLowerCase() ||
+    !isText(value) || value.length > 253 || value !== value.toLowerCase() ||
     value.includes(':') || /^(?:\d+\.)+\d+$/u.test(value)
   ) return false;
   const labels = value.split('.');
@@ -262,7 +302,7 @@ function hostname(value) {
 }
 
 function normalizedEmail(value) {
-  if (typeof value !== 'string') return null;
+  if (!isText(value)) return null;
   const email = value.trim().toLowerCase();
   return email.length <= 254 && EMAIL.test(email) ? email : null;
 }
@@ -281,7 +321,7 @@ function exactSortedUniqueStrings(value, parser, maximum, minimum = 0) {
 }
 
 function canonicalBase64Url32(value) {
-  if (typeof value !== 'string' || !NONCE.test(value)) return null;
+  if (!isText(value) || !NONCE.test(value)) return null;
   let decoded;
   try {
     const raw = atob(`${value.replaceAll('-', '+').replaceAll('_', '/')}=`);
@@ -305,7 +345,7 @@ function canonicalBase64Url32(value) {
 }
 
 function hexBytes(value) {
-  if (typeof value !== 'string' || !SIGNATURE.test(value)) return null;
+  if (!isText(value) || !SIGNATURE.test(value)) return null;
   return Uint8Array.from(value.slice('sha256='.length).match(/../gu) ?? [], (hex) => (
     Number.parseInt(hex, 16)
   ));
@@ -396,12 +436,12 @@ function sourceFailure(error) {
 }
 
 function validSourceLabel(value) {
-  return typeof value === 'string' && value.length >= 2 && value.length <= 80 &&
-    value.trim() === value && !CONTROL.test(value);
+  return isText(value) && value.length >= 2 && value.length <= 80 &&
+    value.trim() === value && !hasControlCharacter(value);
 }
 
 function publicMcpUrl(value) {
-  if (typeof value !== 'string' || value.length > 2048) return null;
+  if (!isText(value) || value.length > 2048) return null;
   let url;
   try { url = new URL(value); } catch { return null; }
   const blockedSuffixes = ['.internal', '.invalid', '.local', '.localhost', '.onion', '.test'];
@@ -413,7 +453,7 @@ function publicMcpUrl(value) {
 
 function hasStandardOauthChallenge(response) {
   const challenge = response.headers.get('www-authenticate');
-  if (typeof challenge !== 'string' || !/^\s*Bearer(?:\s|$)/iu.test(challenge)) return false;
+  if (!isText(challenge) || !/^\s*Bearer(?:\s|$)/iu.test(challenge)) return false;
   const match = challenge.match(/(?:^|[\s,])resource_metadata=(?:"([^"\r\n]+)"|([^,\s]+))/iu);
   const value = match?.[1] ?? match?.[2];
   if (!value || value.length > 2048) return false;
@@ -541,12 +581,12 @@ function requireMcpResult(message, allowUnsupported = false) {
 }
 
 function safeToolSummary(value) {
-  if (!isRecord(value) || typeof value.name !== 'string' || !TOOL.test(value.name)) return null;
+  if (!isRecord(value) || !isText(value.name) || !TOOL.test(value.name)) return null;
   const optionalText = (input, maximum) => (
-    typeof input === 'string' && input.length <= maximum && !CONTROL.test(input) ? input : null
+    isText(input) && input.length <= maximum && !hasControlCharacter(input) ? input : null
   );
   const annotations = isRecord(value.annotations) ? value.annotations : {};
-  const hint = (name) => typeof annotations[name] === 'boolean' ? annotations[name] : null;
+  const hint = (name) => isBoolean(annotations[name]) ? annotations[name] : null;
   const readOnlyHint = hint('readOnlyHint');
   const destructiveHint = hint('destructiveHint');
   return Object.freeze({
@@ -573,7 +613,7 @@ function collectToolPage(result, tools, names) {
     tools.push(tool);
   }
   if (!Object.hasOwn(result, 'nextCursor')) return undefined;
-  if (typeof result.nextCursor !== 'string' || result.nextCursor.length > 2048 || CONTROL.test(result.nextCursor)) {
+  if (!isText(result.nextCursor) || result.nextCursor.length > 2048 || hasControlCharacter(result.nextCursor)) {
     throw new SourceDiscoveryError(502, 'source_tool_list_invalid');
   }
   return result.nextCursor;
@@ -609,7 +649,7 @@ async function discoverModernMcpTools(endpoint) {
 }
 
 function safeSessionId(value) {
-  return typeof value === 'string' && /^[\x21-\x7e]{1,256}$/u.test(value) ? value : null;
+  return isText(value) && /^[\x21-\x7e]{1,256}$/u.test(value) ? value : null;
 }
 
 async function discoverLegacyMcpTools(endpoint) {
@@ -624,7 +664,7 @@ async function discoverLegacyMcpTools(endpoint) {
     },
   }, { 'mcp-method': 'initialize' });
   const result = requireMcpResult(initialized.parsed);
-  if (typeof result.protocolVersion !== 'string' ||
+  if (!isText(result.protocolVersion) ||
       !/^2025-(?:03-26|06-18|11-25)$/u.test(result.protocolVersion)) {
     throw new SourceDiscoveryError(502, 'source_protocol_unsupported');
   }
@@ -634,8 +674,8 @@ async function discoverLegacyMcpTools(endpoint) {
   }
   const baseHeaders = {
     'mcp-protocol-version': result.protocolVersion,
-    ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
   };
+  if (sessionId) baseHeaders['mcp-session-id'] = sessionId;
   await mcpNotification(endpoint, {
     jsonrpc: '2.0', method: 'notifications/initialized',
   }, { ...baseHeaders, 'mcp-method': 'notifications/initialized' });
@@ -712,7 +752,7 @@ async function verifyManagedSource(source) {
 }
 
 function parseEnvironment(env, requireNonce = false) {
-  if (!env || typeof env !== 'object') return null;
+  if (!env || !isObjectReference(env)) return null;
   const value = {
     accountId: env.CLOUDFLARE_ACCOUNT_ID,
     zoneId: env.CLOUDFLARE_ZONE_ID,
@@ -723,23 +763,23 @@ function parseEnvironment(env, requireNonce = false) {
     bootstrapNonce: env.ANKKA_BOOTSTRAP_NONCE,
   };
   if (
-    typeof value.accountId !== 'string' || !ACCOUNT_ID.test(value.accountId) ||
-    typeof value.zoneId !== 'string' || !ACCOUNT_ID.test(value.zoneId) ||
-    !hostname(value.zoneName) || typeof value.release !== 'string' || !RELEASE.test(value.release) ||
-    typeof value.releaseSha256 !== 'string' || !HASH.test(value.releaseSha256) ||
+    !isText(value.accountId) || !ACCOUNT_ID.test(value.accountId) ||
+    !isText(value.zoneId) || !ACCOUNT_ID.test(value.zoneId) ||
+    !hostname(value.zoneName) || !isText(value.release) || !RELEASE.test(value.release) ||
+    !isText(value.releaseSha256) || !HASH.test(value.releaseSha256) ||
     value.zeroTrustReady !== 'true' ||
-    (requireNonce && (typeof value.bootstrapNonce !== 'string' || !NONCE.test(value.bootstrapNonce)))
+    (requireNonce && (!isText(value.bootstrapNonce) || !NONCE.test(value.bootstrapNonce)))
   ) return null;
   return Object.freeze(value);
 }
 
 function parseManagementEnvironment(env) {
   const base = parseEnvironment(env, false);
-  if (!base || typeof env.ANKKA_WORKER_NAME !== 'string' || !WORKER_NAME.test(env.ANKKA_WORKER_NAME) ||
-      typeof env.ANKKA_WORKERS_SUBDOMAIN !== 'string' || !HOST_LABEL.test(env.ANKKA_WORKERS_SUBDOMAIN) ||
+  if (!base || !isText(env.ANKKA_WORKER_NAME) || !WORKER_NAME.test(env.ANKKA_WORKER_NAME) ||
+      !isText(env.ANKKA_WORKERS_SUBDOMAIN) || !HOST_LABEL.test(env.ANKKA_WORKERS_SUBDOMAIN) ||
       !hostname(env.ANKKA_MANAGEMENT_HOSTNAME) || !['canary', 'stable'].includes(env.ANKKA_UPDATE_CHANNEL) ||
-      typeof env.ANKKA_UPDATE_KEY_ID !== 'string' || !KEY_ID.test(env.ANKKA_UPDATE_KEY_ID) ||
-      typeof env.ANKKA_UPDATE_PUBLIC_KEY !== 'string' || !PUBLIC_KEY.test(env.ANKKA_UPDATE_PUBLIC_KEY)) return null;
+      !isText(env.ANKKA_UPDATE_KEY_ID) || !KEY_ID.test(env.ANKKA_UPDATE_KEY_ID) ||
+      !isText(env.ANKKA_UPDATE_PUBLIC_KEY) || !PUBLIC_KEY.test(env.ANKKA_UPDATE_PUBLIC_KEY)) return null;
   return Object.freeze({
     ...base,
     workerName: env.ANKKA_WORKER_NAME,
@@ -780,10 +820,10 @@ function compareUpdateRelease(left, right) {
 function parseUpdateFile(value, component) {
   if (!exactKeys(value, ['byteSize', 'contentType', 'path', 'sha256']) ||
       !Number.isSafeInteger(value.byteSize) || value.byteSize < 0 || value.byteSize > 8 * 1024 * 1024 ||
-      typeof value.contentType !== 'string' || value.contentType.length < 1 || value.contentType.length > 128 ||
-      typeof value.path !== 'string' || !value.path.startsWith(`payload/${component}/`) ||
+      !isText(value.contentType) || value.contentType.length < 1 || value.contentType.length > 128 ||
+      !isText(value.path) || !value.path.startsWith(`payload/${component}/`) ||
       value.path.includes('\\') || value.path.split('/').some((pathPart) => !pathPart || pathPart === '.' || pathPart === '..') ||
-      typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.sha256)) return null;
+      !isText(value.sha256) || !/^[a-f0-9]{64}$/u.test(value.sha256)) return null;
   return Object.freeze({ ...value });
 }
 
@@ -792,7 +832,7 @@ async function parseUpdateComponent(value, component) {
       !Number.isSafeInteger(value.byteSize) || value.byteSize < 0 || value.byteSize > 32 * 1024 * 1024 ||
       !Number.isSafeInteger(value.fileCount) || value.fileCount < 1 || value.fileCount > 10_000 ||
       !Array.isArray(value.files) || value.files.length !== value.fileCount ||
-      typeof value.treeSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.treeSha256)) return null;
+      !isText(value.treeSha256) || !/^[a-f0-9]{64}$/u.test(value.treeSha256)) return null;
   const files = value.files.map((file) => parseUpdateFile(file, component));
   if (files.some((file) => file === null) || files.some((file, index) => index > 0 && files[index - 1].path >= file.path) ||
       files.reduce((sum, file) => sum + file.byteSize, 0) !== value.byteSize ||
@@ -801,20 +841,20 @@ async function parseUpdateComponent(value, component) {
 }
 
 async function parseSignedUpdateManifest(serialized) {
-  if (typeof serialized !== 'string' || serialized.length < 1 || serialized.length > 8 * 1024 * 1024) return null;
+  if (!isText(serialized) || serialized.length < 1 || serialized.length > 8 * 1024 * 1024) return null;
   let value;
   try { value = JSON.parse(serialized); } catch { return null; }
   if (!isPlainData(value) || canonicalJson(value) !== serialized || !exactKeys(value, [
     'artifact', 'cloudflare', 'components', 'oauthScopeIds', 'release', 'schemaVersion', 'sourceCommit',
   ]) || value.schemaVersion !== 1 || !updateSemver(value.release) ||
-      typeof value.sourceCommit !== 'string' || !/^[a-f0-9]{40}$/u.test(value.sourceCommit) ||
+      !isText(value.sourceCommit) || !/^[a-f0-9]{40}$/u.test(value.sourceCommit) ||
       canonicalJson(value.cloudflare) !== canonicalJson(APPROVED_UPDATE_CLOUDFLARE_CONTRACT) ||
       canonicalJson(value.oauthScopeIds) !== canonicalJson(UPDATE_OAUTH_SCOPES) ||
       !exactKeys(value.artifact, ['byteSize', 'fileCount', 'treeSha256']) ||
       !Number.isSafeInteger(value.artifact.byteSize) || value.artifact.byteSize < 1 ||
       value.artifact.byteSize > 32 * 1024 * 1024 ||
       !Number.isSafeInteger(value.artifact.fileCount) || value.artifact.fileCount < 1 ||
-      value.artifact.fileCount > 10_000 || typeof value.artifact.treeSha256 !== 'string' ||
+      value.artifact.fileCount > 10_000 || !isText(value.artifact.treeSha256) ||
       !/^[a-f0-9]{64}$/u.test(value.artifact.treeSha256) || !exactKeys(value.components, [
         'admin', 'installer', 'worker', 'workerCleanup', 'workerRetirement',
       ])) return null;
@@ -840,7 +880,7 @@ async function verifyUpdateEnvelope(value, environment) {
   ]) || value.algorithm !== 'ed25519' || value.channel !== environment.updateChannel ||
       value.keyId !== environment.updateKeyId || value.schemaVersion !== RELEASE_ENVELOPE_SCHEMA_VERSION ||
       value.signatureContext !== RELEASE_SIGNATURE_CONTEXT ||
-      typeof value.manifest !== 'string' || typeof value.signature !== 'string' ||
+      !isText(value.manifest) || !isText(value.signature) ||
       !/^[A-Za-z0-9_-]{86}$/u.test(value.signature)) return null;
   const publicBytes = base64UrlDecode(environment.updatePublicKey);
   const signatureBytes = base64UrlDecode(value.signature);
@@ -865,8 +905,8 @@ async function parseUpdateChannel(value, environment) {
   if (!exactKeys(value, ['channel', 'classification', 'notes', 'release', 'schemaVersion', 'verification']) ||
       value.schemaVersion !== 1 || value.channel !== environment.updateChannel ||
       !exactKeys(value.release, ['artifactSha256', 'id', 'sourceCommit']) || !updateSemver(value.release.id) ||
-      typeof value.release.artifactSha256 !== 'string' || !HASH.test(value.release.artifactSha256) ||
-      typeof value.release.sourceCommit !== 'string' || !/^[a-f0-9]{40}$/u.test(value.release.sourceCommit) ||
+      !isText(value.release.artifactSha256) || !HASH.test(value.release.artifactSha256) ||
+      !isText(value.release.sourceCommit) || !/^[a-f0-9]{40}$/u.test(value.release.sourceCommit) ||
       !exactKeys(value.classification, ['changes', 'excludes', 'kind', 'updaterProtocol']) ||
       value.classification.kind !== 'normal' || value.classification.updaterProtocol !== 2 ||
       canonicalJson(value.classification.changes) !== canonicalJson(['customer_worker_code', 'management_assets']) ||
@@ -874,7 +914,7 @@ async function parseUpdateChannel(value, environment) {
         'access_policies', 'credentials', 'dns', 'durable_object_migrations',
         'mcp_portal_configuration', 'sources', 'tool_allowlists',
       ]) || !Array.isArray(value.notes) || value.notes.length < 1 || value.notes.length > 8 ||
-      value.notes.some((note) => typeof note !== 'string' || note.length < 1 || note.length > 512)) return null;
+      value.notes.some((note) => !isText(note) || note.length < 1 || note.length > 512)) return null;
   const manifest = await verifyUpdateEnvelope(value.verification, environment);
   if (!manifest || manifest.release !== value.release.id ||
       `sha256:${manifest.artifact.treeSha256}` !== value.release.artifactSha256 ||
@@ -918,8 +958,8 @@ async function discoverRuntimeUpdate(env) {
 function parseSettings(value) {
   if (!exactKeys(value, ['schemaVersion', 'connect', 'access', 'sources']) || value.schemaVersion !== 1 ||
       !exactKeys(value.connect, ['name', 'hostname', 'codeMode']) ||
-      typeof value.connect.name !== 'string' || value.connect.name.length < 2 || value.connect.name.length > 80 ||
-      value.connect.name.trim() !== value.connect.name || CONTROL.test(value.connect.name) ||
+      !isText(value.connect.name) || value.connect.name.length < 2 || value.connect.name.length > 80 ||
+      value.connect.name.trim() !== value.connect.name || hasControlCharacter(value.connect.name) ||
       !hostname(value.connect.hostname) || value.connect.codeMode !== 'default_on' ||
       !exactKeys(value.access, ['adminEmails', 'memberEmails']) ||
       !Array.isArray(value.sources) || value.sources.length > 1) return null;
@@ -937,8 +977,8 @@ function parseSettings(value) {
   const source = value.sources[0];
   if (
       !exactKeys(source, ['id', 'label', 'url', 'authentication', 'enabledTools']) ||
-      source.id !== 'company-context' || typeof source.label !== 'string' || source.label.length < 2 ||
-      source.label.length > 80 || source.label.trim() !== source.label || CONTROL.test(source.label) ||
+      source.id !== 'company-context' || !isText(source.label) || source.label.length < 2 ||
+      source.label.length > 80 || source.label.trim() !== source.label || hasControlCharacter(source.label) ||
       !exactKeys(source.authentication, ['mode', 'onBehalfOfUser']) ||
       source.authentication.mode !== 'none' || source.authentication.onBehalfOfUser !== false) return null;
   let sourceUrl;
@@ -948,7 +988,7 @@ function parseSettings(value) {
       sourceUrl.toString() !== source.url) return null;
   const enabledTools = exactSortedUniqueStrings(
     source.enabledTools,
-    (entry) => typeof entry === 'string' && TOOL.test(entry) ? entry : null,
+    (entry) => isText(entry) && TOOL.test(entry) ? entry : null,
     64,
     1,
   );
@@ -1082,7 +1122,7 @@ async function parseClaim(value, environment, nowMs) {
     'settings', 'target', 'release', 'expected', 'cloudflareAccessToken',
   ])) return null;
   if (
-    value.schemaVersion !== 1 || typeof value.requestId !== 'string' || !REQUEST_ID.test(value.requestId) ||
+    value.schemaVersion !== 1 || !isText(value.requestId) || !REQUEST_ID.test(value.requestId) ||
     !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
     value.expiresAt <= value.issuedAt || value.expiresAt - value.issuedAt > REQUEST_LIFETIME_SECONDS ||
     value.settingsRevision !== 1 ||
@@ -1092,12 +1132,12 @@ async function parseClaim(value, environment, nowMs) {
     !exactKeys(value.release, ['id', 'artifactSha256']) || value.release.id !== environment.release ||
     value.release.artifactSha256 !== environment.releaseSha256 ||
     !exactKeys(value.expected, ['configurationHash', 'installationId', 'desiredHash']) ||
-    typeof value.expected.configurationHash !== 'string' || !HASH.test(value.expected.configurationHash) ||
-    typeof value.expected.installationId !== 'string' || !INSTALLATION_ID.test(value.expected.installationId) ||
-    typeof value.expected.desiredHash !== 'string' || !HASH.test(value.expected.desiredHash) ||
-    typeof value.cloudflareAccessToken !== 'string' || value.cloudflareAccessToken.length === 0 ||
+    !isText(value.expected.configurationHash) || !HASH.test(value.expected.configurationHash) ||
+    !isText(value.expected.installationId) || !INSTALLATION_ID.test(value.expected.installationId) ||
+    !isText(value.expected.desiredHash) || !HASH.test(value.expected.desiredHash) ||
+    !isText(value.cloudflareAccessToken) || value.cloudflareAccessToken.length === 0 ||
     value.cloudflareAccessToken.length > 16 * 1024 || value.cloudflareAccessToken.trim() !== value.cloudflareAccessToken ||
-    CONTROL.test(value.cloudflareAccessToken)
+    hasControlCharacter(value.cloudflareAccessToken)
   ) return null;
   const now = Math.floor(nowMs / 1_000);
   if (value.issuedAt > now + MAX_CLOCK_SKEW_SECONDS || value.expiresAt < now ||
@@ -1196,13 +1236,14 @@ function providerUrl(path) {
 async function providerCall(path, token, init = {}) {
   let response;
   try {
+    const headers = {
+      accept: 'application/json',
+      authorization: `Bearer ${token}`,
+    };
+    if (init.body) headers['content-type'] = 'application/json';
     response = await fetch(new Request(providerUrl(path), {
       ...init,
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${token}`,
-        ...(init.body ? { 'content-type': 'application/json' } : {}),
-      },
+      headers,
       redirect: 'manual',
     }));
   } catch {
@@ -1258,7 +1299,7 @@ async function providerList(path, token, query = {}) {
 }
 
 function safeProviderId(value) {
-  return typeof value === 'string' && SAFE_ID.test(value) ? value : null;
+  return isText(value) && SAFE_ID.test(value) ? value : null;
 }
 
 function exactOne(values, predicate) {
@@ -1374,7 +1415,7 @@ function managedOauthMatches(value) {
 
 function policyMatches(value, desired, settings) {
   if (!isRecord(value) || !safeProviderId(value.id) || value.decision !== 'allow' ||
-      typeof value.name !== 'string' || !value.name.endsWith(` [${marker(
+      !isText(value.name) || !value.name.endsWith(` [${marker(
         desired.desired.metadata.installationId, desired.key,
       )}]`) || !Array.isArray(value.include)) return false;
   const emails = [];
@@ -1517,11 +1558,11 @@ async function createResource(state, kind, token) {
       name: desired.desired.name,
       hostname: desired.desired.endpoint,
       auth_type: oauth ? 'oauth' : 'unauthenticated',
-      ...(oauth ? { is_shared_oauth_callback_enabled: true } : {}),
       secure_web_gateway: false,
       description: marker(state.installationId, desired.key),
       updated_tools: toolProjection(desired.desired.toolPolicy.allowedTools),
     };
+    if (oauth) body.is_shared_oauth_callback_enabled = true;
   } else if (kind === 'portal') {
     const server = locator(state, 'mcp_server');
     if (!server && desired.desired.sourceMappings.length !== 0) {
@@ -1535,13 +1576,15 @@ async function createResource(state, kind, token) {
       code_mode: 'default_on',
       secure_web_gateway: false,
       description: marker(state.installationId, desired.key),
-      ...(server ? { servers: [{
+    };
+    if (server) {
+      body.servers = [{
         server_id: server.id,
         default_disabled: true,
         on_behalf: state.settings.sources[0].authentication.onBehalfOfUser,
         updated_tools: toolProjection(state.settings.sources[0].enabledTools),
-      }] } : {}),
-    };
+      }];
+    }
   } else if (kind === 'source_access_policy' || kind === 'portal_access_policy') {
     const parentKind = kind === 'source_access_policy'
       ? 'source_access_application'
@@ -1576,22 +1619,25 @@ async function createResource(state, kind, token) {
     : kind === 'portal_access_policy'
       ? locator(state, 'portal_access_application')
       : null;
+  const provider = { id };
+  if (parent) provider.parentId = parent.id;
   return Object.freeze({
     status: 'submitted',
-    provider: Object.freeze({ id, ...(parent ? { parentId: parent.id } : {}) }),
+    provider: Object.freeze(provider),
   });
 }
 
 function receiptResource(state, desired, provider) {
   const policy = desired.kind === 'source_access_policy' || desired.kind === 'portal_access_policy';
-  return Object.freeze({
+  const resourceValue = {
     kind: desired.kind,
     key: desired.key,
     provider,
     desiredHash: desired.desiredHash,
     marker: marker(state.installationId, desired.key),
-    ...(policy ? { identityHash: state.accessPolicy.identitiesHash } : {}),
-  });
+  };
+  if (policy) resourceValue.identityHash = state.accessPolicy.identitiesHash;
+  return Object.freeze(resourceValue);
 }
 
 function validStoredState(value, claim) {
@@ -1613,7 +1659,9 @@ function validStoredState(value, claim) {
 function parseProviderLocator(value, policy) {
   if (!exactKeys(value, policy ? ['id', 'parentId'] : ['id'])) return null;
   if (!safeProviderId(value.id) || (policy && !safeProviderId(value.parentId))) return null;
-  return Object.freeze({ id: value.id, ...(policy ? { parentId: value.parentId } : {}) });
+  const provider = { id: value.id };
+  if (policy) provider.parentId = value.parentId;
+  return Object.freeze(provider);
 }
 
 async function parseReadyReceipt(value, claim) {
@@ -1627,7 +1675,7 @@ async function parseReadyReceipt(value, claim) {
   ]) || value.schemaVersion !== 1 || value.manager !== MANAGER || value.state !== 'ready' ||
       value.installationId !== claim.expected.installationId || value.revision !== resourceOrder.length + 1 ||
       value.release !== claim.release.id || value.desiredHash !== claim.expected.desiredHash ||
-      value.pending !== null || typeof value.checksum !== 'string' || !HASH.test(value.checksum) ||
+      value.pending !== null || !isText(value.checksum) || !HASH.test(value.checksum) ||
       canonicalJson(value.target) !== canonicalJson({
         ...claim.target, hostname: claim.settings.connect.hostname,
       }) || !exactKeys(value.accessPolicy, ['identityType', 'identityCount', 'identitiesHash']) ||
@@ -1657,11 +1705,12 @@ async function parseReadyReceipt(value, claim) {
     const locatorKey = `${kind}\u0000${provider.parentId ?? ''}\u0000${provider.id}`;
     if (locators.has(locatorKey)) return null;
     locators.add(locatorKey);
-    parsedResources.push(Object.freeze({
+    const parsedResource = {
       kind, key: desired.key, provider, desiredHash: desired.desiredHash,
       marker: resourceValue.marker,
-      ...(policy ? { identityHash: resourceValue.identityHash } : {}),
-    }));
+    };
+    if (policy) parsedResource.identityHash = resourceValue.identityHash;
+    parsedResources.push(Object.freeze(parsedResource));
   }
   const sourceApplication = parsedResources.find((resourceValue) => resourceValue.kind === 'source_access_application');
   const sourcePolicy = parsedResources.find((resourceValue) => resourceValue.kind === 'source_access_policy');
@@ -1861,19 +1910,19 @@ function safePublicStatus(value) {
   if (!isRecord(value) || !exactKeys(value, [
     'schemaVersion', 'status', 'release', 'gateway', 'source', 'access', 'updatedAt',
   ]) || value.schemaVersion !== 1 || value.status !== 'ready' ||
-      typeof value.release !== 'string' || !RELEASE.test(value.release) ||
+      !isText(value.release) || !RELEASE.test(value.release) ||
       !exactKeys(value.gateway, ['name', 'hostname', 'mcpUrl', 'capabilityMode', 'codeMode']) ||
-      typeof value.gateway.name !== 'string' || !hostname(value.gateway.hostname) ||
+      !isText(value.gateway.name) || !hostname(value.gateway.hostname) ||
       value.gateway.mcpUrl !== `https://${value.gateway.hostname}/mcp` ||
       value.gateway.capabilityMode !== 'read_only' || value.gateway.codeMode !== 'default_on' ||
       (value.source !== null && (
         !exactKeys(value.source, ['label', 'endpoint', 'enabledTools']) ||
-        typeof value.source.label !== 'string' || typeof value.source.endpoint !== 'string' ||
+        !isText(value.source.label) || !isText(value.source.endpoint) ||
         !Array.isArray(value.source.enabledTools)
       )) ||
       !exactKeys(value.access, ['administratorCount', 'memberCount']) ||
       !Number.isSafeInteger(value.access.administratorCount) || !Number.isSafeInteger(value.access.memberCount) ||
-      typeof value.updatedAt !== 'string') return null;
+      !isText(value.updatedAt)) return null;
   return Object.freeze(structuredClone(value));
 }
 
@@ -1909,7 +1958,7 @@ function safeManagementControl(value) {
       !ACCOUNT_ID.test(value.accountId) || !exactKeys(value.portal, [
         'id', 'name', 'hostname', 'marker',
       ]) || !safeProviderId(value.portal.id) || !validSourceLabel(value.portal.name) ||
-      !hostname(value.portal.hostname) || typeof value.portal.marker !== 'string' ||
+      !hostname(value.portal.hostname) || !isText(value.portal.marker) ||
       !value.portal.marker.startsWith(`acg:v1:${value.installationId}:`) ||
       !RESOURCE_KEY.test(value.portal.marker.slice(`acg:v1:${value.installationId}:`.length))) {
     return null;
@@ -1986,14 +2035,14 @@ async function managementControlFromReadyResponse(claim, ready, env) {
 }
 
 function toolName(value) {
-  return typeof value === 'string' && TOOL.test(value) ? value : null;
+  return isText(value) && TOOL.test(value) ? value : null;
 }
 
 function safeManagedSource(value) {
   const legacy = exactKeys(value, ['id', 'label', 'url', 'enabledTools', 'status']);
   const current = exactKeys(value, ['id', 'label', 'url', 'authMode', 'enabledTools', 'status']);
   if ((!legacy && !current) ||
-      typeof value.id !== 'string' || !SOURCE_ID.test(value.id) ||
+      !isText(value.id) || !SOURCE_ID.test(value.id) ||
       !validSourceLabel(value.label) || !publicMcpUrl(value.url) ||
       (value.status !== 'installed' && value.status !== 'draft')) return null;
   const authMode = legacy ? 'none' : value.authMode;
@@ -2106,9 +2155,9 @@ function safeSourceActionResource(value, index) {
   if (!exactKeys(value, policy
     ? ['kind', 'key', 'provider', 'desiredHash', 'marker', 'identityHash']
     : ['kind', 'key', 'provider', 'desiredHash', 'marker']) || value.kind !== kind ||
-      !RESOURCE_KEY.test(value.key) || typeof value.desiredHash !== 'string' || !HASH.test(value.desiredHash) ||
-      typeof value.marker !== 'string' || !value.marker.startsWith('acg:v1:') ||
-      (policy && (typeof value.identityHash !== 'string' || !HASH.test(value.identityHash)))) return null;
+      !RESOURCE_KEY.test(value.key) || !isText(value.desiredHash) || !HASH.test(value.desiredHash) ||
+      !isText(value.marker) || !value.marker.startsWith('acg:v1:') ||
+      (policy && (!isText(value.identityHash) || !HASH.test(value.identityHash)))) return null;
   const provider = parseProviderLocator(value.provider, policy);
   if (!provider) return null;
   return Object.freeze({ ...value, provider });
@@ -2129,7 +2178,7 @@ function safePortalUpdate(value) {
   if (value === null) return null;
   if (!exactKeys(value, ['phase', 'desiredHash']) ||
       (value.phase !== 'send_armed' && value.phase !== 'submitted') ||
-      typeof value.desiredHash !== 'string' || !HASH.test(value.desiredHash)) return false;
+      !isText(value.desiredHash) || !HASH.test(value.desiredHash)) return false;
   return Object.freeze({ ...value });
 }
 
@@ -2143,10 +2192,10 @@ function safeSourceAction(value) {
       !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
       value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
       !['authorization_required', 'applying', 'succeeded', 'failed', 'recovery_required'].includes(value.status) ||
-      typeof value.actionKeyHash !== 'string' || !HASH.test(value.actionKeyHash) ||
-      typeof value.sourceHash !== 'string' || !HASH.test(value.sourceHash) ||
+      !isText(value.actionKeyHash) || !HASH.test(value.actionKeyHash) ||
+      !isText(value.sourceHash) || !HASH.test(value.sourceHash) ||
       !Array.isArray(value.resources) || value.resources.length > SOURCE_ACTION_RESOURCE_ORDER.length ||
-      (value.failureCode !== null && (typeof value.failureCode !== 'string' ||
+      (value.failureCode !== null && (!isText(value.failureCode) ||
         !/^[a-z][a-z0-9_]{0,63}$/u.test(value.failureCode)))) return null;
   const resources = value.resources.map(safeSourceActionResource);
   const pending = safeSourceActionPending(value.pending);
@@ -2194,8 +2243,8 @@ function parseSourceActionPrepare(value) {
       !normalizedEmail(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
       !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
       value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
-      typeof value.actionKeyHash !== 'string' || !HASH.test(value.actionKeyHash) ||
-      typeof value.sourceHash !== 'string' || !HASH.test(value.sourceHash)) return null;
+      !isText(value.actionKeyHash) || !HASH.test(value.actionKeyHash) ||
+      !isText(value.sourceHash) || !HASH.test(value.sourceHash)) return null;
   return Object.freeze({ ...value, actorEmail: normalizedEmail(value.actorEmail) });
 }
 
@@ -2335,13 +2384,13 @@ function sourceActionClaim(value, environment, action, nowMs) {
     'schemaVersion', 'actionId', 'actionKey', 'actorEmail', 'accountId',
     'issuedAt', 'expiresAt', 'cloudflareAccessToken',
   ]) || value.schemaVersion !== 1 || value.actionId !== action.actionId ||
-      typeof value.actionKey !== 'string' || !NONCE.test(value.actionKey) ||
+      !isText(value.actionKey) || !NONCE.test(value.actionKey) ||
       normalizedEmail(value.actorEmail) !== action.actorEmail || value.accountId !== environment.accountId ||
       !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
       value.expiresAt !== action.expiresAt || value.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 ||
       value.issuedAt < action.issuedAt || value.expiresAt <= nowMs ||
-      typeof value.cloudflareAccessToken !== 'string' || value.cloudflareAccessToken.length < 20 ||
-      value.cloudflareAccessToken.length > 16 * 1024 || CONTROL.test(value.cloudflareAccessToken)) return null;
+      !isText(value.cloudflareAccessToken) || value.cloudflareAccessToken.length < 20 ||
+      value.cloudflareAccessToken.length > 16 * 1024 || hasControlCharacter(value.cloudflareAccessToken)) return null;
   return value;
 }
 
@@ -2392,7 +2441,7 @@ function normalizedPortalMappings(value) {
   for (const mapping of value.servers) {
     if (!isRecord(mapping)) return null;
     const serverId = safeProviderId(mapping.server_id ?? mapping.id);
-    if (!serverId || mapping.default_disabled !== true || typeof mapping.on_behalf !== 'boolean' ||
+    if (!serverId || mapping.default_disabled !== true || !isBoolean(mapping.on_behalf) ||
         !Array.isArray(mapping.updated_tools) ||
         (Object.hasOwn(mapping, 'updated_prompts') &&
           (!Array.isArray(mapping.updated_prompts) || mapping.updated_prompts.length !== 0))) return null;
@@ -2612,8 +2661,8 @@ const RUNTIME_ACTION_STAGES = Object.freeze([
 
 function runtimeVersion(value) {
   if (!exactKeys(value, ['artifactSha256', 'release', 'versionId']) || !updateSemver(value.release) ||
-      typeof value.artifactSha256 !== 'string' || !HASH.test(value.artifactSha256) ||
-      !(value.versionId === null || (typeof value.versionId === 'string' && VERSION_ID.test(value.versionId)))) return null;
+      !isText(value.artifactSha256) || !HASH.test(value.artifactSha256) ||
+      !(value.versionId === null || (isText(value.versionId) && VERSION_ID.test(value.versionId)))) return null;
   return Object.freeze({ ...value });
 }
 
@@ -2622,14 +2671,14 @@ function safeRuntimeAction(value) {
     'actionId', 'actionKeyHash', 'actorEmail', 'expiresAt', 'failureCode', 'from', 'fromVersionId',
     'issuedAt', 'operation', 'schemaVersion', 'stage', 'status', 'to', 'toVersionId',
   ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) ||
-      typeof value.actionKeyHash !== 'string' || !HASH.test(value.actionKeyHash) ||
+      !isText(value.actionKeyHash) || !HASH.test(value.actionKeyHash) ||
       normalizedEmail(value.actorEmail) !== value.actorEmail || !Number.isSafeInteger(value.issuedAt) ||
       !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
       value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
       !['update', 'rollback'].includes(value.operation) ||
       !['authorization_required', 'applying', 'succeeded', 'failed', 'recovery_required'].includes(value.status) ||
       !(value.stage === null || RUNTIME_ACTION_STAGES.includes(value.stage)) ||
-      !(value.failureCode === null || (typeof value.failureCode === 'string' &&
+      !(value.failureCode === null || (isText(value.failureCode) &&
         /^[a-z][a-z0-9_]{0,79}$/u.test(value.failureCode))) ||
       !(value.fromVersionId === null || VERSION_ID.test(value.fromVersionId)) ||
       !(value.toVersionId === null || VERSION_ID.test(value.toVersionId))) return null;
@@ -2687,7 +2736,7 @@ async function saveRuntimeUpdates(storage, state) {
 async function prepareRuntimeAction(storage, environment, input) {
   if (!exactKeys(input, [
     'actionId', 'actionKeyHash', 'actorEmail', 'expiresAt', 'issuedAt', 'operation', 'to',
-  ]) || !ACTION_ID.test(input.actionId) || typeof input.actionKeyHash !== 'string' ||
+  ]) || !ACTION_ID.test(input.actionId) || !isText(input.actionKeyHash) ||
       !HASH.test(input.actionKeyHash) || normalizedEmail(input.actorEmail) !== input.actorEmail ||
       !Number.isSafeInteger(input.issuedAt) || !Number.isSafeInteger(input.expiresAt) ||
       input.expiresAt <= input.issuedAt || input.expiresAt - input.issuedAt > 10 * 60 * 1000 ||
@@ -2724,13 +2773,14 @@ async function updateRuntimeAction(storage, environment, actionId, transform) {
   const action = safeRuntimeAction(transform(state.actions[index], state));
   if (!action) return null;
   const actions = state.actions.map((candidate, candidateIndex) => candidateIndex === index ? action : candidate);
-  const next = await saveRuntimeUpdates(storage, {
-    ...state, revision: state.revision + 1, actions,
-    ...(action.status === 'succeeded' ? {
+  const nextState = { ...state, revision: state.revision + 1, actions };
+  if (action.status === 'succeeded') {
+    Object.assign(nextState, {
       current: { ...action.to, versionId: action.toVersionId },
       previous: { ...action.from, versionId: action.fromVersionId },
-    } : {}),
-  });
+    });
+  }
+  const next = await saveRuntimeUpdates(storage, nextState);
   if (next && action.status === 'succeeded') {
     const status = safePublicStatus(await storage.get(STATUS_KEY));
     if (!status) return null;
@@ -2758,7 +2808,7 @@ async function processRuntimeActionControl(request, env, storage, nowMs = Date.n
   }
   const state = await runtimeUpdates(storage, environment);
   const action = state?.actions.find((candidate) => candidate.actionId === value.actionId);
-  if (!action || typeof value.actionKey !== 'string' || !NONCE.test(value.actionKey) ||
+  if (!action || !isText(value.actionKey) || !NONCE.test(value.actionKey) ||
       await sha256(value.actionKey) !== action.actionKeyHash ||
       !await verifyHmac(rawBody, value.actionKey, request.headers.get('x-ankka-runtime-action-signature')) ||
       !Number.isSafeInteger(value.issuedAt) || value.issuedAt < action.issuedAt ||
@@ -2796,8 +2846,8 @@ async function processRuntimeActionControl(request, env, storage, nowMs = Date.n
     'actionId', 'actionKey', 'command', 'expiresAt', 'failureCode', 'issuedAt', 'operation',
     'recoveryRequired', 'schemaVersion',
   ]) && value.schemaVersion === 1 && action.status === 'applying' &&
-      typeof value.failureCode === 'string' && /^[a-z][a-z0-9_]{0,79}$/u.test(value.failureCode) &&
-      typeof value.recoveryRequired === 'boolean') {
+      isText(value.failureCode) && /^[a-z][a-z0-9_]{0,79}$/u.test(value.failureCode) &&
+      isBoolean(value.recoveryRequired)) {
     updated = await updateRuntimeAction(storage, environment, action.actionId, (current) => ({
       ...current, status: value.recoveryRequired ? 'recovery_required' : 'failed',
       failureCode: value.failureCode,
@@ -2819,13 +2869,13 @@ function safeTeardownAction(value) {
     'schemaVersion', 'actionId', 'actionKeyHash', 'actorEmail', 'installationId',
     'issuedAt', 'expiresAt', 'status', 'failureCode',
   ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) ||
-      typeof value.actionKeyHash !== 'string' || !HASH.test(value.actionKeyHash) ||
+      !isText(value.actionKeyHash) || !HASH.test(value.actionKeyHash) ||
       normalizedEmail(value.actorEmail) !== value.actorEmail ||
       !INSTALLATION_ID.test(value.installationId) || !Number.isSafeInteger(value.issuedAt) ||
       !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
       value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
       !['authorization_required', 'applying', 'gateway_removed', 'failed', 'recovery_required'].includes(value.status) ||
-      (value.failureCode !== null && (typeof value.failureCode !== 'string' ||
+      (value.failureCode !== null && (!isText(value.failureCode) ||
         !/^[a-z][a-z0-9_]{0,63}$/u.test(value.failureCode)))) return null;
   return Object.freeze({ ...value });
 }
@@ -2856,8 +2906,8 @@ async function safePersistedReadyReceipt(value, environment, installationId) {
     'target', 'accessPolicy', 'desiredHash', 'resources', 'pending', 'checksum',
   ]) || value.schemaVersion !== 1 || value.manager !== MANAGER || value.state !== 'ready' ||
       value.installationId !== installationId || !RELEASE.test(value.release) ||
-      typeof value.desiredHash !== 'string' || !HASH.test(value.desiredHash) || value.pending !== null ||
-      typeof value.checksum !== 'string' || !HASH.test(value.checksum) || !isRecord(value.target) ||
+      !isText(value.desiredHash) || !HASH.test(value.desiredHash) || value.pending !== null ||
+      !isText(value.checksum) || !HASH.test(value.checksum) || !isRecord(value.target) ||
       !exactKeys(value.target, ['accountId', 'zoneId', 'zoneName', 'hostname']) ||
       value.target.accountId !== environment.accountId || value.target.zoneId !== environment.zoneId ||
       value.target.zoneName !== environment.zoneName || !hostname(value.target.hostname) ||
@@ -2865,7 +2915,7 @@ async function safePersistedReadyReceipt(value, environment, installationId) {
         'identityType', 'identityCount', 'identitiesHash',
       ]) || value.accessPolicy.identityType !== 'email' ||
       !Number.isSafeInteger(value.accessPolicy.identityCount) || value.accessPolicy.identityCount < 1 ||
-      typeof value.accessPolicy.identitiesHash !== 'string' || !HASH.test(value.accessPolicy.identitiesHash) ||
+      !isText(value.accessPolicy.identitiesHash) || !HASH.test(value.accessPolicy.identitiesHash) ||
       !Array.isArray(value.resources)) return null;
   const kinds = value.resources.map((resource) => isRecord(resource) ? resource.kind : null);
   const expectedOrder = [RESOURCE_ORDER, PORTAL_RESOURCE_ORDER].find((candidate) =>
@@ -2881,7 +2931,7 @@ async function safePersistedReadyReceipt(value, environment, installationId) {
     if (!exactKeys(resource, policy
       ? ['kind', 'key', 'provider', 'desiredHash', 'marker', 'identityHash']
       : ['kind', 'key', 'provider', 'desiredHash', 'marker']) || resource.kind !== kind ||
-        !RESOURCE_KEY.test(resource.key) || typeof resource.desiredHash !== 'string' ||
+        !RESOURCE_KEY.test(resource.key) || !isText(resource.desiredHash) ||
         !HASH.test(resource.desiredHash) || resource.marker !== marker(installationId, resource.key) ||
         (policy && resource.identityHash !== value.accessPolicy.identitiesHash)) return null;
     const provider = parseProviderLocator(resource.provider, policy);
@@ -3193,7 +3243,7 @@ function safeRootTeardown(value, root, resources, resourcesHash) {
   ]) || value.schemaVersion !== 1 || value.installationId !== root.installationId ||
       value.resourcesHash !== resourcesHash || !['applying', 'removed'].includes(value.status) ||
       !Array.isArray(value.removedKeys) || value.removedKeys.some((key, index) =>
-        typeof key !== 'string' || key !== teardownResourceKey(resources[index])) ||
+        !isText(key) || key !== teardownResourceKey(resources[index])) ||
       value.removedKeys.length > resources.length ||
       !(value.removedAt === null || Number.isSafeInteger(value.removedAt))) return null;
   let pending = null;
@@ -3216,8 +3266,8 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
     'cloudflareAccessToken', 'issuedAt', 'expiresAt',
   ]) || input.schemaVersion !== 1 || !ACTION_ID.test(input.actionId) ||
       !INSTALLATION_ID.test(input.installationId) || !REQUEST_ID.test(input.requestId) ||
-      typeof input.cloudflareAccessToken !== 'string' || input.cloudflareAccessToken.length < 20 ||
-      input.cloudflareAccessToken.length > 16 * 1024 || CONTROL.test(input.cloudflareAccessToken) ||
+      !isText(input.cloudflareAccessToken) || input.cloudflareAccessToken.length < 20 ||
+      input.cloudflareAccessToken.length > 16 * 1024 || hasControlCharacter(input.cloudflareAccessToken) ||
       !Number.isSafeInteger(input.issuedAt) || !Number.isSafeInteger(input.expiresAt) ||
       input.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 || input.expiresAt <= nowMs) return null;
   let root = await storedTeardownRoot(storage, environment, input.installationId);
@@ -3448,9 +3498,9 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
   ]) || value.schemaVersion !== 1 || value.command !== 'apply' || !ACTION_ID.test(value.actionId) ||
       !NONCE.test(value.actionKey) || normalizedEmail(value.actorEmail) !== value.actorEmail ||
       value.accountId !== environment.accountId || !INSTALLATION_ID.test(value.installationId) ||
-      !REQUEST_ID.test(value.requestId) || typeof value.cloudflareAccessToken !== 'string' ||
+      !REQUEST_ID.test(value.requestId) || !isText(value.cloudflareAccessToken) ||
       value.cloudflareAccessToken.length < 20 || value.cloudflareAccessToken.length > 16 * 1024 ||
-      CONTROL.test(value.cloudflareAccessToken) || !Number.isSafeInteger(value.issuedAt) ||
+      hasControlCharacter(value.cloudflareAccessToken) || !Number.isSafeInteger(value.issuedAt) ||
       !Number.isSafeInteger(value.expiresAt) || value.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 ||
       value.expiresAt <= nowMs) return null;
   const actions = safeTeardownActions(await storage.get(TEARDOWNS_KEY));
@@ -3699,7 +3749,7 @@ export class AdminState {
 }
 
 function decodeBase64Url(value) {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/u.test(value)) return null;
+  if (!isText(value) || !/^[A-Za-z0-9_-]+$/u.test(value)) return null;
   try {
     const padding = '='.repeat((4 - value.length % 4) % 4);
     const raw = atob(`${value.replaceAll('-', '+').replaceAll('_', '/')}${padding}`);
@@ -3710,14 +3760,14 @@ function decodeBase64Url(value) {
 }
 
 function accessConfiguration(env) {
-  if (!env || typeof env !== 'object' || typeof env.CF_ACCESS_AUD !== 'string' ||
+  if (!env || !isObjectReference(env) || !isText(env.CF_ACCESS_AUD) ||
       !/^[A-Za-z0-9_-]{8,256}$/u.test(env.CF_ACCESS_AUD) ||
-      typeof env.CF_ACCESS_ISSUER !== 'string') return null;
+      !isText(env.CF_ACCESS_ISSUER)) return null;
   let issuer;
   try { issuer = new URL(env.CF_ACCESS_ISSUER); } catch { return null; }
   if (issuer.protocol !== 'https:' || issuer.username || issuer.password || issuer.search || issuer.hash ||
       issuer.pathname !== '/' || !issuer.hostname.endsWith('.cloudflareaccess.com')) return null;
-  const emails = typeof env.ADMIN_EMAILS === 'string'
+  const emails = isText(env.ADMIN_EMAILS)
     ? [...new Set(env.ADMIN_EMAILS.split(',').map(normalizedEmail).filter(Boolean))].sort(compareText)
     : [];
   if (emails.length < 1 || emails.length > 20) return null;
@@ -3748,9 +3798,9 @@ async function verifyAccess(request, env, nowMs = Date.now()) {
     payloadBytes.fill(0);
   }
   const now = Math.floor(nowMs / 1000);
-  const audiences = typeof payload.aud === 'string' ? [payload.aud] : payload.aud;
+  const audiences = isText(payload.aud) ? [payload.aud] : payload.aud;
   const email = normalizedEmail(payload.email);
-  if (!isRecord(header) || header.alg !== 'RS256' || typeof header.kid !== 'string' ||
+  if (!isRecord(header) || header.alg !== 'RS256' || !isText(header.kid) ||
       !/^[A-Za-z0-9_.:-]{1,256}$/u.test(header.kid) || !isRecord(payload) ||
       payload.iss !== configuration.issuer || !Array.isArray(audiences) ||
       !audiences.includes(configuration.aud) || email !== claimedEmail ||
@@ -3789,11 +3839,11 @@ async function verifyAccess(request, env, nowMs = Date.now()) {
 }
 
 function adminStateStub(env, name) {
-  if (!env.ADMIN_STATE || typeof env.ADMIN_STATE.idFromName !== 'function' ||
-      typeof env.ADMIN_STATE.get !== 'function') return null;
+  if (!env.ADMIN_STATE || !isCallable(env.ADMIN_STATE.idFromName) ||
+      !isCallable(env.ADMIN_STATE.get)) return null;
   try {
     const stub = env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName(name));
-    return stub && typeof stub.fetch === 'function' ? stub : null;
+    return stub && isCallable(stub.fetch) ? stub : null;
   } catch {
     return null;
   }
@@ -3859,6 +3909,7 @@ async function handleStatus(request, env) {
     return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
   }
   const environment = parseManagementEnvironment(env);
+  if (!environment) return fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
   const stub = adminStateStub(env, 'v1:management');
   if (!stub) return fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
   try {

@@ -1,3 +1,7 @@
+import * as v from 'valibot';
+
+import { boundaryValueSchema, type BoundaryValue } from './boundary';
+import { canonicalJson } from './canonical-json';
 import type { AccountWorkersSubdomain } from './cloudflare-management-surface';
 import {
   isCompleteInstallJournal,
@@ -11,7 +15,13 @@ import type {
   InstallationReceiptTarget,
   ReadyInstallationReceipt,
 } from './provider-neutral-installation-receipt';
-import { base64UrlEncode } from './crypto';
+import {
+  installationReceiptAccessPolicySchema,
+  installationReceiptTargetSchema,
+  readyInstallationReceiptSchema,
+} from './provider-neutral-installation-receipt';
+import { base64UrlEncode, sha256Hex } from './crypto';
+import { deepFreezePlainData, isPlainDataTree } from './plain-data';
 import {
   buildStaticUninstallPlan,
   parseStaticUninstallPlan,
@@ -43,10 +53,195 @@ const HASH = /^sha256:[a-f0-9]{64}$/u;
 const INSTALLATION_ID = /^acg-[a-f0-9]{24}$/u;
 const UNINSTALL_ID = /^uninstall-[a-f0-9]{24}$/u;
 const RELEASE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,79}$/u;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 const STANDARD_BASE64_KEY = /^[A-Za-z0-9+/]{43}=$/u;
 const BASE64URL_KEY = /^[A-Za-z0-9_-]{43}$/u;
 const ATTEMPT_ID = /^att_[A-Za-z0-9_-]{32}$/u;
+const UNINSTALL_PLAN_ID = /^uninstall-plan-[a-f0-9]{24}$/u;
+
+function validAccessToken(value: string): boolean {
+  return value.length > 0 && value.length <= MAX_ACCESS_TOKEN_LENGTH && value.trim() === value &&
+    ![...value].some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 31 || codePoint === 127;
+    });
+}
+
+function hasOnlyEnumerableDataProperties<Value extends object>(value: Value): boolean {
+  try {
+    return Object.getPrototypeOf(value) === Object.prototype && Reflect.ownKeys(value).every((key) => {
+      if (!v.is(v.string(), key)) return false;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return descriptor?.enumerable === true && Object.hasOwn(descriptor, 'value');
+    });
+  } catch {
+    return false;
+  }
+}
+
+const hashSchema = v.pipe(v.string(), v.regex(HASH));
+const accountIdSchema = v.pipe(v.string(), v.regex(ACCOUNT_ID));
+const installationIdSchema = v.pipe(v.string(), v.regex(INSTALLATION_ID));
+const releaseEvidenceSchema = v.strictObject({
+  id: v.pipe(v.string(), v.regex(RELEASE)),
+  artifactSha256: hashSchema,
+});
+const customerTargetSchema = v.strictObject({
+  accountId: accountIdSchema,
+  zoneId: accountIdSchema,
+  zoneName: v.string(),
+});
+const providerSubdomainSchema = v.strictObject({
+  accountId: accountIdSchema,
+  subdomain: v.pipe(v.string(), v.regex(HOST_LABEL)),
+});
+const approvalSchema = v.strictObject({
+  attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  authorizedTarget: v.unknown(),
+});
+const claimSchema = v.pipe(v.strictObject({
+  schemaVersion: v.literal(1),
+  requestId: v.pipe(v.string(), v.regex(REQUEST_ID)),
+  issuedAt: v.pipe(v.number(), v.safeInteger()),
+  expiresAt: v.pipe(v.number(), v.safeInteger()),
+  target: customerTargetSchema,
+  release: releaseEvidenceSchema,
+  expected: v.strictObject({
+    configurationHash: hashSchema,
+    installationId: installationIdSchema,
+    desiredHash: hashSchema,
+    readyReceipt: readyInstallationReceiptSchema,
+  }),
+}), v.check((claim) => claim.expiresAt > claim.issuedAt &&
+  claim.expiresAt - claim.issuedAt <= REQUEST_LIFETIME_SECONDS));
+const semanticRecordSchema = v.pipe(v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('customer_uninstall_submit'),
+  accountId: accountIdSchema,
+  zoneId: accountIdSchema,
+  zoneName: v.string(),
+  accountWorkersSubdomain: v.pipe(v.string(), v.regex(HOST_LABEL)),
+  workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
+  requestId: v.pipe(v.string(), v.regex(REQUEST_ID)),
+  issuedAt: v.pipe(v.number(), v.safeInteger()),
+  expiresAt: v.pipe(v.number(), v.safeInteger()),
+  installationId: installationIdSchema,
+  configurationHash: hashSchema,
+  desiredHash: hashSchema,
+  release: releaseEvidenceSchema,
+  rootReceiptRevision: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+  rootReceiptChecksum: hashSchema,
+  installBindingHash: hashSchema,
+  installConvergenceHash: hashSchema,
+  adminStateNamespaceId: accountIdSchema,
+  uninstallPlanId: v.pipe(v.string(), v.regex(UNINSTALL_PLAN_ID)),
+  uninstallPlanHash: hashSchema,
+  authorityHash: hashSchema,
+  approvalAttemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+  claimHash: hashSchema,
+}), v.check((record) => record.expiresAt > record.issuedAt &&
+  record.expiresAt - record.issuedAt <= REQUEST_LIFETIME_SECONDS));
+const removedReceiptSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  manager: v.literal('ankka-mcp-gateway'),
+  installationId: installationIdSchema,
+  state: v.literal('removed'),
+  revision: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+  release: v.pipe(v.string(), v.regex(RELEASE)),
+  target: installationReceiptTargetSchema,
+  accessPolicy: installationReceiptAccessPolicySchema,
+  desiredHash: hashSchema,
+  resources: v.tuple([]),
+  pending: v.null(),
+  checksum: hashSchema,
+});
+const removedResultSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('removed'),
+  installationId: installationIdSchema,
+  configurationHash: hashSchema,
+  uninstallId: v.pipe(v.string(), v.regex(UNINSTALL_ID)),
+  release: releaseEvidenceSchema,
+  receipt: v.strictObject({
+    revision: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+    resourceCount: v.literal(0),
+    evidence: removedReceiptSchema,
+  }),
+  uninstallInvoked: v.boolean(),
+  resumed: v.boolean(),
+});
+const recoveryReasonSchema = v.picklist([
+  'uninstall_recovery_required',
+  'uninstall_fresh_grant_required',
+  'uninstall_requires_repair',
+  'uninstall_request_mismatch',
+  'uninstall_blocked',
+]);
+const recoveryResultSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  error: recoveryReasonSchema,
+  retryable: v.boolean(),
+});
+const locatorAuthorityEntries = {
+  requestId: v.pipe(v.string(), v.regex(REQUEST_ID)),
+  accountId: accountIdSchema,
+  zoneId: accountIdSchema,
+  zoneName: v.string(),
+  accountWorkersSubdomain: v.pipe(v.string(), v.regex(HOST_LABEL)),
+  workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
+  installationId: installationIdSchema,
+  configurationHash: hashSchema,
+  desiredHash: hashSchema,
+  release: releaseEvidenceSchema,
+  installBindingHash: hashSchema,
+  installConvergenceHash: hashSchema,
+  adminStateNamespaceId: accountIdSchema,
+  uninstallPlanId: v.pipe(v.string(), v.regex(UNINSTALL_PLAN_ID)),
+  uninstallPlanHash: hashSchema,
+  authorityHash: hashSchema,
+  approvalAttemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
+};
+const removedLocatorSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('removed'),
+  ...locatorAuthorityEntries,
+  uninstallId: v.pipe(v.string(), v.regex(UNINSTALL_ID)),
+  receipt: v.strictObject({
+    revision: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+    resourceCount: v.literal(0),
+    evidence: removedReceiptSchema,
+  }),
+  uninstallInvoked: v.boolean(),
+  resumed: v.boolean(),
+});
+const recoveryLocatorSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.literal('recovery_required'),
+  ...locatorAuthorityEntries,
+  reason: recoveryReasonSchema,
+  freshGrantRequired: v.boolean(),
+});
+const customerUninstallLocatorSchema = v.variant('status', [removedLocatorSchema, recoveryLocatorSchema]);
+const prepareInputSchema = v.strictObject({
+  installJournal: v.unknown(),
+  uninstallPlan: v.unknown(),
+  approval: v.unknown(),
+  accountWorkersSubdomain: v.unknown(),
+  nowMs: v.optional(v.number()),
+  randomBytes: v.optional(v.function()),
+});
+const submitInputSchema = v.strictObject({
+  installJournal: v.unknown(),
+  uninstallPlan: v.unknown(),
+  approval: v.unknown(),
+  mutation: v.unknown(),
+  accountWorkersSubdomain: v.unknown(),
+  uninstallNonce: v.string(),
+  cloudflareAccessToken: v.string(),
+  transport: v.function(),
+  nowMs: v.number(),
+});
+
+type ParsedProviderSubdomain = v.InferOutput<typeof providerSubdomainSchema>;
 
 export type CustomerUninstallStage =
   | 'validate'
@@ -292,92 +487,7 @@ function fail(
   throw new CustomerUninstallRequestError(code, stage, outcome);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  try {
-    if (Object.getPrototypeOf(value) !== Object.prototype) return false;
-    if (Reflect.ownKeys(value).some((key) => typeof key !== 'string')) return false;
-    return Object.values(Object.getOwnPropertyDescriptors(value)).every(
-      (descriptor) => descriptor.enumerable === true && 'value' in descriptor,
-    );
-  } catch {
-    return false;
-  }
-}
-
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort(compareText);
-  const sortedExpected = [...expected].sort(compareText);
-  return actual.length === sortedExpected.length &&
-    actual.every((key, index) => key === sortedExpected[index]);
-}
-
-function exactDataKeys(value: unknown, expected: readonly string[]): value is Record<string, unknown> {
-  return isRecord(value) && exactKeys(value, expected);
-}
-
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function isPlainDataTree(
-  value: unknown,
-  budget = { remaining: 20_000 },
-  depth = 0,
-): boolean {
-  if (
-    value === null || typeof value === 'string' || typeof value === 'boolean' ||
-    (typeof value === 'number' && Number.isFinite(value))
-  ) return true;
-  if (typeof value !== 'object' || depth > 64 || --budget.remaining < 0) return false;
-  let prototype: object | null;
-  let descriptors: PropertyDescriptorMap;
-  let keys: readonly PropertyKey[];
-  try {
-    prototype = Object.getPrototypeOf(value);
-    descriptors = Object.getOwnPropertyDescriptors(value);
-    keys = Reflect.ownKeys(value);
-  } catch {
-    return false;
-  }
-  if (keys.some((key) => typeof key !== 'string')) return false;
-  if (Array.isArray(value)) {
-    if (prototype !== Array.prototype || value.length > 10_000 || keys.length !== value.length + 1) return false;
-    const length = descriptors.length;
-    if (!length || !('value' in length) || length.value !== value.length) return false;
-    for (let index = 0; index < value.length; index += 1) {
-      const descriptor = descriptors[String(index)];
-      if (!descriptor || descriptor.enumerable !== true || !('value' in descriptor) ||
-          !isPlainDataTree(descriptor.value, budget, depth + 1)) return false;
-    }
-    return true;
-  }
-  if (prototype !== Object.prototype) return false;
-  return keys.every((key) => {
-    const descriptor = descriptors[key as string];
-    return Boolean(
-      descriptor && descriptor.enumerable === true && 'value' in descriptor &&
-      isPlainDataTree(descriptor.value, budget, depth + 1),
-    );
-  });
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
-    return JSON.stringify(value);
-  }
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .sort(compareText)
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
-      .join(',')}}`;
-  }
-  throw new TypeError('canonical_json_invalid');
-}
-
-function exactJson(left: unknown, right: unknown): boolean {
+function exactJson<Left, Right>(left: Left, right: Right): boolean {
   try {
     return canonicalJson(left) === canonicalJson(right);
   } catch {
@@ -386,23 +496,18 @@ function exactJson(left: unknown, right: unknown): boolean {
 }
 
 async function prefixedSha256(value: string): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(value),
-  ));
-  const result = `sha256:${bytesToHex(digest)}`;
-  digest.fill(0);
-  return result;
+  return `sha256:${await sha256Hex(value)}`;
 }
 
 function managementWorkerName(journal: InstallJournal): string | null {
   const matches = journal.plan.managementResources.filter(
     (resource) => resource.kind === 'management_worker',
   );
-  return matches.length === 1 && WORKER_NAME.test(matches[0].name) ? matches[0].name : null;
+  const match = matches.length === 1 ? matches.at(0) : undefined;
+  return match !== undefined && WORKER_NAME.test(match.name) ? match.name : null;
 }
 
-async function requireInstallAuthority(value: unknown): Promise<InstallAuthority> {
+async function requireInstallAuthority<Input>(value: Input): Promise<InstallAuthority> {
   if (!isPlainDataTree(value)) fail('install_authority_invalid', 'validate', 'not_sent');
   let journal: InstallJournal;
   try {
@@ -470,21 +575,16 @@ async function requireInstallAuthority(value: unknown): Promise<InstallAuthority
   });
 }
 
-function requireProviderSubdomain(
-  value: unknown,
+function requireProviderSubdomain<Input>(
+  value: Input,
   expectedAccountId: string,
-): { readonly accountId: string; readonly subdomain: string } {
-  if (!exactDataKeys(value, ['accountId', 'subdomain'])) {
+): ParsedProviderSubdomain {
+  if (!isPlainDataTree(value)) fail('origin_invalid', 'validate', 'not_sent');
+  const result = v.safeParse(providerSubdomainSchema, value);
+  if (!result.success || result.output.accountId !== expectedAccountId) {
     fail('origin_invalid', 'validate', 'not_sent');
   }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const accountId = descriptors.accountId.value as unknown;
-  const subdomain = descriptors.subdomain.value as unknown;
-  if (
-    accountId !== expectedAccountId || typeof accountId !== 'string' || !ACCOUNT_ID.test(accountId) ||
-    typeof subdomain !== 'string' || !HOST_LABEL.test(subdomain)
-  ) fail('origin_invalid', 'validate', 'not_sent');
-  return Object.freeze({ accountId, subdomain });
+  return Object.freeze(result.output);
 }
 
 /** The exact removal endpoint, for a readiness probe before the one-shot POST. */
@@ -528,12 +628,14 @@ function freshRequestId(generator: ((length: number) => Uint8Array) | undefined)
   return requestId;
 }
 
-function safeNow(value: unknown): number {
-  const now = value === undefined ? Date.now() : value;
-  if (!Number.isSafeInteger(now) || (now as number) < 0) {
+function safeNow<Input>(value: Input): number {
+  const result = v.safeParse(v.union([v.pipe(v.number(), v.safeInteger(), v.minValue(0)), v.undefined()]), value);
+  if (!result.success) {
     fail('invalid_input', 'validate', 'not_sent');
   }
-  return now as number;
+  const now = result.output === undefined ? Date.now() : result.output;
+  if (!Number.isSafeInteger(now) || now < 0) fail('invalid_input', 'validate', 'not_sent');
+  return now;
 }
 
 async function expectedReviewedAuthorityHash(authority: InstallAuthority): Promise<string> {
@@ -545,18 +647,17 @@ async function expectedReviewedAuthorityHash(authority: InstallAuthority): Promi
   }));
 }
 
-async function requireReviewedUninstallAuthority(
-  uninstallPlanValue: unknown,
-  approvalValue: unknown,
+async function requireReviewedUninstallAuthority<PlanInput, ApprovalInput>(
+  uninstallPlanValue: PlanInput,
+  approvalValue: ApprovalInput,
   authority: InstallAuthority,
   nowMs: number,
 ): Promise<ReviewedUninstallAuthority> {
-  if (!isPlainDataTree(approvalValue) || !exactDataKeys(approvalValue, [
-    'attemptId', 'authorizedTarget',
-  ]) || typeof approvalValue.attemptId !== 'string' || !ATTEMPT_ID.test(approvalValue.attemptId) ||
-    !exactJson(approvalValue.authorizedTarget, authority.journal.target) ||
-    authority.journal.approvalHistory.some((entry) => entry.attemptId === approvalValue.attemptId) ||
-    authority.journal.leaseAttemptIds.includes(approvalValue.attemptId)) {
+  if (!isPlainDataTree(approvalValue)) fail('install_authority_invalid', 'validate', 'not_sent');
+  const approvalResult = v.safeParse(approvalSchema, approvalValue);
+  if (!approvalResult.success || !exactJson(approvalResult.output.authorizedTarget, authority.journal.target) ||
+    authority.journal.approvalHistory.some((entry) => entry.attemptId === approvalResult.output.attemptId) ||
+    authority.journal.leaseAttemptIds.includes(approvalResult.output.attemptId)) {
     fail('install_authority_invalid', 'validate', 'not_sent');
   }
   let plan: StaticUninstallPlan;
@@ -586,13 +687,22 @@ async function requireReviewedUninstallAuthority(
   if (nowMs < plan.createdAt || nowMs >= plan.expiresAt || nowMs >= authority.journal.recoverUntil) {
     fail('request_expired', 'validate', 'not_sent');
   }
-  return Object.freeze({ plan, approvalAttemptId: approvalValue.attemptId });
+  return Object.freeze({ plan, approvalAttemptId: approvalResult.output.attemptId });
+}
+
+interface ReviewedClaimCommitment {
+  readonly schemaVersion: 1;
+  readonly approvalAttemptId: string;
+  readonly authorityHash: string;
+  readonly claim: PreparedCustomerUninstallClaim;
+  readonly uninstallPlanHash: string;
+  readonly uninstallPlanId: string;
 }
 
 function reviewedClaimCommitment(
   claim: PreparedCustomerUninstallClaim,
   review: Pick<ReviewedUninstallAuthority, 'approvalAttemptId' | 'plan'>,
-): Record<string, unknown> {
+): ReviewedClaimCommitment {
   return {
     schemaVersion: 1,
     approvalAttemptId: review.approvalAttemptId,
@@ -627,6 +737,28 @@ function locatorAuthority(
   });
 }
 
+function locatorAuthorityFromLocator(locator: CustomerUninstallLocator): CustomerUninstallLocatorAuthority {
+  return Object.freeze({
+    requestId: locator.requestId,
+    accountId: locator.accountId,
+    zoneId: locator.zoneId,
+    zoneName: locator.zoneName,
+    accountWorkersSubdomain: locator.accountWorkersSubdomain,
+    workerName: locator.workerName,
+    installationId: locator.installationId,
+    configurationHash: locator.configurationHash,
+    desiredHash: locator.desiredHash,
+    release: locator.release,
+    installBindingHash: locator.installBindingHash,
+    installConvergenceHash: locator.installConvergenceHash,
+    adminStateNamespaceId: locator.adminStateNamespaceId,
+    uninstallPlanId: locator.uninstallPlanId,
+    uninstallPlanHash: locator.uninstallPlanHash,
+    authorityHash: locator.authorityHash,
+    approvalAttemptId: locator.approvalAttemptId,
+  });
+}
+
 /**
  * Build a fresh exact claim and its credential-free recovery record. No
  * provider request, HMAC, nonce access, or OAuth token access occurs here.
@@ -634,15 +766,7 @@ function locatorAuthority(
 export async function prepareCustomerUninstallRequest(
   input: PrepareCustomerUninstallRequestInput,
 ): Promise<CustomerUninstallMutationPlan> {
-  if (!exactDataKeys(input, [
-    'installJournal', 'uninstallPlan', 'approval', 'accountWorkersSubdomain', 'nowMs', 'randomBytes',
-  ]) && !exactDataKeys(input, [
-    'installJournal', 'uninstallPlan', 'approval', 'accountWorkersSubdomain', 'nowMs',
-  ]) && !exactDataKeys(input, [
-    'installJournal', 'uninstallPlan', 'approval', 'accountWorkersSubdomain', 'randomBytes',
-  ]) && !exactDataKeys(input, [
-    'installJournal', 'uninstallPlan', 'approval', 'accountWorkersSubdomain',
-  ])) {
+  if (!hasOnlyEnumerableDataProperties(input) || !v.safeParse(prepareInputSchema, input).success) {
     fail('invalid_input', 'validate', 'not_sent');
   }
   const authority = await requireInstallAuthority(input.installJournal);
@@ -713,102 +837,36 @@ export async function prepareCustomerUninstallRequest(
   });
 }
 
-function parseClaim(value: unknown): PreparedCustomerUninstallClaim | null {
-  if (!exactDataKeys(value, [
-    'schemaVersion', 'requestId', 'issuedAt', 'expiresAt', 'target', 'release', 'expected',
-  ])) return null;
-  if (
-    value.schemaVersion !== 1 || typeof value.requestId !== 'string' || !REQUEST_ID.test(value.requestId) ||
-    !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
-    (value.expiresAt as number) <= (value.issuedAt as number) ||
-    (value.expiresAt as number) - (value.issuedAt as number) > REQUEST_LIFETIME_SECONDS ||
-    !exactDataKeys(value.target, ['accountId', 'zoneId', 'zoneName']) ||
-    !exactDataKeys(value.release, ['id', 'artifactSha256']) ||
-    !exactDataKeys(value.expected, ['configurationHash', 'installationId', 'desiredHash', 'readyReceipt'])
-  ) return null;
-  return value as unknown as PreparedCustomerUninstallClaim;
+function parseClaim<Input>(value: Input): PreparedCustomerUninstallClaim | null {
+  if (!isPlainDataTree(value)) return null;
+  const result = v.safeParse(claimSchema, value);
+  return result.success ? deepFreezePlainData(result.output) : null;
 }
 
-export function parseCustomerUninstallSemanticRecord(
-  value: unknown,
+export function parseCustomerUninstallSemanticRecord<Input>(
+  value: Input,
 ): CustomerUninstallSemanticRecord | null {
-  if (!exactDataKeys(value, [
-    'schemaVersion', 'kind', 'accountId', 'zoneId', 'zoneName', 'accountWorkersSubdomain',
-    'workerName', 'requestId', 'issuedAt', 'expiresAt', 'installationId', 'configurationHash',
-    'desiredHash', 'release', 'rootReceiptRevision', 'rootReceiptChecksum', 'installBindingHash',
-    'installConvergenceHash', 'adminStateNamespaceId', 'uninstallPlanId', 'uninstallPlanHash',
-    'authorityHash', 'approvalAttemptId', 'claimHash',
-  ])) return null;
-  if (
-    value.schemaVersion !== 1 || value.kind !== 'customer_uninstall_submit' ||
-    typeof value.accountId !== 'string' || !ACCOUNT_ID.test(value.accountId) ||
-    typeof value.zoneId !== 'string' || !ACCOUNT_ID.test(value.zoneId) ||
-    typeof value.zoneName !== 'string' || typeof value.accountWorkersSubdomain !== 'string' ||
-    !HOST_LABEL.test(value.accountWorkersSubdomain) || typeof value.workerName !== 'string' ||
-    !WORKER_NAME.test(value.workerName) || typeof value.requestId !== 'string' || !REQUEST_ID.test(value.requestId) ||
-    !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
-    (value.expiresAt as number) <= (value.issuedAt as number) ||
-    (value.expiresAt as number) - (value.issuedAt as number) > REQUEST_LIFETIME_SECONDS ||
-    typeof value.installationId !== 'string' || !INSTALLATION_ID.test(value.installationId) ||
-    typeof value.configurationHash !== 'string' || !HASH.test(value.configurationHash) ||
-    typeof value.desiredHash !== 'string' || !HASH.test(value.desiredHash) ||
-    !exactDataKeys(value.release, ['id', 'artifactSha256']) ||
-    typeof value.release.id !== 'string' || !RELEASE.test(value.release.id) ||
-    typeof value.release.artifactSha256 !== 'string' || !HASH.test(value.release.artifactSha256) ||
-    !Number.isSafeInteger(value.rootReceiptRevision) || (value.rootReceiptRevision as number) < 0 ||
-    typeof value.rootReceiptChecksum !== 'string' || !HASH.test(value.rootReceiptChecksum) ||
-    typeof value.installBindingHash !== 'string' || !HASH.test(value.installBindingHash) ||
-    typeof value.installConvergenceHash !== 'string' || !HASH.test(value.installConvergenceHash) ||
-    typeof value.adminStateNamespaceId !== 'string' || !ACCOUNT_ID.test(value.adminStateNamespaceId) ||
-    typeof value.uninstallPlanId !== 'string' || !/^uninstall-plan-[a-f0-9]{24}$/u.test(value.uninstallPlanId) ||
-    typeof value.uninstallPlanHash !== 'string' || !HASH.test(value.uninstallPlanHash) ||
-    typeof value.authorityHash !== 'string' || !HASH.test(value.authorityHash) ||
-    typeof value.approvalAttemptId !== 'string' || !ATTEMPT_ID.test(value.approvalAttemptId) ||
-    typeof value.claimHash !== 'string' || !HASH.test(value.claimHash)
-  ) return null;
-  return Object.freeze({
-    schemaVersion: 1,
-    kind: 'customer_uninstall_submit',
-    accountId: value.accountId,
-    zoneId: value.zoneId,
-    zoneName: value.zoneName,
-    accountWorkersSubdomain: value.accountWorkersSubdomain,
-    workerName: value.workerName,
-    requestId: value.requestId,
-    issuedAt: value.issuedAt,
-    expiresAt: value.expiresAt,
-    installationId: value.installationId,
-    configurationHash: value.configurationHash,
-    desiredHash: value.desiredHash,
-    release: Object.freeze({
-      id: value.release.id,
-      artifactSha256: value.release.artifactSha256,
-    }),
-    rootReceiptRevision: value.rootReceiptRevision,
-    rootReceiptChecksum: value.rootReceiptChecksum,
-    installBindingHash: value.installBindingHash,
-    installConvergenceHash: value.installConvergenceHash,
-    adminStateNamespaceId: value.adminStateNamespaceId,
-    uninstallPlanId: value.uninstallPlanId,
-    uninstallPlanHash: value.uninstallPlanHash,
-    authorityHash: value.authorityHash,
-    approvalAttemptId: value.approvalAttemptId,
-    claimHash: value.claimHash,
-  } as CustomerUninstallSemanticRecord);
+  if (!isPlainDataTree(value)) return null;
+  const result = v.safeParse(semanticRecordSchema, value);
+  return result.success ? deepFreezePlainData(result.output) : null;
 }
 
-async function requireMutation(
-  value: unknown,
+async function requireMutation<Input>(
+  value: Input,
   authority: InstallAuthority,
   provider: { readonly subdomain: string },
   review: ReviewedUninstallAuthority,
 ): Promise<CustomerUninstallMutationPlan> {
-  if (!isPlainDataTree(value) || !exactDataKeys(value, ['ephemeral', 'semantic']) ||
-      !exactDataKeys(value.ephemeral, ['claim'])) {
+  if (!isPlainDataTree(value)) {
     fail('invalid_input', 'validate', 'not_sent');
   }
-  const claim = parseClaim(value.ephemeral.claim);
-  const semantic = parseCustomerUninstallSemanticRecord(value.semantic);
+  const mutationResult = v.safeParse(v.strictObject({
+    ephemeral: v.strictObject({ claim: claimSchema }),
+    semantic: semanticRecordSchema,
+  }), value);
+  if (!mutationResult.success) fail('invalid_input', 'validate', 'not_sent');
+  const claim = parseClaim(mutationResult.output.ephemeral.claim);
+  const semantic = parseCustomerUninstallSemanticRecord(mutationResult.output.semantic);
   if (!claim || !semantic) fail('invalid_input', 'validate', 'not_sent');
   const expectedClaim: PreparedCustomerUninstallClaim = {
     schemaVersion: 1,
@@ -884,11 +942,13 @@ function decodeCanonicalBase64(value: string, variant: 'base64' | 'base64url'): 
   return bytes;
 }
 
-function decodeDerivationKey(value: unknown): Uint8Array<ArrayBuffer> {
-  if (typeof value !== 'string') throw new CustomerUninstallNonceDerivationError();
+function decodeDerivationKey<Input>(value: Input): Uint8Array<ArrayBuffer> {
+  const result = v.safeParse(v.string(), value);
+  if (!result.success) throw new CustomerUninstallNonceDerivationError();
+  const encoded = result.output;
   let bytes: Uint8Array<ArrayBuffer>;
-  if (STANDARD_BASE64_KEY.test(value)) bytes = decodeCanonicalBase64(value, 'base64');
-  else if (BASE64URL_KEY.test(value)) bytes = decodeCanonicalBase64(value, 'base64url');
+  if (STANDARD_BASE64_KEY.test(encoded)) bytes = decodeCanonicalBase64(encoded, 'base64');
+  else if (BASE64URL_KEY.test(encoded)) bytes = decodeCanonicalBase64(encoded, 'base64url');
   else throw new CustomerUninstallNonceDerivationError();
   if (bytes.every((byte) => byte === 0)) {
     bytes.fill(0);
@@ -901,9 +961,9 @@ function decodeDerivationKey(value: unknown): Uint8Array<ArrayBuffer> {
  * Deterministically derive the cleanup-only HMAC nonce from a separate root
  * key and the complete namespace-bound install authority. Nothing is stored.
  */
-export async function deriveCustomerUninstallNonce(
-  encodedKey: unknown,
-  installJournal: unknown,
+export async function deriveCustomerUninstallNonce<KeyInput, JournalInput>(
+  encodedKey: KeyInput,
+  installJournal: JournalInput,
 ): Promise<string> {
   let authority: InstallAuthority;
   try {
@@ -946,13 +1006,14 @@ export async function deriveCustomerUninstallNonce(
   }
 }
 
-function requireNonce(value: unknown): Uint8Array<ArrayBuffer> {
-  if (typeof value !== 'string' || !NONCE.test(value)) {
+function requireNonce<Input>(value: Input): Uint8Array<ArrayBuffer> {
+  const result = v.safeParse(v.pipe(v.string(), v.regex(NONCE)), value);
+  if (!result.success) {
     fail('invalid_input', 'validate', 'not_sent');
   }
   let bytes: Uint8Array<ArrayBuffer>;
   try {
-    bytes = decodeCanonicalBase64(value, 'base64url');
+    bytes = decodeCanonicalBase64(result.output, 'base64url');
   } catch {
     fail('invalid_input', 'validate', 'not_sent');
   }
@@ -963,12 +1024,10 @@ function requireNonce(value: unknown): Uint8Array<ArrayBuffer> {
   return bytes;
 }
 
-function requireAccessToken(value: unknown): string {
-  if (
-    typeof value !== 'string' || value.length === 0 || value.length > MAX_ACCESS_TOKEN_LENGTH ||
-    value.trim() !== value || CONTROL_CHARACTER.test(value)
-  ) fail('invalid_input', 'validate', 'not_sent');
-  return value;
+function requireAccessToken<Input>(value: Input): string {
+  const result = v.safeParse(v.pipe(v.string(), v.check(validAccessToken)), value);
+  if (!result.success) fail('invalid_input', 'validate', 'not_sent');
+  return result.output;
 }
 
 async function signRawBody(rawBody: string, nonceBytes: Uint8Array): Promise<string> {
@@ -998,78 +1057,60 @@ async function signRawBody(rawBody: string, nonceBytes: Uint8Array): Promise<str
   return fail('sign_failed', 'sign', 'not_sent');
 }
 
-async function parseRemovedReceipt(
-  value: unknown,
+async function parseRemovedReceipt<Input>(
+  value: Input,
   root: ReadyInstallationReceipt,
 ): Promise<RemovedInstallationReceipt | null> {
-  if (!exactDataKeys(value, [
-    'schemaVersion', 'manager', 'installationId', 'state', 'revision', 'release',
-    'target', 'accessPolicy', 'desiredHash', 'resources', 'pending', 'checksum',
-  ])) return null;
+  if (!isPlainDataTree(value)) return null;
+  const result = v.safeParse(removedReceiptSchema, value);
+  if (!result.success) return null;
+  const receipt = result.output;
   const expectedRevision = root.revision + (root.resources.length * 2) + 1;
   if (
-    !Number.isSafeInteger(expectedRevision) || value.schemaVersion !== 1 ||
-    value.manager !== 'ankka-mcp-gateway' || value.installationId !== root.installationId ||
-    value.state !== 'removed' || value.revision !== expectedRevision || value.release !== root.release ||
-    !exactJson(value.target, root.target) || !exactJson(value.accessPolicy, root.accessPolicy) ||
-    value.desiredHash !== root.desiredHash || !Array.isArray(value.resources) || value.resources.length !== 0 ||
-    value.pending !== null || typeof value.checksum !== 'string' || !HASH.test(value.checksum)
+    !Number.isSafeInteger(expectedRevision) || receipt.installationId !== root.installationId ||
+    receipt.revision !== expectedRevision || receipt.release !== root.release ||
+    !exactJson(receipt.target, root.target) || !exactJson(receipt.accessPolicy, root.accessPolicy) ||
+    receipt.desiredHash !== root.desiredHash
   ) return null;
-  const unsigned = {
-    schemaVersion: 1 as const,
-    manager: 'ankka-mcp-gateway' as const,
+  const unsigned: Omit<RemovedInstallationReceipt, 'checksum'> = {
+    schemaVersion: 1,
+    manager: 'ankka-mcp-gateway',
     installationId: root.installationId,
-    state: 'removed' as const,
+    state: 'removed',
     revision: expectedRevision,
     release: root.release,
-    target: value.target,
-    accessPolicy: value.accessPolicy,
+    target: root.target,
+    accessPolicy: root.accessPolicy,
     desiredHash: root.desiredHash,
     resources: [],
     pending: null,
   };
-  if (await prefixedSha256(canonicalJson(unsigned)) !== value.checksum) return null;
-  return Object.freeze({
-    ...unsigned,
-    manager: 'ankka-mcp-gateway' as const,
-    state: 'removed' as const,
-    target: Object.freeze({ ...root.target }),
-    accessPolicy: Object.freeze({ ...root.accessPolicy }),
-    resources: Object.freeze([]) as readonly [],
-    checksum: value.checksum,
-  });
+  if (await prefixedSha256(canonicalJson(unsigned)) !== receipt.checksum) return null;
+  return deepFreezePlainData({ ...unsigned, checksum: receipt.checksum });
 }
 
-async function parseRemovedResult(
-  value: unknown,
+async function parseRemovedResult<Input>(
+  value: Input,
   mutation: CustomerUninstallMutationPlan,
 ): Promise<CustomerUninstallRemovedLocator | null> {
   const claim = mutation.ephemeral.claim;
-  if (!exactDataKeys(value, [
-    'schemaVersion', 'status', 'installationId', 'configurationHash', 'uninstallId',
-    'release', 'receipt', 'uninstallInvoked', 'resumed',
-  ])) return null;
-  if (
-    value.schemaVersion !== 1 || value.status !== 'removed' ||
-    value.installationId !== claim.expected.installationId ||
-    value.configurationHash !== claim.expected.configurationHash ||
-    typeof value.uninstallId !== 'string' || !UNINSTALL_ID.test(value.uninstallId) ||
-    !exactJson(value.release, claim.release) ||
-    !exactDataKeys(value.receipt, ['revision', 'resourceCount', 'evidence']) ||
-    value.receipt.resourceCount !== 0 || typeof value.uninstallInvoked !== 'boolean' ||
-    typeof value.resumed !== 'boolean' ||
-    (value.uninstallInvoked === false && value.resumed === false)
-  ) return null;
-  const evidence = await parseRemovedReceipt(value.receipt.evidence, claim.expected.readyReceipt);
-  if (!evidence || value.receipt.revision !== evidence.revision) return null;
+  if (!isPlainDataTree(value)) return null;
+  const result = v.safeParse(removedResultSchema, value);
+  if (!result.success) return null;
+  const removed = result.output;
+  if (removed.installationId !== claim.expected.installationId ||
+      removed.configurationHash !== claim.expected.configurationHash || !exactJson(removed.release, claim.release) ||
+      (!removed.uninstallInvoked && !removed.resumed)) return null;
+  const evidence = await parseRemovedReceipt(removed.receipt.evidence, claim.expected.readyReceipt);
+  if (!evidence || removed.receipt.revision !== evidence.revision) return null;
   return Object.freeze({
     schemaVersion: 1,
     status: 'removed',
     ...locatorAuthority(mutation.semantic),
-    uninstallId: value.uninstallId,
+    uninstallId: removed.uninstallId,
     receipt: Object.freeze({ revision: evidence.revision, resourceCount: 0, evidence }),
-    uninstallInvoked: value.uninstallInvoked,
-    resumed: value.resumed,
+    uninstallInvoked: removed.uninstallInvoked,
+    resumed: removed.resumed,
   });
 }
 
@@ -1081,19 +1122,17 @@ const RECOVERY_RETRYABILITY = Object.freeze({
   uninstall_blocked: true,
 } satisfies Readonly<Record<CustomerUninstallRecoveryReason, boolean>>);
 
-function parseRecoveryResult(
-  value: unknown,
+function parseRecoveryResult<Input>(
+  value: Input,
   status: number,
   semantic: CustomerUninstallSemanticRecord,
 ): CustomerUninstallRecoveryLocator | null {
-  if (
-    status !== 409 || !exactDataKeys(value, ['schemaVersion', 'error', 'retryable']) ||
-    value.schemaVersion !== 1 || typeof value.error !== 'string' ||
-    !Object.hasOwn(RECOVERY_RETRYABILITY, value.error)
-  ) return null;
-  const reason = value.error as CustomerUninstallRecoveryReason;
+  if (status !== 409 || !isPlainDataTree(value)) return null;
+  const result = v.safeParse(recoveryResultSchema, value);
+  if (!result.success) return null;
+  const reason = result.output.error;
   const retryable = RECOVERY_RETRYABILITY[reason];
-  if (value.retryable !== retryable) return null;
+  if (result.output.retryable !== retryable) return null;
   return Object.freeze({
     schemaVersion: 1,
     status: 'recovery_required',
@@ -1148,12 +1187,15 @@ async function semanticMatchesInstallAuthority(
  * record and exact completed install authority. This never needs the ephemeral
  * claim, OAuth grant, uninstall nonce, request body, or provider response.
  */
-export async function parseCustomerUninstallLocator(
-  value: unknown,
-  semanticInput: unknown,
-  installJournal: unknown,
+export async function parseCustomerUninstallLocator<ValueInput, SemanticInput, JournalInput>(
+  value: ValueInput,
+  semanticInput: SemanticInput,
+  installJournal: JournalInput,
 ): Promise<CustomerUninstallLocator | null> {
-  if (!isPlainDataTree(value) || !isRecord(value)) return null;
+  if (!isPlainDataTree(value)) return null;
+  const locatorResult = v.safeParse(customerUninstallLocatorSchema, value);
+  if (!locatorResult.success) return null;
+  const locator = locatorResult.output;
   const semantic = parseCustomerUninstallSemanticRecord(semanticInput);
   if (!semantic) return null;
   let authority: InstallAuthority;
@@ -1163,42 +1205,25 @@ export async function parseCustomerUninstallLocator(
     return null;
   }
   if (!await semanticMatchesInstallAuthority(semantic, authority)) return null;
-  const commonKeys = [
-    'requestId', 'accountId', 'zoneId', 'zoneName', 'accountWorkersSubdomain', 'workerName',
-    'installationId', 'configurationHash', 'desiredHash', 'release', 'installBindingHash',
-    'installConvergenceHash', 'adminStateNamespaceId', 'uninstallPlanId', 'uninstallPlanHash',
-    'authorityHash', 'approvalAttemptId',
-  ] as const;
-  if (!exactDataKeys(value, ['schemaVersion', 'status', ...commonKeys,
-    ...(value.status === 'removed'
-      ? ['uninstallId', 'receipt', 'uninstallInvoked', 'resumed']
-      : ['reason', 'freshGrantRequired']),
-  ])) return null;
   const expectedAuthority = locatorAuthority(semantic);
-  if (!Object.entries(expectedAuthority).every(([key, expected]) => exactJson(value[key], expected))) return null;
-  if (value.schemaVersion !== 1) return null;
-  if (value.status === 'removed') {
-    if (typeof value.uninstallId !== 'string' || !UNINSTALL_ID.test(value.uninstallId) ||
-      !exactDataKeys(value.receipt, ['revision', 'resourceCount', 'evidence']) ||
-      value.receipt.resourceCount !== 0 || typeof value.uninstallInvoked !== 'boolean' ||
-      typeof value.resumed !== 'boolean' || (value.uninstallInvoked === false && value.resumed === false)) return null;
-    const evidence = await parseRemovedReceipt(value.receipt.evidence, authority.readyReceipt);
-    if (!evidence || value.receipt.revision !== evidence.revision) return null;
+  if (!exactJson(locatorAuthorityFromLocator(locator), expectedAuthority)) return null;
+  if (locator.status === 'removed') {
+    if (!locator.uninstallInvoked && !locator.resumed) return null;
+    const evidence = await parseRemovedReceipt(locator.receipt.evidence, authority.readyReceipt);
+    if (!evidence || locator.receipt.revision !== evidence.revision) return null;
     return Object.freeze({
       schemaVersion: 1,
       status: 'removed',
       ...expectedAuthority,
-      uninstallId: value.uninstallId,
+      uninstallId: locator.uninstallId,
       receipt: Object.freeze({ revision: evidence.revision, resourceCount: 0, evidence }),
-      uninstallInvoked: value.uninstallInvoked,
-      resumed: value.resumed,
+      uninstallInvoked: locator.uninstallInvoked,
+      resumed: locator.resumed,
     });
   }
-  if (value.status !== 'recovery_required' || typeof value.reason !== 'string' ||
-    !Object.hasOwn(RECOVERY_RETRYABILITY, value.reason)) return null;
-  const reason = value.reason as CustomerUninstallRecoveryReason;
+  const reason = locator.reason;
   const freshGrantRequired = RECOVERY_RETRYABILITY[reason];
-  if (value.freshGrantRequired !== freshGrantRequired) return null;
+  if (locator.freshGrantRequired !== freshGrantRequired) return null;
   return Object.freeze({
     schemaVersion: 1,
     status: 'recovery_required',
@@ -1208,7 +1233,7 @@ export async function parseCustomerUninstallLocator(
   });
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+async function readBoundedJson(response: Response): Promise<BoundaryValue> {
   const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
   if (contentType !== 'application/json') fail('response_invalid', 'response', 'unknown');
   const declared = response.headers.get('content-length');
@@ -1246,7 +1271,7 @@ async function readBoundedJson(response: Response): Promise<unknown> {
       offset += chunk.byteLength;
     }
     try {
-      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
+      return v.parse(boundaryValueSchema, JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
     } catch {
       fail('response_invalid', 'response', 'unknown');
     } finally {
@@ -1284,13 +1309,19 @@ async function parseUninstallResponse(
  * Submit exactly one cleanup request. There is no retry loop, persistence hook,
  * logger, runtime fetch default, environment read, or Authorization header.
  */
-export async function submitCustomerUninstallRequest(
-  input: SubmitCustomerUninstallRequestInput,
+export async function submitCustomerUninstallRequest<
+  MutationCandidate,
+  AccountWorkersSubdomainCandidate,
+>(
+  input: Omit<
+    SubmitCustomerUninstallRequestInput,
+    'mutation' | 'accountWorkersSubdomain'
+  > & {
+    readonly mutation: MutationCandidate;
+    readonly accountWorkersSubdomain: AccountWorkersSubdomainCandidate;
+  },
 ): Promise<CustomerUninstallLocator> {
-  if (!exactDataKeys(input, [
-    'installJournal', 'uninstallPlan', 'approval', 'mutation', 'accountWorkersSubdomain',
-    'uninstallNonce', 'cloudflareAccessToken', 'transport', 'nowMs',
-  ]) || typeof input.transport !== 'function') {
+  if (!hasOnlyEnumerableDataProperties(input) || !v.safeParse(submitInputSchema, input).success) {
     fail('invalid_input', 'validate', 'not_sent');
   }
   const authority = await requireInstallAuthority(input.installJournal);
@@ -1368,7 +1399,7 @@ export async function submitCustomerUninstallRequest(
   return fail('outcome_unknown', 'submit', 'unknown');
 }
 
-export function canonicalCustomerUninstallJson(value: unknown): string {
+export function canonicalCustomerUninstallJson<Value>(value: Value): string {
   return canonicalJson(value);
 }
 

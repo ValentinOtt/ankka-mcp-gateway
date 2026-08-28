@@ -1,3 +1,12 @@
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+  type JsonValue,
+} from './json.ts';
+
 const SCHEMA_VERSION = 1;
 const MANAGER = 'ankka-mcp-gateway';
 const HASH_PREFIX = 'sha256:';
@@ -6,7 +15,10 @@ const SAFE_OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const RELEASE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,79}$/;
 const HASH = /^sha256:[0-9a-f]{64}$/;
 const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-const RESOURCE_KINDS = new Set([
+const stringSchema = v.string();
+const numberSchema = v.number();
+const booleanSchema = v.boolean();
+const resourceKindSchema = v.picklist([
   'mcp_server',
   'source_access_application',
   'source_access_policy',
@@ -15,14 +27,87 @@ const RESOURCE_KINDS = new Set([
   'portal_access_policy',
   'dns_record',
 ]);
-const ACCESS_APPLICATION_KINDS = new Set([
+const receiptStateSchema = v.picklist(['installing', 'ready', 'uninstalling', 'removed']);
+const operationTypeSchema = v.picklist(['apply', 'uninstall']);
+const actionSchema = v.picklist(['create', 'update', 'delete']);
+
+export type ReceiptResourceKind = v.InferOutput<typeof resourceKindSchema>;
+export type ReceiptState = v.InferOutput<typeof receiptStateSchema>;
+export type ReceiptOperationType = v.InferOutput<typeof operationTypeSchema>;
+export type ReceiptAction = v.InferOutput<typeof actionSchema>;
+
+export type ReceiptTarget = {
+  readonly accountId: string;
+  readonly hostname: string;
+  readonly zoneId: string;
+  readonly zoneName: string;
+};
+
+export type ReceiptAccessPolicy = {
+  readonly identitiesHash: string;
+  readonly identityCount: number;
+  readonly identityType: string;
+};
+
+export type ReceiptProviderLocator = {
+  readonly id: string;
+  readonly parentId?: string;
+};
+
+export type ReceiptResource = {
+  readonly desiredHash: string;
+  readonly identityHash?: string;
+  readonly key: string;
+  readonly kind: ReceiptResourceKind;
+  readonly marker?: string;
+  readonly provider: ReceiptProviderLocator;
+};
+
+export type ReceiptPendingAction = {
+  readonly action: ReceiptAction;
+  readonly expectedDesiredHash: string;
+  readonly key: string;
+  readonly kind: ReceiptResourceKind;
+  readonly operationId: string;
+  readonly planId: string;
+  readonly pruneApprovalId?: string;
+  readonly requestHash: string;
+  readonly type: ReceiptOperationType;
+};
+
+type ReceiptUnsigned = {
+  readonly accessPolicy: ReceiptAccessPolicy;
+  readonly desiredHash: string;
+  readonly installationId: string;
+  readonly manager: typeof MANAGER;
+  readonly pending: ReceiptPendingAction | null;
+  readonly release: string;
+  readonly resources: readonly ReceiptResource[];
+  readonly revision: number;
+  readonly schemaVersion: typeof SCHEMA_VERSION;
+  readonly state: ReceiptState;
+  readonly target: ReceiptTarget;
+};
+
+type ReceiptCandidate = ReceiptUnsigned & { readonly checksum?: string };
+
+export type InstallationReceipt = ReceiptUnsigned & { readonly checksum: string };
+
+type CommitResult = {
+  identityHash?: string;
+  marker?: string;
+  provider?: ReceiptProviderLocator;
+};
+
+export type ReceiptValidationOptions = {
+  readonly expectedTarget?: BoundaryValue;
+};
+
+const ACCESS_APPLICATION_KINDS = new Set<ReceiptResourceKind>([
   'source_access_application',
   'portal_access_application',
 ]);
-const RECEIPT_STATES = new Set(['installing', 'ready', 'uninstalling', 'removed']);
-const OPERATION_TYPES = new Set(['apply', 'uninstall']);
-const ACTIONS = new Set(['create', 'update', 'delete']);
-const RESOURCE_ORDER = new Map([
+const RESOURCE_ORDER = new Map<ReceiptResourceKind, number>([
   ['mcp_server', 0],
   ['source_access_application', 1],
   ['source_access_policy', 2],
@@ -39,7 +124,9 @@ const PRIVATE_KEY_VALUE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 const JWT_VALUE = /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/;
 
 export class ReceiptValidationError extends TypeError {
-  constructor(errors) {
+  readonly errors: readonly string[];
+
+  constructor(errors: readonly string[]) {
     super(`Invalid installation receipt:\n- ${errors.join('\n- ')}`);
     this.name = 'ReceiptValidationError';
     this.errors = [...errors];
@@ -47,8 +134,8 @@ export class ReceiptValidationError extends TypeError {
 }
 
 /** Return the compact marker written to Cloudflare resources that support it. */
-export function ownershipMarker(installationId, key) {
-  const errors = [];
+export function ownershipMarker(installationId: string, key: string): string {
+  const errors: string[] = [];
   validateResourceKey(installationId, 'installationId', errors);
   validateResourceKey(key, 'key', errors);
   if (errors.length > 0) throw new ReceiptValidationError(errors);
@@ -59,7 +146,7 @@ export function ownershipMarker(installationId, key) {
  * Compute the checksum of a receipt's canonical, checksum-free representation.
  * Object key order and resource array order do not affect this value.
  */
-export async function receiptChecksum(receipt) {
+export async function receiptChecksum(receipt: BoundaryValue): Promise<string> {
   const normalized = normalizeReceipt(receipt, { checksumRequired: false });
   const { checksum: _checksum, ...unsigned } = normalized;
   return hashCanonical(unsigned);
@@ -69,8 +156,10 @@ export async function receiptChecksum(receipt) {
  * Allocate a non-secret, customer-owned installation receipt from a reviewed
  * plan. The caller persists the returned value through an injected store.
  */
-export async function createInstallationReceipt(input = {}) {
-  const errors = [];
+export async function createInstallationReceipt(
+  input: BoundaryValue = {},
+): Promise<InstallationReceipt> {
+  const errors: string[] = [];
   if (!isObject(input)) throw new ReceiptValidationError(['input must be an object']);
   rejectUnknownKeys(input, 'input', ['plan', 'target', 'accessPolicy', 'resources'], errors);
   const { plan, target, accessPolicy, resources = [] } = input;
@@ -100,7 +189,10 @@ export async function createInstallationReceipt(input = {}) {
  * Advance receipt-level desired metadata after a newly approved plan. Existing
  * provider ownership remains untouched and the target cannot be retargeted.
  */
-export async function updateInstallationReceipt(receipt, input = {}) {
+export async function updateInstallationReceipt(
+  receipt: BoundaryValue,
+  input: BoundaryValue = {},
+): Promise<InstallationReceipt> {
   const current = await validateInstallationReceipt(receipt);
   if (current.state === 'removed') {
     throw new ReceiptValidationError(['removed receipts cannot be updated']);
@@ -109,7 +201,7 @@ export async function updateInstallationReceipt(receipt, input = {}) {
     throw new ReceiptValidationError(['a receipt with a pending action cannot be updated']);
   }
   if (!isObject(input)) throw new ReceiptValidationError(['input must be an object']);
-  const inputErrors = [];
+  const inputErrors: string[] = [];
   rejectUnknownKeys(input, 'input', ['plan', 'target', 'accessPolicy'], inputErrors);
   if (inputErrors.length > 0) throw new ReceiptValidationError(inputErrors);
   const { plan, target, accessPolicy } = input;
@@ -125,10 +217,10 @@ export async function updateInstallationReceipt(receipt, input = {}) {
   }
 
   const nextAccessPolicy = accessPolicy ?? inferAccessPolicy(plan);
-  const errors = [];
+  const errors: string[] = [];
   const normalizedAccessPolicy = normalizeAccessPolicy(nextAccessPolicy, 'accessPolicy', errors);
   if (errors.length > 0) throw new ReceiptValidationError(unique(errors));
-  if (typeof plan.release !== 'string' || !RELEASE.test(plan.release)) {
+  if (!isString(plan.release) || !RELEASE.test(plan.release)) {
     errors.push('plan.release must be a safe identifier of at most 80 characters');
   }
   validateHash(plan.desiredHash, 'plan.desiredHash', errors);
@@ -152,14 +244,19 @@ export async function updateInstallationReceipt(receipt, input = {}) {
 }
 
 /** Validate, checksum-verify, normalize, and copy an installation receipt. */
-export async function validateInstallationReceipt(receipt, options = {}) {
-  const optionErrors = [];
+export async function validateInstallationReceipt(
+  receipt: BoundaryValue,
+  options: ReceiptValidationOptions = {},
+): Promise<InstallationReceipt> {
+  const optionErrors: string[] = [];
   if (!isObject(options)) {
     throw new ReceiptValidationError(['options must be an object']);
   }
   rejectUnknownKeys(options, 'options', ['expectedTarget'], optionErrors);
   if (optionErrors.length > 0) throw new ReceiptValidationError(optionErrors);
-  const normalized = normalizeReceipt(receipt, { checksumRequired: true });
+  const normalized = requireSealedReceipt(
+    normalizeReceipt(receipt, { checksumRequired: true }),
+  );
   const expectedChecksum = await receiptChecksum(normalized);
   if (normalized.checksum !== expectedChecksum) {
     throw new ReceiptValidationError(['checksum does not match the receipt contents']);
@@ -178,7 +275,10 @@ export async function validateInstallationReceipt(receipt, options = {}) {
 }
 
 /** Record one exact mutation intent before any remote write occurs. */
-export async function beginReceiptAction(receipt, intent) {
+export async function beginReceiptAction(
+  receipt: BoundaryValue,
+  intent: BoundaryValue,
+): Promise<InstallationReceipt> {
   const current = await validateInstallationReceipt(receipt);
   if (current.state === 'removed') {
     throw new ReceiptValidationError(['removed receipts cannot begin new actions']);
@@ -203,7 +303,7 @@ export async function beginReceiptAction(receipt, intent) {
   if (
     pending.action === 'delete' &&
     existingIndex !== -1 &&
-    current.resources[existingIndex].desiredHash !== pending.expectedDesiredHash
+    current.resources.at(existingIndex)?.desiredHash !== pending.expectedDesiredHash
   ) {
     throw new ReceiptValidationError([
       'delete action expectedDesiredHash does not match the owned receipt resource',
@@ -222,7 +322,10 @@ export async function beginReceiptAction(receipt, intent) {
  * Commit the currently journaled action. Create/update upsert the exact owned
  * resource; delete removes it. No mutation can be committed without an intent.
  */
-export async function commitReceiptAction(receipt, result = {}) {
+export async function commitReceiptAction(
+  receipt: BoundaryValue,
+  result: BoundaryValue = {},
+): Promise<InstallationReceipt> {
   const current = await validateInstallationReceipt(receipt);
   if (current.pending === null) {
     throw new ReceiptValidationError(['there is no pending receipt action to commit']);
@@ -241,21 +344,26 @@ export async function commitReceiptAction(receipt, result = {}) {
     if (existingIndex !== -1) {
       throw new ReceiptValidationError(['pending create already has an owned receipt resource']);
     }
-    resources.push({
+    if (!normalizedResult.provider) {
+      throw new ReceiptValidationError(['create commit requires a provider locator']);
+    }
+    let resource: ReceiptResource = {
       kind: pending.kind,
       key: pending.key,
       provider: normalizedResult.provider,
       desiredHash: pending.expectedDesiredHash,
-      ...(normalizedResult.marker ? { marker: normalizedResult.marker } : {}),
-      ...(normalizedResult.identityHash
-        ? { identityHash: normalizedResult.identityHash }
-        : {}),
-    });
+    };
+    if (normalizedResult.marker) resource = { ...resource, marker: normalizedResult.marker };
+    if (normalizedResult.identityHash) {
+      resource = { ...resource, identityHash: normalizedResult.identityHash };
+    }
+    resources.push(resource);
   } else {
     if (existingIndex === -1) {
       throw new ReceiptValidationError(['pending update no longer has an owned receipt resource']);
     }
-    const existing = resources[existingIndex];
+    const existing = resources.at(existingIndex);
+    if (!existing) throw new Error('Receipt update resource invariant failed');
     if (
       normalizedResult.provider &&
       providerIdentity(pending.kind, normalizedResult.provider) !==
@@ -263,14 +371,17 @@ export async function commitReceiptAction(receipt, result = {}) {
     ) {
       throw new ReceiptValidationError(['an update cannot change the owned provider locator']);
     }
-    resources[existingIndex] = {
+    let updated: ReceiptResource = {
       ...existing,
       desiredHash: pending.expectedDesiredHash,
-      ...(normalizedResult.marker !== undefined ? { marker: normalizedResult.marker } : {}),
-      ...(normalizedResult.identityHash !== undefined
-        ? { identityHash: normalizedResult.identityHash }
-        : {}),
     };
+    if (normalizedResult.marker !== undefined) {
+      updated = { ...updated, marker: normalizedResult.marker };
+    }
+    if (normalizedResult.identityHash !== undefined) {
+      updated = { ...updated, identityHash: normalizedResult.identityHash };
+    }
+    resources[existingIndex] = updated;
   }
 
   assertUniqueResources(resources);
@@ -284,7 +395,10 @@ export async function commitReceiptAction(receipt, result = {}) {
 }
 
 /** Clear a journaled action without claiming that its remote mutation succeeded. */
-export async function clearReceiptAction(receipt, operationId) {
+export async function clearReceiptAction(
+  receipt: BoundaryValue,
+  operationId?: BoundaryValue,
+): Promise<InstallationReceipt> {
   const current = await validateInstallationReceipt(receipt);
   if (current.pending === null) return current;
   if (operationId !== undefined) {
@@ -302,7 +416,7 @@ export async function clearReceiptAction(receipt, operationId) {
 }
 
 /** Retain a final, checksum-protected tombstone once every owned resource is gone. */
-export async function markReceiptRemoved(receipt) {
+export async function markReceiptRemoved(receipt: BoundaryValue): Promise<InstallationReceipt> {
   const current = await validateInstallationReceipt(receipt);
   if (current.state === 'removed') return current;
   if (current.pending !== null) {
@@ -318,15 +432,20 @@ export async function markReceiptRemoved(receipt) {
   });
 }
 
-async function sealReceipt(candidate) {
+async function sealReceipt(candidate: BoundaryValue): Promise<InstallationReceipt> {
   const normalized = normalizeReceipt(candidate, { checksumRequired: false });
   const { checksum: _checksum, ...unsigned } = normalized;
   const checksum = await hashCanonical(unsigned);
-  return normalizeReceipt({ ...unsigned, checksum }, { checksumRequired: true });
+  return requireSealedReceipt(
+    normalizeReceipt({ ...unsigned, checksum }, { checksumRequired: true }),
+  );
 }
 
-function normalizeReceipt(input, { checksumRequired }) {
-  const errors = [];
+function normalizeReceipt(
+  input: BoundaryValue,
+  { checksumRequired }: { readonly checksumRequired: boolean },
+): ReceiptCandidate {
+  const errors: string[] = [];
   if (!isObject(input)) throw new ReceiptValidationError(['receipt must be an object']);
   findForbiddenMaterial(input, '$', errors);
   rejectUnknownKeys(
@@ -352,11 +471,13 @@ function normalizeReceipt(input, { checksumRequired }) {
   if (input.schemaVersion !== SCHEMA_VERSION) errors.push('schemaVersion must be 1');
   if (input.manager !== MANAGER) errors.push(`manager must be ${MANAGER}`);
   validateResourceKey(input.installationId, 'installationId', errors);
-  if (!RECEIPT_STATES.has(input.state)) errors.push('state is not supported');
-  if (!Number.isSafeInteger(input.revision) || input.revision < 0) {
+  if (!isReceiptState(input.state)) errors.push('state is not supported');
+  if (!v.is(numberSchema, input.revision)
+    || !Number.isSafeInteger(input.revision)
+    || input.revision < 0) {
     errors.push('revision must be a non-negative safe integer');
   }
-  if (typeof input.release !== 'string' || !RELEASE.test(input.release)) {
+  if (!isString(input.release) || !RELEASE.test(input.release)) {
     errors.push('release must be a safe identifier of at most 80 characters');
   }
   validateHash(input.desiredHash, 'desiredHash', errors);
@@ -379,9 +500,8 @@ function normalizeReceipt(input, { checksumRequired }) {
   for (const [index, resource] of resources.entries()) {
     if (
       resource.marker !== undefined &&
-      typeof input.installationId === 'string' &&
+      isString(input.installationId) &&
       RESOURCE_KEY.test(input.installationId) &&
-      typeof resource.key === 'string' &&
       RESOURCE_KEY.test(resource.key) &&
       resource.marker !== ownershipMarker(input.installationId, resource.key)
     ) {
@@ -393,23 +513,35 @@ function normalizeReceipt(input, { checksumRequired }) {
   }
   if (errors.length > 0) throw new ReceiptValidationError(unique(errors));
 
-  return {
+  const normalized: ReceiptCandidate = {
     schemaVersion: SCHEMA_VERSION,
     manager: MANAGER,
-    installationId: input.installationId,
-    state: input.state,
-    revision: input.revision,
-    release: input.release,
+    installationId: isString(input.installationId) ? input.installationId : '',
+    state: isReceiptState(input.state) ? input.state : 'ready',
+    revision: v.is(numberSchema, input.revision) ? input.revision : 0,
+    release: isString(input.release) ? input.release : '',
     target,
     accessPolicy,
-    desiredHash: input.desiredHash,
+    desiredHash: isString(input.desiredHash) ? input.desiredHash : '',
     resources,
     pending,
-    ...(input.checksum !== undefined ? { checksum: input.checksum } : {}),
   };
+  if (isString(input.checksum)) return { ...normalized, checksum: input.checksum };
+  return normalized;
 }
 
-function normalizeTargetForReceipt(input, path, errors) {
+function requireSealedReceipt(candidate: ReceiptCandidate): InstallationReceipt {
+  if (!candidate.checksum) {
+    throw new ReceiptValidationError(['checksum must be a canonical SHA-256 digest']);
+  }
+  return { ...candidate, checksum: candidate.checksum };
+}
+
+function normalizeTargetForReceipt(
+  input: BoundaryValue,
+  path: string,
+  errors: string[],
+): ReceiptTarget {
   if (!isObject(input)) {
     errors.push(`${path} must be an object`);
     return { accountId: '', zoneId: '', zoneName: '', hostname: '' };
@@ -420,15 +552,15 @@ function normalizeTargetForReceipt(input, path, errors) {
   validateHostname(input.zoneName, `${path}.zoneName`, errors);
   validateHostname(input.hostname, `${path}.hostname`, errors);
   return {
-    accountId: input.accountId,
-    zoneId: input.zoneId,
-    zoneName: input.zoneName,
-    hostname: input.hostname,
+    accountId: isString(input.accountId) ? input.accountId : '',
+    zoneId: isString(input.zoneId) ? input.zoneId : '',
+    zoneName: isString(input.zoneName) ? input.zoneName : '',
+    hostname: isString(input.hostname) ? input.hostname : '',
   };
 }
 
-function normalizeTarget(input, path) {
-  const errors = [];
+function normalizeTarget(input: BoundaryValue, path: string): ReceiptTarget {
+  const errors: string[] = [];
   const target = normalizeTargetForReceipt(input, path, errors);
   if (target.zoneName && target.hostname && !hostnameBelongsToZone(target.hostname, target.zoneName)) {
     errors.push(`${path}.hostname must belong to ${path}.zoneName`);
@@ -437,25 +569,32 @@ function normalizeTarget(input, path) {
   return target;
 }
 
-function normalizeAccessPolicy(input, path, errors) {
+function normalizeAccessPolicy(
+  input: BoundaryValue,
+  path: string,
+  errors: string[],
+): ReceiptAccessPolicy {
   if (!isObject(input)) {
     errors.push(`${path} must be an object`);
     return { identityType: '', identityCount: -1, identitiesHash: '' };
   }
   rejectUnknownKeys(input, path, ['identityType', 'identityCount', 'identitiesHash'], errors);
   if (input.identityType !== 'email') errors.push(`${path}.identityType must be email`);
-  if (!Number.isSafeInteger(input.identityCount) || input.identityCount < 1 || input.identityCount > 10000) {
+  if (!v.is(numberSchema, input.identityCount)
+    || !Number.isSafeInteger(input.identityCount)
+    || input.identityCount < 1
+    || input.identityCount > 10000) {
     errors.push(`${path}.identityCount must be an integer from 1 to 10000`);
   }
   validateHash(input.identitiesHash, `${path}.identitiesHash`, errors);
   return {
-    identityType: input.identityType,
-    identityCount: input.identityCount,
-    identitiesHash: input.identitiesHash,
+    identityType: isString(input.identityType) ? input.identityType : '',
+    identityCount: v.is(numberSchema, input.identityCount) ? input.identityCount : -1,
+    identitiesHash: isString(input.identitiesHash) ? input.identitiesHash : '',
   };
 }
 
-function normalizeResources(input, errors) {
+function normalizeResources(input: BoundaryValue, errors: string[]): ReceiptResource[] {
   if (!Array.isArray(input)) {
     errors.push('resources must be an array');
     return [];
@@ -466,10 +605,14 @@ function normalizeResources(input, errors) {
   return resources.sort(compareResources);
 }
 
-function normalizeResource(input, path, errors) {
+function normalizeResource(
+  input: BoundaryValue,
+  path: string,
+  errors: string[],
+): ReceiptResource {
   if (!isObject(input)) {
     errors.push(`${path} must be an object`);
-    return { kind: '', key: '', provider: { id: '' }, desiredHash: '' };
+    return { kind: 'mcp_server', key: '', provider: { id: '' }, desiredHash: '' };
   }
   rejectUnknownKeys(
     input,
@@ -484,29 +627,39 @@ function normalizeResource(input, path, errors) {
     ],
     errors,
   );
-  if (!RESOURCE_KINDS.has(input.kind)) errors.push(`${path}.kind is not supported`);
+  if (!isResourceKind(input.kind)) errors.push(`${path}.kind is not supported`);
+  const kind = isResourceKind(input.kind) ? input.kind : 'mcp_server';
   validateResourceKey(input.key, `${path}.key`, errors);
-  const provider = normalizeProvider(input.provider, `${path}.provider`, errors, input.kind);
+  const provider = normalizeProvider(input.provider, `${path}.provider`, errors, kind);
   validateHash(input.desiredHash, `${path}.desiredHash`, errors);
   if (input.marker !== undefined) {
-    if (typeof input.marker !== 'string' || input.marker.length > 96) {
+    if (!isString(input.marker) || input.marker.length > 96) {
       errors.push(`${path}.marker must be a bounded ownership marker`);
     }
   }
   if (input.identityHash !== undefined) {
     validateHash(input.identityHash, `${path}.identityHash`, errors);
   }
-  return {
-    kind: input.kind,
-    key: input.key,
+  const resource: ReceiptResource = {
+    kind,
+    key: isString(input.key) ? input.key : '',
     provider,
-    desiredHash: input.desiredHash,
-    ...(input.marker !== undefined ? { marker: input.marker } : {}),
-    ...(input.identityHash !== undefined ? { identityHash: input.identityHash } : {}),
+    desiredHash: isString(input.desiredHash) ? input.desiredHash : '',
   };
+  if (isString(input.marker) && isString(input.identityHash)) {
+    return { ...resource, marker: input.marker, identityHash: input.identityHash };
+  }
+  if (isString(input.marker)) return { ...resource, marker: input.marker };
+  if (isString(input.identityHash)) return { ...resource, identityHash: input.identityHash };
+  return resource;
 }
 
-function normalizeProvider(input, path, errors, kind) {
+function normalizeProvider(
+  input: BoundaryValue,
+  path: string,
+  errors: string[],
+  kind: ReceiptResourceKind,
+): ReceiptProviderLocator {
   if (!isObject(input)) {
     errors.push(`${path} must be an object`);
     return { id: '' };
@@ -515,21 +668,27 @@ function normalizeProvider(input, path, errors, kind) {
   rejectUnknownKeys(input, path, policy ? ['id', 'parentId'] : ['id'], errors);
   validateOpaqueId(input.id, `${path}.id`, errors);
   if (policy) validateOpaqueId(input.parentId, `${path}.parentId`, errors);
-  return {
-    id: input.id,
-    ...(policy ? { parentId: input.parentId } : {}),
-  };
+  const id = isString(input.id) ? input.id : '';
+  if (policy) {
+    return { id, parentId: isString(input.parentId) ? input.parentId : '' };
+  }
+  return { id };
 }
 
-function normalizePending(input, path) {
-  const errors = [];
+function normalizePending(input: BoundaryValue, path: string): ReceiptPendingAction {
+  const errors: string[] = [];
   findForbiddenMaterial(input, path, errors);
   const pending = normalizePendingForReceipt(input, path, errors);
   if (errors.length > 0) throw new ReceiptValidationError(unique(errors));
+  if (!pending) throw new ReceiptValidationError([`${path} must be an object`]);
   return pending;
 }
 
-function normalizePendingForReceipt(input, path, errors) {
+function normalizePendingForReceipt(
+  input: BoundaryValue,
+  path: string,
+  errors: string[],
+): ReceiptPendingAction | null {
   if (!isObject(input)) {
     errors.push(`${path} must be an object or null`);
     return null;
@@ -551,10 +710,10 @@ function normalizePendingForReceipt(input, path, errors) {
     errors,
   );
   validateOpaqueId(input.operationId, `${path}.operationId`, errors);
-  if (!OPERATION_TYPES.has(input.type)) errors.push(`${path}.type is not supported`);
+  if (!isOperationType(input.type)) errors.push(`${path}.type is not supported`);
   validateOpaqueId(input.planId, `${path}.planId`, errors);
-  if (!ACTIONS.has(input.action)) errors.push(`${path}.action is not supported`);
-  if (!RESOURCE_KINDS.has(input.kind)) errors.push(`${path}.kind is not supported`);
+  if (!isReceiptAction(input.action)) errors.push(`${path}.action is not supported`);
+  if (!isResourceKind(input.kind)) errors.push(`${path}.kind is not supported`);
   validateResourceKey(input.key, `${path}.key`, errors);
   validateHash(input.expectedDesiredHash, `${path}.expectedDesiredHash`, errors);
   if (input.pruneApprovalId !== undefined) {
@@ -564,23 +723,28 @@ function normalizePendingForReceipt(input, path, errors) {
     }
   }
   validateHash(input.requestHash, `${path}.requestHash`, errors);
-  return {
-    operationId: input.operationId,
-    type: input.type,
-    planId: input.planId,
-    action: input.action,
-    kind: input.kind,
-    key: input.key,
-    expectedDesiredHash: input.expectedDesiredHash,
-    ...(input.pruneApprovalId !== undefined
-      ? { pruneApprovalId: input.pruneApprovalId }
-      : {}),
-    requestHash: input.requestHash,
+  const pending: ReceiptPendingAction = {
+    operationId: isString(input.operationId) ? input.operationId : '',
+    type: isOperationType(input.type) ? input.type : 'apply',
+    planId: isString(input.planId) ? input.planId : '',
+    action: isReceiptAction(input.action) ? input.action : 'create',
+    kind: isResourceKind(input.kind) ? input.kind : 'mcp_server',
+    key: isString(input.key) ? input.key : '',
+    expectedDesiredHash: isString(input.expectedDesiredHash) ? input.expectedDesiredHash : '',
+    requestHash: isString(input.requestHash) ? input.requestHash : '',
   };
+  if (isString(input.pruneApprovalId)) {
+    return { ...pending, pruneApprovalId: input.pruneApprovalId };
+  }
+  return pending;
 }
 
-function normalizeCommitResult(input, pending, installationId) {
-  const errors = [];
+function normalizeCommitResult(
+  input: BoundaryValue,
+  pending: ReceiptPendingAction,
+  installationId: string,
+): CommitResult {
+  const errors: string[] = [];
   if (!isObject(input)) throw new ReceiptValidationError(['result must be an object']);
   findForbiddenMaterial(input, 'result', errors);
   rejectUnknownKeys(
@@ -590,7 +754,7 @@ function normalizeCommitResult(input, pending, installationId) {
     errors,
   );
 
-  let provider;
+  let provider: ReceiptProviderLocator | undefined;
   if (input.provider !== undefined) {
     provider = normalizeProvider(input.provider, 'result.provider', errors, pending.kind);
   }
@@ -614,14 +778,19 @@ function normalizeCommitResult(input, pending, installationId) {
     validateHash(input.identityHash, 'result.identityHash', errors);
   }
   if (errors.length > 0) throw new ReceiptValidationError(unique(errors));
-  return {
-    ...(provider ? { provider } : {}),
-    ...(input.marker !== undefined ? { marker: input.marker } : {}),
-    ...(input.identityHash !== undefined ? { identityHash: input.identityHash } : {}),
-  };
+  const result: CommitResult = {};
+  if (provider) result.provider = provider;
+  if (isString(input.marker)) result.marker = input.marker;
+  if (isString(input.identityHash)) result.identityHash = input.identityHash;
+  return result;
 }
 
-function validateStateConsistency(state, pending, resources, errors) {
+function validateStateConsistency(
+  state: BoundaryValue,
+  pending: ReceiptPendingAction | null,
+  resources: readonly ReceiptResource[],
+  errors: string[],
+): void {
   if (state === 'removed' && (pending !== null || resources.length > 0)) {
     errors.push('removed receipt must be a resource-free tombstone with no pending action');
   }
@@ -636,7 +805,11 @@ function validateStateConsistency(state, pending, resources, errors) {
   }
 }
 
-function validatePendingOwnership(pending, resources, errors) {
+function validatePendingOwnership(
+  pending: ReceiptPendingAction | null,
+  resources: readonly ReceiptResource[],
+  errors: string[],
+): void {
   if (pending === null) return;
   const index = findResourceIndex(resources, pending.kind, pending.key);
   if (pending.type === 'uninstall' && pending.action !== 'delete') {
@@ -651,17 +824,20 @@ function validatePendingOwnership(pending, resources, errors) {
   if (
     pending.action === 'delete' &&
     index !== -1 &&
-    pending.expectedDesiredHash !== resources[index].desiredHash
+    pending.expectedDesiredHash !== resources.at(index)?.desiredHash
   ) {
     errors.push('pending delete hash must match the receipt resource');
   }
 }
 
-function assertUniqueResources(resources, errors) {
+function assertUniqueResources(
+  resources: readonly ReceiptResource[],
+  errors?: string[],
+): void {
   const localErrors = errors ?? [];
-  const identities = new Set();
-  const providerLocators = new Set();
-  const accessApplicationIds = new Set();
+  const identities = new Set<string>();
+  const providerLocators = new Set<string>();
+  const accessApplicationIds = new Set<string>();
   for (const resource of resources) {
     const identity = `${resource.kind}\u0000${resource.key}`;
     if (identities.has(identity)) {
@@ -694,15 +870,17 @@ function assertUniqueResources(resources, errors) {
     const boundParentIds = parents.map((parent) => parent.provider.id);
     if (
       boundParentIds.length > 0 &&
-      !boundParentIds.includes(resource.provider.parentId)
+      !boundParentIds.includes(resource.provider.parentId ?? '')
     ) {
       localErrors.push(`${resource.kind}/${resource.key} parentId does not match its parent binding`);
     }
   }
-  if (!errors && localErrors.length > 0) throw new ReceiptValidationError(unique(localErrors));
+  if (errors === undefined && localErrors.length > 0) {
+    throw new ReceiptValidationError(unique(localErrors));
+  }
 }
 
-function inferAccessPolicy(plan) {
+function inferAccessPolicy(plan: BoundaryValue): BoundaryValue {
   if (!isObject(plan)) return undefined;
   if (isObject(plan.accessPolicy)) {
     return {
@@ -713,12 +891,13 @@ function inferAccessPolicy(plan) {
   }
   if (!Array.isArray(plan.changes)) return undefined;
   for (const change of plan.changes) {
-    const allow = isObject(change?.desired) ? change.desired.allow : undefined;
+    const allow = isObject(change) && isObject(change.desired) ? change.desired.allow : undefined;
     if (
       isObject(allow) &&
       allow.identityType === 'email' &&
+      v.is(numberSchema, allow.identityCount) &&
       Number.isSafeInteger(allow.identityCount) &&
-      typeof allow.identitiesHash === 'string'
+      isString(allow.identitiesHash)
     ) {
       return {
         identityType: allow.identityType,
@@ -730,7 +909,7 @@ function inferAccessPolicy(plan) {
   return undefined;
 }
 
-function findForbiddenMaterial(value, path, errors) {
+function findForbiddenMaterial(value: BoundaryValue, path: string, errors: string[]): void {
   if (Array.isArray(value)) {
     value.forEach((item, index) => findForbiddenMaterial(item, `${path}[${index}]`, errors));
     return;
@@ -745,7 +924,7 @@ function findForbiddenMaterial(value, path, errors) {
     }
     return;
   }
-  if (typeof value !== 'string') return;
+  if (!isString(value)) return;
   if (
     EMAIL_VALUE.test(value) ||
     BEARER_VALUE.test(value) ||
@@ -756,7 +935,12 @@ function findForbiddenMaterial(value, path, errors) {
   }
 }
 
-function rejectUnknownKeys(value, path, allowedKeys, errors) {
+function rejectUnknownKeys(
+  value: BoundaryValue,
+  path: string,
+  allowedKeys: readonly string[],
+  errors: string[],
+): void {
   if (!isObject(value)) return;
   const allowed = new Set(allowedKeys);
   for (const key of Object.keys(value)) {
@@ -764,33 +948,33 @@ function rejectUnknownKeys(value, path, allowedKeys, errors) {
   }
 }
 
-function validateResourceKey(value, path, errors) {
-  if (typeof value !== 'string' || !RESOURCE_KEY.test(value)) {
+function validateResourceKey(value: BoundaryValue, path: string, errors: string[]): void {
+  if (!isString(value) || !RESOURCE_KEY.test(value)) {
     errors.push(`${path} must use at most 32 lowercase letters, numbers, and hyphens`);
   }
 }
 
-function validateOpaqueId(value, path, errors) {
-  if (typeof value !== 'string' || !SAFE_OPAQUE_ID.test(value)) {
+function validateOpaqueId(value: BoundaryValue, path: string, errors: string[]): void {
+  if (!isString(value) || !SAFE_OPAQUE_ID.test(value)) {
     errors.push(`${path} must be a bounded opaque identifier`);
   }
 }
 
-function validateSafeOpaqueId(value, path) {
-  const errors = [];
+function validateSafeOpaqueId(value: BoundaryValue, path: string): void {
+  const errors: string[] = [];
   validateOpaqueId(value, path, errors);
   if (errors.length > 0) throw new ReceiptValidationError(errors);
 }
 
-function validateHash(value, path, errors) {
-  if (typeof value !== 'string' || !HASH.test(value)) {
+function validateHash(value: BoundaryValue, path: string, errors: string[]): void {
+  if (!isString(value) || !HASH.test(value)) {
     errors.push(`${path} must be a canonical SHA-256 digest`);
   }
 }
 
-function validateHostname(value, path, errors) {
+function validateHostname(value: BoundaryValue, path: string, errors: string[]): void {
   if (
-    typeof value !== 'string' ||
+    !isString(value) ||
     value.length > 253 ||
     value !== value.toLowerCase() ||
     value.includes(':') ||
@@ -805,15 +989,18 @@ function validateHostname(value, path, errors) {
   }
 }
 
-function hostnameBelongsToZone(hostname, zoneName) {
+function hostnameBelongsToZone(hostname: string, zoneName: string): boolean {
   return hostname === zoneName || hostname.endsWith(`.${zoneName}`);
 }
 
-function providerIdentity(kind, provider) {
+function providerIdentity(
+  kind: ReceiptResourceKind,
+  provider: ReceiptProviderLocator | undefined,
+): string {
   return `${kind}\u0000${provider?.parentId ?? ''}\u0000${provider?.id ?? ''}`;
 }
 
-function compareResources(left, right) {
+function compareResources(left: ReceiptResource, right: ReceiptResource): number {
   return (
     (RESOURCE_ORDER.get(left.kind) ?? -1) - (RESOURCE_ORDER.get(right.kind) ?? -1) ||
     compareText(left.key, right.key) ||
@@ -822,11 +1009,15 @@ function compareResources(left, right) {
   );
 }
 
-function findResourceIndex(resources, kind, key) {
+function findResourceIndex(
+  resources: readonly ReceiptResource[],
+  kind: ReceiptResourceKind,
+  key: string,
+): number {
   return resources.findIndex((resource) => resource.kind === kind && resource.key === key);
 }
 
-function sameTarget(left, right) {
+function sameTarget(left: ReceiptTarget, right: ReceiptTarget): boolean {
   return (
     left.accountId === right.accountId &&
     left.zoneId === right.zoneId &&
@@ -835,7 +1026,7 @@ function sameTarget(left, right) {
   );
 }
 
-function sameAccessPolicy(left, right) {
+function sameAccessPolicy(left: ReceiptAccessPolicy, right: ReceiptAccessPolicy): boolean {
   return (
     left.identityType === right.identityType &&
     left.identityCount === right.identityCount &&
@@ -843,14 +1034,14 @@ function sameAccessPolicy(left, right) {
   );
 }
 
-function copyResource(resource) {
+function copyResource(resource: ReceiptResource): ReceiptResource {
   return {
     ...resource,
     provider: { ...resource.provider },
   };
 }
 
-function withoutChecksum(receipt) {
+function withoutChecksum(receipt: InstallationReceipt): ReceiptUnsigned {
   const { checksum: _checksum, ...unsigned } = receipt;
   return {
     ...unsigned,
@@ -861,14 +1052,14 @@ function withoutChecksum(receipt) {
   };
 }
 
-function incrementRevision(revision) {
+function incrementRevision(revision: number): number {
   if (!Number.isSafeInteger(revision) || revision >= Number.MAX_SAFE_INTEGER) {
     throw new ReceiptValidationError(['revision cannot be incremented safely']);
   }
   return revision + 1;
 }
 
-async function hashCanonical(value) {
+async function hashCanonical(value: JsonValue): Promise<string> {
   if (!globalThis.crypto?.subtle) {
     throw new Error('Web Crypto is required to protect an installation receipt');
   }
@@ -879,34 +1070,60 @@ async function hashCanonical(value) {
     .join('')}`;
 }
 
-function canonicalJson(value) {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
-    return JSON.stringify(value);
+function canonicalJson(value: JsonValue): string {
+  if (value === null || v.is(booleanSchema, value) || isString(value)) {
+    return serializeJsonPrimitive(value);
   }
-  if (typeof value === 'number') {
+  if (v.is(numberSchema, value)) {
     if (!Number.isFinite(value)) throw new TypeError('Cannot hash a non-finite number');
-    return JSON.stringify(value);
+    return serializeJsonPrimitive(value);
   }
   if (Array.isArray(value)) {
     return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
   }
   if (isObject(value)) {
-    return `{${Object.keys(value)
-      .sort(compareText)
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => compareText(left, right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
       .join(',')}}`;
   }
   throw new TypeError('Cannot hash an unsupported receipt value');
 }
 
-function compareText(left, right) {
+function serializeJsonPrimitive(value: boolean | null | number | string): string {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) throw new TypeError('Cannot serialize receipt primitive');
+  return serialized;
+}
+
+function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function unique(values) {
+function unique(values: readonly string[]): string[] {
   return [...new Set(values)];
 }
 
-function isObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+function isObject(value: BoundaryValue): value is BoundaryObject {
+  return v.is(boundaryObjectSchema, value);
+}
+
+function isString(value: BoundaryValue): value is string {
+  return v.is(stringSchema, value);
+}
+
+function isResourceKind(value: BoundaryValue): value is ReceiptResourceKind {
+  return v.is(resourceKindSchema, value);
+}
+
+function isReceiptState(value: BoundaryValue): value is ReceiptState {
+  return v.is(receiptStateSchema, value);
+}
+
+function isOperationType(value: BoundaryValue): value is ReceiptOperationType {
+  return v.is(operationTypeSchema, value);
+}
+
+function isReceiptAction(value: BoundaryValue): value is ReceiptAction {
+  return v.is(actionSchema, value);
 }

@@ -1,14 +1,9 @@
 import { render, screen, waitFor } from '@testing-library/react'
+import { RouterProvider } from '@tanstack/react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GatewayAdminApi, GatewayStatus, ManagedSources, RuntimeUpdate } from '../api'
 import { GatewayProvider } from '../GatewayContext'
-import { OverviewPage } from './OverviewPage'
-
-vi.mock('@tanstack/react-router', () => ({
-  Link: ({ children, to, ...props }: { children: React.ReactNode; to: string }) => (
-    <a href={to} {...props}>{children}</a>
-  ),
-}))
+import { router } from '../router'
 
 const status: GatewayStatus = {
   schemaVersion: 1,
@@ -66,7 +61,7 @@ describe('OverviewPage teardown entry', () => {
     const scrollIntoView = vi.fn()
     HTMLElement.prototype.scrollIntoView = scrollIntoView
 
-    render(<GatewayProvider api={api()}><OverviewPage /></GatewayProvider>)
+    render(<GatewayProvider api={api()}><RouterProvider router={router} /></GatewayProvider>)
 
     const button = await screen.findByRole('button', { name: 'Review teardown plan' })
     const section = button.closest('section')

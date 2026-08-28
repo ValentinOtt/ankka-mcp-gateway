@@ -1,6 +1,7 @@
 import { base64UrlDecode, base64UrlEncode } from './crypto';
 import type { GatewayDeployEnv } from './env';
 import { DeployError } from './errors';
+import * as v from 'valibot';
 
 export const ANONYMOUS_SESSION_RATE_LIMIT_BINDING = 'ANONYMOUS_SESSION_RATE_LIMIT' as const;
 export const SESSION_READ_RATE_LIMIT_BINDING = 'SESSION_READ_RATE_LIMIT' as const;
@@ -29,13 +30,14 @@ const DOMAIN = 'ankka-gateway-deploy-abuse-control-v1';
 const SESSION_ID_DOMAIN = 'ankka-gateway-deploy-session-id-v1';
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const CLIENT_ADDRESS_PATTERN = /^[0-9a-f:.]{2,64}$/u;
+const functionSchema = v.function();
+const rateLimitOutcomeSchema = v.object({ success: v.boolean() });
 
 function unavailable(): never {
   throw new DeployError(503, 'abuse_controls_unavailable');
 }
 
 function decodeDeploymentKey(value: string): Uint8Array<ArrayBuffer> {
-  if (typeof value !== 'string') unavailable();
   const compact = value.trim();
   let decoded: Uint8Array;
   try {
@@ -145,7 +147,15 @@ export async function isAuthenticatedSessionId(
   const expected = await keyedDigest(encodedDeploymentKey, SESSION_ID_DOMAIN, 'cookie-v1', nonce);
   let mismatch = 0;
   for (let index = 0; index < 16; index += 1) {
-    mismatch |= token[index + 16] ^ expected[index];
+    const tokenByte = token.at(index + 16);
+    const expectedByte = expected.at(index);
+    if (tokenByte === undefined || expectedByte === undefined) {
+      token.fill(0);
+      nonce.fill(0);
+      expected.fill(0);
+      return false;
+    }
+    mismatch |= tokenByte ^ expectedByte;
   }
   token.fill(0);
   nonce.fill(0);
@@ -170,13 +180,13 @@ async function consume(
 ): Promise<void> {
   let outcome: RateLimitOutcome;
   try {
-    if (!binding || typeof binding.limit !== 'function') unavailable();
+    if (!binding || !v.is(functionSchema, binding.limit)) unavailable();
     outcome = await binding.limit({ key });
   } catch (error) {
     if (error instanceof DeployError) throw error;
     unavailable();
   }
-  if (!outcome || typeof outcome.success !== 'boolean') unavailable();
+  if (!v.is(rateLimitOutcomeSchema, outcome)) unavailable();
   if (!outcome.success) throw new DeployError(429, 'rate_limited');
 }
 

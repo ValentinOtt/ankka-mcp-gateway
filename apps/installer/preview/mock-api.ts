@@ -229,7 +229,7 @@ function authorization() {
   }
 }
 
-function sendJson(response: Connect.ServerResponse, status: number, body: unknown): void {
+function sendJson<Body>(response: Connect.ServerResponse, status: number, body: Body): void {
   const bytes = JSON.stringify(body)
   response.statusCode = status
   response.setHeader('cache-control', 'no-store')

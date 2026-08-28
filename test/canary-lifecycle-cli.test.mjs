@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const execFileAsync = promisify(execFile);
-const cli = fileURLToPath(new URL('../src/canary-lifecycle-cli.mjs', import.meta.url));
+const cli = fileURLToPath(new URL('../src/canary-lifecycle-cli.ts', import.meta.url));
 const LOCK_CONFIRMATION = 'remove-inspected-stale-receipt-lock';
 const target = {
   accountId: 'a'.repeat(32),

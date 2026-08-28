@@ -1,3 +1,12 @@
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  boundaryValueSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+} from './boundary';
+import { canonicalJson } from './canonical-json';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 
 const ACCOUNT_ID_PATTERN = /^[a-f0-9]{32}$/u;
@@ -9,7 +18,6 @@ const UUID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3
 const RELEASE_PATTERN = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]+$/u;
 const DNS_LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 
 const MAX_RESPONSE_BYTES = 128 * 1024;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -67,6 +75,473 @@ const ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
   '.webp': 'image/webp',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
+});
+
+const accountIdSchema = v.pipe(v.string(), v.regex(ACCOUNT_ID_PATTERN));
+const workerNameSchema = v.pipe(v.string(), v.regex(WORKER_NAME_PATTERN));
+const sha256Schema = v.pipe(v.string(), v.regex(SHA256_PATTERN));
+const safeTokenSchema = v.pipe(v.string(), v.minLength(20), v.maxLength(8_192), v.regex(TOKEN_PATTERN));
+const safeBootstrapNonceSchema = v.pipe(safeTokenSchema, v.minLength(32));
+const safeBindingValueSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(4_096),
+  v.check((value) => ![...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 31 || codePoint === 127;
+  })),
+);
+const uploadFileSchema = v.strictObject({
+  name: v.string(),
+  contentType: v.string(),
+  sha256: sha256Schema,
+  bytes: v.instance(Uint8Array),
+});
+const assetFileSchema = v.strictObject({
+  path: v.string(),
+  contentType: v.string(),
+  sha256: sha256Schema,
+  bytes: v.instance(Uint8Array),
+});
+const plainTextBindingsSchema = v.strictObject({
+  ADMIN_EMAILS: safeBindingValueSchema,
+  ANKKA_GATEWAY_RELEASE: safeBindingValueSchema,
+  ANKKA_GATEWAY_RELEASE_SHA256: safeBindingValueSchema,
+  ANKKA_MANAGEMENT_HOSTNAME: safeBindingValueSchema,
+  ANKKA_UPDATE_CHANNEL: safeBindingValueSchema,
+  ANKKA_UPDATE_KEY_ID: safeBindingValueSchema,
+  ANKKA_UPDATE_PUBLIC_KEY: safeBindingValueSchema,
+  ANKKA_WORKERS_SUBDOMAIN: safeBindingValueSchema,
+  ANKKA_WORKER_NAME: safeBindingValueSchema,
+  CF_ACCESS_AUD: safeBindingValueSchema,
+  CF_ACCESS_ISSUER: safeBindingValueSchema,
+  CLOUDFLARE_ACCOUNT_ID: safeBindingValueSchema,
+  CLOUDFLARE_ZONE_ID: safeBindingValueSchema,
+  CLOUDFLARE_ZONE_NAME: safeBindingValueSchema,
+  ZERO_TRUST_READY: safeBindingValueSchema,
+});
+const prepareReleaseInputSchema = v.object({
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  release: v.strictObject({
+    verification: v.literal('ed25519'),
+    release: v.pipe(v.string(), v.regex(RELEASE_PATTERN)),
+    artifactSha256: sha256Schema,
+    worker: v.strictObject({
+      mainModule: v.literal('index.js'),
+      compatibilityDate: v.literal(EXACT_COMPATIBILITY_DATE),
+      compatibilityFlags: v.tuple([]),
+      modules: v.pipe(v.array(uploadFileSchema), v.minLength(1)),
+      assets: v.strictObject({
+        binding: v.literal('ASSETS'),
+        notFoundHandling: v.literal('single-page-application'),
+        runWorkerFirst: v.tuple([v.literal('/__ankka/*'), v.literal('/api/*')]),
+        files: v.pipe(v.array(assetFileSchema), v.minLength(1)),
+      }),
+      durableObject: v.strictObject({
+        binding: v.literal('ADMIN_STATE'),
+        className: v.literal('AdminState'),
+        storage: v.literal('sqlite'),
+      }),
+    }),
+  }),
+  plainTextBindings: plainTextBindingsSchema,
+  bootstrapNonce: safeBootstrapNonceSchema,
+});
+const directUploadTransportSchema = v.custom<CloudflareDirectUploadTransport>(
+  (value) => v.is(v.function(), value),
+);
+const directUploadCallSchema = v.object({
+  accessToken: safeTokenSchema,
+  transport: directUploadTransportSchema,
+  timeoutMs: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(100), v.maxValue(60_000))),
+});
+const providerEnvelopeSchema = v.strictObject({
+  errors: v.nullable(v.array(boundaryValueSchema)),
+  messages: v.nullable(v.array(boundaryValueSchema)),
+  result: boundaryValueSchema,
+  success: v.boolean(),
+});
+const providerErrorListSchema = v.pipe(v.array(v.looseObject({
+  code: v.pipe(v.number(), v.safeInteger()),
+  message: v.pipe(v.string(), v.minLength(1), v.maxLength(2_048)),
+})), v.minLength(1), v.maxLength(16));
+const emptyBoundaryArraySchema = v.pipe(v.array(boundaryValueSchema), v.length(0));
+const disabledObservabilityDetailSchema = v.looseObject({
+  enabled: v.optional(v.literal(false)),
+  destinations: v.optional(emptyBoundaryArraySchema),
+});
+const disabledObservabilitySchema = v.strictObject({
+  enabled: v.literal(false),
+  head_sampling_rate: v.optional(boundaryValueSchema),
+  redact_query_string: v.optional(v.literal(false)),
+  logs: v.optional(disabledObservabilityDetailSchema),
+  traces: v.optional(disabledObservabilityDetailSchema),
+});
+const emptyWorkerReferencesSchema = v.strictObject({
+  dispatch_namespace_outbounds: emptyBoundaryArraySchema,
+  domains: emptyBoundaryArraySchema,
+  durable_objects: emptyBoundaryArraySchema,
+  queues: emptyBoundaryArraySchema,
+  workers: emptyBoundaryArraySchema,
+});
+const convergedWorkerReferencesSchema = v.strictObject({
+  dispatch_namespace_outbounds: emptyBoundaryArraySchema,
+  domains: v.pipe(v.array(v.strictObject({
+    id: v.string(),
+    hostname: v.string(),
+    zone_id: v.string(),
+    zone_name: v.string(),
+  })), v.length(1)),
+  durable_objects: v.pipe(v.array(v.strictObject({
+    worker_id: v.string(),
+    worker_name: v.string(),
+    namespace_id: v.string(),
+    namespace_name: v.string(),
+  })), v.length(1)),
+  queues: emptyBoundaryArraySchema,
+  workers: emptyBoundaryArraySchema,
+});
+const workerStateSchema = v.strictObject({
+  created_on: v.string(),
+  deployed_on: v.optional(v.nullable(v.string())),
+  id: v.pipe(v.string(), v.regex(WORKER_ID_PATTERN)),
+  logpush: v.literal(false),
+  name: v.string(),
+  observability: disabledObservabilitySchema,
+  references: boundaryValueSchema,
+  subdomain: v.strictObject({ enabled: v.literal(false), previews_enabled: v.literal(false) }),
+  tags: v.array(v.string()),
+  tail_consumers: emptyBoundaryArraySchema,
+  updated_on: v.string(),
+});
+const workerTargetInputSchema = v.strictObject({ accountId: accountIdSchema, workerName: workerNameSchema });
+const workerIntentSchema = v.strictObject({
+  kind: v.literal('worker'),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  requestHash: sha256Schema,
+  correlationTag: v.pipe(v.string(), v.regex(/^ankka-worker-sha256:[a-f0-9]{64}$/u)),
+  body: v.strictObject({
+    logpush: v.literal(false),
+    name: workerNameSchema,
+    observability: v.strictObject({ enabled: v.literal(false) }),
+    subdomain: v.strictObject({ enabled: v.literal(false), previews_enabled: v.literal(false) }),
+    tags: v.array(v.string()),
+    tail_consumers: emptyBoundaryArraySchema,
+  }),
+});
+const namespaceTextSchema = (maximum: number) => v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(maximum),
+  v.check((value) => ![...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 31 || codePoint === 127;
+  })),
+);
+const durableObjectNamespaceItemSchema = v.strictObject({
+  id: accountIdSchema,
+  class: namespaceTextSchema(128),
+  name: namespaceTextSchema(256),
+  script: namespaceTextSchema(128),
+  use_sqlite: v.boolean(),
+});
+const durableObjectNamespacePageSchema = v.strictObject({
+  errors: v.nullable(v.array(boundaryValueSchema)),
+  messages: v.nullable(v.array(boundaryValueSchema)),
+  result: v.array(durableObjectNamespaceItemSchema),
+  result_info: v.strictObject({
+    count: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+    page: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+    per_page: v.literal(NAMESPACE_PAGE_SIZE),
+    total_count: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(MAX_NAMESPACE_COUNT)),
+    total_pages: v.optional(v.pipe(
+      v.number(),
+      v.safeInteger(),
+      v.minValue(0),
+      v.maxValue(MAX_NAMESPACE_PAGES),
+    )),
+  }),
+  success: v.literal(true),
+});
+const inspectNamespaceInputSchema = v.strictObject({
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  className: v.literal('AdminState'),
+  storage: v.literal('sqlite'),
+  expectedNamespaceId: v.optional(accountIdSchema),
+});
+const assetHashSchema = v.pipe(v.string(), v.regex(ASSET_HASH_PATTERN));
+const assetManifestEntrySchema = v.strictObject({
+  hash: assetHashSchema,
+  size: v.pipe(v.number(), v.safeInteger(), v.minValue(1), v.maxValue(MAX_FILE_BYTES)),
+});
+const assetManifestSchema = v.pipe(
+  v.record(v.string(), assetManifestEntrySchema),
+  v.check((manifest) => Object.keys(manifest).length > 0),
+);
+const assetSessionResponseSchema = v.strictObject({
+  jwt: safeTokenSchema,
+  buckets: v.array(v.pipe(v.array(assetHashSchema), v.minLength(1))),
+});
+const assetSessionIntentSchema = v.strictObject({
+  kind: v.literal('asset_session'),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  requestHash: sha256Schema,
+  body: v.strictObject({ manifest: assetManifestSchema }),
+});
+const assetSessionSubmissionSchema = v.strictObject({
+  kind: v.literal('asset_session'),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  requestHash: sha256Schema,
+  uploadJwt: safeTokenSchema,
+  buckets: v.pipe(
+    v.array(v.pipe(v.array(assetHashSchema), v.minLength(1), v.maxLength(10_000))),
+    v.minLength(1),
+    v.maxLength(10_000),
+  ),
+});
+const assetBucketIntentSchema = v.strictObject({
+  kind: v.literal('asset_bucket'),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  sessionRequestHash: sha256Schema,
+  bucketIndex: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+  bucketCount: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+  hashes: v.pipe(v.array(assetHashSchema), v.minLength(1)),
+  isFinal: v.boolean(),
+  requestHash: sha256Schema,
+});
+const workerVersionPhaseSchema = v.picklist(['provision', 'bootstrap', 'clean']);
+const exactRunWorkerFirstSchema = v.tuple([v.literal('/__ankka/*'), v.literal('/api/*')]);
+const releaseExportsSchema = v.strictObject({
+  AdminState: v.strictObject({
+    type: v.literal('durable-object'),
+    storage: v.literal('sqlite'),
+    state: v.optional(v.literal('created')),
+  }),
+  default: v.optional(v.strictObject({
+    type: v.literal('worker'),
+    state: v.optional(v.literal('created')),
+    cache: v.optional(v.strictObject({ enabled: v.literal(false) })),
+  })),
+});
+const exportsReconciliationSchema = v.strictObject({
+  created: v.pipe(v.array(v.string()), v.maxLength(1)),
+  deleted: emptyBoundaryArraySchema,
+  info: emptyBoundaryArraySchema,
+  removable_entries: emptyBoundaryArraySchema,
+  renamed: emptyBoundaryArraySchema,
+  transfer_pending: emptyBoundaryArraySchema,
+  transferred: emptyBoundaryArraySchema,
+  updated: emptyBoundaryArraySchema,
+  warnings: emptyBoundaryArraySchema,
+});
+const versionAnnotationsSchema = v.strictObject({
+  'workers/tag': v.string(),
+  'workers/message': v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(256))),
+  'workers/triggered_by': v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(256))),
+});
+const workerVersionAssetConfigSchema = v.strictObject({
+  html_handling: v.optional(v.literal('auto-trailing-slash')),
+  not_found_handling: v.literal('single-page-application'),
+  run_worker_first: exactRunWorkerFirstSchema,
+});
+const returnedVersionBindingSchema = v.union([
+  v.strictObject({
+    name: v.literal('ADMIN_STATE'),
+    type: v.literal('durable_object_namespace'),
+    class_name: v.literal('AdminState'),
+    namespace_id: v.optional(accountIdSchema),
+  }),
+  v.strictObject({ name: v.literal('ASSETS'), type: v.literal('assets') }),
+  v.strictObject({ name: v.literal('ANKKA_BOOTSTRAP_NONCE'), type: v.literal('secret_text') }),
+  v.strictObject({
+    name: v.picklist(EXACT_PLAIN_TEXT_BINDINGS),
+    type: v.literal('plain_text'),
+    text: v.string(),
+  }),
+]);
+const returnedVersionModuleSchema = v.strictObject({
+  name: v.string(),
+  content_type: v.string(),
+  content_base64: v.optional(v.string()),
+});
+const versionResultSchema = v.strictObject({
+  annotations: versionAnnotationsSchema,
+  assets: v.optional(v.strictObject({ config: workerVersionAssetConfigSchema })),
+  bindings: v.array(returnedVersionBindingSchema),
+  compatibility_date: v.literal(EXACT_COMPATIBILITY_DATE),
+  compatibility_flags: v.optional(v.tuple([])),
+  created_on: v.string(),
+  env: v.optional(boundaryObjectSchema),
+  exports: releaseExportsSchema,
+  exports_reconciliation: v.optional(exportsReconciliationSchema),
+  id: v.string(),
+  limits: v.optional(v.strictObject({
+    cpu_ms: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0))),
+  })),
+  main_module: v.literal('index.js'),
+  modules: v.array(returnedVersionModuleSchema),
+  number: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+  placement: v.optional(v.strictObject({
+    hint: v.optional(v.string()),
+    mode: v.optional(v.string()),
+  })),
+  source: v.optional(v.literal('api')),
+  startup_time_ms: v.optional(v.pipe(v.number(), v.finite(), v.minValue(0))),
+  urls: v.optional(v.array(boundaryValueSchema)),
+  usage_model: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(128))),
+});
+const versionReleaseContractSchema = v.strictObject({
+  assetBinding: v.literal('ASSETS'),
+  assetConfig: v.strictObject({
+    notFoundHandling: v.literal('single-page-application'),
+    runWorkerFirst: exactRunWorkerFirstSchema,
+  }),
+  bootstrapBinding: v.picklist(['present', 'absent']),
+  compatibilityDate: v.literal(EXACT_COMPATIBILITY_DATE),
+  compatibilityFlags: v.tuple([]),
+  durableObject: v.strictObject({
+    binding: v.literal('ADMIN_STATE'),
+    className: v.literal('AdminState'),
+    storage: v.literal('sqlite'),
+  }),
+  exports: v.strictObject({
+    AdminState: v.strictObject({ type: v.literal('durable-object'), storage: v.literal('sqlite') }),
+  }),
+  mainModule: v.literal('index.js'),
+});
+const versionRecoveryRecordSchema = v.strictObject({
+  kind: v.literal('version_recovery'),
+  phase: workerVersionPhaseSchema,
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: v.pipe(v.string(), v.regex(WORKER_ID_PATTERN)),
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+  releaseContract: versionReleaseContractSchema,
+  assets: v.pipe(v.array(v.strictObject({
+    path: v.string(),
+    uploadHash: assetHashSchema,
+    contentType: v.string(),
+    byteLength: v.pipe(v.number(), v.safeInteger(), v.minValue(1), v.maxValue(MAX_FILE_BYTES)),
+  })), v.minLength(1), v.maxLength(10_000)),
+  plainTextBindingHashes: v.pipe(v.array(v.strictObject({
+    name: v.picklist(EXACT_PLAIN_TEXT_BINDINGS),
+    valueSha256: sha256Schema,
+  })), v.length(EXACT_PLAIN_TEXT_BINDINGS.length)),
+  modules: v.pipe(v.array(v.strictObject({
+    name: v.string(),
+    contentType: v.string(),
+    contentSha256: sha256Schema,
+    byteLength: v.pipe(v.number(), v.safeInteger(), v.minValue(1), v.maxValue(MAX_FILE_BYTES)),
+  })), v.minLength(1)),
+});
+const submitVersionBindingSchema = v.union([
+  v.strictObject({
+    name: v.literal('ADMIN_STATE'),
+    type: v.literal('durable_object_namespace'),
+    class_name: v.literal('AdminState'),
+  }),
+  v.strictObject({ name: v.literal('ASSETS'), type: v.literal('assets') }),
+  v.strictObject({
+    name: v.literal('ANKKA_BOOTSTRAP_NONCE'),
+    type: v.literal('secret_text'),
+    text: safeBootstrapNonceSchema,
+  }),
+  v.strictObject({
+    name: v.picklist(EXACT_PLAIN_TEXT_BINDINGS),
+    type: v.literal('plain_text'),
+    text: v.string(),
+  }),
+]);
+const versionSubmitIntentSchema = v.strictObject({
+  kind: v.literal('version_submit'),
+  phase: workerVersionPhaseSchema,
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: v.pipe(v.string(), v.regex(WORKER_ID_PATTERN)),
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+  semanticCommitment: boundaryObjectSchema,
+  body: v.strictObject({
+    annotations: v.strictObject({ 'workers/tag': v.string() }),
+    assets: v.optional(v.strictObject({ config: v.strictObject({
+      not_found_handling: v.literal('single-page-application'),
+      run_worker_first: exactRunWorkerFirstSchema,
+    }), jwt: safeTokenSchema })),
+    bindings: v.array(submitVersionBindingSchema),
+    compatibility_date: v.literal(EXACT_COMPATIBILITY_DATE),
+    compatibility_flags: v.tuple([]),
+    exports: v.strictObject({
+      AdminState: v.strictObject({ type: v.literal('durable-object'), storage: v.literal('sqlite') }),
+    }),
+    main_module: v.literal('index.js'),
+    modules: v.array(v.strictObject({
+      name: v.string(),
+      content_type: v.string(),
+      content_base64: v.string(),
+    })),
+  }),
+});
+const versionListItemSchema = v.strictObject({
+  annotations: v.optional(v.strictObject({
+    'workers/message': v.optional(v.string()),
+    'workers/tag': v.optional(v.string()),
+    'workers/triggered_by': v.optional(v.string()),
+  })),
+  assets: v.optional(boundaryValueSchema),
+  bindings: v.optional(boundaryValueSchema),
+  compatibility_date: v.optional(boundaryValueSchema),
+  compatibility_flags: v.optional(boundaryValueSchema),
+  created_on: v.optional(boundaryValueSchema),
+  exports: v.optional(boundaryValueSchema),
+  exports_reconciliation: v.optional(boundaryValueSchema),
+  id: v.pipe(v.string(), v.regex(UUID_PATTERN)),
+  limits: v.optional(boundaryValueSchema),
+  main_module: v.optional(boundaryValueSchema),
+  modules: v.optional(boundaryValueSchema),
+  number: v.optional(boundaryValueSchema),
+  placement: v.optional(boundaryValueSchema),
+  startup_time_ms: v.optional(boundaryValueSchema),
+  usage_model: v.optional(boundaryValueSchema),
+});
+const versionListPageSchema = v.strictObject({
+  errors: v.nullable(v.array(boundaryValueSchema)),
+  messages: v.nullable(v.array(boundaryValueSchema)),
+  result: v.pipe(v.array(versionListItemSchema), v.maxLength(1)),
+  result_info: v.strictObject({
+    count: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(1)),
+    page: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+    per_page: v.literal(1),
+    total_count: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(100)),
+    total_pages: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(100))),
+  }),
+  success: v.literal(true),
+});
+const deploymentAnnotationsSchema = v.strictObject({
+  'workers/message': v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(256))),
+  'workers/triggered_by': v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(256))),
+});
+const deploymentVersionSchema = v.strictObject({
+  version_id: v.pipe(v.string(), v.regex(UUID_PATTERN)),
+  percentage: v.pipe(v.number(), v.finite(), v.minValue(Number.MIN_VALUE), v.maxValue(100)),
+});
+const deploymentObservationSchema = v.strictObject({
+  annotations: v.optional(deploymentAnnotationsSchema),
+  author_email: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(320))),
+  created_on: v.string(),
+  id: v.pipe(v.string(), v.regex(UUID_PATTERN)),
+  source: v.literal('api'),
+  strategy: v.literal('percentage'),
+  versions: v.pipe(v.array(deploymentVersionSchema), v.minLength(1), v.maxLength(100)),
+});
+const deploymentListResultSchema = v.strictObject({
+  deployments: v.pipe(v.array(deploymentObservationSchema), v.maxLength(1_000)),
 });
 
 export type CloudflareDirectUploadStage =
@@ -302,9 +777,9 @@ interface MutableProgress {
 }
 
 interface CloudflareEnvelope {
-  readonly errors: null | readonly unknown[];
-  readonly messages: null | readonly unknown[];
-  readonly result: unknown;
+  readonly errors: null | readonly BoundaryValue[];
+  readonly messages: null | readonly BoundaryValue[];
+  readonly result: BoundaryValue;
   readonly success: boolean;
 }
 
@@ -336,8 +811,8 @@ function submissionKey(submission: CloudflareDirectUploadSubmission): string {
   return `deployment:${submission.deploymentId}`;
 }
 
-function rethrowWithSubmissions(
-  error: unknown,
+function rethrowWithSubmissions<Thrown>(
+  error: Thrown,
   submissions: readonly CloudflareDirectUploadSubmission[],
   outcome?: CloudflareDirectUploadOutcome,
 ): never {
@@ -355,11 +830,11 @@ function rethrowWithSubmissions(
   );
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+function isRecord<Value>(value: Value): value is Value & BoundaryObject {
+  return v.is(boundaryObjectSchema, value);
 }
 
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+function exactKeys<Value extends object>(value: Value, keys: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
@@ -369,35 +844,26 @@ function lexicalCompare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function isEmptyProviderList(value: unknown): value is null | readonly [] {
-  return value === null || (Array.isArray(value) && value.length === 0);
+function isEmptyProviderList<Value>(value: Value): boolean {
+  return v.is(v.union([v.null(), v.pipe(v.array(boundaryValueSchema), v.length(0))]), value);
 }
 
-function validProviderErrorList(value: unknown): boolean {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 16) return false;
-  return value.every((entry) => {
-    if (!isRecord(entry)) return false;
-    const allowed = new Set(['code', 'documentation_url', 'message', 'source']);
-    if (Object.keys(entry).some((key) => !allowed.has(key))) return false;
-    return typeof entry.code === 'number' && Number.isSafeInteger(entry.code) &&
-      typeof entry.message === 'string' && entry.message.length > 0 && entry.message.length <= 2048;
-  });
+function validProviderErrorList<Value>(value: Value): boolean {
+  return v.is(providerErrorListSchema, value);
 }
 
-function parseEnvelope(value: unknown): CloudflareEnvelope | null {
-  if (!isRecord(value) || !exactKeys(value, ['errors', 'messages', 'result', 'success'])) return null;
-  if (typeof value.success !== 'boolean') return null;
-  if (!(value.errors === null || Array.isArray(value.errors))) return null;
-  if (!(value.messages === null || Array.isArray(value.messages))) return null;
+function parseEnvelope<Value>(value: Value): CloudflareEnvelope | null {
+  const candidate = v.safeParse(providerEnvelopeSchema, value);
+  if (!candidate.success) return null;
   return {
-    errors: value.errors,
-    messages: value.messages,
-    result: value.result,
-    success: value.success,
+    errors: candidate.output.errors,
+    messages: candidate.output.messages,
+    result: candidate.output.result,
+    success: candidate.output.success,
   };
 }
 
-function parseSuccessEnvelope(value: unknown): unknown | null {
+function parseSuccessEnvelope<Value>(value: Value): BoundaryValue | null {
   const envelope = parseEnvelope(value);
   if (
     !envelope ||
@@ -408,7 +874,7 @@ function parseSuccessEnvelope(value: unknown): unknown | null {
   return envelope.result;
 }
 
-function parseAbsentEnvelope(value: unknown): boolean {
+function parseAbsentEnvelope<Value>(value: Value): boolean {
   const envelope = parseEnvelope(value);
   return Boolean(
     envelope &&
@@ -419,11 +885,8 @@ function parseAbsentEnvelope(value: unknown): boolean {
   );
 }
 
-function safeToken(value: unknown, minimum = 20): value is string {
-  return typeof value === 'string' &&
-    value.length >= minimum &&
-    value.length <= 8192 &&
-    TOKEN_PATTERN.test(value);
+function safeToken<Value>(value: Value, minimum = 20): value is Value & string {
+  return v.is(v.pipe(safeTokenSchema, v.minLength(minimum)), value);
 }
 
 function extension(path: string): string {
@@ -432,31 +895,43 @@ function extension(path: string): string {
   return dot > slash ? path.slice(dot).toLowerCase() : '';
 }
 
-function safeModuleName(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 256) return false;
-  if (value.startsWith('/') || value.includes('\\') || CONTROL_CHARACTER.test(value)) return false;
+function hasControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 31 || codePoint === 127;
+  });
+}
+
+function safeModuleName<Value>(value: Value): value is Value & string {
+  if (!v.is(v.pipe(v.string(), v.minLength(1), v.maxLength(256)), value)) return false;
+  if (value.startsWith('/') || value.includes('\\') || hasControlCharacter(value)) return false;
   return value.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
 }
 
-function safeAssetPath(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length < 2 || value.length > 1024) return false;
-  if (!value.startsWith('/') || value.includes('\\') || CONTROL_CHARACTER.test(value)) return false;
+function safeAssetPath<Value>(value: Value): value is Value & string {
+  if (!v.is(v.pipe(v.string(), v.minLength(2), v.maxLength(1_024)), value)) return false;
+  if (!value.startsWith('/') || value.includes('\\') || hasControlCharacter(value)) return false;
   return value.slice(1).split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
 }
 
-function safeBindingValue(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !CONTROL_CHARACTER.test(value);
+function safeBindingValue<Value>(value: Value): value is Value & string {
+  return v.is(safeBindingValueSchema, value);
 }
 
-function safeHostname(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length > 253 || value !== value.toLowerCase() ||
+function safeHostname<Value>(value: Value): value is Value & string {
+  if (!v.is(v.pipe(v.string(), v.minLength(3), v.maxLength(253)), value) || value !== value.toLowerCase() ||
       value.includes(':') || /^(?:\d+\.)+\d+$/u.test(value)) return false;
   const labels = value.split('.');
   return labels.length >= 2 && labels.every((label) => DNS_LABEL_PATTERN.test(label));
 }
 
-function safeIsoDate(value: unknown): value is string {
-  return typeof value === 'string' && value.length >= 20 && value.length <= 40 && Number.isFinite(Date.parse(value));
+function safeIsoDate<Value>(value: Value): value is Value & string {
+  return v.is(v.pipe(
+    v.string(),
+    v.minLength(20),
+    v.maxLength(40),
+    v.check((date) => Number.isFinite(Date.parse(date))),
+  ), value);
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -469,21 +944,22 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function strictBase64Bytes(value: unknown, expectedByteLength: number): Uint8Array | null {
-  if (
-    typeof value !== 'string' ||
-    value.length !== 4 * Math.ceil(expectedByteLength / 3) ||
-    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)
-  ) return null;
+function strictBase64Bytes<Value>(value: Value, expectedByteLength: number): Uint8Array | null {
+  const candidate = v.safeParse(v.pipe(
+    v.string(),
+    v.length(4 * Math.ceil(expectedByteLength / 3)),
+    v.regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u),
+  ), value);
+  if (!candidate.success) return null;
   let binary: string;
   try {
-    binary = atob(value);
+    binary = atob(candidate.output);
   } catch {
     return null;
   }
   if (binary.length !== expectedByteLength) return null;
   const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-  return bytesToBase64(bytes) === value ? bytes : null;
+  return bytesToBase64(bytes) === candidate.output ? bytes : null;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -491,7 +967,7 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 async function sha256(value: Uint8Array | string): Promise<string> {
-  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+  const bytes = v.is(v.string(), value) ? new TextEncoder().encode(value) : value;
   const digestInput = new Uint8Array(bytes).buffer;
   return bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', digestInput)));
 }
@@ -500,70 +976,35 @@ async function prepareInput(
   input: PrepareVerifiedWorkerReleaseInput,
   progress: MutableProgress,
 ): Promise<PreparedVerifiedWorkerRelease> {
-  if (
-    !isRecord(input) ||
-    !ACCOUNT_ID_PATTERN.test(input.accountId) ||
-    !WORKER_NAME_PATTERN.test(input.workerName) ||
-    !isRecord(input.release) ||
-    input.release.verification !== 'ed25519' ||
-    !RELEASE_PATTERN.test(input.release.release) ||
-    !SHA256_PATTERN.test(input.release.artifactSha256) ||
-    !isRecord(input.release.worker) ||
-    input.release.worker.mainModule !== 'index.js' ||
-    input.release.worker.compatibilityDate !== EXACT_COMPATIBILITY_DATE ||
-    !Array.isArray(input.release.worker.compatibilityFlags) ||
-    input.release.worker.compatibilityFlags.length !== 0 ||
-    !Array.isArray(input.release.worker.modules) ||
-    input.release.worker.modules.length === 0 ||
-    !isRecord(input.release.worker.assets) ||
-    input.release.worker.assets.binding !== 'ASSETS' ||
-    input.release.worker.assets.notFoundHandling !== 'single-page-application' ||
-    !Array.isArray(input.release.worker.assets.runWorkerFirst) ||
-    input.release.worker.assets.runWorkerFirst.length !== EXACT_RUN_WORKER_FIRST.length ||
-    !input.release.worker.assets.runWorkerFirst.every(
-      (route, index) => route === EXACT_RUN_WORKER_FIRST[index],
-    ) ||
-    !Array.isArray(input.release.worker.assets.files) ||
-    input.release.worker.assets.files.length === 0 ||
-    !isRecord(input.release.worker.durableObject) ||
-    input.release.worker.durableObject.binding !== 'ADMIN_STATE' ||
-    input.release.worker.durableObject.className !== 'AdminState' ||
-    input.release.worker.durableObject.storage !== 'sqlite' ||
-    !isRecord(input.plainTextBindings) ||
-    !exactKeys(input.plainTextBindings, EXACT_PLAIN_TEXT_BINDINGS) ||
-    !safeToken(input.bootstrapNonce, 32)
-  ) fail('invalid_input', 'validate', 'not_sent', progress);
+  const candidate = v.safeParse(prepareReleaseInputSchema, input);
+  if (!candidate.success) fail('invalid_input', 'validate', 'not_sent', progress);
+  const parsedInput = candidate.output;
 
   for (const name of EXACT_PLAIN_TEXT_BINDINGS) {
-    if (!safeBindingValue(input.plainTextBindings[name])) {
+    if (!safeBindingValue(parsedInput.plainTextBindings[name])) {
       fail('invalid_input', 'validate', 'not_sent', progress);
     }
   }
   if (
-    input.plainTextBindings.ANKKA_GATEWAY_RELEASE !== input.release.release ||
-    input.plainTextBindings.ANKKA_GATEWAY_RELEASE_SHA256 !== `sha256:${input.release.artifactSha256}` ||
-    input.plainTextBindings.ANKKA_WORKER_NAME !== input.workerName ||
-    !WORKER_NAME_PATTERN.test(input.plainTextBindings.ANKKA_WORKER_NAME) ||
-    !DNS_LABEL_PATTERN.test(input.plainTextBindings.ANKKA_WORKERS_SUBDOMAIN) ||
-    !safeHostname(input.plainTextBindings.ANKKA_MANAGEMENT_HOSTNAME) ||
-    input.plainTextBindings.CLOUDFLARE_ACCOUNT_ID !== input.accountId ||
-    !ACCOUNT_ID_PATTERN.test(input.plainTextBindings.CLOUDFLARE_ZONE_ID) ||
-    input.plainTextBindings.ZERO_TRUST_READY !== 'true'
+    parsedInput.plainTextBindings.ANKKA_GATEWAY_RELEASE !== parsedInput.release.release ||
+    parsedInput.plainTextBindings.ANKKA_GATEWAY_RELEASE_SHA256 !== `sha256:${parsedInput.release.artifactSha256}` ||
+    parsedInput.plainTextBindings.ANKKA_WORKER_NAME !== parsedInput.workerName ||
+    !WORKER_NAME_PATTERN.test(parsedInput.plainTextBindings.ANKKA_WORKER_NAME) ||
+    !DNS_LABEL_PATTERN.test(parsedInput.plainTextBindings.ANKKA_WORKERS_SUBDOMAIN) ||
+    !safeHostname(parsedInput.plainTextBindings.ANKKA_MANAGEMENT_HOSTNAME) ||
+    parsedInput.plainTextBindings.CLOUDFLARE_ACCOUNT_ID !== parsedInput.accountId ||
+    !ACCOUNT_ID_PATTERN.test(parsedInput.plainTextBindings.CLOUDFLARE_ZONE_ID) ||
+    parsedInput.plainTextBindings.ZERO_TRUST_READY !== 'true'
   ) fail('invalid_input', 'validate', 'not_sent', progress);
 
   const modules: PreparedModule[] = [];
   const moduleNames = new Set<string>();
   let totalBytes = 0;
-  for (const module of input.release.worker.modules) {
+  for (const module of parsedInput.release.worker.modules) {
     if (
-      !isRecord(module) ||
       !safeModuleName(module.name) ||
       moduleNames.has(module.name) ||
-      typeof module.contentType !== 'string' ||
       module.contentType !== MODULE_CONTENT_TYPES[extension(module.name)] ||
-      typeof module.sha256 !== 'string' ||
-      !SHA256_PATTERN.test(module.sha256) ||
-      !(module.bytes instanceof Uint8Array) ||
       module.bytes.byteLength === 0 ||
       module.bytes.byteLength > MAX_FILE_BYTES
     ) fail('invalid_input', 'validate', 'not_sent', progress);
@@ -580,16 +1021,11 @@ async function prepareInput(
   const assets: PreparedAsset[] = [];
   const assetPaths = new Set<string>();
   const hashContentTypes = new Map<string, string>();
-  for (const asset of input.release.worker.assets.files) {
+  for (const asset of parsedInput.release.worker.assets.files) {
     if (
-      !isRecord(asset) ||
       !safeAssetPath(asset.path) ||
       assetPaths.has(asset.path) ||
-      typeof asset.contentType !== 'string' ||
       asset.contentType !== ASSET_CONTENT_TYPES[extension(asset.path)] ||
-      typeof asset.sha256 !== 'string' ||
-      !SHA256_PATTERN.test(asset.sha256) ||
-      !(asset.bytes instanceof Uint8Array) ||
       asset.bytes.byteLength === 0 ||
       asset.bytes.byteLength > MAX_FILE_BYTES
     ) fail('invalid_input', 'validate', 'not_sent', progress);
@@ -619,13 +1055,13 @@ async function prepareInput(
   modules.sort((left, right) => lexicalCompare(left.name, right.name));
   assets.sort((left, right) => lexicalCompare(left.path, right.path));
   return {
-    accountId: input.accountId,
-    workerName: input.workerName,
-    release: input.release.release,
+    accountId: parsedInput.accountId,
+    workerName: parsedInput.workerName,
+    release: parsedInput.release.release,
     modules: Object.freeze(modules),
     assets: Object.freeze(assets),
-    plainTextBindings: Object.freeze({ ...input.plainTextBindings }),
-    bootstrapNonce: input.bootstrapNonce,
+    plainTextBindings: Object.freeze({ ...parsedInput.plainTextBindings }),
+    bootstrapNonce: parsedInput.bootstrapNonce,
   };
 }
 
@@ -636,19 +1072,16 @@ export async function prepareVerifiedWorkerRelease(
 }
 
 function prepareCall(call: CloudflareDirectUploadCall, progress: MutableProgress): PreparedCall {
-  if (!isRecord(call)) fail('invalid_input', 'validate', 'not_sent', progress);
-  const timeoutMs = call.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  if (
-    !safeToken(call.accessToken) ||
-    typeof call.transport !== 'function' ||
-    !Number.isSafeInteger(timeoutMs) ||
-    timeoutMs < 100 ||
-    timeoutMs > 60_000
-  ) fail('invalid_input', 'validate', 'not_sent', progress);
-  return { accessToken: call.accessToken, transport: call.transport, timeoutMs };
+  const candidate = v.safeParse(directUploadCallSchema, call);
+  if (!candidate.success) fail('invalid_input', 'validate', 'not_sent', progress);
+  return {
+    accessToken: candidate.output.accessToken,
+    transport: candidate.output.transport,
+    timeoutMs: candidate.output.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  };
 }
 
-async function readBoundedJson(response: Response, maxBytes = MAX_RESPONSE_BYTES): Promise<unknown> {
+async function readBoundedJson(response: Response, maxBytes = MAX_RESPONSE_BYTES): Promise<BoundaryValue> {
   const declaredLength = response.headers.get('content-length');
   if (declaredLength !== null) {
     const declared = Number(declaredLength);
@@ -686,7 +1119,7 @@ async function readBoundedJson(response: Response, maxBytes = MAX_RESPONSE_BYTES
     throw new TypeError('response');
   }
   try {
-    return JSON.parse(text) as unknown;
+    return v.parse(boundaryValueSchema, JSON.parse(text));
   } catch {
     throw new TypeError('response');
   }
@@ -699,7 +1132,7 @@ async function performRequest(
   url: string,
   init: RequestInit,
   maxResponseBytes = MAX_RESPONSE_BYTES,
-): Promise<{ readonly status: number; readonly value: unknown }> {
+): Promise<{ readonly status: number; readonly value: BoundaryValue }> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -749,7 +1182,7 @@ function jsonHeaders(accessToken: string): Headers {
 
 function rejectForStatus(
   status: number,
-  value: unknown,
+  value: BoundaryValue,
   stage: CloudflareDirectUploadStage,
   progress: MutableProgress,
 ): never {
@@ -766,11 +1199,11 @@ function rejectForStatus(
 }
 
 function requireSuccess(
-  response: { readonly status: number; readonly value: unknown },
+  response: { readonly status: number; readonly value: BoundaryValue },
   expectedStatuses: readonly number[],
   stage: CloudflareDirectUploadStage,
   progress: MutableProgress,
-): unknown {
+): BoundaryValue {
   if (!expectedStatuses.includes(response.status)) {
     rejectForStatus(response.status, response.value, stage, progress);
   }
@@ -779,28 +1212,12 @@ function requireSuccess(
   return result;
 }
 
-function disabledObservability(value: unknown): boolean {
-  if (!isRecord(value) || value.enabled !== false) return false;
-  const allowed = new Set(['enabled', 'head_sampling_rate', 'redact_query_string', 'logs', 'traces']);
-  if (Object.keys(value).some((key) => !allowed.has(key))) return false;
-  if (value.redact_query_string !== undefined && value.redact_query_string !== false) return false;
-  for (const key of ['logs', 'traces'] as const) {
-    const nested = value[key];
-    if (nested === undefined) continue;
-    if (!isRecord(nested)) return false;
-    if (nested.enabled !== undefined && nested.enabled !== false) return false;
-    if (nested.destinations !== undefined && (!Array.isArray(nested.destinations) || nested.destinations.length !== 0)) {
-      return false;
-    }
-  }
-  return true;
+function disabledObservability<Value>(value: Value): boolean {
+  return v.is(disabledObservabilitySchema, value);
 }
 
-function emptyReferences(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const expected = ['dispatch_namespace_outbounds', 'domains', 'durable_objects', 'queues', 'workers'];
-  if (!exactKeys(value, expected)) return false;
-  return expected.every((key) => Array.isArray(value[key]) && (value[key] as unknown[]).length === 0);
+function emptyReferences(value: BoundaryValue): boolean {
+  return v.is(emptyWorkerReferencesSchema, value);
 }
 
 /**
@@ -820,89 +1237,53 @@ export interface ConvergedWorkerExpectation {
 }
 
 function exactConvergedReferences(
-  value: unknown,
+  value: BoundaryValue,
   expectedName: string,
   converged: ConvergedWorkerExpectation,
 ): boolean {
-  if (!isRecord(value)) return false;
-  if (!exactKeys(value, ['dispatch_namespace_outbounds', 'domains', 'durable_objects', 'queues', 'workers'])) {
-    return false;
-  }
-  for (const key of ['dispatch_namespace_outbounds', 'queues', 'workers'] as const) {
-    if (!Array.isArray(value[key]) || (value[key] as unknown[]).length !== 0) return false;
-  }
-  if (!Array.isArray(value.domains) || value.domains.length !== 1) return false;
-  const domain = value.domains[0];
+  const candidate = v.safeParse(convergedWorkerReferencesSchema, value);
+  if (!candidate.success) return false;
+  const domain = candidate.output.domains.at(0);
+  if (domain === undefined) return false;
   if (
-    !isRecord(domain) || !exactKeys(domain, ['id', 'hostname', 'zone_id', 'zone_name']) ||
     domain.id !== converged.domain.id || domain.hostname !== converged.domain.hostname ||
     domain.zone_id !== converged.domain.zoneId || domain.zone_name !== converged.domain.zoneName
   ) return false;
-  if (!Array.isArray(value.durable_objects) || value.durable_objects.length !== 1) return false;
-  const namespace = value.durable_objects[0];
-  return isRecord(namespace) &&
-    exactKeys(namespace, ['worker_id', 'worker_name', 'namespace_id', 'namespace_name']) &&
-    namespace.namespace_id === converged.namespaceId &&
+  const namespace = candidate.output.durable_objects.at(0);
+  if (namespace === undefined) return false;
+  return namespace.namespace_id === converged.namespaceId &&
     namespace.worker_name === expectedName &&
     namespace.namespace_name === `${expectedName}_AdminState`;
 }
 
 function exactWorkerState(
-  value: unknown,
+  value: BoundaryValue,
   expectedName: string,
   expectedTags: readonly string[],
   expectedId?: string,
   converged?: ConvergedWorkerExpectation,
-): value is Record<string, unknown> {
-  if (!isRecord(value)) return false;
-  const allowed = new Set([
-    'created_on',
-    'deployed_on',
-    'id',
-    'logpush',
-    'name',
-    'observability',
-    'references',
-    'subdomain',
-    'tags',
-    'tail_consumers',
-    'updated_on',
-  ]);
-  if (Object.keys(value).some((key) => !allowed.has(key))) return false;
+): value is BoundaryObject & { readonly id: string } {
+  const candidate = v.safeParse(workerStateSchema, value);
+  if (!candidate.success) return false;
+  const observation = candidate.output;
   if (
-    !WORKER_ID_PATTERN.test(String(value.id)) ||
-    (expectedId !== undefined && value.id !== expectedId) ||
-    value.name !== expectedName ||
-    value.logpush !== false ||
-    !disabledObservability(value.observability) ||
-    !isRecord(value.subdomain) ||
-    value.subdomain.enabled !== false ||
-    value.subdomain.previews_enabled !== false ||
-    !Array.isArray(value.tags) ||
-    value.tags.length !== expectedTags.length ||
-    !value.tags.every((tag, index) => tag === expectedTags[index]) ||
-    !Array.isArray(value.tail_consumers) ||
-    value.tail_consumers.length !== 0 ||
-    !safeIsoDate(value.created_on) ||
-    !safeIsoDate(value.updated_on) ||
+    (expectedId !== undefined && observation.id !== expectedId) ||
+    observation.name !== expectedName ||
+    !disabledObservability(observation.observability) ||
+    observation.tags.length !== expectedTags.length ||
+    !observation.tags.every((tag, index) => tag === expectedTags[index]) ||
+    !safeIsoDate(observation.created_on) ||
+    !safeIsoDate(observation.updated_on) ||
     (converged
-      ? !safeIsoDate(value.deployed_on) || !exactConvergedReferences(value.references, expectedName, converged)
-      : !(value.deployed_on === undefined || value.deployed_on === null) || !emptyReferences(value.references))
+      ? !safeIsoDate(observation.deployed_on) ||
+        !exactConvergedReferences(observation.references, expectedName, converged)
+      : !(observation.deployed_on === undefined || observation.deployed_on === null) ||
+        !emptyReferences(observation.references))
   ) return false;
   return true;
 }
 
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('canonical');
-}
-
-function canonicalEqual(left: unknown, right: unknown): boolean {
+function canonicalEqual<Left, Right>(left: Left, right: Right): boolean {
   try {
     return canonicalJson(left) === canonicalJson(right);
   } catch {
@@ -948,18 +1329,13 @@ function workerCoreBody(workerName: string) {
  * Prepare the deterministic Worker container before release bindings exist.
  * Access application state (including CF_ACCESS_AUD) is intentionally absent.
  */
-export async function prepareWorkerMutationForTarget(
-  input: PrepareWorkerMutationForTargetInput,
+export async function prepareWorkerMutationForTarget<Input>(
+  input: Input,
 ): Promise<WorkerMutationIntent> {
   const progress = initialProgress();
-  if (!isRecord(input) || !exactKeys(input, ['accountId', 'workerName'])) {
-    fail('invalid_input', 'validate', 'not_sent', progress);
-  }
-  const accountId = input.accountId;
-  const workerName = input.workerName;
-  if (!ACCOUNT_ID_PATTERN.test(accountId) || !WORKER_NAME_PATTERN.test(workerName)) {
-    fail('invalid_input', 'validate', 'not_sent', progress);
-  }
+  const candidate = v.safeParse(workerTargetInputSchema, input);
+  if (!candidate.success) fail('invalid_input', 'validate', 'not_sent', progress);
+  const { accountId, workerName } = candidate.output;
   const core = workerCoreBody(workerName);
   const requestHash = await sha256(canonicalJson(core));
   const correlationTag = `ankka-worker-sha256:${requestHash}`;
@@ -985,25 +1361,22 @@ export async function prepareWorkerMutation(
 }
 
 async function validWorkerIntent(intent: WorkerMutationIntent): Promise<boolean> {
-  if (
-    !isRecord(intent) ||
-    intent.kind !== 'worker' ||
-    !ACCOUNT_ID_PATTERN.test(intent.accountId) ||
-    !WORKER_NAME_PATTERN.test(intent.workerName) ||
-    !SHA256_PATTERN.test(intent.requestHash) ||
-    intent.correlationTag !== `ankka-worker-sha256:${intent.requestHash}` ||
-    !isRecord(intent.body) ||
-    !canonicalEqual(intent.body, {
-      ...workerCoreBody(intent.workerName),
-      tags: [MANAGED_WORKER_TAG, intent.correlationTag],
+  const candidate = v.safeParse(workerIntentSchema, intent);
+  if (!candidate.success ||
+    candidate.output.correlationTag !== `ankka-worker-sha256:${candidate.output.requestHash}` ||
+    !canonicalEqual(candidate.output.body, {
+      ...workerCoreBody(candidate.output.workerName),
+      tags: [MANAGED_WORKER_TAG, candidate.output.correlationTag],
     })
   ) return false;
-  return await sha256(canonicalJson(workerCoreBody(intent.workerName))) === intent.requestHash;
+  return await sha256(canonicalJson(workerCoreBody(candidate.output.workerName))) === candidate.output.requestHash;
 }
 
-function rawResultId(value: unknown, pattern: RegExp): string | null {
-  if (!isRecord(value) || !isRecord(value.result) || typeof value.result.id !== 'string') return null;
-  return pattern.test(value.result.id) ? value.result.id : null;
+function rawResultId(value: BoundaryValue, pattern: RegExp): string | null {
+  const envelope = parseEnvelope(value);
+  if (!envelope) return null;
+  const result = v.safeParse(v.looseObject({ id: v.pipe(v.string(), v.regex(pattern)) }), envelope.result);
+  return result.success ? result.output.id : null;
 }
 
 function workerSubmission(intent: WorkerMutationIntent, workerId: string): WorkerSubmission {
@@ -1132,41 +1505,14 @@ interface DurableObjectNamespacePage {
   readonly totalPages: number | null;
 }
 
-function boundedNamespaceText(value: unknown, maximum: number): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= maximum && !CONTROL_CHARACTER.test(value);
-}
-
-function parseDurableObjectNamespacePage(value: unknown): DurableObjectNamespacePage | null {
-  if (!isRecord(value) || !exactKeys(value, ['errors', 'messages', 'result', 'result_info', 'success'])) return null;
-  if (
-    value.success !== true || !isEmptyProviderList(value.errors) || !isEmptyProviderList(value.messages) ||
-    !Array.isArray(value.result) || !isRecord(value.result_info) ||
-    // Live (2026-08-23): this endpoint omits total_pages entirely.
-    !exactKeys(value.result_info, Object.hasOwn(value.result_info, 'total_pages')
-      ? ['count', 'page', 'per_page', 'total_count', 'total_pages']
-      : ['count', 'page', 'per_page', 'total_count'])
-  ) return null;
-  const info = value.result_info;
-  if (
-    !Number.isSafeInteger(info.count) || (info.count as number) < 0 ||
-    !Number.isSafeInteger(info.page) || (info.page as number) < 1 ||
-    info.per_page !== NAMESPACE_PAGE_SIZE ||
-    !Number.isSafeInteger(info.total_count) || (info.total_count as number) < 0 ||
-    (info.total_count as number) > MAX_NAMESPACE_COUNT ||
-    (info.total_pages !== undefined && (
-      !Number.isSafeInteger(info.total_pages) || (info.total_pages as number) < 0 ||
-      (info.total_pages as number) > MAX_NAMESPACE_PAGES
-    )) ||
-    info.count !== value.result.length
-  ) return null;
+function parseDurableObjectNamespacePage(value: BoundaryValue): DurableObjectNamespacePage | null {
+  const candidate = v.safeParse(durableObjectNamespacePageSchema, value);
+  if (!candidate.success || !isEmptyProviderList(candidate.output.errors) ||
+    !isEmptyProviderList(candidate.output.messages) ||
+    candidate.output.result_info.count !== candidate.output.result.length) return null;
+  const info = candidate.output.result_info;
   const items: DurableObjectNamespaceItem[] = [];
-  for (const item of value.result) {
-    if (!isRecord(item) || !exactKeys(item, ['id', 'class', 'name', 'script', 'use_sqlite'])) return null;
-    if (
-      typeof item.id !== 'string' || !ACCOUNT_ID_PATTERN.test(item.id) ||
-      !boundedNamespaceText(item.class, 128) || !boundedNamespaceText(item.name, 256) ||
-      !boundedNamespaceText(item.script, 128) || typeof item.use_sqlite !== 'boolean'
-    ) return null;
+  for (const item of candidate.output.result) {
     items.push(Object.freeze({
       id: item.id,
       className: item.class,
@@ -1177,11 +1523,11 @@ function parseDurableObjectNamespacePage(value: unknown): DurableObjectNamespace
   }
   return Object.freeze({
     items: Object.freeze(items),
-    page: info.page as number,
+    page: info.page,
     perPage: NAMESPACE_PAGE_SIZE,
-    count: info.count as number,
-    totalCount: info.total_count as number,
-    totalPages: info.total_pages === undefined ? null : info.total_pages as number,
+    count: info.count,
+    totalCount: info.total_count,
+    totalPages: info.total_pages ?? null,
   });
 }
 
@@ -1195,15 +1541,9 @@ export async function inspectAdminStateDurableObjectNamespace(
   callInput: CloudflareDirectUploadCall,
 ): Promise<AdminStateDurableObjectNamespaceLocator> {
   const progress = initialProgress();
-  if (
-    !isRecord(input) ||
-    !exactKeys(input, input.expectedNamespaceId === undefined
-      ? ['accountId', 'workerName', 'className', 'storage']
-      : ['accountId', 'workerName', 'className', 'storage', 'expectedNamespaceId']) ||
-    !ACCOUNT_ID_PATTERN.test(input.accountId) || !WORKER_NAME_PATTERN.test(input.workerName) ||
-    input.className !== 'AdminState' || input.storage !== 'sqlite' ||
-    (input.expectedNamespaceId !== undefined && !ACCOUNT_ID_PATTERN.test(input.expectedNamespaceId))
-  ) fail('invalid_input', 'validate', 'not_sent', progress);
+  const candidate = v.safeParse(inspectNamespaceInputSchema, input);
+  if (!candidate.success) fail('invalid_input', 'validate', 'not_sent', progress);
+  const parsedInput = candidate.output;
   const call = prepareCall(callInput, progress);
   const seenIds = new Set<string>();
   const identityMatches: DurableObjectNamespaceItem[] = [];
@@ -1216,7 +1556,7 @@ export async function inspectAdminStateDurableObjectNamespace(
       call,
       progress,
       'namespace_verify',
-      `${CLOUDFLARE_API_ORIGIN}/client/v4/accounts/${input.accountId}/workers/durable_objects/namespaces?page=${page}&per_page=${NAMESPACE_PAGE_SIZE}`,
+      `${CLOUDFLARE_API_ORIGIN}/client/v4/accounts/${parsedInput.accountId}/workers/durable_objects/namespaces?page=${page}&per_page=${NAMESPACE_PAGE_SIZE}`,
       { method: 'GET', headers: authHeaders(call.accessToken) },
       MAX_NAMESPACE_RESPONSE_BYTES,
     );
@@ -1241,18 +1581,20 @@ export async function inspectAdminStateDurableObjectNamespace(
       (parsed.totalPages !== null && parsed.totalPages !== expectedTotalPages)
     ) fail('provider_mismatch', 'namespace_verify', 'unknown', progress);
 
-    const remaining = (expectedTotalCount as number) - observedCount;
+    if (expectedTotalCount === null) fail('provider_mismatch', 'namespace_verify', 'unknown', progress);
+    const remaining = expectedTotalCount - observedCount;
     const expectedPageCount = Math.max(0, Math.min(NAMESPACE_PAGE_SIZE, remaining));
     if (parsed.count !== expectedPageCount) fail('provider_mismatch', 'namespace_verify', 'unknown', progress);
     for (const item of parsed.items) {
       if (seenIds.has(item.id)) fail('recovery_ambiguous', 'namespace_verify', 'unknown', progress);
       seenIds.add(item.id);
-      if (item.script === input.workerName && item.className === input.className) identityMatches.push(item);
+      if (item.script === parsedInput.workerName && item.className === parsedInput.className) identityMatches.push(item);
     }
     observedCount += parsed.count;
-    const lastPage = expectedTotalPages === 0 ? 1 : expectedTotalPages as number;
+    if (expectedTotalPages === null) fail('provider_mismatch', 'namespace_verify', 'unknown', progress);
+    const lastPage = expectedTotalPages === 0 ? 1 : expectedTotalPages;
     if (page === lastPage) break;
-    if (page >= (expectedTotalPages as number)) fail('provider_mismatch', 'namespace_verify', 'unknown', progress);
+    if (page >= expectedTotalPages) fail('provider_mismatch', 'namespace_verify', 'unknown', progress);
   }
 
   if (expectedTotalCount === null || observedCount !== expectedTotalCount) {
@@ -1260,34 +1602,34 @@ export async function inspectAdminStateDurableObjectNamespace(
   }
   if (identityMatches.length === 0) fail('provider_mismatch', 'namespace_verify', 'unknown', progress);
   if (identityMatches.length > 1) fail('recovery_ambiguous', 'namespace_verify', 'unknown', progress);
-  const match = identityMatches[0];
-  if (!match.useSqlite || (input.expectedNamespaceId !== undefined && match.id !== input.expectedNamespaceId)) {
+  const match = identityMatches.at(0);
+  if (match === undefined) fail('provider_mismatch', 'namespace_verify', 'unknown', progress);
+  if (!match.useSqlite ||
+    (parsedInput.expectedNamespaceId !== undefined && match.id !== parsedInput.expectedNamespaceId)) {
     fail('provider_mismatch', 'namespace_verify', 'unknown', progress);
   }
   return Object.freeze({
-    accountId: input.accountId,
+    accountId: parsedInput.accountId,
     namespaceId: match.id,
     namespaceName: match.name,
-    workerName: input.workerName,
+    workerName: parsedInput.workerName,
     className: 'AdminState',
     storage: 'sqlite',
   });
 }
 
 function parseAssetSession(
-  value: unknown,
+  value: BoundaryValue,
   knownHashes: ReadonlySet<string>,
 ): { readonly jwt: string; readonly buckets: readonly (readonly string[])[] } | null {
-  if (!isRecord(value) || !exactKeys(value, ['buckets', 'jwt']) || !safeToken(value.jwt) || !Array.isArray(value.buckets)) {
-    return null;
-  }
+  const candidate = v.safeParse(assetSessionResponseSchema, value);
+  if (!candidate.success) return null;
   const seen = new Set<string>();
   const buckets: string[][] = [];
-  for (const bucket of value.buckets) {
-    if (!Array.isArray(bucket) || bucket.length === 0) return null;
+  for (const bucket of candidate.output.buckets) {
     const parsed: string[] = [];
     for (const hash of bucket) {
-      if (typeof hash !== 'string' || !ASSET_HASH_PATTERN.test(hash) || !knownHashes.has(hash) || seen.has(hash)) {
+      if (!knownHashes.has(hash) || seen.has(hash)) {
         return null;
       }
       seen.add(hash);
@@ -1295,7 +1637,7 @@ function parseAssetSession(
     }
     buckets.push(parsed);
   }
-  return { jwt: value.jwt, buckets };
+  return { jwt: candidate.output.jwt, buckets };
 }
 
 export interface AssetUploadSessionMutationIntent {
@@ -1346,10 +1688,12 @@ export type AssetBucketSubmission =
       readonly completionJwt: string;
     };
 
-function assetManifest(prepared: PreparedVerifiedWorkerRelease): {
+interface PreparedAssetManifest {
   readonly manifest: Record<string, { readonly hash: string; readonly size: number }>;
   readonly assetsByHash: Map<string, PreparedAsset>;
-} {
+}
+
+function assetManifest(prepared: PreparedVerifiedWorkerRelease): PreparedAssetManifest {
   const manifest: Record<string, { readonly hash: string; readonly size: number }> = {};
   const assetsByHash = new Map<string, PreparedAsset>();
   for (const asset of prepared.assets) {
@@ -1375,32 +1719,13 @@ export async function prepareAssetUploadSessionMutation(
 }
 
 async function validAssetSessionIntent(intent: AssetUploadSessionMutationIntent): Promise<boolean> {
-  if (
-    !isRecord(intent) ||
-    intent.kind !== 'asset_session' ||
-    !ACCOUNT_ID_PATTERN.test(intent.accountId) ||
-    !WORKER_NAME_PATTERN.test(intent.workerName) ||
-    !SHA256_PATTERN.test(intent.requestHash) ||
-    !isRecord(intent.body) ||
-    !exactKeys(intent.body, ['manifest']) ||
-    !isRecord(intent.body.manifest) ||
-    Object.keys(intent.body.manifest).length === 0
-  ) return false;
-  for (const [path, entry] of Object.entries(intent.body.manifest)) {
-    if (
-      !safeAssetPath(path) ||
-      !isRecord(entry) ||
-      !exactKeys(entry, ['hash', 'size']) ||
-      typeof entry.hash !== 'string' ||
-      !ASSET_HASH_PATTERN.test(entry.hash) ||
-      typeof entry.size !== 'number' ||
-      !Number.isSafeInteger(entry.size) ||
-      entry.size <= 0 ||
-      entry.size > MAX_FILE_BYTES
-    ) return false;
+  const candidate = v.safeParse(assetSessionIntentSchema, intent);
+  if (!candidate.success) return false;
+  for (const path of Object.keys(candidate.output.body.manifest)) {
+    if (!safeAssetPath(path)) return false;
   }
   try {
-    return await sha256(canonicalJson(intent.body)) === intent.requestHash;
+    return await sha256(canonicalJson(candidate.output.body)) === candidate.output.requestHash;
   } catch {
     return false;
   }
@@ -1441,39 +1766,27 @@ export async function submitAssetUploadSessionMutation(
 function assetBucketCore(
   session: AssetUploadSessionSubmission,
   bucketIndex: number,
-): Omit<AssetBucketMutationIntent, 'kind' | 'requestHash'> {
+): Omit<AssetBucketMutationIntent, 'kind' | 'requestHash'> | null {
+  const hashes = session.buckets.at(bucketIndex);
+  if (hashes === undefined) return null;
   return {
     accountId: session.accountId,
     workerName: session.workerName,
     sessionRequestHash: session.requestHash,
     bucketIndex,
     bucketCount: session.buckets.length,
-    hashes: [...session.buckets[bucketIndex]],
+    hashes: [...hashes],
     isFinal: bucketIndex === session.buckets.length - 1,
   };
 }
 
 function validAssetSessionSubmission(session: AssetUploadSessionSubmission): boolean {
-  if (
-    !isRecord(session) ||
-    session.kind !== 'asset_session' ||
-    !ACCOUNT_ID_PATTERN.test(session.accountId) ||
-    !WORKER_NAME_PATTERN.test(session.workerName) ||
-    !SHA256_PATTERN.test(session.requestHash) ||
-    !safeToken(session.uploadJwt) ||
-    !Array.isArray(session.buckets) ||
-    session.buckets.length === 0 ||
-    session.buckets.length > 10_000
-  ) return false;
+  const candidate = v.safeParse(assetSessionSubmissionSchema, session);
+  if (!candidate.success) return false;
   const seen = new Set<string>();
-  for (const bucket of session.buckets) {
-    if (!Array.isArray(bucket) || bucket.length === 0 || bucket.length > 10_000) return false;
+  for (const bucket of candidate.output.buckets) {
     for (const hash of bucket) {
-      if (
-        typeof hash !== 'string' ||
-        !ASSET_HASH_PATTERN.test(hash) ||
-        seen.has(hash)
-      ) return false;
+      if (seen.has(hash)) return false;
       seen.add(hash);
     }
   }
@@ -1492,9 +1805,10 @@ export async function prepareAssetBucketMutation(
     bucketIndex >= session.buckets.length
   ) fail('invalid_input', 'validate', 'not_sent', progress);
   const core = assetBucketCore(session, bucketIndex);
+  if (core === null) fail('invalid_input', 'validate', 'not_sent', progress);
   if (
     core.hashes.length === 0 ||
-    core.hashes.some((hash) => typeof hash !== 'string' || !ASSET_HASH_PATTERN.test(hash)) ||
+    core.hashes.some((hash) => !ASSET_HASH_PATTERN.test(hash)) ||
     new Set(core.hashes).size !== core.hashes.length
   ) fail('invalid_input', 'validate', 'not_sent', progress);
   const requestHash = await sha256(canonicalJson(core));
@@ -1510,25 +1824,20 @@ async function validAssetBucketIntent(
   intent: AssetBucketMutationIntent,
   session: AssetUploadSessionSubmission,
 ): Promise<boolean> {
-  if (
-    !isRecord(intent) ||
-    intent.kind !== 'asset_bucket' ||
-    !ACCOUNT_ID_PATTERN.test(intent.accountId) ||
-    !WORKER_NAME_PATTERN.test(intent.workerName) ||
-    !SHA256_PATTERN.test(intent.sessionRequestHash) ||
-    !SHA256_PATTERN.test(intent.requestHash) ||
-    intent.accountId !== session.accountId ||
-    intent.workerName !== session.workerName ||
-    intent.sessionRequestHash !== session.requestHash ||
-    !Number.isSafeInteger(intent.bucketIndex) ||
-    intent.bucketIndex < 0 ||
-    intent.bucketIndex >= session.buckets.length ||
-    intent.bucketCount !== session.buckets.length ||
-    intent.isFinal !== (intent.bucketIndex === session.buckets.length - 1) ||
-    !canonicalEqual(intent.hashes, session.buckets[intent.bucketIndex])
+  const candidate = v.safeParse(assetBucketIntentSchema, intent);
+  if (!candidate.success ||
+    candidate.output.accountId !== session.accountId ||
+    candidate.output.workerName !== session.workerName ||
+    candidate.output.sessionRequestHash !== session.requestHash ||
+    candidate.output.bucketIndex >= session.buckets.length ||
+    candidate.output.bucketCount !== session.buckets.length ||
+    candidate.output.isFinal !== (candidate.output.bucketIndex === session.buckets.length - 1) ||
+    !canonicalEqual(candidate.output.hashes, session.buckets.at(candidate.output.bucketIndex))
   ) return false;
   try {
-    return await sha256(canonicalJson(assetBucketCore(session, intent.bucketIndex))) === intent.requestHash;
+    const core = assetBucketCore(session, candidate.output.bucketIndex);
+    return core !== null && await sha256(canonicalJson(core)) ===
+      candidate.output.requestHash;
   } catch {
     return false;
   }
@@ -1632,7 +1941,8 @@ async function uploadAssets(
 
   let completionJwt: string | null = null;
   for (let index = 0; index < session.buckets.length; index += 1) {
-    const bucket = session.buckets[index];
+    const bucket = session.buckets.at(index);
+    if (bucket === undefined) fail('provider_mismatch', 'asset_bucket', 'unknown', progress);
     const form = new FormData();
     for (const hash of bucket) {
       const asset = assetsByHash.get(hash);
@@ -1758,9 +2068,9 @@ export interface WorkerVersionSubmitIntent {
   readonly requestHash: string;
   readonly correlationTag: string;
   /** Nonsecret exact release semantics used to validate a freshly rebuilt submit body. */
-  readonly semanticCommitment: Readonly<Record<string, unknown>>;
+  readonly semanticCommitment: BoundaryObject;
   /** Ephemeral only: contains provider credentials and must NEVER be journaled. */
-  readonly body: Record<string, unknown>;
+  readonly body: BoundaryObject;
 }
 
 export interface WorkerVersionMutationPlan {
@@ -1770,177 +2080,48 @@ export interface WorkerVersionMutationPlan {
   readonly recovery: WorkerVersionRecoveryRecord;
 }
 
-function exactExports(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const keys = Object.keys(value).sort();
-  if (!(keys.length === 1 || (keys.length === 2 && keys[0] === 'AdminState' && keys[1] === 'default'))) {
-    return false;
-  }
-  const admin = value.AdminState;
-  if (
-    !isRecord(admin) ||
-    !(
-      exactKeys(admin, ['storage', 'type']) ||
-      exactKeys(admin, ['state', 'storage', 'type'])
-    ) ||
-    admin.type !== 'durable-object' ||
-    admin.storage !== 'sqlite' ||
-    !(admin.state === undefined || admin.state === 'created')
-  ) return false;
-  if (value.default !== undefined) {
-    const defaultExport = value.default;
-    if (!isRecord(defaultExport)) return false;
-    const allowed = new Set(['cache', 'state', 'type']);
-    if (Object.keys(defaultExport).some((key) => !allowed.has(key))) return false;
-    if (
-      defaultExport.type !== 'worker' ||
-      !(defaultExport.state === undefined || defaultExport.state === 'created')
-    ) return false;
-    if (defaultExport.cache !== undefined) {
-      if (!isRecord(defaultExport.cache) || !exactKeys(defaultExport.cache, ['enabled']) || defaultExport.cache.enabled !== false) {
-        return false;
-      }
-    }
-  }
-  return true;
+function exactExports(value: BoundaryValue): boolean {
+  return v.is(releaseExportsSchema, value);
 }
 
-function exactExportsReconciliation(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const expected = [
-    'created',
-    'deleted',
-    'info',
-    'removable_entries',
-    'renamed',
-    'transfer_pending',
-    'transferred',
-    'updated',
-    'warnings',
-  ];
-  if (!exactKeys(value, expected)) return false;
-  return Array.isArray(value.created) &&
-    value.created.length <= 1 &&
-    (value.created.length === 0 || value.created[0] === 'AdminState') &&
-    expected.slice(1).every((key) => Array.isArray(value[key]) && (value[key] as unknown[]).length === 0);
+function exactExportsReconciliation(value: BoundaryValue): boolean {
+  const candidate = v.safeParse(exportsReconciliationSchema, value);
+  return candidate.success &&
+    (candidate.output.created.length === 0 || candidate.output.created[0] === 'AdminState');
 }
 
-function exactVersionAnnotations(value: unknown, correlationTag: string): boolean {
-  if (!isRecord(value)) return false;
-  const allowed = new Set(['workers/message', 'workers/tag', 'workers/triggered_by']);
-  if (Object.keys(value).some((key) => !allowed.has(key))) return false;
-  if (value['workers/tag'] !== correlationTag) return false;
-  return ['workers/message', 'workers/triggered_by'].every((key) => (
-    value[key] === undefined || (
-      typeof value[key] === 'string' && value[key].length > 0 && value[key].length <= 256
-    )
-  ));
+function exactVersionAnnotations(value: BoundaryValue, correlationTag: string): boolean {
+  const candidate = v.safeParse(versionAnnotationsSchema, value);
+  return candidate.success && candidate.output['workers/tag'] === correlationTag;
 }
 
 async function exactVersionResult(
-  value: unknown,
+  value: BoundaryValue,
   recovery: WorkerVersionRecoveryRecord,
   expectedVersionId: string,
   expectedNamespaceId?: string,
   requireModuleContent = false,
 ): Promise<boolean> {
+  const candidate = v.safeParse(versionResultSchema, value);
+  if (!candidate.success) return false;
+  const result = candidate.output;
   if (
-    !isRecord(value) ||
-    // Live version read-back (2026-08-23) also carries env, source, and urls,
-    // and omits compatibility_flags, assets, exports_reconciliation, and
-    // modules when they are empty or not yet reconciled.
-    Object.keys(value).some((key) => ![
-      'annotations',
-      'assets',
-      'bindings',
-      'compatibility_date',
-      'compatibility_flags',
-      'created_on',
-      'env',
-      'exports',
-      'exports_reconciliation',
-      'id',
-      'limits',
-      'main_module',
-      'modules',
-      'number',
-      'placement',
-      'source',
-      'startup_time_ms',
-      'urls',
-      'usage_model',
-    ].includes(key)) ||
-    value.id !== expectedVersionId ||
-    !safeIsoDate(value.created_on) ||
-    typeof value.number !== 'number' ||
-    !Number.isSafeInteger(value.number) ||
-    value.number < 1
-  ) return false;
-  if (
-    value.compatibility_date !== EXACT_COMPATIBILITY_DATE ||
-    !(value.compatibility_flags === undefined ||
-      (Array.isArray(value.compatibility_flags) && value.compatibility_flags.length === 0)) ||
-    value.main_module !== 'index.js' ||
-    Object.hasOwn(value, 'migrations') ||
-    Object.hasOwn(value, 'migration_tag') ||
+    result.id !== expectedVersionId || !safeIsoDate(result.created_on) ||
     (recovery.phase === 'provision'
-      ? Object.hasOwn(value, 'assets')
-      : !isRecord(value.assets) ||
-        !exactKeys(value.assets, ['config']) ||
-        !isRecord((value.assets as { config?: unknown }).config) ||
-        Object.keys((value.assets as { config: Record<string, unknown> }).config).some(
-          (key) => !['html_handling', 'not_found_handling', 'run_worker_first'].includes(key),
-        ) ||
-        ((value.assets as { config: Record<string, unknown> }).config.html_handling !== undefined && (value.assets as { config: Record<string, unknown> }).config.html_handling !== 'auto-trailing-slash') ||
-        (value.assets as { config: Record<string, unknown> }).config.not_found_handling !== 'single-page-application' ||
-        !Array.isArray((value.assets as { config: Record<string, unknown> }).config.run_worker_first) ||
-        ((value.assets as { config: { run_worker_first: unknown[] } }).config.run_worker_first).length !== EXACT_RUN_WORKER_FIRST.length ||
-        !((value.assets as { config: { run_worker_first: unknown[] } }).config.run_worker_first).every((route, index) => route === EXACT_RUN_WORKER_FIRST[index])) ||
-    !Array.isArray(value.bindings) ||
-    value.bindings.length !== recovery.plainTextBindingHashes.length + (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) ||
-    !Array.isArray(value.modules) ||
-    value.modules.length !== recovery.modules.length ||
-    !exactVersionAnnotations(value.annotations, recovery.correlationTag) ||
-    !exactExports(value.exports) ||
+      ? result.assets !== undefined
+      : result.assets === undefined) ||
+    result.bindings.length !== recovery.plainTextBindingHashes.length +
+      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) ||
+    result.modules.length !== recovery.modules.length ||
+    !exactVersionAnnotations(result.annotations, recovery.correlationTag) ||
+    !exactExports(result.exports) ||
     // Declarative exports are reconciled by the deployment, so the field is
     // absent on a version that has not been deployed yet.
-    !(value.exports_reconciliation === undefined || exactExportsReconciliation(value.exports_reconciliation))
+    !(result.exports_reconciliation === undefined || exactExportsReconciliation(result.exports_reconciliation))
   ) return false;
-  if (value.source !== undefined && value.source !== 'api') return false;
-  if (value.urls !== undefined && !Array.isArray(value.urls)) return false;
-  if (value.env !== undefined && !isRecord(value.env)) return false;
-
-  if (
-    value.usage_model !== undefined &&
-    !(typeof value.usage_model === 'string' && value.usage_model.length > 0 && value.usage_model.length <= 128)
-  ) return false;
-  if (
-    value.startup_time_ms !== undefined &&
-    !(typeof value.startup_time_ms === 'number' && Number.isFinite(value.startup_time_ms) && value.startup_time_ms >= 0)
-  ) return false;
-  if (value.limits !== undefined) {
-    if (
-      !isRecord(value.limits) ||
-      Object.keys(value.limits).some((key) => key !== 'cpu_ms') ||
-      (value.limits.cpu_ms !== undefined && (
-        typeof value.limits.cpu_ms !== 'number' ||
-        !Number.isSafeInteger(value.limits.cpu_ms) ||
-        value.limits.cpu_ms < 0
-      ))
-    ) return false;
-  }
-  if (value.placement !== undefined) {
-    if (
-      !isRecord(value.placement) ||
-      Object.keys(value.placement).some((key) => !['hint', 'mode'].includes(key)) ||
-      (value.placement.mode !== undefined && typeof value.placement.mode !== 'string') ||
-      (value.placement.hint !== undefined && typeof value.placement.hint !== 'string')
-    ) return false;
-  }
-
-  const returnedBindings = new Map<string, unknown>();
-  for (const binding of value.bindings) {
-    if (!isRecord(binding) || typeof binding.name !== 'string' || returnedBindings.has(binding.name)) return false;
+  const returnedBindings = new Map<string, v.InferOutput<typeof returnedVersionBindingSchema>>();
+  for (const binding of result.bindings) {
+    if (returnedBindings.has(binding.name)) return false;
     returnedBindings.set(binding.name, binding);
   }
   if (recovery.phase === 'provision') {
@@ -1948,48 +2129,35 @@ async function exactVersionResult(
   } else {
     const adminBinding = returnedBindings.get('ADMIN_STATE');
     if (
-      !isRecord(adminBinding) ||
-      adminBinding.type !== 'durable_object_namespace' ||
-      adminBinding.class_name !== 'AdminState' ||
-      Object.keys(adminBinding).some((key) => !['class_name', 'name', 'namespace_id', 'type'].includes(key)) ||
-      (adminBinding.namespace_id !== undefined && !(
-        typeof adminBinding.namespace_id === 'string' && ACCOUNT_ID_PATTERN.test(adminBinding.namespace_id)
-      )) ||
+      adminBinding?.name !== 'ADMIN_STATE' ||
       (expectedNamespaceId !== undefined && adminBinding.namespace_id !== undefined &&
         adminBinding.namespace_id !== expectedNamespaceId)
     ) return false;
     const assetsBinding = returnedBindings.get('ASSETS');
-    if (!isRecord(assetsBinding) || !exactKeys(assetsBinding, ['name', 'type']) || assetsBinding.type !== 'assets') {
+    if (assetsBinding?.name !== 'ASSETS') {
       return false;
     }
   }
   const redactedBinding = returnedBindings.get('ANKKA_BOOTSTRAP_NONCE');
   if (recovery.phase === 'bootstrap') {
-    if (
-      !isRecord(redactedBinding) ||
-      !exactKeys(redactedBinding, ['name', 'type']) ||
-      redactedBinding.type !== 'secret_text'
-    ) return false;
+    if (redactedBinding?.name !== 'ANKKA_BOOTSTRAP_NONCE') return false;
   } else if (redactedBinding !== undefined) return false;
   for (const expected of recovery.plainTextBindingHashes) {
     const binding = returnedBindings.get(expected.name);
     if (
-      !isRecord(binding) ||
-      !exactKeys(binding, ['name', 'text', 'type']) ||
-      binding.type !== 'plain_text' ||
-      typeof binding.text !== 'string' ||
+      binding?.name !== expected.name || binding.type !== 'plain_text' ||
       await sha256(binding.text) !== expected.valueSha256
     ) return false;
   }
 
-  const returnedModules = new Map<string, unknown>();
-  for (const module of value.modules) {
-    if (!isRecord(module) || typeof module.name !== 'string' || returnedModules.has(module.name)) return false;
+  const returnedModules = new Map<string, v.InferOutput<typeof returnedVersionModuleSchema>>();
+  for (const module of result.modules) {
+    if (returnedModules.has(module.name)) return false;
     returnedModules.set(module.name, module);
   }
   for (const module of recovery.modules) {
     const returned = returnedModules.get(module.name);
-    if (!isRecord(returned)) return false;
+    if (!returned) return false;
     const keys = Object.keys(returned);
     if (
       !keys.every((key) => ['content_base64', 'content_type', 'name'].includes(key)) ||
@@ -2024,7 +2192,7 @@ type WorkerVersionSemanticInput = Pick<
   | 'workerName'
 >;
 
-function versionSemanticCommitment(input: WorkerVersionSemanticInput): Record<string, unknown> {
+function versionSemanticCommitment(input: WorkerVersionSemanticInput) {
   return {
     accountId: input.accountId,
     assets: {
@@ -2102,6 +2270,7 @@ export async function prepareWorkerVersionRecoveryRecord(
     contentType: asset.contentType,
     byteLength: asset.bytes.byteLength,
   })));
+  const compatibilityFlags: readonly [] = Object.freeze([]);
   const releaseContract = Object.freeze({
     assetBinding: 'ASSETS' as const,
     assetConfig: Object.freeze({
@@ -2110,7 +2279,7 @@ export async function prepareWorkerVersionRecoveryRecord(
     }),
     bootstrapBinding: phase === 'bootstrap' ? 'present' as const : 'absent' as const,
     compatibilityDate: EXACT_COMPATIBILITY_DATE,
-    compatibilityFlags: Object.freeze([]) as readonly [],
+    compatibilityFlags,
     durableObject: Object.freeze({
       binding: 'ADMIN_STATE' as const,
       className: 'AdminState' as const,
@@ -2167,16 +2336,7 @@ export async function prepareWorkerVersionMutation(
   const recovery = await prepareWorkerVersionRecoveryRecord(prepared, worker, phase);
   const bindings = versionBindings(prepared, phase);
   const semanticCommitment = Object.freeze(versionSemanticCommitment(recovery));
-  const coreBody = {
-    ...(phase === 'provision' ? {} : {
-      assets: {
-        config: {
-          not_found_handling: 'single-page-application',
-          run_worker_first: [...EXACT_RUN_WORKER_FIRST],
-        },
-        jwt: completionJwt as string,
-      },
-    }),
+  const versionBodyCore = {
     bindings,
     compatibility_date: recovery.releaseContract.compatibilityDate,
     compatibility_flags: [...recovery.releaseContract.compatibilityFlags],
@@ -2188,6 +2348,22 @@ export async function prepareWorkerVersionMutation(
       content_base64: bytesToBase64(module.bytes),
     })),
   };
+  let coreBody: BoundaryObject;
+  if (phase === 'provision') {
+    coreBody = versionBodyCore;
+  } else {
+    if (!safeToken(completionJwt)) fail('invalid_input', 'validate', 'not_sent', progress);
+    coreBody = {
+      ...versionBodyCore,
+      assets: {
+        config: {
+          not_found_handling: 'single-page-application',
+          run_worker_first: [...EXACT_RUN_WORKER_FIRST],
+        },
+        jwt: completionJwt,
+      },
+    };
+  }
   const body = Object.freeze({
     ...coreBody,
     annotations: Object.freeze({ 'workers/tag': recovery.correlationTag }),
@@ -2218,91 +2394,30 @@ function hasSecretRecoverySerialization(recovery: WorkerVersionRecoveryRecord): 
 }
 
 function validVersionReleaseContract(
-  value: unknown,
+  value: BoundaryValue,
   phase: WorkerVersionPhase,
 ): value is WorkerVersionRecoveryRecord['releaseContract'] {
-  if (!isRecord(value) || !exactKeys(value, [
-    'assetBinding',
-    'assetConfig',
-    'bootstrapBinding',
-    'compatibilityDate',
-    'compatibilityFlags',
-    'durableObject',
-    'exports',
-    'mainModule',
-  ])) return false;
-  if (
-    value.assetBinding !== 'ASSETS' ||
-    !isRecord(value.assetConfig) ||
-    !exactKeys(value.assetConfig, ['notFoundHandling', 'runWorkerFirst']) ||
-    value.assetConfig.notFoundHandling !== 'single-page-application' ||
-    !Array.isArray(value.assetConfig.runWorkerFirst) ||
-    value.assetConfig.runWorkerFirst.length !== EXACT_RUN_WORKER_FIRST.length ||
-    !value.assetConfig.runWorkerFirst.every((route, index) => route === EXACT_RUN_WORKER_FIRST[index]) ||
-    value.bootstrapBinding !== (phase === 'bootstrap' ? 'present' : 'absent') ||
-    value.compatibilityDate !== EXACT_COMPATIBILITY_DATE ||
-    !Array.isArray(value.compatibilityFlags) ||
-    value.compatibilityFlags.length !== 0 ||
-    !canonicalEqual(value.durableObject, {
-      binding: 'ADMIN_STATE', className: 'AdminState', storage: 'sqlite',
-    }) ||
-    !canonicalEqual(value.exports, {
-      AdminState: { type: 'durable-object', storage: 'sqlite' },
-    }) ||
-    value.mainModule !== 'index.js'
-  ) return false;
-  return true;
+  const candidate = v.safeParse(versionReleaseContractSchema, value);
+  return candidate.success &&
+    candidate.output.bootstrapBinding === (phase === 'bootstrap' ? 'present' : 'absent');
 }
 
 async function validVersionRecoveryRecord(recovery: WorkerVersionRecoveryRecord): Promise<boolean> {
-  if (
-    !isRecord(recovery) ||
-    !exactKeys(recovery, [
-      'accountId',
-      'assets',
-      'correlationTag',
-      'kind',
-      'modules',
-      'phase',
-      'plainTextBindingHashes',
-      'releaseContract',
-      'requestHash',
-      'workerId',
-      'workerName',
-    ]) ||
-    recovery.kind !== 'version_recovery' ||
-    (recovery.phase !== 'provision' && recovery.phase !== 'bootstrap' && recovery.phase !== 'clean') ||
-    !ACCOUNT_ID_PATTERN.test(recovery.accountId) ||
-    !WORKER_NAME_PATTERN.test(recovery.workerName) ||
-    !WORKER_ID_PATTERN.test(recovery.workerId) ||
-    !SHA256_PATTERN.test(recovery.requestHash) ||
-    recovery.correlationTag !== versionCorrelationTag(recovery.phase, recovery.requestHash) ||
-    !validVersionReleaseContract(recovery.releaseContract, recovery.phase) ||
-    !Array.isArray(recovery.assets) ||
-    recovery.assets.length === 0 ||
-    recovery.assets.length > 10_000 ||
-    !Array.isArray(recovery.plainTextBindingHashes) ||
-    recovery.plainTextBindingHashes.length !== EXACT_PLAIN_TEXT_BINDINGS.length ||
-    !Array.isArray(recovery.modules) ||
-    recovery.modules.length === 0 ||
-    hasSecretRecoverySerialization(recovery)
-  ) return false;
+  const candidate = v.safeParse(versionRecoveryRecordSchema, recovery);
+  if (!candidate.success) return false;
+  const record = candidate.output;
+  if (record.correlationTag !== versionCorrelationTag(record.phase, record.requestHash) ||
+    !validVersionReleaseContract(record.releaseContract, record.phase) ||
+    hasSecretRecoverySerialization(recovery)) return false;
   let totalBytes = 0;
   let previousAssetPath = '';
   const contentTypesByHash = new Map<string, string>();
-  for (const asset of recovery.assets) {
+  for (const asset of record.assets) {
     if (
-      !isRecord(asset) ||
-      !exactKeys(asset, ['byteLength', 'contentType', 'path', 'uploadHash']) ||
       !safeAssetPath(asset.path) ||
       (previousAssetPath !== '' && previousAssetPath >= asset.path) ||
       asset.contentType !== ASSET_CONTENT_TYPES[extension(asset.path)] ||
-      typeof asset.uploadHash !== 'string' ||
-      !ASSET_HASH_PATTERN.test(asset.uploadHash) ||
-      typeof asset.byteLength !== 'number' ||
-      !Number.isSafeInteger(asset.byteLength) ||
-      asset.byteLength <= 0 ||
-      asset.byteLength > MAX_FILE_BYTES
+      !ASSET_HASH_PATTERN.test(asset.uploadHash)
     ) return false;
     const priorContentType = contentTypesByHash.get(asset.uploadHash);
     if (priorContentType !== undefined && priorContentType !== asset.contentType) return false;
@@ -2311,32 +2426,22 @@ async function validVersionRecoveryRecord(recovery: WorkerVersionRecoveryRecord)
     if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_RELEASE_BYTES) return false;
     previousAssetPath = asset.path;
   }
-  for (let index = 0; index < recovery.plainTextBindingHashes.length; index += 1) {
-    const binding = recovery.plainTextBindingHashes[index];
+  for (let index = 0; index < record.plainTextBindingHashes.length; index += 1) {
+    const binding = record.plainTextBindingHashes.at(index);
+    const expectedName = EXACT_PLAIN_TEXT_BINDINGS.at(index);
     if (
-      !isRecord(binding) ||
-      !exactKeys(binding, ['name', 'valueSha256']) ||
-      binding.name !== EXACT_PLAIN_TEXT_BINDINGS[index] ||
-      typeof binding.valueSha256 !== 'string' ||
-      !SHA256_PATTERN.test(binding.valueSha256)
+      binding === undefined || expectedName === undefined || binding.name !== expectedName
     ) return false;
   }
   const names = new Set<string>();
   let previousModuleName = '';
-  for (const module of recovery.modules) {
+  for (const module of record.modules) {
     if (
-      !isRecord(module) ||
-      !exactKeys(module, ['byteLength', 'contentSha256', 'contentType', 'name']) ||
       !safeModuleName(module.name) ||
       names.has(module.name) ||
       (previousModuleName !== '' && previousModuleName >= module.name) ||
       module.contentType !== MODULE_CONTENT_TYPES[extension(module.name)] ||
-      typeof module.contentSha256 !== 'string' ||
-      !SHA256_PATTERN.test(module.contentSha256) ||
-      typeof module.byteLength !== 'number' ||
-      !Number.isSafeInteger(module.byteLength) ||
-      module.byteLength <= 0 ||
-      module.byteLength > MAX_FILE_BYTES
+      !SHA256_PATTERN.test(module.contentSha256)
     ) return false;
     totalBytes += module.byteLength;
     if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_RELEASE_BYTES) return false;
@@ -2345,7 +2450,7 @@ async function validVersionRecoveryRecord(recovery: WorkerVersionRecoveryRecord)
   }
   if (!names.has('index.js')) return false;
   try {
-    return await versionSemanticHash(recovery) === recovery.requestHash;
+    return await versionSemanticHash(record) === record.requestHash;
   } catch {
     return false;
   }
@@ -2357,13 +2462,15 @@ async function validVersionRecoveryRecord(recovery: WorkerVersionRecoveryRecord)
  * has been recomputed. Callers should persist this result, never the submit
  * intent or its body.
  */
-export async function parseWorkerVersionRecoveryRecord(
-  value: unknown,
+export async function parseWorkerVersionRecoveryRecord<Input>(
+  value: Input,
 ): Promise<WorkerVersionRecoveryRecord | null> {
   try {
-    if (!await validVersionRecoveryRecord(value as WorkerVersionRecoveryRecord)) return null;
-    const input = value as WorkerVersionRecoveryRecord;
+    const candidate = v.safeParse(versionRecoveryRecordSchema, value);
+    if (!candidate.success || !await validVersionRecoveryRecord(candidate.output)) return null;
+    const input = candidate.output;
     const phase = input.phase;
+    const compatibilityFlags: readonly [] = Object.freeze([]);
     const parsed: WorkerVersionRecoveryRecord = Object.freeze({
       kind: 'version_recovery',
       phase,
@@ -2380,7 +2487,7 @@ export async function parseWorkerVersionRecoveryRecord(
         }),
         bootstrapBinding: phase === 'bootstrap' ? 'present' : 'absent',
         compatibilityDate: EXACT_COMPATIBILITY_DATE,
-        compatibilityFlags: Object.freeze([]) as readonly [],
+        compatibilityFlags,
         durableObject: Object.freeze({
           binding: 'ADMIN_STATE',
           className: 'AdminState',
@@ -2418,55 +2525,27 @@ async function validVersionSubmitIntent(
   intent: WorkerVersionSubmitIntent,
   recovery: WorkerVersionRecoveryRecord,
 ): Promise<boolean> {
+  const candidate = v.safeParse(versionSubmitIntentSchema, intent);
+  if (!candidate.success || !await validVersionRecoveryRecord(recovery)) return false;
+  const parsedIntent = candidate.output;
   if (
-    !await validVersionRecoveryRecord(recovery) ||
-    !isRecord(intent) ||
-    !exactKeys(intent, [
-      'accountId', 'body', 'correlationTag', 'kind', 'phase', 'requestHash', 'semanticCommitment',
-      'workerId', 'workerName',
-    ]) ||
-    intent.kind !== 'version_submit' ||
-    intent.phase !== recovery.phase ||
-    intent.accountId !== recovery.accountId ||
-    intent.workerName !== recovery.workerName ||
-    intent.workerId !== recovery.workerId ||
-    intent.requestHash !== recovery.requestHash ||
-    intent.correlationTag !== recovery.correlationTag ||
-    !canonicalEqual(intent.semanticCommitment, versionSemanticCommitment(recovery)) ||
-    !isRecord(intent.body) ||
-    !isRecord(intent.body.annotations) ||
-    !exactKeys(intent.body.annotations, ['workers/tag']) ||
-    intent.body.annotations['workers/tag'] !== intent.correlationTag ||
-    !exactKeys(intent.body, recovery.phase === 'provision'
-      ? ['annotations', 'bindings', 'compatibility_date', 'compatibility_flags', 'exports', 'main_module', 'modules']
-      : ['annotations', 'assets', 'bindings', 'compatibility_date', 'compatibility_flags', 'exports', 'main_module', 'modules']) ||
-    !Array.isArray(intent.body.bindings) ||
-    intent.body.bindings.length !== recovery.plainTextBindingHashes.length + (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) ||
-    !Array.isArray(intent.body.modules) ||
-    intent.body.modules.length !== recovery.modules.length ||
-    intent.body.compatibility_date !== recovery.releaseContract.compatibilityDate ||
-    !Array.isArray(intent.body.compatibility_flags) ||
-    intent.body.compatibility_flags.length !== 0 ||
-    intent.body.main_module !== 'index.js' ||
-    !canonicalEqual(intent.body.exports, recovery.releaseContract.exports) ||
+    parsedIntent.phase !== recovery.phase || parsedIntent.accountId !== recovery.accountId ||
+    parsedIntent.workerName !== recovery.workerName || parsedIntent.workerId !== recovery.workerId ||
+    parsedIntent.requestHash !== recovery.requestHash || parsedIntent.correlationTag !== recovery.correlationTag ||
+    !canonicalEqual(parsedIntent.semanticCommitment, versionSemanticCommitment(recovery)) ||
+    parsedIntent.body.annotations['workers/tag'] !== parsedIntent.correlationTag ||
+    parsedIntent.body.bindings.length !== recovery.plainTextBindingHashes.length +
+      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) ||
+    parsedIntent.body.modules.length !== recovery.modules.length ||
+    !canonicalEqual(parsedIntent.body.exports, recovery.releaseContract.exports) ||
     // The provision version carries no ASSETS binding and no asset session.
     (recovery.phase === 'provision'
-      ? Object.hasOwn(intent.body, 'assets')
-      : !isRecord(intent.body.assets) ||
-        !exactKeys(intent.body.assets, ['config', 'jwt']) ||
-        !safeToken((intent.body.assets as { jwt?: unknown }).jwt) ||
-        !isRecord((intent.body.assets as { config?: unknown }).config) ||
-        !exactKeys((intent.body.assets as { config: Record<string, unknown> }).config, ['not_found_handling', 'run_worker_first']) ||
-        (intent.body.assets as { config: Record<string, unknown> }).config.not_found_handling !== recovery.releaseContract.assetConfig.notFoundHandling ||
-        !Array.isArray((intent.body.assets as { config: Record<string, unknown> }).config.run_worker_first) ||
-        ((intent.body.assets as { config: { run_worker_first: unknown[] } }).config.run_worker_first).length !== recovery.releaseContract.assetConfig.runWorkerFirst.length ||
-        !((intent.body.assets as { config: { run_worker_first: unknown[] } }).config.run_worker_first).every(
-          (route, index) => route === recovery.releaseContract.assetConfig.runWorkerFirst[index],
-        ))
+      ? parsedIntent.body.assets !== undefined
+      : parsedIntent.body.assets === undefined)
   ) return false;
-  const bindings = new Map<string, unknown>();
-  for (const binding of intent.body.bindings) {
-    if (!isRecord(binding) || typeof binding.name !== 'string' || bindings.has(binding.name)) return false;
+  const bindings = new Map<string, v.InferOutput<typeof submitVersionBindingSchema>>();
+  for (const binding of parsedIntent.body.bindings) {
+    if (bindings.has(binding.name)) return false;
     bindings.set(binding.name, binding);
   }
   if (recovery.phase === 'provision') {
@@ -2479,30 +2558,20 @@ async function validVersionSubmitIntent(
   }
   const redactedBinding = bindings.get('ANKKA_BOOTSTRAP_NONCE');
   if (recovery.phase === 'bootstrap') {
-    if (
-      !isRecord(redactedBinding) ||
-      !exactKeys(redactedBinding, ['name', 'text', 'type']) ||
-      redactedBinding.type !== 'secret_text' ||
-      !safeToken(redactedBinding.text, 32)
-    ) return false;
+    if (redactedBinding?.name !== 'ANKKA_BOOTSTRAP_NONCE') return false;
   } else if (redactedBinding !== undefined) return false;
   for (const expected of recovery.plainTextBindingHashes) {
     const binding = bindings.get(expected.name);
     if (
-      !isRecord(binding) ||
-      !exactKeys(binding, ['name', 'text', 'type']) ||
-      binding.type !== 'plain_text' ||
-      typeof binding.text !== 'string' ||
+      binding?.name !== expected.name || binding.type !== 'plain_text' ||
       await sha256(binding.text) !== expected.valueSha256
     ) return false;
   }
-  for (let index = 0; index < intent.body.modules.length; index += 1) {
-    const module = intent.body.modules[index];
-    const metadata = recovery.modules[index];
+  for (let index = 0; index < parsedIntent.body.modules.length; index += 1) {
+    const module = parsedIntent.body.modules.at(index);
+    const metadata = recovery.modules.at(index);
     if (
-      !isRecord(module) ||
-      !exactKeys(module, ['content_base64', 'content_type', 'name']) ||
-      !isRecord(metadata) ||
+      module === undefined || metadata === undefined ||
       module.name !== metadata.name ||
       module.content_type !== metadata.contentType ||
       strictBase64Bytes(module.content_base64, metadata.byteLength) === null
@@ -2511,7 +2580,7 @@ async function validVersionSubmitIntent(
     if (!bytes || await sha256(bytes) !== metadata.contentSha256) return false;
   }
   try {
-    return await sha256(canonicalJson(intent.semanticCommitment)) === intent.requestHash;
+    return await sha256(canonicalJson(parsedIntent.semanticCommitment)) === parsedIntent.requestHash;
   } catch {
     return false;
   }
@@ -2649,70 +2718,35 @@ export async function verifyWorkerVersionSubmission(
   );
 }
 
+type VersionListItem = v.InferOutput<typeof versionListItemSchema>;
+
 function parseVersionListPage(
-  value: unknown,
+  value: BoundaryValue,
   expectedPage: number,
-): { readonly items: readonly unknown[]; readonly totalCount: number; readonly totalPages: number } | null {
-  if (!isRecord(value) || !exactKeys(value, ['errors', 'messages', 'result', 'result_info', 'success'])) return null;
-  if (value.success !== true || !isEmptyProviderList(value.errors) || !isEmptyProviderList(value.messages)) return null;
-  if (!Array.isArray(value.result) || !isRecord(value.result_info)) return null;
-  const info = value.result_info;
-  const allowed = new Set(['count', 'page', 'per_page', 'total_count', 'total_pages']);
-  if (Object.keys(info).some((key) => !allowed.has(key))) return null;
+): { readonly items: readonly VersionListItem[]; readonly totalCount: number; readonly totalPages: number } | null {
+  const candidate = v.safeParse(versionListPageSchema, value);
+  if (!candidate.success || !isEmptyProviderList(candidate.output.errors) ||
+    !isEmptyProviderList(candidate.output.messages)) return null;
+  const info = candidate.output.result_info;
   // Live (2026-08-23): the version list omits total_pages entirely. When it is
   // absent the page count is derived from the totals actually reported.
   const totalPages = info.total_pages === undefined
-    ? (info.total_count === 0 ? 0 : Math.ceil(info.total_count as number))
+    ? (info.total_count === 0 ? 0 : Math.ceil(info.total_count))
     : info.total_pages;
   if (
     info.page !== expectedPage ||
     info.per_page !== 1 ||
-    info.count !== value.result.length ||
-    typeof info.count !== 'number' ||
-    !Number.isSafeInteger(info.count) ||
-    typeof info.total_count !== 'number' ||
-    !Number.isSafeInteger(info.total_count) ||
-    info.total_count < 0 ||
-    typeof totalPages !== 'number' ||
-    !Number.isSafeInteger(totalPages) ||
-    totalPages < 0 ||
-    totalPages > 100 ||
+    info.count !== candidate.output.result.length ||
     totalPages !== (info.total_count === 0 ? 0 : Math.ceil(info.total_count)) ||
-    (totalPages === 0 && (expectedPage !== 1 || value.result.length !== 0)) ||
-    value.result.length > 1
+    (totalPages === 0 && (expectedPage !== 1 || candidate.output.result.length !== 0))
   ) return null;
-  return { items: value.result, totalCount: info.total_count, totalPages };
+  return { items: candidate.output.result, totalCount: info.total_count, totalPages };
 }
 
-function versionItemTag(value: unknown): { readonly id: string; readonly tag: string | null } | null {
-  if (!isRecord(value) || typeof value.id !== 'string' || !UUID_PATTERN.test(value.id)) return null;
-  const allowed = new Set([
-    'annotations',
-    'assets',
-    'bindings',
-    'compatibility_date',
-    'compatibility_flags',
-    'created_on',
-    'exports',
-    'exports_reconciliation',
-    'id',
-    'limits',
-    'main_module',
-    'modules',
-    'number',
-    'placement',
-    'startup_time_ms',
-    'usage_model',
-  ]);
-  if (Object.keys(value).some((key) => !allowed.has(key))) return null;
+function versionItemTag(value: VersionListItem): { readonly id: string; readonly tag: string | null } | null {
   if (value.annotations === undefined) return { id: value.id, tag: null };
-  if (!isRecord(value.annotations)) return null;
-  if (Object.keys(value.annotations).some(
-    (key) => !['workers/message', 'workers/tag', 'workers/triggered_by'].includes(key),
-  )) return null;
   const tag = value.annotations['workers/tag'];
-  if (!(tag === undefined || typeof tag === 'string')) return null;
-  return { id: value.id, tag: typeof tag === 'string' ? tag : null };
+  return { id: value.id, tag: tag ?? null };
 }
 
 export async function inspectWorkerVersionRecovery(
@@ -2757,60 +2791,32 @@ export async function inspectWorkerVersionRecovery(
   }
   if (matches.length === 0) return null;
   if (matches.length !== 1) fail('recovery_ambiguous', 'version_recovery', 'unknown', progress);
-  const submission = versionSubmission(recovery, matches[0]);
+  const versionId = matches.at(0);
+  if (versionId === undefined) fail('provider_mismatch', 'version_recovery', 'unknown', progress);
+  const submission = versionSubmission(recovery, versionId);
   return await verifyWorkerVersionSubmission(recovery, submission, callInput);
 }
 
-function deploymentAnnotations(value: unknown): Record<string, unknown> | null {
-  if (!isRecord(value)) return null;
-  const allowed = new Set(['workers/message', 'workers/triggered_by']);
-  if (Object.keys(value).some((key) => !allowed.has(key))) return null;
-  for (const key of allowed) {
-    const entry = value[key];
-    if (entry !== undefined && !(
-      typeof entry === 'string' && entry.length > 0 && entry.length <= 256
-    )) return null;
-  }
-  return value;
+type DeploymentObservation = v.InferOutput<typeof deploymentObservationSchema>;
+
+function deploymentAnnotations<Value>(
+  value: Value,
+): v.InferOutput<typeof deploymentAnnotationsSchema> | null {
+  const candidate = v.safeParse(deploymentAnnotationsSchema, value);
+  return candidate.success ? candidate.output : null;
 }
 
-function validDeploymentShape(value: unknown): value is Record<string, unknown> {
-  if (!isRecord(value)) return false;
-  const allowed = new Set(['annotations', 'author_email', 'created_on', 'id', 'source', 'strategy', 'versions']);
-  if (Object.keys(value).some((key) => !allowed.has(key))) return false;
-  if (
-    !UUID_PATTERN.test(String(value.id)) ||
-    !safeIsoDate(value.created_on) ||
-    value.source !== 'api' ||
-    value.strategy !== 'percentage' ||
-    (value.author_email !== undefined && !(
-      typeof value.author_email === 'string' &&
-      value.author_email.length > 0 &&
-      value.author_email.length <= 320
-    )) ||
-    (value.annotations !== undefined && deploymentAnnotations(value.annotations) === null) ||
-    !Array.isArray(value.versions) ||
-    value.versions.length === 0 ||
-    value.versions.length > 100
-  ) return false;
+function parseDeploymentObservation<Value>(value: Value): DeploymentObservation | null {
+  const candidate = v.safeParse(deploymentObservationSchema, value);
+  if (!candidate.success || !safeIsoDate(candidate.output.created_on)) return null;
   let total = 0;
   const versionIds = new Set<string>();
-  for (const version of value.versions) {
-    if (
-      !isRecord(version) ||
-      !exactKeys(version, ['percentage', 'version_id']) ||
-      typeof version.version_id !== 'string' ||
-      !UUID_PATTERN.test(version.version_id) ||
-      versionIds.has(version.version_id) ||
-      typeof version.percentage !== 'number' ||
-      !Number.isFinite(version.percentage) ||
-      version.percentage <= 0 ||
-      version.percentage > 100
-    ) return false;
+  for (const version of candidate.output.versions) {
+    if (versionIds.has(version.version_id)) return null;
     versionIds.add(version.version_id);
     total += version.percentage;
   }
-  return total === 100;
+  return total === 100 ? candidate.output : null;
 }
 
 export interface WorkerDeploymentMutationIntent {
@@ -2913,17 +2919,15 @@ function deploymentSubmission(
 }
 
 function exactDeployment(
-  value: unknown,
+  value: BoundaryValue,
   intent: WorkerDeploymentMutationIntent,
   expectedDeploymentId: string,
-): value is Record<string, unknown> {
-  if (!validDeploymentShape(value) || value.id !== expectedDeploymentId) return false;
-  if (!isRecord(value.annotations) || value.annotations['workers/message'] !== intent.correlationTag) return false;
-  const versions = value.versions as readonly unknown[];
-  return versions.length === 1 &&
-    isRecord(versions[0]) &&
-    versions[0].percentage === 100 &&
-    versions[0].version_id === intent.versionId;
+): boolean {
+  const observation = parseDeploymentObservation(value);
+  return observation !== null && observation.id === expectedDeploymentId &&
+    observation.annotations?.['workers/message'] === intent.correlationTag &&
+    observation.versions.length === 1 && observation.versions[0]?.percentage === 100 &&
+    observation.versions[0]?.version_id === intent.versionId;
 }
 
 export async function submitWorkerDeploymentMutation(
@@ -3053,15 +3057,16 @@ export async function verifyActiveWorkerDeployment(
     const seenIds = new Set<string>();
     let correlationMatches = 0;
     for (const deployment of deployments) {
-      if (!validDeploymentShape(deployment)) {
+      const observation = parseDeploymentObservation(deployment);
+      if (!observation) {
         fail('provider_mismatch', 'deployment_active_verify', 'submitted', progress, [submission]);
       }
-      const deploymentId = String(deployment.id);
+      const deploymentId = observation.id;
       if (seenIds.has(deploymentId)) {
         fail('provider_mismatch', 'deployment_active_verify', 'submitted', progress, [submission]);
       }
       seenIds.add(deploymentId);
-      const annotations = deploymentAnnotations(deployment.annotations);
+      const annotations = deploymentAnnotations(observation.annotations);
       if (annotations?.['workers/message'] === intent.correlationTag) correlationMatches += 1;
     }
     if (correlationMatches !== 1) {
@@ -3124,12 +3129,11 @@ export async function proveActiveWorkerVersionRecovery(
   }
   const deployments = parseDeploymentList(response.value);
   const active = deployments?.[0];
-  if (!deployments || !validDeploymentShape(active) || !Array.isArray(active.versions) ||
-    active.versions.length !== 1) {
+  if (!deployments || !active || active.versions.length !== 1) {
     fail('provider_mismatch', 'deployment_active_verify', 'unknown', progress);
   }
-  const activeVersion = (active.versions as readonly unknown[])[0];
-  if (!isRecord(activeVersion) || activeVersion.percentage !== 100) {
+  const activeVersion = active.versions[0];
+  if (!activeVersion || activeVersion.percentage !== 100) {
     fail('provider_mismatch', 'deployment_active_verify', 'unknown', progress);
   }
   const version = versionSubmission(recovery, String(activeVersion.version_id));
@@ -3150,11 +3154,10 @@ export async function proveActiveWorkerVersionRecovery(
   return Object.freeze({ version, deployment });
 }
 
-function parseDeploymentList(value: unknown): readonly unknown[] | null {
+function parseDeploymentList(value: BoundaryValue): readonly DeploymentObservation[] | null {
   const result = parseSuccessEnvelope(value);
-  if (!isRecord(result) || !exactKeys(result, ['deployments']) || !Array.isArray(result.deployments)) return null;
-  if (result.deployments.length > 1_000) return null;
-  return result.deployments;
+  const candidate = v.safeParse(deploymentListResultSchema, result);
+  return candidate.success ? candidate.output.deployments : null;
 }
 
 export async function inspectWorkerDeploymentRecovery(
@@ -3177,15 +3180,18 @@ export async function inspectWorkerDeploymentRecovery(
   if (!deployments) fail('provider_mismatch', 'deployment_recovery', 'unknown', progress);
   const matches: string[] = [];
   for (const deployment of deployments) {
-    if (!validDeploymentShape(deployment)) {
+    const observation = parseDeploymentObservation(deployment);
+    if (!observation) {
       fail('provider_mismatch', 'deployment_recovery', 'unknown', progress);
     }
-    const annotations = deploymentAnnotations(deployment.annotations);
-    if (annotations?.['workers/message'] === intent.correlationTag) matches.push(String(deployment.id));
+    const annotations = deploymentAnnotations(observation.annotations);
+    if (annotations?.['workers/message'] === intent.correlationTag) matches.push(observation.id);
   }
   if (matches.length === 0) return null;
   if (matches.length !== 1) fail('recovery_ambiguous', 'deployment_recovery', 'unknown', progress);
-  return await verifyWorkerDeploymentSubmission(intent, deploymentSubmission(intent, matches[0]), callInput);
+  const deploymentId = matches.at(0);
+  if (deploymentId === undefined) fail('provider_mismatch', 'deployment_recovery', 'unknown', progress);
+  return await verifyWorkerDeploymentSubmission(intent, deploymentSubmission(intent, deploymentId), callInput);
 }
 
 /**

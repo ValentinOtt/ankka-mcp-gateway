@@ -25,6 +25,12 @@ const expected = await deriveCustomerGatewayInstallationReceiptExpectation({
 });
 
 describe('provider-neutral installation receipt evidence', () => {
+  function required<Item>(items: readonly Item[], index: number): Item {
+    const item = items[index];
+    if (!item) throw new TypeError('receipt resource fixture');
+    return item;
+  }
+
   it('accepts and freezes the exact checksum-valid reviewed seven-resource root', async () => {
     const receipt = await readyInstallationReceiptFixture(expected);
     const parsed = await parseReadyInstallationReceipt(structuredClone(receipt), expected);
@@ -57,52 +63,51 @@ describe('provider-neutral installation receipt evidence', () => {
     await expect(parseReadyInstallationReceipt({ ...receipt, revision: receipt.revision + 1 }, expected))
       .resolves.toBeNull();
 
-    const wrongHash = structuredClone(receipt) as any;
-    wrongHash.resources[0] = { ...wrongHash.resources[0], desiredHash: `sha256:${'0'.repeat(64)}` };
+    const wrongHash = {
+      ...receipt,
+      resources: receipt.resources.map((resource, index) =>
+        index === 0 ? { ...resource, desiredHash: `sha256:${'0'.repeat(64)}` } : resource),
+    };
     const resealedHash = await resealInstallationReceiptFixture(wrongHash);
     await expect(parseReadyInstallationReceipt(resealedHash, expected)).resolves.toBeNull();
 
-    const wrongTarget = structuredClone(receipt) as any;
-    wrongTarget.target = { ...wrongTarget.target, accountId: '3'.repeat(32) };
+    const wrongTarget = {
+      ...receipt,
+      target: { ...receipt.target, accountId: '3'.repeat(32) },
+    };
     const resealedTarget = await resealInstallationReceiptFixture(wrongTarget);
     await expect(parseReadyInstallationReceipt(resealedTarget, expected)).resolves.toBeNull();
   });
 
   it('rejects partial, reordered, duplicate, and parent-detached resource evidence', async () => {
     const receipt = await readyInstallationReceiptFixture(expected);
-    const mutations = [
-      (() => {
-        const value = structuredClone(receipt) as unknown as Record<string, unknown>;
-        delete value.accessPolicy;
-        return value;
-      })(),
-      (() => {
-        const value = structuredClone(receipt) as any;
-        [value.resources[0], value.resources[1]] = [value.resources[1], value.resources[0]];
-        return value;
-      })(),
-      (() => {
-        const value = structuredClone(receipt) as any;
-        value.resources[1] = {
-          ...value.resources[1],
-          provider: { id: value.resources[4].provider.id },
-        };
-        return value;
-      })(),
-      (() => {
-        const value = structuredClone(receipt) as any;
-        value.resources[2] = {
-          ...value.resources[2],
-          provider: { ...value.resources[2].provider, parentId: 'detached-parent' },
-        };
-        return value;
-      })(),
-    ];
-    for (const value of mutations) {
-      const resealed = 'checksum' in value
-        ? await resealInstallationReceiptFixture(value as typeof receipt)
-        : value;
-      await expect(parseReadyInstallationReceipt(resealed, expected)).resolves.toBeNull();
-    }
+    const { accessPolicy: _accessPolicy, ...missingAccessPolicy } = receipt;
+    await expect(parseReadyInstallationReceipt(missingAccessPolicy, expected)).resolves.toBeNull();
+
+    const first = required(receipt.resources, 0);
+    const second = required(receipt.resources, 1);
+    const reordered = { ...receipt, resources: [second, first, ...receipt.resources.slice(2)] };
+    await expect(parseReadyInstallationReceipt(
+      await resealInstallationReceiptFixture(reordered), expected,
+    )).resolves.toBeNull();
+
+    const duplicateProvider = required(receipt.resources, 4).provider.id;
+    const duplicate = {
+      ...receipt,
+      resources: receipt.resources.map((resource, index) =>
+        index === 1 ? { ...resource, provider: { id: duplicateProvider } } : resource),
+    };
+    await expect(parseReadyInstallationReceipt(
+      await resealInstallationReceiptFixture(duplicate), expected,
+    )).resolves.toBeNull();
+
+    const detached = {
+      ...receipt,
+      resources: receipt.resources.map((resource, index) =>
+        index === 2 ? { ...resource, provider: { ...resource.provider, parentId: 'detached-parent' } } : resource),
+    };
+    await expect(parseReadyInstallationReceipt(
+      await resealInstallationReceiptFixture(detached), expected,
+    )).resolves.toBeNull();
   });
 });

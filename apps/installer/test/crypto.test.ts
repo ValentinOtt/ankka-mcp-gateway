@@ -91,8 +91,7 @@ describe('opaque and sealed cookies', () => {
       { ...source, releaseIdentity: { ...source.releaseIdentity, copiedAuthority: true } },
       { ...source, releaseIdentity: { ...source.releaseIdentity, artifactSha256: `sha256:${'c'.repeat(64)}` } },
     ]) {
-      const invalidSealed = await sealOauthCookie(ENCRYPTION_KEY, invalid as never);
-      await expect(openOauthCookie(ENCRYPTION_KEY, invalidSealed))
+      await expect(sealOauthCookie(ENCRYPTION_KEY, invalid))
         .rejects.toMatchObject({ code: 'session_invalid' });
     }
   });
@@ -162,8 +161,7 @@ describe('opaque and sealed cookies', () => {
     ];
 
     for (const value of invalid) {
-      const sealed = await sealOauthCookie(ENCRYPTION_KEY, value as never);
-      await expect(openOauthCookie(ENCRYPTION_KEY, sealed))
+      await expect(sealOauthCookie(ENCRYPTION_KEY, value))
         .rejects.toMatchObject({ code: 'session_invalid' });
     }
   });
@@ -186,8 +184,7 @@ describe('opaque and sealed cookies', () => {
       { ...verified, purpose: 'source_apply' },
       { ...verified, managementOrigin: 'https://manage.example.com/path' },
     ]) {
-      const invalidSealed = await sealOauthCookie(ENCRYPTION_KEY, invalid as never);
-      await expect(openOauthCookie(ENCRYPTION_KEY, invalidSealed))
+      await expect(sealOauthCookie(ENCRYPTION_KEY, invalid))
         .rejects.toMatchObject({ code: 'session_invalid' });
     }
   });

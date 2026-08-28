@@ -1,3 +1,8 @@
+import * as v from 'valibot';
+
+import { boundaryValueSchema, type BoundaryValue } from './boundary';
+import { canonicalJson } from './canonical-json';
+import { parseGatewayWorkerSubdomainState } from './cloudflare-gateway-runtime-state';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 import { parseStaticDeployPlan, type StaticDeployPlan } from './schema';
 
@@ -37,6 +42,87 @@ const IDENTITY_PROVIDER_TYPES = new Set([
   'saml',
   'yandex',
 ]);
+
+const positiveIntegerSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(1));
+const nonnegativeIntegerSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
+const providerIdSchema = v.pipe(v.string(), v.regex(PROVIDER_ID_PATTERN));
+const customDomainIdSchema = v.pipe(
+  v.string(),
+  v.regex(/^(?:(?:[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})|[a-f0-9]{40})$/u),
+);
+const accessAudSchema = v.pipe(v.string(), v.regex(ACCESS_AUD_PATTERN));
+const providerErrorSchema = v.strictObject({
+  code: v.pipe(v.number(), v.safeInteger()),
+  documentation_url: v.optional(boundaryValueSchema),
+  message: v.pipe(v.string(), v.minLength(1), v.maxLength(2_048)),
+  source: v.optional(boundaryValueSchema),
+});
+const envelopeSchema = v.strictObject({
+  errors: v.nullable(v.array(boundaryValueSchema)),
+  messages: v.nullable(v.array(boundaryValueSchema)),
+  result: boundaryValueSchema,
+  result_info: v.optional(boundaryValueSchema),
+  success: v.boolean(),
+});
+const resultInfoSchema = v.looseObject({
+  page: v.optional(positiveIntegerSchema),
+  per_page: v.optional(positiveIntegerSchema),
+  count: v.optional(nonnegativeIntegerSchema),
+  total_count: v.optional(nonnegativeIntegerSchema),
+  total_pages: v.optional(nonnegativeIntegerSchema),
+});
+const zeroTrustOrganizationSchema = v.looseObject({
+  auth_domain: v.string(),
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(256)),
+});
+const identityProviderSchema = v.looseObject({
+  id: providerIdSchema,
+  name: v.pipe(v.string(), v.maxLength(256)),
+  type: v.string(),
+  read_only: v.optional(v.boolean()),
+});
+const accountSubdomainSchema = v.strictObject({
+  subdomain: v.pipe(v.string(), v.regex(DNS_LABEL_PATTERN), v.maxLength(63)),
+});
+const accessApplicationSchema = v.looseObject({
+  id: providerIdSchema,
+  aud: accessAudSchema,
+  name: v.string(),
+  type: v.literal('self_hosted'),
+  domain: v.string(),
+  session_duration: v.literal(ACCESS_SESSION_DURATION),
+  app_launcher_visible: v.literal(false),
+  auto_redirect_to_identity: v.literal(false),
+  allow_authenticate_via_warp: v.literal(false),
+  allowed_idps: v.array(v.string()),
+});
+const providerIdResultSchema = v.looseObject({ id: providerIdSchema });
+const applicationLocatorResultSchema = v.looseObject({ id: providerIdSchema, aud: accessAudSchema });
+const policySchema = v.looseObject({
+  id: providerIdSchema,
+  name: v.string(),
+  decision: v.literal('allow'),
+  precedence: v.literal(1),
+  approval_required: v.optional(v.literal(false)),
+  isolation_required: v.optional(v.literal(false)),
+  purpose_justification_required: v.optional(v.literal(false)),
+  include: v.array(v.strictObject({ email: v.strictObject({ email: v.string() }) })),
+  exclude: v.array(boundaryValueSchema),
+  require: v.array(boundaryValueSchema),
+});
+const customDomainSchema = v.looseObject({
+  id: customDomainIdSchema,
+  hostname: v.string(),
+  service: v.string(),
+  zone_id: v.string(),
+  zone_name: v.string(),
+  environment: v.optional(v.string()),
+});
+const workerRouteSchema = v.looseObject({
+  id: providerIdSchema,
+  pattern: v.string(),
+  script: v.optional(v.nullable(v.string())),
+});
 
 export type CloudflareManagementStage =
   | 'zero_trust_organization_get'
@@ -252,16 +338,24 @@ export interface ManagementCustomDomainRecoveryRecord {
 }
 
 interface CloudflareEnvelope {
-  readonly errors: null | readonly unknown[];
-  readonly messages: null | readonly unknown[];
-  readonly result: unknown;
+  readonly errors: null | readonly BoundaryValue[];
+  readonly messages: null | readonly BoundaryValue[];
+  readonly result: BoundaryValue;
   readonly success: boolean;
-  readonly resultInfo?: unknown;
+  readonly resultInfo?: BoundaryValue;
+}
+
+interface CloudflareEnvelopeDraft {
+  errors: null | BoundaryValue[];
+  messages: null | BoundaryValue[];
+  result: BoundaryValue;
+  resultInfo?: BoundaryValue;
+  success: boolean;
 }
 
 interface ProviderResponse {
   readonly status: number;
-  readonly value: unknown;
+  readonly value: BoundaryValue;
 }
 
 interface ExpectedApplication {
@@ -296,6 +390,26 @@ interface ExpectedDomain {
   readonly zoneName: string;
 }
 
+interface ValidatedApplicationIntent {
+  readonly expected: Omit<ExpectedApplication, 'applicationId' | 'aud'>;
+  readonly intent: ManagementAccessApplicationIntent;
+}
+
+interface ValidatedPolicyIntent {
+  readonly expected: Omit<ExpectedPolicy, 'policyId'>;
+  readonly intent: ManagementAdminPolicyIntent;
+}
+
+interface ValidatedWorkerSubdomainInput {
+  readonly call: ValidatedCloudflareManagementCall;
+  readonly workerName: string;
+}
+
+interface ValidatedDomainIntent {
+  readonly expected: Omit<ExpectedDomain, 'domainId'>;
+  readonly intent: ManagementCustomDomainIntent;
+}
+
 function fail(
   code: CloudflareManagementErrorCode,
   stage: CloudflareManagementStage,
@@ -304,72 +418,37 @@ function fail(
   throw new CloudflareManagementError(code, stage, outcome);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
-function stableJson(value: unknown): string {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('json');
-}
-
-function exactJson(left: unknown, right: unknown): boolean {
+function exactJson<Left, Right>(left: Left, right: Right): boolean {
   try {
-    return stableJson(left) === stableJson(right);
+    return canonicalJson(left) === canonicalJson(right);
   } catch {
     return false;
   }
 }
 
-function isEmptyProviderList(value: unknown): value is null | readonly [] {
+function isEmptyProviderList(value: null | readonly BoundaryValue[]): boolean {
   return value === null || (Array.isArray(value) && value.length === 0);
 }
 
-function validProviderErrorList(value: unknown): boolean {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 16) return false;
-  return value.every((entry) => {
-    if (!isRecord(entry)) return false;
-    const allowed = new Set(['code', 'documentation_url', 'message', 'source']);
-    if (Object.keys(entry).some((key) => !allowed.has(key))) return false;
-    return typeof entry.code === 'number' && Number.isSafeInteger(entry.code) &&
-      typeof entry.message === 'string' && entry.message.length > 0 && entry.message.length <= 2_048;
-  });
+function validProviderErrorList(value: null | readonly BoundaryValue[]): boolean {
+  return value !== null && value.length > 0 && value.length <= 16 &&
+    value.every((entry) => v.safeParse(providerErrorSchema, entry).success);
 }
 
-function parseEnvelope(value: unknown): CloudflareEnvelope | null {
-  if (!isRecord(value)) return null;
-  const allowed = new Set(['errors', 'messages', 'result', 'result_info', 'success']);
-  if (
-    Object.keys(value).some((key) => !allowed.has(key)) ||
-    !Object.hasOwn(value, 'errors') ||
-    !Object.hasOwn(value, 'messages') ||
-    !Object.hasOwn(value, 'result') ||
-    !Object.hasOwn(value, 'success') ||
-    typeof value.success !== 'boolean' ||
-    !(value.errors === null || Array.isArray(value.errors)) ||
-    !(value.messages === null || Array.isArray(value.messages))
-  ) return null;
-  return {
-    errors: value.errors,
-    messages: value.messages,
-    result: value.result,
-    success: value.success,
-    ...(Object.hasOwn(value, 'result_info') ? { resultInfo: value.result_info } : {}),
+function parseEnvelope(value: BoundaryValue): CloudflareEnvelope | null {
+  const parsed = v.safeParse(envelopeSchema, value);
+  if (!parsed.success) return null;
+  const envelope: CloudflareEnvelopeDraft = {
+    errors: parsed.output.errors,
+    messages: parsed.output.messages,
+    result: parsed.output.result,
+    success: parsed.output.success,
   };
+  if (parsed.output.result_info !== undefined) envelope.resultInfo = parsed.output.result_info;
+  return Object.freeze(envelope);
 }
 
-function parseSuccessEnvelope(value: unknown): CloudflareEnvelope | null {
+function parseSuccessEnvelope(value: BoundaryValue): CloudflareEnvelope | null {
   const envelope = parseEnvelope(value);
   if (
     !envelope ||
@@ -381,25 +460,11 @@ function parseSuccessEnvelope(value: unknown): CloudflareEnvelope | null {
 }
 
 interface ParsedListPage {
-  readonly values: readonly unknown[];
+  readonly values: readonly BoundaryValue[];
   readonly page: number | null;
   readonly perPage: number | null;
   readonly totalCount: number | null;
   readonly totalPages: number | null;
-}
-
-function optionalPositiveInteger(value: unknown): number | null | undefined {
-  if (value === undefined) return null;
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
-    ? value
-    : undefined;
-}
-
-function optionalNonnegativeInteger(value: unknown): number | null | undefined {
-  if (value === undefined) return null;
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-    ? value
-    : undefined;
 }
 
 function parseListPage(envelope: CloudflareEnvelope, requestedPage: number): ParsedListPage | null {
@@ -407,27 +472,20 @@ function parseListPage(envelope: CloudflareEnvelope, requestedPage: number): Par
   if (envelope.resultInfo === undefined) {
     return { values: envelope.result, page: null, perPage: null, totalCount: null, totalPages: null };
   }
-  if (!isRecord(envelope.resultInfo)) return null;
-  const info = envelope.resultInfo;
-  const page = optionalPositiveInteger(info.page);
-  const perPage = optionalPositiveInteger(info.per_page);
-  const count = optionalNonnegativeInteger(info.count);
-  const totalCount = optionalNonnegativeInteger(info.total_count);
-  const totalPages = optionalNonnegativeInteger(info.total_pages);
-  if (
-    page === undefined ||
-    perPage === undefined ||
-    count === undefined ||
-    totalCount === undefined ||
-    totalPages === undefined ||
-    (page !== null && page !== requestedPage) ||
-    (count !== null && count !== envelope.result.length)
-  ) return null;
+  const parsedInfo = v.safeParse(resultInfoSchema, envelope.resultInfo);
+  if (!parsedInfo.success) return null;
+  const page = parsedInfo.output.page ?? null;
+  const perPage = parsedInfo.output.per_page ?? null;
+  const count = parsedInfo.output.count ?? null;
+  const totalCount = parsedInfo.output.total_count ?? null;
+  const totalPages = parsedInfo.output.total_pages ?? null;
+  if ((page !== null && page !== requestedPage) ||
+      (count !== null && count !== envelope.result.length)) return null;
   return { values: envelope.result, page, perPage, totalCount, totalPages };
 }
 
-function providerId(value: unknown): value is string {
-  return typeof value === 'string' && PROVIDER_ID_PATTERN.test(value);
+function providerId(value: BoundaryValue): value is string {
+  return v.is(providerIdSchema, value);
 }
 
 /**
@@ -435,16 +493,16 @@ function providerId(value: unknown): value is string {
  * provider id in this surface (live 2026-08-23). Kept separate so the exact
  * 32-hex/UUID identity check still applies everywhere else.
  */
-function customDomainId(value: unknown): value is string {
-  return typeof value === 'string' && (PROVIDER_ID_PATTERN.test(value) || /^[a-f0-9]{40}$/u.test(value));
+function customDomainId(value: BoundaryValue): value is string {
+  return v.is(customDomainIdSchema, value);
 }
 
-function accessAud(value: unknown): value is string {
-  return typeof value === 'string' && ACCESS_AUD_PATTERN.test(value);
+function accessAud(value: BoundaryValue): value is string {
+  return v.is(accessAudSchema, value);
 }
 
-function validHostname(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length < 3 || value.length > 253 || value !== value.toLowerCase()) return false;
+function validHostname(value: string): boolean {
+  if (value.length < 3 || value.length > 253 || value !== value.toLowerCase()) return false;
   const labels = value.split('.');
   return labels.length >= 2 && labels.every((label) => DNS_LABEL_PATTERN.test(label));
 }
@@ -453,12 +511,12 @@ function validZoneRelation(hostname: string, zoneName: string): boolean {
   return validHostname(hostname) && validHostname(zoneName) && hostname !== zoneName && hostname.endsWith(`.${zoneName}`);
 }
 
-function validToken(value: unknown): value is string {
-  return typeof value === 'string' && ACCESS_TOKEN_PATTERN.test(value);
+function validToken(value: string): boolean {
+  return ACCESS_TOKEN_PATTERN.test(value);
 }
 
 function canonicalStrings(values: readonly string[]): readonly string[] | null {
-  if (!Array.isArray(values) || values.length === 0 || values.length > 64) return null;
+  if (values.length === 0 || values.length > 64) return null;
   const normalized = [...values];
   if (!normalized.every(providerId)) return null;
   normalized.sort();
@@ -467,8 +525,8 @@ function canonicalStrings(values: readonly string[]): readonly string[] | null {
 }
 
 function canonicalEmails(values: readonly string[]): readonly string[] | null {
-  if (!Array.isArray(values) || values.length === 0 || values.length > 64) return null;
-  const normalized = values.map((value) => typeof value === 'string' ? value.trim().toLowerCase() : '');
+  if (values.length === 0 || values.length > 64) return null;
+  const normalized = values.map((value) => value.trim().toLowerCase());
   if (normalized.some((value) => value.length > 254 || !EMAIL_PATTERN.test(value))) return null;
   normalized.sort();
   const unique = normalized.filter((value, index) => index === 0 || value !== normalized[index - 1]);
@@ -480,11 +538,17 @@ function validatedTimeout(value: number | undefined): number | null {
   return Number.isSafeInteger(timeout) && timeout >= 100 && timeout <= 60_000 ? timeout : null;
 }
 
+interface ValidatedCloudflareManagementCall {
+  readonly accessToken: string;
+  readonly transport: CloudflareManagementTransport;
+  readonly timeoutMs: number;
+}
+
 function commonInput(
   input: CloudflareManagementCall,
   stage: CloudflareManagementStage,
-): { accessToken: string; transport: CloudflareManagementTransport; timeoutMs: number } {
-  if (!isRecord(input) || !validToken(input.accessToken) || typeof input.transport !== 'function') {
+): ValidatedCloudflareManagementCall {
+  if (!validToken(input.accessToken) || !v.is(v.function(), input.transport)) {
     return fail('invalid_input', stage, 'not_sent');
   }
   const timeoutMs = validatedTimeout(input.timeoutMs);
@@ -502,7 +566,7 @@ function jsonHeaders(accessToken: string): Headers {
   return headers;
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+async function readBoundedJson(response: Response): Promise<BoundaryValue> {
   const declaredLength = response.headers.get('content-length');
   if (declaredLength !== null) {
     const declared = Number(declaredLength);
@@ -533,7 +597,9 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   }
   try {
     const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    return JSON.parse(text) as unknown;
+    const parsed = v.safeParse(boundaryValueSchema, JSON.parse(text));
+    if (!parsed.success) throw new TypeError('response');
+    return parsed.output;
   } catch {
     throw new TypeError('response');
   }
@@ -611,8 +677,8 @@ async function collectPaginated(
   perPage: number,
   urlForPage: (page: number, perPage: number) => URL,
   totalCountMatchesQuery = false,
-): Promise<readonly unknown[]> {
-  const values: unknown[] = [];
+): Promise<readonly BoundaryValue[]> {
+  const values: BoundaryValue[] = [];
   let totalCount: number | null = null;
   let totalPages: number | null = null;
   for (let pageNumber = 1; pageNumber <= MAX_LIST_PAGES; pageNumber += 1) {
@@ -752,14 +818,11 @@ export async function getZeroTrustOrganization(
     accountUrl(input.accountId, '/access/organizations'),
     { method: 'GET', headers: authHeaders(call.accessToken) },
   );
-  const result = requireSuccess(response, stage).result;
-  if (!isRecord(result)) fail('provider_mismatch', stage, 'rejected');
-  const authDomain = result.auth_domain;
-  const name = result.name;
+  const result = v.safeParse(zeroTrustOrganizationSchema, requireSuccess(response, stage).result);
+  if (!result.success) fail('provider_mismatch', stage, 'rejected');
+  const authDomain = result.output.auth_domain;
+  const name = result.output.name;
   if (
-    typeof name !== 'string' ||
-    name.length === 0 ||
-    name.length > 256 ||
     !validHostname(authDomain) ||
     !authDomain.endsWith('.cloudflareaccess.com') ||
     authDomain === 'cloudflareaccess.com'
@@ -783,22 +846,19 @@ export async function listAccessIdentityProviders(
   const seen = new Set<string>();
   const providers: AccessIdentityProvider[] = [];
   for (const value of values) {
-    if (!isRecord(value)) fail('provider_mismatch', stage, 'rejected');
-    const { id, name, type } = value;
-    const readOnly = value.read_only ?? false;
+    const result = v.safeParse(identityProviderSchema, value);
+    if (!result.success) fail('provider_mismatch', stage, 'rejected');
+    const { id, name, type } = result.output;
+    const readOnly = result.output.read_only ?? false;
     // The account-default Cloudflare identity provider (type "cloudflare") is
     // listed with an empty name (observed live 2026-08-23); every other type
     // carries one. An empty name is therefore accepted for that type only.
     if (
-      !providerId(id) ||
       seen.has(id) ||
-      typeof name !== 'string' ||
       (name.length === 0 && type !== 'cloudflare') ||
-      name.length > 256 ||
-      typeof type !== 'string' ||
       !IDENTITY_PROVIDER_TYPES.has(type) ||
-      typeof readOnly !== 'boolean'
-    ) fail(seen.has(String(id)) ? 'provider_ambiguous' : 'provider_mismatch', stage, 'rejected');
+      !v.is(v.boolean(), readOnly)
+    ) fail(seen.has(id) ? 'provider_ambiguous' : 'provider_mismatch', stage, 'rejected');
     seen.add(id);
     providers.push(Object.freeze({ id, name, type, readOnly }));
   }
@@ -818,15 +878,9 @@ export async function getAccountWorkersSubdomain(
     accountUrl(input.accountId, '/workers/subdomain'),
     { method: 'GET', headers: authHeaders(call.accessToken) },
   );
-  const result = requireSuccess(response, stage).result;
-  if (
-    !isRecord(result) ||
-    !exactKeys(result, ['subdomain']) ||
-    typeof result.subdomain !== 'string' ||
-    !DNS_LABEL_PATTERN.test(result.subdomain) ||
-    result.subdomain.length > 63
-  ) fail('provider_mismatch', stage, 'rejected');
-  return Object.freeze({ accountId: input.accountId, subdomain: result.subdomain });
+  const result = v.safeParse(accountSubdomainSchema, requireSuccess(response, stage).result);
+  if (!result.success) fail('provider_mismatch', stage, 'rejected');
+  return Object.freeze({ accountId: input.accountId, subdomain: result.output.subdomain });
 }
 
 function validateApplicationSpec(
@@ -858,21 +912,17 @@ function applicationsListUrl(accountId: string, hostname: string, page: number, 
   return url;
 }
 
-function exactApplication(value: unknown, expected: ExpectedApplication): boolean {
-  if (!isRecord(value)) return false;
+function exactApplication(value: BoundaryValue, expected: ExpectedApplication): boolean {
+  const result = v.safeParse(accessApplicationSchema, value);
+  if (!result.success) return false;
+  const application = result.output;
   if (
-    value.id !== expected.applicationId ||
-    value.aud !== expected.aud ||
-    value.name !== expected.name ||
-    value.type !== 'self_hosted' ||
-    value.domain !== expected.domain ||
-    value.session_duration !== ACCESS_SESSION_DURATION ||
-    value.app_launcher_visible !== false ||
-    value.auto_redirect_to_identity !== false ||
-    value.allow_authenticate_via_warp !== false ||
-    !Array.isArray(value.allowed_idps)
+    application.id !== expected.applicationId ||
+    application.aud !== expected.aud ||
+    application.name !== expected.name ||
+    application.domain !== expected.domain
   ) return false;
-  const ids = canonicalStrings(value.allowed_idps as string[]);
+  const ids = canonicalStrings(application.allowed_idps);
   return Boolean(
     ids &&
     ids.length === expected.allowedIdentityProviderIds.length &&
@@ -895,8 +945,8 @@ export async function preflightFreshManagementAccessApplication(
     applicationsListUrl(input.accountId, plan.managementHostname, page, perPage));
   if (values.length > 1) fail('provider_ambiguous', stage, 'rejected');
   if (values.length === 1) {
-    const value = values[0];
-    if (!isRecord(value) || value.domain !== plan.managementHostname || !providerId(value.id)) {
+    const value = v.safeParse(v.looseObject({ domain: v.string(), id: providerIdSchema }), values[0]);
+    if (!value.success || value.output.domain !== plan.managementHostname) {
       fail('provider_mismatch', stage, 'rejected');
     }
     fail('fresh_baseline_collision', stage, 'rejected');
@@ -937,13 +987,10 @@ export function prepareManagementAccessApplicationIntent(
 function requireApplicationIntent(
   input: ManagementAccessApplicationSpec & { readonly intent: ManagementAccessApplicationIntent },
   stage: CloudflareManagementStage,
-): {
-  readonly expected: Omit<ExpectedApplication, 'applicationId' | 'aud'>;
-  readonly intent: ManagementAccessApplicationIntent;
-} {
+): ValidatedApplicationIntent {
   const expected = validateApplicationSpec(input, stage);
   const canonical = prepareManagementAccessApplicationIntent(input);
-  if (!isRecord(input.intent) || !exactJson(input.intent, canonical)) fail('invalid_input', stage, 'not_sent');
+  if (!exactJson(input.intent, canonical)) fail('invalid_input', stage, 'not_sent');
   return { expected, intent: canonical };
 }
 
@@ -960,11 +1007,11 @@ export async function createManagementAccessApplication(
     headers: jsonHeaders(call.accessToken),
     body: JSON.stringify(intent.request),
   });
-  const result = requireSuccess(response, stage, CREATED_STATUSES).result;
-  if (!isRecord(result) || !providerId(result.id) || !accessAud(result.aud)) {
+  const result = v.safeParse(applicationLocatorResultSchema, requireSuccess(response, stage, CREATED_STATUSES).result);
+  if (!result.success) {
     fail('provider_unknown', stage, 'unknown');
   }
-  return Object.freeze({ applicationId: result.id, aud: result.aud });
+  return Object.freeze({ applicationId: result.output.id, aud: result.output.aud });
 }
 
 function expectedApplication(
@@ -1020,12 +1067,13 @@ export async function recoverManagementAccessApplication(
     applicationsListUrl(input.accountId, expected.domain, page, perPage));
   const matches: ManagementAccessApplicationLocator[] = [];
   for (const value of values) {
-    if (!isRecord(value) || !providerId(value.id) || !accessAud(value.aud)) {
+    const parsed = v.safeParse(applicationLocatorResultSchema, value);
+    if (!parsed.success) {
       fail('provider_mismatch', stage, 'rejected');
     }
-    const candidate = { ...expected, applicationId: value.id, aud: value.aud };
+    const candidate = { ...expected, applicationId: parsed.output.id, aud: parsed.output.aud };
     if (exactApplication(value, candidate)) {
-      matches.push(Object.freeze({ applicationId: value.id, aud: value.aud }));
+      matches.push(Object.freeze({ applicationId: parsed.output.id, aud: parsed.output.aud }));
     }
   }
   if (matches.length > 1 || (matches.length === 1 && values.length !== 1)) {
@@ -1035,13 +1083,15 @@ export async function recoverManagementAccessApplication(
     if (values.length > 0) fail('provider_mismatch', stage, 'rejected');
     fail('provider_unknown', stage, 'unknown');
   }
+  const locator = matches.at(0);
+  if (locator === undefined) fail('provider_unknown', stage, 'unknown');
   return Object.freeze({
     schemaVersion: 1,
     kind: 'management_access_application_recovery',
     planId: input.intent.planId,
     planHash: input.intent.planHash,
     ownershipMarker: input.intent.ownershipMarker,
-    locator: matches[0],
+    locator,
   });
 }
 
@@ -1082,33 +1132,18 @@ function policyBody(expected: Omit<ExpectedPolicy, 'policyId'>): ManagementAdmin
   };
 }
 
-function exactPolicy(value: unknown, expected: ExpectedPolicy): boolean {
-  if (!isRecord(value)) return false;
+function exactPolicy(value: BoundaryValue, expected: ExpectedPolicy): boolean {
+  const result = v.safeParse(policySchema, value);
+  if (!result.success) return false;
+  const policy = result.output;
   if (
-    value.id !== expected.policyId ||
-    value.name !== expected.name ||
-    value.decision !== 'allow' ||
-    value.precedence !== 1 ||
-    // Live (2026-08-23): these flags are omitted from the policy when false.
-    !(value.approval_required === false || value.approval_required === undefined) ||
-    !(value.isolation_required === false || value.isolation_required === undefined) ||
-    !(value.purpose_justification_required === false || value.purpose_justification_required === undefined) ||
-    !Array.isArray(value.include) ||
-    !Array.isArray(value.exclude) ||
-    value.exclude.length !== 0 ||
-    !Array.isArray(value.require) ||
-    value.require.length !== 0 ||
-    value.include.length !== expected.adminEmails.length
+    policy.id !== expected.policyId ||
+    policy.name !== expected.name ||
+    policy.exclude.length !== 0 ||
+    policy.require.length !== 0 ||
+    policy.include.length !== expected.adminEmails.length
   ) return false;
-  const emails: string[] = [];
-  for (const rule of value.include) {
-    if (!isRecord(rule) || !exactKeys(rule, ['email']) || !isRecord(rule.email) || !exactKeys(rule.email, ['email'])) {
-      return false;
-    }
-    const email = rule.email.email;
-    if (typeof email !== 'string') return false;
-    emails.push(email);
-  }
+  const emails = policy.include.map((rule) => rule.email.email);
   emails.sort();
   return emails.every((email, index) => email === expected.adminEmails[index]);
 }
@@ -1132,13 +1167,10 @@ export function prepareManagementAdminPolicyIntent(
 function requirePolicyIntent(
   input: ManagementAdminPolicySpec & { readonly intent: ManagementAdminPolicyIntent },
   stage: CloudflareManagementStage,
-): {
-  readonly expected: Omit<ExpectedPolicy, 'policyId'>;
-  readonly intent: ManagementAdminPolicyIntent;
-} {
+): ValidatedPolicyIntent {
   const expected = validatePolicySpec(input, stage);
   const canonical = prepareManagementAdminPolicyIntent(input);
-  if (!isRecord(input.intent) || !exactJson(input.intent, canonical)) fail('invalid_input', stage, 'not_sent');
+  if (!exactJson(input.intent, canonical)) fail('invalid_input', stage, 'not_sent');
   return { expected, intent: canonical };
 }
 
@@ -1160,9 +1192,9 @@ export async function createManagementAdminAllowPolicy(
       body: JSON.stringify(intent.request),
     },
   );
-  const result = requireSuccess(response, stage, CREATED_STATUSES).result;
-  if (!isRecord(result) || !providerId(result.id)) fail('provider_unknown', stage, 'unknown');
-  return Object.freeze({ policyId: result.id });
+  const result = v.safeParse(providerIdResultSchema, requireSuccess(response, stage, CREATED_STATUSES).result);
+  if (!result.success) fail('provider_unknown', stage, 'unknown');
+  return Object.freeze({ policyId: result.output.id });
 }
 
 function expectedPolicy(
@@ -1228,9 +1260,10 @@ export async function recoverManagementAdminAllowPolicy(
   }, true);
   const matches: ManagementAdminPolicyLocator[] = [];
   for (const value of values) {
-    if (!isRecord(value) || !providerId(value.id)) fail('provider_mismatch', stage, 'rejected');
-    if (exactPolicy(value, { ...expected, policyId: value.id })) {
-      matches.push(Object.freeze({ policyId: value.id }));
+    const parsed = v.safeParse(providerIdResultSchema, value);
+    if (!parsed.success) fail('provider_mismatch', stage, 'rejected');
+    if (exactPolicy(value, { ...expected, policyId: parsed.output.id })) {
+      matches.push(Object.freeze({ policyId: parsed.output.id }));
     }
   }
   if (matches.length > 1) fail('provider_ambiguous', stage, 'rejected');
@@ -1238,20 +1271,22 @@ export async function recoverManagementAdminAllowPolicy(
     fail('foreign_policy', stage, 'rejected');
   }
   if (matches.length === 0) fail('provider_unknown', stage, 'unknown');
+  const locator = matches.at(0);
+  if (locator === undefined) fail('provider_unknown', stage, 'unknown');
   return Object.freeze({
     schemaVersion: 1,
     kind: 'management_admin_policy_recovery',
     planId: input.intent.planId,
     planHash: input.intent.planHash,
     ownershipMarker: input.intent.ownershipMarker,
-    locator: matches[0],
+    locator,
   });
 }
 
 function validateWorkerSubdomainInput(
   input: CloudflareManagementCall & { readonly accountId: string; readonly plan: StaticDeployPlan },
   stage: CloudflareManagementStage,
-): { readonly call: ReturnType<typeof commonInput>; readonly workerName: string } {
+): ValidatedWorkerSubdomainInput {
   const call = commonInput(input, stage);
   if (!ACCOUNT_ID_PATTERN.test(input.accountId)) {
     fail('invalid_input', stage, 'not_sent');
@@ -1261,10 +1296,8 @@ function validateWorkerSubdomainInput(
   return { call, workerName: plan.workerName };
 }
 
-function parseSubdomainState(value: unknown): WorkerSubdomainState | null {
-  if (!isRecord(value) || !exactKeys(value, ['enabled', 'previews_enabled'])) return null;
-  if (typeof value.enabled !== 'boolean' || value.previews_enabled !== false) return null;
-  return Object.freeze({ enabled: value.enabled, previewsEnabled: false });
+function parseSubdomainState(value: BoundaryValue): WorkerSubdomainState | null {
+  return parseGatewayWorkerSubdomainState(value);
 }
 
 /**
@@ -1280,7 +1313,7 @@ export async function setWorkerBootstrapSubdomain(
 ): Promise<WorkerSubdomainState> {
   const stage = 'worker_subdomain_set';
   const { call, workerName } = validateWorkerSubdomainInput(input, stage);
-  if (typeof input.enabled !== 'boolean') fail('invalid_input', stage, 'not_sent');
+  if (!v.is(v.boolean(), input.enabled)) fail('invalid_input', stage, 'not_sent');
   const response = await performRequest(
     call,
     stage,
@@ -1305,7 +1338,7 @@ export async function verifyWorkerBootstrapSubdomain(
 ): Promise<WorkerSubdomainState> {
   const stage = 'worker_subdomain_get';
   const { call, workerName } = validateWorkerSubdomainInput(input, stage);
-  if (typeof input.expectedEnabled !== 'boolean') fail('invalid_input', stage, 'not_sent');
+  if (!v.is(v.boolean(), input.expectedEnabled)) fail('invalid_input', stage, 'not_sent');
   const response = await performRequest(
     call,
     stage,
@@ -1348,14 +1381,16 @@ function domainsListUrl(accountId: string, hostname: string, page: number, perPa
   return url;
 }
 
-function exactDomain(value: unknown, expected: ExpectedDomain): boolean {
-  if (!isRecord(value)) return false;
-  return value.id === expected.domainId &&
-    value.hostname === expected.hostname &&
-    value.service === expected.service &&
-    value.zone_id === expected.zoneId &&
-    value.zone_name === expected.zoneName &&
-    (value.environment === undefined || value.environment === 'production');
+function exactDomain(value: BoundaryValue, expected: ExpectedDomain): boolean {
+  const result = v.safeParse(customDomainSchema, value);
+  if (!result.success) return false;
+  const domain = result.output;
+  return domain.id === expected.domainId &&
+    domain.hostname === expected.hostname &&
+    domain.service === expected.service &&
+    domain.zone_id === expected.zoneId &&
+    domain.zone_name === expected.zoneName &&
+    (domain.environment === undefined || domain.environment === 'production');
 }
 
 async function assertNoManagementCustomDomain(
@@ -1367,8 +1402,8 @@ async function assertNoManagementCustomDomain(
     domainsListUrl(expected.accountId, expected.hostname, page, perPage));
   if (values.length > 1) fail('provider_ambiguous', stage, 'rejected');
   if (values.length === 1) {
-    const value = values[0];
-    if (!isRecord(value) || value.hostname !== expected.hostname || !providerId(value.id)) {
+    const value = v.safeParse(v.looseObject({ hostname: v.string(), id: providerIdSchema }), values[0]);
+    if (!value.success || value.output.hostname !== expected.hostname) {
       fail('provider_mismatch', stage, 'rejected');
     }
     fail('fresh_baseline_collision', stage, 'rejected');
@@ -1415,13 +1450,10 @@ export function prepareManagementCustomDomainIntent(
 function requireDomainIntent(
   input: ManagementCustomDomainSpec & { readonly intent: ManagementCustomDomainIntent },
   stage: CloudflareManagementStage,
-): {
-  readonly expected: Omit<ExpectedDomain, 'domainId'>;
-  readonly intent: ManagementCustomDomainIntent;
-} {
+): ValidatedDomainIntent {
   const expected = validateDomainSpec(input, stage);
   const canonical = prepareManagementCustomDomainIntent(input);
-  if (!isRecord(input.intent) || !exactJson(input.intent, canonical)) fail('invalid_input', stage, 'not_sent');
+  if (!exactJson(input.intent, canonical)) fail('invalid_input', stage, 'not_sent');
   return { expected, intent: canonical };
 }
 
@@ -1438,26 +1470,31 @@ async function assertNoExactDnsCollision(
     return url;
   });
   for (const value of values) {
-    if (!isRecord(value) || !providerId(value.id) || value.name !== expected.hostname) {
+    const record = v.safeParse(v.looseObject({ id: providerIdSchema, name: v.string() }), value);
+    if (!record.success || record.output.name !== expected.hostname) {
       fail('provider_mismatch', stage, 'rejected');
     }
   }
   if (values.length > 0) fail('dns_collision', stage, 'rejected');
 }
 
-function routeOverlapsHostname(pattern: unknown, hostname: string): boolean | null {
+function unsafeRouteCharacter(character: string): boolean {
+  const codePoint = character.codePointAt(0);
+  return codePoint === undefined || codePoint <= 0x20 || codePoint === 0x7f;
+}
+
+function routeOverlapsHostname(pattern: string, hostname: string): boolean | null {
   if (
-    typeof pattern !== 'string' ||
     pattern.length < 3 ||
     pattern.length > 512 ||
     pattern !== pattern.toLowerCase() ||
-    /[\u0000-\u0020\u007f]/u.test(pattern)
+    [...pattern].some(unsafeRouteCharacter)
   ) return null;
   const withoutScheme = pattern.replace(/^https?:\/\//u, '');
   const slash = withoutScheme.indexOf('/');
   if (slash <= 0 || slash === withoutScheme.length - 1) return null;
   const hostPattern = withoutScheme.slice(0, slash);
-  if (/[\[\]@:?#]/u.test(hostPattern)) return null;
+  if ([...hostPattern].some((character) => '[]@:?#'.includes(character))) return null;
   if (!hostPattern.includes('*')) return validHostname(hostPattern) ? hostPattern === hostname : null;
   if (!hostPattern.startsWith('*') || hostPattern.slice(1).includes('*')) return null;
   const suffix = hostPattern.slice(1).replace(/^\./u, '');
@@ -1477,13 +1514,9 @@ async function assertNoOverlappingWorkerRoute(
     return url;
   }, true);
   for (const value of values) {
-    if (
-      !isRecord(value) ||
-      !providerId(value.id) ||
-      !Object.hasOwn(value, 'pattern') ||
-      (Object.hasOwn(value, 'script') && value.script !== null && typeof value.script !== 'string')
-    ) fail('provider_mismatch', stage, 'rejected');
-    const overlap = routeOverlapsHostname(value.pattern, expected.hostname);
+    const route = v.safeParse(workerRouteSchema, value);
+    if (!route.success) fail('provider_mismatch', stage, 'rejected');
+    const overlap = routeOverlapsHostname(route.output.pattern, expected.hostname);
     if (overlap === null) fail('provider_mismatch', stage, 'rejected');
     if (overlap) fail('worker_route_collision', stage, 'rejected');
   }
@@ -1515,9 +1548,10 @@ export async function attachManagementCustomDomain(
     headers: jsonHeaders(call.accessToken),
     body: JSON.stringify(intent.request),
   });
-  const result = requireSuccess(response, stage, CREATED_STATUSES).result;
-  if (!isRecord(result) || !customDomainId(result.id)) fail('provider_unknown', stage, 'unknown');
-  return Object.freeze({ domainId: result.id });
+  const result = v.safeParse(v.looseObject({ id: customDomainIdSchema }),
+    requireSuccess(response, stage, CREATED_STATUSES).result);
+  if (!result.success) fail('provider_unknown', stage, 'unknown');
+  return Object.freeze({ domainId: result.output.id });
 }
 
 function expectedDomain(
@@ -1570,9 +1604,10 @@ export async function recoverManagementCustomDomain(
     domainsListUrl(input.accountId, expected.hostname, page, perPage));
   const matches: ManagementCustomDomainLocator[] = [];
   for (const value of values) {
-    if (!isRecord(value) || !providerId(value.id)) fail('provider_mismatch', stage, 'rejected');
-    if (exactDomain(value, { ...expected, domainId: value.id })) {
-      matches.push(Object.freeze({ domainId: value.id }));
+    const parsed = v.safeParse(v.looseObject({ id: customDomainIdSchema }), value);
+    if (!parsed.success) fail('provider_mismatch', stage, 'rejected');
+    if (exactDomain(value, { ...expected, domainId: parsed.output.id })) {
+      matches.push(Object.freeze({ domainId: parsed.output.id }));
     }
   }
   if (matches.length > 1 || (matches.length === 1 && values.length !== 1)) {
@@ -1582,12 +1617,14 @@ export async function recoverManagementCustomDomain(
     if (values.length > 0) fail('provider_mismatch', stage, 'rejected');
     fail('provider_unknown', stage, 'unknown');
   }
+  const locator = matches.at(0);
+  if (locator === undefined) fail('provider_unknown', stage, 'unknown');
   return Object.freeze({
     schemaVersion: 1,
     kind: 'management_custom_domain_recovery',
     planId: input.intent.planId,
     planHash: input.intent.planHash,
     ownershipMarker: input.intent.ownershipMarker,
-    locator: matches[0],
+    locator,
   });
 }

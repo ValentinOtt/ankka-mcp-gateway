@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import * as v from 'valibot';
 
 import {
   CustomerUninstallNonceDerivationError,
@@ -36,7 +37,13 @@ import {
   type InstallActionName,
   type InstallActionRecord,
   type InstallJournal,
+  type WorkerDeploymentCreateRecord,
+  type WorkerDeploymentLocator,
+  type WorkerVersionCreateRecord,
+  type WorkerVersionLocator,
 } from '../src/install-journal';
+import { boundaryObjectSchema, type BoundaryObject, type BoundaryValue } from '../src/boundary';
+import { canonicalJson } from '../src/canonical-json';
 import { sha256Hex } from '../src/crypto';
 import { buildStaticDeployPlan, parseDeploySelection, type StaticDeployPlan } from '../src/schema';
 import type { AuthorizedTarget } from '../src/cloudflare-target';
@@ -77,23 +84,8 @@ const CUSTOMER_PLAN_ID = `plan-${'7'.repeat(24)}`;
 const NONCE_KEY = base64url(Uint8Array.from({ length: 32 }, (_value, index) => index + 31));
 const OAUTH_TOKEN = 'fresh-uninstall-oauth-token-never-persist';
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function canonical(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string' || typeof value === 'number') {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('invalid fixture');
-}
-
-async function hash(value: unknown): Promise<string> {
-  return sha256Hex(canonical(value));
+async function hash<Value>(value: Value): Promise<string> {
+  return sha256Hex(canonicalJson(value));
 }
 
 function base64url(bytes: Uint8Array): string {
@@ -103,13 +95,25 @@ function base64url(bytes: Uint8Array): string {
     .replace(/=+$/u, '');
 }
 
+function boundaryObject(value: BoundaryValue): BoundaryObject {
+  return v.parse(boundaryObjectSchema, value);
+}
+
+async function responseObject(response: Response): Promise<BoundaryObject> {
+  return v.parse(boundaryObjectSchema, await response.json());
+}
+
+interface CapturedRequest {
+  request: Request | null;
+}
+
 function workerName(plan: StaticDeployPlan): string {
   const worker = plan.managementResources.find((resource) => resource.kind === 'management_worker');
   if (!worker) throw new Error('missing worker');
   return worker.name;
 }
 
-const PLAIN_BINDINGS = Object.freeze([
+const PLAIN_BINDING_NAMES = Object.freeze([
   'ADMIN_EMAILS',
   'ANKKA_GATEWAY_RELEASE',
   'ANKKA_GATEWAY_RELEASE_SHA256',
@@ -125,7 +129,13 @@ const PLAIN_BINDINGS = Object.freeze([
   'CLOUDFLARE_ZONE_ID',
   'CLOUDFLARE_ZONE_NAME',
   'ZERO_TRUST_READY',
-].map((name, index) => Object.freeze({ name, valueSha256: String(index % 10).repeat(64) })));
+] as const);
+const PLAIN_BINDINGS: WorkerVersionCreateRecord['plainTextBindingHashes'] = Object.freeze(
+  PLAIN_BINDING_NAMES.map((name, index) => Object.freeze({
+    name,
+    valueSha256: String(index % 10).repeat(64),
+  })),
+);
 
 async function workerRecord(plan: StaticDeployPlan): Promise<InstallActionRecord> {
   const requestHash = await hash({
@@ -186,7 +196,7 @@ async function policyRecord(plan: StaticDeployPlan): Promise<InstallActionRecord
 async function versionRecord(
   plan: StaticDeployPlan,
   phase: 'provision' | 'bootstrap' | 'clean',
-): Promise<InstallActionRecord> {
+): Promise<WorkerVersionCreateRecord> {
   const releaseContract = {
     assetBinding: 'ASSETS' as const,
     assetConfig: {
@@ -251,7 +261,7 @@ async function versionRecord(
     correlationTag: `ankka-version-${phase}-sha256:${requestHash}`,
     releaseContract,
     assets,
-    plainTextBindingHashes: PLAIN_BINDINGS as never,
+    plainTextBindingHashes: PLAIN_BINDINGS,
     modules,
   };
 }
@@ -259,9 +269,9 @@ async function versionRecord(
 async function versionLocator(
   plan: StaticDeployPlan,
   phase: 'provision' | 'bootstrap' | 'clean',
-): Promise<InstallActionLocator> {
-  const record = await versionRecord(plan, phase) as Extract<InstallActionRecord, { kind: 'worker_version_create' }>;
-  return {
+): Promise<WorkerVersionLocator> {
+  const record = await versionRecord(plan, phase);
+  const locator: WorkerVersionLocator = {
     kind: 'version',
     phase,
     accountId: TARGET.account.id,
@@ -270,15 +280,15 @@ async function versionLocator(
     versionId: phase === 'provision' ? PROVISION_VERSION_ID : phase === 'bootstrap' ? BOOTSTRAP_VERSION_ID : CLEAN_VERSION_ID,
     requestHash: record.requestHash,
     correlationTag: record.correlationTag,
-    // The provision version precedes the deployment that creates the namespace.
-    ...(phase === 'provision' ? {} : { namespaceId: NAMESPACE_ID }),
   };
+  // The provision version precedes the deployment that creates the namespace.
+  return phase === 'provision' ? locator : { ...locator, namespaceId: NAMESPACE_ID };
 }
 
 async function deploymentRecord(
   plan: StaticDeployPlan,
   phase: 'provision' | 'bootstrap' | 'clean',
-): Promise<InstallActionRecord> {
+): Promise<WorkerDeploymentCreateRecord> {
   const versionId = phase === 'provision' ? PROVISION_VERSION_ID : phase === 'bootstrap' ? BOOTSTRAP_VERSION_ID : CLEAN_VERSION_ID;
   const requestHash = await hash({
     strategy: 'percentage',
@@ -300,8 +310,8 @@ async function deploymentRecord(
 async function deploymentLocator(
   plan: StaticDeployPlan,
   phase: 'provision' | 'bootstrap' | 'clean',
-): Promise<InstallActionLocator> {
-  const record = await deploymentRecord(plan, phase) as Extract<InstallActionRecord, { kind: 'worker_deployment_create' }>;
+): Promise<WorkerDeploymentLocator> {
+  const record = await deploymentRecord(plan, phase);
   return {
     kind: 'deployment',
     phase,
@@ -665,13 +675,13 @@ async function rehashUninstallPlan(
     ...semantic
   } = mutable;
   const digest = await hash(semantic);
-  return {
+  return await parseStaticUninstallPlan({
     ...semantic,
     planId: `uninstall-plan-${digest.slice(0, 24)}`,
     planHash: `sha256:${digest}`,
     createdAt,
     expiresAt,
-  } as StaticUninstallPlan;
+  });
 }
 
 async function removedReceipt(
@@ -747,7 +757,7 @@ describe('private customer cleanup request primitive', () => {
     expect(serializedSemantic).not.toContain(TARGET.actor.email);
     expect(serializedSemantic).not.toMatch(/"(?:body|token|nonce|signature|request|response)"/iu);
 
-    let captured: Request | null = null;
+    const captured: CapturedRequest = { request: null };
     const result = await submitCustomerUninstallRequest({
       installJournal: journal,
       ...review,
@@ -757,7 +767,7 @@ describe('private customer cleanup request primitive', () => {
       cloudflareAccessToken: OAUTH_TOKEN,
       nowMs: NOW + 100_001,
       transport: async (request) => {
-        captured = request;
+        captured.request = request;
         return removedResponse(mutation);
       },
     });
@@ -790,8 +800,8 @@ describe('private customer cleanup request primitive', () => {
     expect(Object.isFrozen(parsedLocator)).toBe(true);
     await expect(parseCustomerUninstallLocator({ ...result, extra: true }, mutation.semantic, journal))
       .resolves.toBeNull();
-    expect(captured).not.toBeNull();
-    const sent = captured as unknown as Request;
+    const sent = captured.request;
+    if (!sent) throw new TypeError('expected captured uninstall request');
     expect(sent.url).toBe(`https://${workerName(journal.plan)}.${ACCOUNT_SUBDOMAIN.subdomain}.workers.dev/__ankka/uninstall`);
     expect(sent.method).toBe('POST');
     expect(sent.redirect).toBe('manual');
@@ -802,7 +812,7 @@ describe('private customer cleanup request primitive', () => {
       'accept', 'content-type', 'x-ankka-uninstall-signature',
     ]);
     const raw = await sent.clone().text();
-    const body = JSON.parse(raw) as Record<string, unknown>;
+    const body = v.parse(boundaryObjectSchema, JSON.parse(raw));
     expect(Object.keys(body).sort()).toEqual([
       'cloudflareAccessToken', 'expected', 'expiresAt', 'issuedAt', 'release',
       'requestId', 'schemaVersion', 'target',
@@ -816,7 +826,10 @@ describe('private customer cleanup request primitive', () => {
       false,
       ['verify'],
     );
-    const signature = sent.headers.get('x-ankka-uninstall-signature') as string;
+    const signature = v.parse(
+      v.pipe(v.string(), v.regex(/^sha256=[a-f0-9]{64}$/u)),
+      sent.headers.get('x-ankka-uninstall-signature'),
+    );
     expect(await crypto.subtle.verify(
       'HMAC',
       key,
@@ -844,8 +857,14 @@ describe('private customer cleanup request primitive', () => {
       accountWorkersSubdomain: ACCOUNT_SUBDOMAIN,
       nowMs: NOW + 100_000,
     })).rejects.toMatchObject({ code: 'install_authority_invalid', outcome: 'not_sent' });
-    const namespaceDrift = structuredClone(journal) as InstallJournal;
-    (namespaceDrift.actions.at(-1)?.locator as { adminStateNamespaceId: string }).adminStateNamespaceId = 'f'.repeat(32);
+    const namespaceDrift = structuredClone(journal);
+    const finalAction = namespaceDrift.actions.at(-1);
+    if (!finalAction?.locator) throw new TypeError('expected final install locator');
+    Object.defineProperty(finalAction.locator, 'adminStateNamespaceId', {
+      configurable: true,
+      enumerable: true,
+      value: 'f'.repeat(32),
+    });
     await expect(deriveCustomerUninstallNonce(NONCE_KEY, namespaceDrift)).rejects.toBeInstanceOf(
       CustomerUninstallNonceDerivationError,
     );
@@ -859,7 +878,11 @@ describe('private customer cleanup request primitive', () => {
       nowMs: NOW + 100_000,
     })).rejects.toMatchObject({ code: 'origin_invalid', outcome: 'not_sent' });
     const tampered = structuredClone(mutation);
-    (tampered.ephemeral.claim.expected.readyReceipt.target as { accountId: string }).accountId = 'f'.repeat(32);
+    Object.defineProperty(tampered.ephemeral.claim.expected.readyReceipt.target, 'accountId', {
+      configurable: true,
+      enumerable: true,
+      value: 'f'.repeat(32),
+    });
     await expect(submitCustomerUninstallRequest({
       installJournal: journal,
       ...review,
@@ -906,16 +929,12 @@ describe('private customer cleanup request primitive', () => {
       nowMs: NOW + 100_000,
     })).rejects.toMatchObject({ code: 'install_authority_invalid', outcome: 'not_sent' });
 
-    const actorDrift = structuredClone(TARGET) as unknown as {
-      actor: { id: string; email: string };
-      account: { id: string; name: string };
-      zone: { id: string; name: string; status: string };
-    };
-    actorDrift.actor.id = 'different-actor';
-    const accountDrift = structuredClone(TARGET) as unknown as typeof actorDrift;
-    accountDrift.account.id = 'f'.repeat(32);
-    const zoneDrift = structuredClone(TARGET) as unknown as typeof actorDrift;
-    zoneDrift.zone.id = 'f'.repeat(32);
+    const actorDrift = structuredClone(TARGET);
+    Object.defineProperty(actorDrift.actor, 'id', { value: 'different-actor' });
+    const accountDrift = structuredClone(TARGET);
+    Object.defineProperty(accountDrift.account, 'id', { value: 'f'.repeat(32) });
+    const zoneDrift = structuredClone(TARGET);
+    Object.defineProperty(zoneDrift.zone, 'id', { value: 'f'.repeat(32) });
     const wrongApprovals: readonly { readonly attemptId: string; readonly authorizedTarget: unknown }[] = [
       { attemptId: UNINSTALL_APPROVAL_ATTEMPT_ID, authorizedTarget: actorDrift },
       { attemptId: UNINSTALL_APPROVAL_ATTEMPT_ID, authorizedTarget: accountDrift },
@@ -955,14 +974,16 @@ describe('private customer cleanup request primitive', () => {
       ['authorityHash', `sha256:${'d'.repeat(64)}`],
       ['approvalAttemptId', `att_${'d'.repeat(32)}`],
     ] as const) {
-      const tampered = structuredClone(mutation) as unknown as {
-        semantic: Record<string, unknown>;
-      };
-      tampered.semantic[field] = value;
+      const tampered = structuredClone(mutation);
+      Object.defineProperty(tampered.semantic, field, {
+        configurable: true,
+        enumerable: true,
+        value,
+      });
       await expect(submitCustomerUninstallRequest({
         installJournal: journal,
         ...review,
-        mutation: tampered as unknown as CustomerUninstallMutationPlan,
+        mutation: tampered,
         accountWorkersSubdomain: ACCOUNT_SUBDOMAIN,
         uninstallNonce: nonce,
         cloudflareAccessToken: OAUTH_TOKEN,
@@ -975,7 +996,7 @@ describe('private customer cleanup request primitive', () => {
     const prototypeSemantic = Object.assign(Object.create({ inherited: true }), mutation.semantic);
     expect(parseCustomerUninstallSemanticRecord(prototypeSemantic)).toBeNull();
     let getterCalls = 0;
-    const getterSemantic = { ...mutation.semantic } as Record<string, unknown>;
+    const getterSemantic = { ...mutation.semantic };
     Object.defineProperty(getterSemantic, 'authorityHash', {
       enumerable: true,
       get: () => {
@@ -1104,7 +1125,7 @@ describe('private customer cleanup request primitive', () => {
       { uninstallInvoked: false, resumed: true },
     ]) {
       const coherent = await removedResponse(mutation);
-      const coherentBody = await coherent.json() as Record<string, any>;
+      const coherentBody = await responseObject(coherent);
       Object.assign(coherentBody, flags);
       await expect(submitCustomerUninstallRequest({
         installJournal: journal,
@@ -1118,9 +1139,8 @@ describe('private customer cleanup request primitive', () => {
       })).resolves.toMatchObject({ status: 'removed', ...flags });
     }
     const impossible = await removedResponse(mutation);
-    const impossibleBody = await impossible.json() as Record<string, any>;
-    impossibleBody.uninstallInvoked = false;
-    impossibleBody.resumed = false;
+    const impossibleBody = await responseObject(impossible);
+    Object.assign(impossibleBody, { uninstallInvoked: false, resumed: false });
     await expect(submitCustomerUninstallRequest({
       installJournal: journal,
       ...review,
@@ -1133,8 +1153,20 @@ describe('private customer cleanup request primitive', () => {
     })).rejects.toMatchObject({ code: 'response_invalid', outcome: 'unknown' });
 
     const valid = await removedResponse(mutation);
-    const body = await valid.json() as Record<string, any>;
-    body.receipt.evidence.target.accountId = 'f'.repeat(32);
+    const body = await responseObject(valid);
+    const receipt = boundaryObject(body.receipt);
+    const evidence = boundaryObject(receipt.evidence);
+    const receiptTarget = boundaryObject(evidence.target);
+    const forgedTargetBody = {
+      ...body,
+      receipt: {
+        ...receipt,
+        evidence: {
+          ...evidence,
+          target: { ...receiptTarget, accountId: 'f'.repeat(32) },
+        },
+      },
+    };
     const forgedTarget = async () => submitCustomerUninstallRequest({
       installJournal: journal,
       ...review,
@@ -1143,14 +1175,25 @@ describe('private customer cleanup request primitive', () => {
       uninstallNonce: nonce,
       cloudflareAccessToken: OAUTH_TOKEN,
       nowMs: NOW + 100_001,
-      transport: async () => Response.json(body),
+      transport: async () => Response.json(forgedTargetBody),
     });
     await expect(forgedTarget()).rejects.toMatchObject({ code: 'response_invalid', outcome: 'unknown' });
 
     const validAgain = await removedResponse(mutation);
-    const revisionBody = await validAgain.json() as Record<string, any>;
-    revisionBody.receipt.evidence.revision += 1;
-    revisionBody.receipt.revision += 1;
+    const revisionBody = await responseObject(validAgain);
+    const revisionReceipt = boundaryObject(revisionBody.receipt);
+    const revisionEvidence = boundaryObject(revisionReceipt.evidence);
+    const forgedRevisionBody = {
+      ...revisionBody,
+      receipt: {
+        ...revisionReceipt,
+        evidence: {
+          ...revisionEvidence,
+          revision: v.parse(v.number(), revisionEvidence.revision) + 1,
+        },
+        revision: v.parse(v.number(), revisionReceipt.revision) + 1,
+      },
+    };
     const forgedRevision = async () => submitCustomerUninstallRequest({
       installJournal: journal,
       ...review,
@@ -1159,7 +1202,7 @@ describe('private customer cleanup request primitive', () => {
       uninstallNonce: nonce,
       cloudflareAccessToken: OAUTH_TOKEN,
       nowMs: NOW + 100_001,
-      transport: async () => Response.json(revisionBody),
+      transport: async () => Response.json(forgedRevisionBody),
     });
     await expect(forgedRevision()).rejects.toMatchObject({ code: 'response_invalid', outcome: 'unknown' });
   });
@@ -1227,14 +1270,14 @@ describe('private customer cleanup request primitive', () => {
         markStarted?.();
         return new Promise<Response>(() => undefined);
       });
-      const rejected = expect(pending).rejects.toMatchObject({
-        code: 'outcome_unknown', stage: 'submit', outcome: 'unknown',
-      });
+      const rejected = pending.catch((error) => error);
       await started;
       await vi.advanceTimersByTimeAsync(89_999);
       expect(observedSignals[0]?.aborted).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
-      await rejected;
+      await expect(rejected).resolves.toMatchObject({
+        code: 'outcome_unknown', stage: 'submit', outcome: 'unknown',
+      });
       expect(observedSignals[0]?.aborted).toBe(true);
     } finally {
       vi.useRealTimers();

@@ -1,5 +1,7 @@
+import * as v from 'valibot';
 import { beforeAll, describe, expect, it } from 'vitest';
 
+import type { JsonObject } from '../src/boundary';
 import { REQUIRED_OAUTH_SCOPES, OAUTH_COOKIE, PUBLIC_ORIGIN } from '../src/constants';
 import { base64UrlEncode } from '../src/crypto';
 import type { GatewayDeployEnv } from '../src/env';
@@ -8,6 +10,7 @@ import {
   sourceActionRuntimeFixture,
   type SourceActionRuntimeFixture,
 } from './source-action-runtime-fixture';
+import { requestJson, responseJson } from './boundary';
 
 const NOW = Date.UTC(2026, 7, 26, 1, 0, 0);
 const ACCOUNT_ID = 'a'.repeat(32);
@@ -18,9 +21,22 @@ const WORKER_ID = 'b'.repeat(32);
 const VERSION_ID = '11111111-1111-4111-8111-111111111111';
 const DEPLOYMENT_ID = '22222222-2222-4222-8222-222222222222';
 let signedRuntime: SourceActionRuntimeFixture;
-let activeDeployment: Readonly<Record<string, unknown>>;
+let activeDeployment: JsonObject;
 let attackerRuntime: SourceActionRuntimeFixture;
-let attackerDeployment: Readonly<Record<string, unknown>>;
+let attackerDeployment: JsonObject;
+
+const authorizationResponseSchema = v.object({ authorizationUrl: v.string() });
+const subdomainMutationSchema = v.object({ enabled: v.boolean() });
+const relayRequestSchema = v.object({ cloudflareAccessToken: v.string() });
+
+const unavailableSessionNamespace = {
+  idFromName(): never {
+    throw new Error('hosted session must not be used by management OAuth');
+  },
+  get(): never {
+    throw new Error('hosted session must not be used by management OAuth');
+  },
+};
 
 beforeAll(async () => {
   signedRuntime = await sourceActionRuntimeFixture({
@@ -47,7 +63,7 @@ function cookiePair(header: string): string {
   return header.split(';', 1)[0] ?? '';
 }
 
-function envelope(result: unknown): Response {
+function envelope<Result>(result: Result): Response {
   return new Response(JSON.stringify({ success: true, errors: [], messages: [], result }), {
     headers: { 'content-type': 'application/json' },
   });
@@ -55,7 +71,7 @@ function envelope(result: unknown): Response {
 
 function workerEnv(): GatewayDeployEnv {
   return {
-    GATEWAY_DEPLOY_SESSION: {} as DurableObjectNamespace,
+    GATEWAY_DEPLOY_SESSION: unavailableSessionNamespace,
     CLOUDFLARE_OAUTH_CLIENT_ID: 'cloudflare-client-id-value',
     CLOUDFLARE_OAUTH_CLIENT_SECRET: 'cloudflare-client-secret-value',
     DEPLOY_SESSION_ENCRYPTION_KEY: base64UrlEncode(new Uint8Array(32).fill(7)),
@@ -81,7 +97,7 @@ function managementClaim(managementOrigin = MANAGEMENT_ORIGIN) {
 function runtimePreflightResponse(
   url: URL,
   runtime: SourceActionRuntimeFixture = signedRuntime,
-  deployment: Readonly<Record<string, unknown>> = activeDeployment,
+  deployment: JsonObject = activeDeployment,
 ): Response | null {
   if (url.pathname.endsWith('/workers/workers/ankka-gateway-example')) {
     return envelope({
@@ -105,10 +121,10 @@ const exactReleaseProvider = {
   },
 };
 
-async function requestManagementAuthorization(
+async function requestManagementAuthorization<Claim>(
   worker: ReturnType<typeof createGatewayDeployWorker>,
   env: GatewayDeployEnv,
-  claim: unknown,
+  claim: Claim,
 ): Promise<Response> {
   const handoff = base64UrlEncode(new TextEncoder().encode(JSON.stringify(claim)));
   return worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/management/authorize`, {
@@ -118,20 +134,22 @@ async function requestManagementAuthorization(
   }), env);
 }
 
-async function authorizeManagement(
+async function authorizeManagement<Claim>(
   worker: ReturnType<typeof createGatewayDeployWorker>,
   env: GatewayDeployEnv,
   managementOrigin = MANAGEMENT_ORIGIN,
-  claim: unknown = managementClaim(managementOrigin),
+  claim?: Claim,
 ): Promise<{ readonly oauth: string; readonly state: string }> {
-  const authorize = await requestManagementAuthorization(worker, env, claim);
+  const effectiveClaim = claim === undefined ? managementClaim(managementOrigin) : claim;
+  const authorize = await requestManagementAuthorization(worker, env, effectiveClaim);
   expect(authorize.status).toBe(200);
-  const payload = await authorize.json() as { authorizationUrl: string };
+  const payload = await responseJson(authorize, authorizationResponseSchema);
   const state = new URL(payload.authorizationUrl).searchParams.get('state');
   expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+  if (!state) throw new TypeError('management OAuth state fixture');
   const oauth = cookiePair(authorize.headers.get('set-cookie') ?? '');
   expect(oauth.startsWith(`${OAUTH_COOKIE}=`)).toBe(true);
-  return { oauth, state: state as string };
+  return { oauth, state };
 }
 
 describe('management source OAuth', () => {
@@ -167,7 +185,7 @@ describe('management source OAuth', () => {
       if (runtime) return runtime;
       if (url.origin === 'https://api.cloudflare.com' && url.pathname.endsWith('/subdomain')) {
         if (request.method === 'GET') return envelope({ enabled, previews_enabled: false });
-        const body = await request.json() as { enabled: boolean };
+        const body = await requestJson(request, subdomainMutationSchema);
         enabled = body.enabled;
         return envelope({ enabled, previews_enabled: false });
       }
@@ -176,7 +194,7 @@ describe('management source OAuth', () => {
       }
       if (url.hostname.endsWith('.workers.dev') && request.method === 'POST') {
         customerPosts += 1;
-        const body = await request.json() as Record<string, unknown>;
+        const body = await requestJson(request, relayRequestSchema);
         expect(body.cloudflareAccessToken).toBe('ephemeral-management-source-token');
         return new Response(JSON.stringify({
           schemaVersion: 1,
@@ -214,7 +232,7 @@ describe('management source OAuth', () => {
     const callback = await worker.fetch(new Request(
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
       { headers: { cookie: oauth } },
-    ), env, { waitUntil() {} } as unknown as ExecutionContext);
+    ), env, undefined);
     expect(callback.status).toBe(200);
     expect(callbackExecuted).toBe(true);
     expect(customerPosts).toBe(1);
@@ -405,7 +423,7 @@ describe('management source OAuth', () => {
       if (runtime) return runtime;
       if (url.origin === 'https://api.cloudflare.com' && url.pathname.endsWith('/subdomain')) {
         if (request.method === 'GET') return envelope({ enabled, previews_enabled: false });
-        const body = await request.json() as { enabled: boolean };
+        const body = await requestJson(request, subdomainMutationSchema);
         enabled = body.enabled;
         return envelope({ enabled, previews_enabled: false });
       }

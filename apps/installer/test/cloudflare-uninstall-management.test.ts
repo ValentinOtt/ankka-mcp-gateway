@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+import * as v from 'valibot';
 
+import { jsonValueSchema, type JsonValue } from '../src/boundary';
+import { canonicalJson } from '../src/canonical-json';
 import {
   CloudflareUninstallManagementError,
   HOSTED_UNINSTALL_MANAGEMENT_DELETE_ORDER,
@@ -57,10 +60,11 @@ import {
   type InstallActionName,
   type InstallActionRecord,
   type InstallJournal,
+  type WorkerVersionCreateRecord,
 } from '../src/install-journal';
 import { buildStaticDeployPlan, parseDeploySelection } from '../src/schema';
 import { buildStaticUninstallPlan } from '../src/uninstall-plan';
-import { manifest, NOW, selectionInput, verifiedRelease } from './fixtures';
+import { manifest, NOW, requiredFixture, selectionInput, verifiedRelease } from './fixtures';
 import { readyInstallationReceiptFixture } from './provider-neutral-installation-receipt-fixture';
 
 const ACCOUNT_ID = 'a'.repeat(32);
@@ -102,30 +106,23 @@ const target: AuthorizedTarget = Object.freeze({
 });
 let correlationTag = `ankka-worker-sha256:${'7'.repeat(64)}`;
 
-function fixtureCanonical(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string' || typeof value === 'number') {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(fixtureCanonical).join(',')}]`;
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) =>
-      `${JSON.stringify(key)}:${fixtureCanonical(record[key])}`).join(',')}}`;
-  }
-  throw new TypeError('fixture');
+async function fixtureHash<Input>(value: Input): Promise<string> {
+  return sha256Hex(canonicalJson(v.parse(jsonValueSchema, value)));
 }
 
-async function fixtureHash(value: unknown): Promise<string> {
-  return sha256Hex(fixtureCanonical(value));
-}
-
-const PLAIN_BINDINGS = Object.freeze([
+const PLAIN_BINDING_NAMES = [
   'ADMIN_EMAILS', 'ANKKA_GATEWAY_RELEASE', 'ANKKA_GATEWAY_RELEASE_SHA256',
   'ANKKA_MANAGEMENT_HOSTNAME', 'ANKKA_UPDATE_CHANNEL', 'ANKKA_UPDATE_KEY_ID', 'ANKKA_UPDATE_PUBLIC_KEY',
   'ANKKA_WORKERS_SUBDOMAIN', 'ANKKA_WORKER_NAME', 'CF_ACCESS_AUD',
   'CF_ACCESS_ISSUER', 'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_ZONE_ID', 'CLOUDFLARE_ZONE_NAME',
   'ZERO_TRUST_READY',
-].map((name, index) => Object.freeze({ name, valueSha256: String(index % 10).repeat(64) })));
+] as const;
+const PLAIN_BINDINGS: WorkerVersionCreateRecord['plainTextBindingHashes'] = Object.freeze(
+  PLAIN_BINDING_NAMES.map((name, index) => Object.freeze({
+    name,
+    valueSha256: String(index % 10).repeat(64),
+  })),
+);
 
 async function fixtureRecord(action: InstallActionName, phase?: 'provision' | 'bootstrap' | 'clean'): Promise<InstallActionRecord> {
   if (action === 'worker_create') {
@@ -184,7 +181,7 @@ async function fixtureRecord(action: InstallActionName, phase?: 'provision' | 'b
     });
     return { schemaVersion: 1, kind: 'worker_version_create', phase, accountId: ACCOUNT_ID, workerName,
       workerId: WORKER_ID, requestHash, correlationTag: `ankka-version-${phase}-sha256:${requestHash}`,
-      releaseContract, assets, plainTextBindingHashes: PLAIN_BINDINGS as never, modules };
+      releaseContract, assets, plainTextBindingHashes: PLAIN_BINDINGS, modules };
   }
   if (action.endsWith('_worker_deployment_create') && phase) {
     const versionId = phase === 'provision' ? PROVISION_VERSION_ID : phase === 'bootstrap' ? BOOTSTRAP_VERSION_ID : CLEAN_VERSION_ID;
@@ -204,15 +201,17 @@ async function fixtureLocator(action: InstallActionName, phase?: 'provision' | '
     return { enabled: action === 'bootstrap_subdomain_enable', previewsEnabled: false };
   }
   if (action.endsWith('_worker_version_create') && phase) {
-    const record = await fixtureRecord(action, phase) as Extract<InstallActionRecord, { kind: 'worker_version_create' }>;
-    return { kind: 'version', phase, accountId: ACCOUNT_ID, workerName, workerId: WORKER_ID,
+    const record = await fixtureRecord(action, phase);
+    if (record.kind !== 'worker_version_create') throw new TypeError('worker version fixture');
+    const locator = { kind: 'version' as const, phase, accountId: ACCOUNT_ID, workerName, workerId: WORKER_ID,
       versionId: phase === 'provision' ? PROVISION_VERSION_ID : phase === 'bootstrap' ? BOOTSTRAP_VERSION_ID : CLEAN_VERSION_ID,
-      requestHash: record.requestHash, correlationTag: record.correlationTag,
-      // The provision version precedes the deployment that creates the namespace.
-      ...(phase === 'provision' ? {} : { namespaceId: NAMESPACE_ID }) };
+      requestHash: record.requestHash, correlationTag: record.correlationTag };
+    // The provision version precedes the deployment that creates the namespace.
+    return phase === 'provision' ? locator : { ...locator, namespaceId: NAMESPACE_ID };
   }
   if (action.endsWith('_worker_deployment_create') && phase) {
-    const record = await fixtureRecord(action, phase) as Extract<InstallActionRecord, { kind: 'worker_deployment_create' }>;
+    const record = await fixtureRecord(action, phase);
+    if (record.kind !== 'worker_deployment_create') throw new TypeError('worker deployment fixture');
     return { kind: 'deployment', phase, accountId: ACCOUNT_ID, workerName, workerId: WORKER_ID,
       versionId: record.versionId,
       deploymentId: phase === 'provision' ? PROVISION_DEPLOYMENT_ID : phase === 'bootstrap' ? BOOTSTRAP_DEPLOYMENT_ID : CLEAN_DEPLOYMENT_ID,
@@ -354,11 +353,12 @@ const approvalFixtures = Object.freeze([
 ]);
 
 function contextThroughApproval(index: 0 | 1 | 2 | 3): HostedUninstallManagementContext {
+  const activeApproval = requiredFixture(approvalFixtures.at(index), 'active approval');
   return Object.freeze({
     schemaVersion: 1,
     installJournal,
     approvalHistory: Object.freeze(approvalFixtures.slice(0, index + 1)),
-    activeAttemptId: approvalFixtures[index].attemptId,
+    activeAttemptId: activeApproval.attemptId,
   });
 }
 
@@ -370,12 +370,17 @@ interface RecordedTransport {
   readonly transport: CloudflareUninstallManagementTransport;
 }
 
-function success(result: unknown, status = 200): Response {
+function success(result: JsonValue, status = 200): Response {
   return Response.json({ errors: [], messages: [], result, success: true }, { status });
 }
 
-function list(result: readonly unknown[], overrides: Record<string, unknown> = {}): Response {
-  const totalCount = typeof overrides.total_count === 'number' ? overrides.total_count : result.length;
+interface ListOverrides {
+  readonly total_count?: number;
+  readonly total_pages?: number;
+}
+
+function list(result: readonly JsonValue[], overrides: ListOverrides = {}): Response {
+  const totalCount = overrides.total_count ?? result.length;
   return Response.json({
     errors: [],
     messages: [],
@@ -392,7 +397,7 @@ function list(result: readonly unknown[], overrides: Record<string, unknown> = {
   });
 }
 
-function singlePage(result: readonly unknown[]): Response {
+function singlePage(result: readonly JsonValue[]): Response {
   return Response.json({ errors: [], messages: [], result, success: true });
 }
 
@@ -411,7 +416,7 @@ function recorded(factory: Response | ResponseFactory): RecordedTransport {
     requests,
     transport: async (request) => {
       const index = requests.length;
-      requests.push(request.clone() as unknown as ManagementRequest);
+      requests.push(new Request(request));
       return factory instanceof Response ? factory.clone() : await factory(request, index);
     },
   };
@@ -432,19 +437,19 @@ function call(transport: CloudflareUninstallManagementTransport): CloudflareUnin
 function exactDomain(
   id = DOMAIN_ID,
   environment: 'omitted' | 'production' = 'omitted',
-): Record<string, unknown> {
-  return {
+ ) {
+  const domain = {
     cert_id: CERTIFICATE_ID,
     hostname: selection.basics.managementHostname,
     id,
     service: workerName,
     zone_id: ZONE_ID,
     zone_name: selection.basics.zoneName,
-    ...(environment === 'production' ? { environment } : {}),
   };
+  return environment === 'production' ? { ...domain, environment } : domain;
 }
 
-function exactPolicy(id = POLICY_ID): Record<string, unknown> {
+function exactPolicy(id = POLICY_ID) {
   return {
     approval_required: false,
     decision: 'allow',
@@ -459,7 +464,7 @@ function exactPolicy(id = POLICY_ID): Record<string, unknown> {
   };
 }
 
-function exactApplication(id = APPLICATION_ID, aud = AUD): Record<string, unknown> {
+function exactApplication(id = APPLICATION_ID, aud = AUD) {
   return {
     allow_authenticate_via_warp: false,
     allowed_idps: [IDP_ONE, IDP_TWO],
@@ -475,7 +480,7 @@ function exactApplication(id = APPLICATION_ID, aud = AUD): Record<string, unknow
 }
 
 /** The exact shape Cloudflare returns for an installed gateway (live 2026-08-23). */
-function installedReferences(): Record<string, readonly unknown[]> {
+function installedReferences() {
   return {
     dispatch_namespace_outbounds: [],
     domains: [{
@@ -495,7 +500,7 @@ function installedReferences(): Record<string, readonly unknown[]> {
   };
 }
 
-function exactWorker(): Record<string, unknown> {
+function exactWorker() {
   return {
     created_on: '2026-08-23T00:00:00.000Z',
     deployed_on: '2026-08-23T00:00:30.123456Z',
@@ -517,7 +522,7 @@ function exactWorker(): Record<string, unknown> {
   };
 }
 
-function managedCustomDomainDns(): Record<string, unknown> {
+function managedCustomDomainDns() {
   return {
     content: '100::',
     id: DNS_ID,
@@ -558,9 +563,10 @@ async function expectManagementError(
     await operation;
     expect.fail('expected CloudflareUninstallManagementError');
   } catch (error) {
+    if (!(error instanceof CloudflareUninstallManagementError)) throw error;
     expect(error).toBeInstanceOf(CloudflareUninstallManagementError);
     expect(error).toMatchObject({ code, stage, outcome, canRetry: false });
-    expect((error as Error).message).toBe(code);
+    expect(error.message).toBe(code);
     expect(JSON.stringify(error)).not.toContain(ACCESS_TOKEN);
   }
 }
@@ -732,12 +738,13 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
       expect(request.redirect).toBe('manual');
       expect(request.body).toBeNull();
     }
-    expect(new URL(provider.requests[1].url).searchParams.get('hostname')).toBe(selection.basics.managementHostname);
-    expect(new URL(provider.requests[1].url).searchParams.get('page')).toBeNull();
-    expect(new URL(provider.requests[1].url).searchParams.get('per_page')).toBeNull();
-    expect(new URL(provider.requests[5].url).searchParams.get('domain')).toBe(selection.basics.managementHostname);
-    expect(new URL(provider.requests[9].url).searchParams.get('name.exact')).toBe(selection.basics.managementHostname);
-    expect(new URL(provider.requests[10].url).search).toBe('');
+    const applicationListUrl = new URL(requiredFixture(provider.requests.at(1), 'application list request').url);
+    expect(applicationListUrl.searchParams.get('hostname')).toBe(selection.basics.managementHostname);
+    expect(applicationListUrl.searchParams.get('page')).toBeNull();
+    expect(applicationListUrl.searchParams.get('per_page')).toBeNull();
+    expect(new URL(requiredFixture(provider.requests.at(5), 'custom domain request').url).searchParams.get('domain')).toBe(selection.basics.managementHostname);
+    expect(new URL(requiredFixture(provider.requests.at(9), 'DNS request').url).searchParams.get('name.exact')).toBe(selection.basics.managementHostname);
+    expect(new URL(requiredFixture(provider.requests.at(10), 'route request').url).search).toBe('');
   });
 
   it('also accepts an installed Custom Domain whose managed DNS companion is hidden from DNS Records', async () => {
@@ -807,7 +814,7 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
       6: success({ ...exactWorker(), references: {
         ...installedReferences(),
         domains: [{
-          ...(installedReferences().domains[0] as Record<string, unknown>),
+          ...installedReferences().domains[0],
           certificate_id: '8'.repeat(32),
         }],
       } }),
@@ -972,12 +979,13 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
 
   it('binds authority to the complete install journal, uninstall plan, approval attempt, and exact target', async () => {
     const provider = recorded(success(null));
+    const activeApproval = requiredFixture(context.approvalHistory.at(0), 'active approval');
     const wrongTarget = {
       ...context,
-      approvalHistory: [{ ...context.approvalHistory[0], authorizedTarget: {
+      approvalHistory: [{ ...activeApproval, authorizedTarget: {
         ...target, account: { ...target.account, id: FOREIGN_ID },
       } }],
-    } as HostedUninstallManagementContext;
+    };
     await expectManagementError(
       preflightHostedUninstallManagement(wrongTarget, call(provider.transport), AUTH_NOW),
       'invalid_input',
@@ -987,7 +995,7 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
     const extraSelection = {
       ...context,
       selection,
-    } as unknown as HostedUninstallManagementContext;
+    };
     await expectManagementError(
       preflightHostedUninstallManagement(extraSelection, call(provider.transport), AUTH_NOW),
       'invalid_input',
@@ -996,10 +1004,10 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
     );
     const forgedPlan = {
       ...context,
-      approvalHistory: [{ ...context.approvalHistory[0], uninstallPlan: {
+      approvalHistory: [{ ...activeApproval, uninstallPlan: {
         ...uninstallPlan, authorityHash: `sha256:${'f'.repeat(64)}`,
       } }],
-    } as HostedUninstallManagementContext;
+    };
     await expectManagementError(
       preflightHostedUninstallManagement(forgedPlan, call(provider.transport), AUTH_NOW),
       'invalid_input',
@@ -1010,7 +1018,7 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
       await expectManagementError(
         preflightHostedUninstallManagement(
           { ...context, activeAttemptId: attemptId, approvalHistory: [{
-            ...context.approvalHistory[0], attemptId,
+            ...activeApproval, attemptId,
           }] },
           call(provider.transport),
           AUTH_NOW,
@@ -1025,12 +1033,14 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
 
   it('rejects unapproved evidence origins and target, plan, or authority drift across grants', async () => {
     const contextB = contextThroughApproval(1);
-    async function forgedDomainEvidence(
-      patch: Record<string, unknown>,
-    ): Promise<typeof domainAbsence> {
+    type DomainEvidencePatch = Partial<Pick<
+      typeof domainAbsence,
+      'attemptId' | 'accountId' | 'uninstallPlanHash' | 'uninstallAuthorityHash'
+    >>;
+    async function forgedDomainEvidence(patch: DomainEvidencePatch) {
       const { evidenceSha256: _discard, ...base } = domainAbsence;
       const semantic = { ...base, ...patch };
-      return { ...semantic, evidenceSha256: await fixtureHash(semantic) } as typeof domainAbsence;
+      return { ...semantic, evidenceSha256: await fixtureHash(semantic) };
     }
     const candidates = [
       await forgedDomainEvidence({ attemptId: `att_${'f'.repeat(32)}` }),
@@ -1051,14 +1061,17 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
       );
     }
 
+    const firstApproval = contextB.approvalHistory[0];
+    const secondApproval = contextB.approvalHistory[1];
+    if (!firstApproval || !secondApproval) throw new Error('missing approval fixture');
     const duplicateAttempt = {
       ...contextB,
-      approvalHistory: [contextB.approvalHistory[0], {
-        ...contextB.approvalHistory[1],
-        attemptId: contextB.approvalHistory[0]?.attemptId,
+      approvalHistory: [firstApproval, {
+        ...secondApproval,
+        attemptId: firstApproval.attemptId,
       }],
-      activeAttemptId: contextB.approvalHistory[0]?.attemptId,
-    } as HostedUninstallManagementContext;
+      activeAttemptId: firstApproval.attemptId,
+    };
     await expectManagementError(
       preflightHostedUninstallManagement(duplicateAttempt, call(recorded(success(null)).transport), AUTH_NOW),
       'invalid_input',
@@ -1077,6 +1090,7 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
     expect(HOSTED_UNINSTALL_MANAGEMENT_JOURNAL_ALLOWLIST.intent).toContain('installConvergenceHash');
     expect(HOSTED_UNINSTALL_MANAGEMENT_JOURNAL_ALLOWLIST.intent).toContain('prerequisiteCommitments');
     for (const [index, intent] of canonicalIntents.entries()) {
+      const prerequisites = requiredFixture(canonicalPrerequisites.at(index), `prerequisites ${index}`);
       expect(intent).toMatchObject({
         ordinal: index,
         uninstallPlanId: uninstallPlan.planId,
@@ -1089,17 +1103,18 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
       expect(JSON.stringify(intent)).not.toMatch(/bearer|authorization|secret|ephemeral_oauth/iu);
       expect(await parseHostedUninstallManagementDeleteIntent(
         context,
-        canonicalPrerequisites[index],
+        prerequisites,
         intent,
       )).toEqual(intent);
       expect(await parseHostedUninstallManagementDeleteIntent(
         context,
-        canonicalPrerequisites[index],
+        prerequisites,
         { ...intent, accessToken: ACCESS_TOKEN },
       )).toBeNull();
     }
     expect(await parseHostedUninstallManagementPreflightResult(context, canonicalPreflight)).toEqual(canonicalPreflight);
-    expect(Object.isFrozen((await parseHostedUninstallManagementPreflightResult(context, canonicalPreflight))!)).toBe(true);
+    const parsedPreflight = await parseHostedUninstallManagementPreflightResult(context, canonicalPreflight);
+    expect(Object.isFrozen(requiredFixture(parsedPreflight ?? undefined, 'parsed preflight'))).toBe(true);
     expect(await parseHostedUninstallManagementPreflightResult(
       context,
       { ...canonicalPreflight, attestationSha256: '0'.repeat(64) },
@@ -1123,7 +1138,7 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
       ],
     ];
     for (const [index, intent] of canonicalIntents.entries()) {
-      const prerequisites = canonicalPrerequisites[index];
+      const prerequisites = requiredFixture(canonicalPrerequisites.at(index), `prerequisites ${index}`);
       const arm = await prepareHostedUninstallManagementDeleteArm(
         context,
         intent,
@@ -1131,7 +1146,7 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
         AUTH_NOW + 10 + index,
       );
       expect(await parseHostedUninstallManagementDeleteArm(context, intent, prerequisites, arm)).toEqual(arm);
-      const provider = sequenced(providerSteps[index]);
+      const provider = sequenced(requiredFixture(providerSteps.at(index), `provider steps ${index}`));
       const submission = await submitHostedUninstallManagementDeleteOnce(
         context,
         intent,
@@ -1301,7 +1316,8 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
 
   it('proves exact delete absence and parsers recompute the evidence commitment', async () => {
     for (const [index, intent] of canonicalIntents.entries()) {
-      const evidence = deletionEvidence[index];
+      const evidence = requiredFixture(deletionEvidence.at(index), `deletion evidence ${index}`);
+      const prerequisites = requiredFixture(canonicalPrerequisites.at(index), `prerequisites ${index}`);
       expect(evidence).toMatchObject({
         status: 'absent',
         action: intent.kind,
@@ -1311,13 +1327,13 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
       expect(await parseHostedUninstallManagementAbsenceEvidence(
         context,
         intent,
-        canonicalPrerequisites[index],
+        prerequisites,
         evidence,
       )).toEqual(evidence);
       expect(await parseHostedUninstallManagementAbsenceEvidence(
         context,
         intent,
-        canonicalPrerequisites[index],
+        prerequisites,
         { ...evidence, locator: { id: FOREIGN_ID } },
       )).toBeNull();
     }

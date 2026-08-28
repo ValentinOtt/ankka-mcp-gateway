@@ -108,6 +108,24 @@ deletion authority.
 Generated builds, signed envelopes, credentials, and deployment output are not
 committed.
 
+The history gate treats commit `4ba4c065aa67a761287bd74fc56f4911f7e558b3`
+as the last already-published branding baseline. Only retired gateway naming in
+that commit and its ancestors is grandfathered. Every other content, path,
+generated-output, and structural check still covers all reachable history, and
+every other commit receives the complete policy.
+
+### JavaScript and TypeScript boundary
+
+Application and library source is TypeScript. The JavaScript under `payload/`
+is intentional: those files are dependency-free, single-module release inputs
+whose exact bytes are hashed and signed before customer deployment. Compiling
+them from TypeScript during release would introduce a second, toolchain-shaped
+artifact between the reviewed source and the signed payload.
+
+Standalone Node.js release utilities and tests use `.mjs` when they need to run
+directly without producing checked-in build output. New reusable runtime logic
+belongs in TypeScript unless it must be part of an exact signed payload.
+
 ## Security and privacy
 
 - MCP source-provider credentials never transit or persist at Ankka.

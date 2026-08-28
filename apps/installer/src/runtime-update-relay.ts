@@ -1,3 +1,12 @@
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  boundaryValueSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+  type JsonObject,
+} from './boundary';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 import { base64UrlDecode, base64UrlEncode } from './crypto';
 import { DeployError } from './errors';
@@ -47,6 +56,60 @@ const BINDING_NAMES = Object.freeze([
   'CLOUDFLARE_ZONE_NAME',
   'ZERO_TRUST_READY',
 ] as const);
+const runtimeVersionSchema = v.strictObject({
+  artifactSha256: v.string(),
+  release: v.string(),
+  versionId: v.nullable(v.string()),
+});
+const providerResponseSchema = v.looseObject({
+  result: boundaryValueSchema,
+  success: v.literal(true),
+});
+const activeDeploymentsSchema = v.strictObject({
+  deployments: v.array(v.looseObject({
+    id: v.string(),
+    versions: v.array(v.looseObject({
+      percentage: v.number(),
+      version_id: v.string(),
+    })),
+  })),
+});
+const currentWorkerSchema = v.looseObject({
+  id: v.string(),
+  name: v.string(),
+  tags: v.array(v.string()),
+});
+const currentVersionSchema = v.looseObject({
+  id: v.string(),
+});
+const currentBindingsSchema = v.looseObject({
+  bindings: v.array(boundaryObjectSchema),
+  compatibility_date: v.string(),
+  main_module: v.string(),
+});
+const namedBindingSchema = v.looseObject({ name: v.string() });
+const adminStateBindingSchema = v.looseObject({
+  class_name: v.string(),
+  name: v.string(),
+  type: v.string(),
+});
+const assetsBindingSchema = v.strictObject({ name: v.string(), type: v.string() });
+const plainTextBindingSchema = v.strictObject({
+  name: v.string(),
+  text: v.string(),
+  type: v.string(),
+});
+const subdomainStateSchema = v.strictObject({
+  enabled: v.boolean(),
+  previews_enabled: v.literal(false),
+});
+const accountSubdomainSchema = v.strictObject({ subdomain: v.string() });
+const workerDomainsSchema = v.array(v.looseObject({
+  environment: v.optional(v.string()),
+  hostname: v.string(),
+  service: v.string(),
+}));
+const deploymentResultSchema = v.looseObject({ id: v.string() });
 
 type RuntimeVersion = Readonly<{
   release: string;
@@ -86,24 +149,20 @@ interface CurrentRuntime {
   readonly bindings: GatewayWorkerPlainTextBindings;
 }
 
+interface ActiveDeployment {
+  readonly deploymentId: string;
+  readonly versionId: string;
+}
+
 function invalid(code: 'bad_request' | 'session_conflict' = 'bad_request'): never {
   throw new DeployError(code === 'bad_request' ? 400 : 409, code);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
 function runtimeVersion(value: RuntimeVersion): boolean {
-  return isRecord(value) && exactKeys(value, ['artifactSha256', 'release', 'versionId']) &&
-    RELEASE.test(value.release) && ARTIFACT.test(value.artifactSha256) &&
-    (value.versionId === null || UUID.test(value.versionId));
+  const result = v.safeParse(runtimeVersionSchema, value);
+  return result.success && RELEASE.test(result.output.release) &&
+    ARTIFACT.test(result.output.artifactSha256) &&
+    (result.output.versionId === null || UUID.test(result.output.versionId));
 }
 
 function validate(input: RuntimeUpdateRelayInput, now: number): URL {
@@ -114,7 +173,7 @@ function validate(input: RuntimeUpdateRelayInput, now: number): URL {
       !NONCE.test(input.actionKey) || !runtimeVersion(input.from) || !runtimeVersion(input.to) ||
       (input.operation !== 'update' && input.operation !== 'rollback') ||
       !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= now ||
-      input.expiresAt > now + 10 * 60 * 1000 || typeof input.accessToken !== 'string' ||
+      input.expiresAt > now + 10 * 60 * 1000 ||
       input.accessToken.length < 20 || input.accessToken.length > 16 * 1024 ||
       management.protocol !== 'https:' || management.username !== '' || management.password !== '' ||
       management.port !== '' || management.pathname !== '/' || management.search !== '' || management.hash !== '') {
@@ -124,7 +183,7 @@ function validate(input: RuntimeUpdateRelayInput, now: number): URL {
   return management;
 }
 
-async function readJson(response: Response): Promise<unknown> {
+async function readJson(response: Response): Promise<BoundaryValue> {
   if (response.redirected || response.status >= 300 && response.status < 400) invalid('session_conflict');
   const declared = response.headers.get('content-length');
   if (declared !== null && (!Number.isSafeInteger(Number(declared)) || Number(declared) > MAX_RESPONSE_BYTES)) {
@@ -132,7 +191,13 @@ async function readJson(response: Response): Promise<unknown> {
   }
   const text = await response.text();
   if (new TextEncoder().encode(text).byteLength > MAX_RESPONSE_BYTES) invalid('session_conflict');
-  try { return JSON.parse(text); } catch { invalid('session_conflict'); }
+  try {
+    const result = v.safeParse(boundaryValueSchema, JSON.parse(text));
+    if (!result.success) invalid('session_conflict');
+    return result.output;
+  } catch {
+    invalid('session_conflict');
+  }
 }
 
 function providerUrl(accountId: string, path: string): URL {
@@ -143,7 +208,7 @@ async function providerResult(
   input: RuntimeUpdateRelayInput,
   path: string,
   init: RequestInit = {},
-): Promise<unknown> {
+): Promise<BoundaryValue> {
   const headers = new Headers(init.headers);
   headers.set('accept', 'application/json');
   headers.set('authorization', `Bearer ${input.accessToken}`);
@@ -152,60 +217,90 @@ async function providerResult(
     ...init, headers, redirect: 'manual',
   });
   const value = await readJson(response);
-  if (!response.ok || !isRecord(value) || value.success !== true || !Object.hasOwn(value, 'result')) {
-    invalid('session_conflict');
-  }
-  return value.result;
+  const result = v.safeParse(providerResponseSchema, value);
+  if (!response.ok || !result.success) invalid('session_conflict');
+  return result.output.result;
 }
 
-function activeDeployment(value: unknown): { deploymentId: string; versionId: string } {
-  if (!isRecord(value) || !exactKeys(value, ['deployments']) || !Array.isArray(value.deployments) ||
-      value.deployments.length < 1 || value.deployments.length > 1_000) invalid('session_conflict');
-  const active = value.deployments[0];
-  if (!isRecord(active) || !UUID.test(String(active.id)) || !Array.isArray(active.versions) ||
-      active.versions.length !== 1 || !isRecord(active.versions[0]) ||
-      active.versions[0].percentage !== 100 || !UUID.test(String(active.versions[0].version_id))) {
+function activeDeployment(value: BoundaryValue): ActiveDeployment {
+  const result = v.safeParse(activeDeploymentsSchema, value);
+  if (!result.success || result.output.deployments.length < 1 ||
+      result.output.deployments.length > 1_000) invalid('session_conflict');
+  const active = result.output.deployments.at(0);
+  const version = active?.versions.length === 1 ? active.versions.at(0) : undefined;
+  if (active === undefined || version === undefined || !UUID.test(active.id) ||
+      version.percentage !== 100 || !UUID.test(version.version_id)) {
     invalid('session_conflict');
   }
-  return { deploymentId: String(active.id), versionId: String(active.versions[0].version_id) };
+  return { deploymentId: active.id, versionId: version.version_id };
 }
 
-function exactCurrentBindings(value: unknown): GatewayWorkerPlainTextBindings {
-  if (!isRecord(value) || !Array.isArray(value.bindings) || value.bindings.length !== BINDING_NAMES.length + 2 ||
-      value.main_module !== 'index.js' || value.compatibility_date !== '2026-08-08' ||
-      Object.hasOwn(value, 'migrations') || Object.hasOwn(value, 'migration_tag')) invalid('session_conflict');
-  const bindings = new Map<string, Record<string, unknown>>();
-  for (const binding of value.bindings) {
-    if (!isRecord(binding) || typeof binding.name !== 'string' || bindings.has(binding.name)) invalid('session_conflict');
-    bindings.set(binding.name, binding);
+function exactCurrentBindings(value: BoundaryValue): GatewayWorkerPlainTextBindings {
+  const result = v.safeParse(currentBindingsSchema, value);
+  if (!result.success || result.output.bindings.length !== BINDING_NAMES.length + 2 ||
+      result.output.main_module !== 'index.js' || result.output.compatibility_date !== '2026-08-08' ||
+      Object.hasOwn(result.output, 'migrations') || Object.hasOwn(result.output, 'migration_tag')) {
+    invalid('session_conflict');
   }
-  const admin = bindings.get('ADMIN_STATE');
-  const assets = bindings.get('ASSETS');
-  if (!admin || admin.type !== 'durable_object_namespace' || admin.class_name !== 'AdminState' ||
-      !assets || !exactKeys(assets, ['name', 'type']) || assets.type !== 'assets') invalid('session_conflict');
-  const output = {} as Record<(typeof BINDING_NAMES)[number], string>;
-  for (const name of BINDING_NAMES) {
+  const bindings = new Map<string, BoundaryObject>();
+  for (const binding of result.output.bindings) {
+    const named = v.safeParse(namedBindingSchema, binding);
+    if (!named.success || bindings.has(named.output.name)) invalid('session_conflict');
+    bindings.set(named.output.name, binding);
+  }
+  const admin = v.safeParse(adminStateBindingSchema, bindings.get('ADMIN_STATE'));
+  const assets = v.safeParse(assetsBindingSchema, bindings.get('ASSETS'));
+  if (!admin.success || admin.output.type !== 'durable_object_namespace' ||
+      admin.output.class_name !== 'AdminState' || !assets.success || assets.output.type !== 'assets') {
+    invalid('session_conflict');
+  }
+  const bindingText = (name: (typeof BINDING_NAMES)[number]): string => {
     const binding = bindings.get(name);
-    if (!binding || !exactKeys(binding, ['name', 'text', 'type']) || binding.type !== 'plain_text' ||
-        typeof binding.text !== 'string' || binding.text.length < 1 || binding.text.length > 4_096) {
+    const parsed = v.safeParse(plainTextBindingSchema, binding);
+    if (!parsed.success || parsed.output.name !== name || parsed.output.type !== 'plain_text' ||
+        parsed.output.text.length < 1 || parsed.output.text.length > 4_096) {
       invalid('session_conflict');
     }
-    output[name] = binding.text;
-  }
-  return Object.freeze(output);
+    return parsed.output.text;
+  };
+  return Object.freeze({
+    ADMIN_EMAILS: bindingText('ADMIN_EMAILS'),
+    ANKKA_GATEWAY_RELEASE: bindingText('ANKKA_GATEWAY_RELEASE'),
+    ANKKA_GATEWAY_RELEASE_SHA256: bindingText('ANKKA_GATEWAY_RELEASE_SHA256'),
+    ANKKA_MANAGEMENT_HOSTNAME: bindingText('ANKKA_MANAGEMENT_HOSTNAME'),
+    ANKKA_UPDATE_CHANNEL: bindingText('ANKKA_UPDATE_CHANNEL'),
+    ANKKA_UPDATE_KEY_ID: bindingText('ANKKA_UPDATE_KEY_ID'),
+    ANKKA_UPDATE_PUBLIC_KEY: bindingText('ANKKA_UPDATE_PUBLIC_KEY'),
+    ANKKA_WORKERS_SUBDOMAIN: bindingText('ANKKA_WORKERS_SUBDOMAIN'),
+    ANKKA_WORKER_NAME: bindingText('ANKKA_WORKER_NAME'),
+    CF_ACCESS_AUD: bindingText('CF_ACCESS_AUD'),
+    CF_ACCESS_ISSUER: bindingText('CF_ACCESS_ISSUER'),
+    CLOUDFLARE_ACCOUNT_ID: bindingText('CLOUDFLARE_ACCOUNT_ID'),
+    CLOUDFLARE_ZONE_ID: bindingText('CLOUDFLARE_ZONE_ID'),
+    CLOUDFLARE_ZONE_NAME: bindingText('CLOUDFLARE_ZONE_NAME'),
+    ZERO_TRUST_READY: bindingText('ZERO_TRUST_READY'),
+  });
 }
 
 async function inspectCurrent(input: RuntimeUpdateRelayInput): Promise<CurrentRuntime> {
-  const worker = await providerResult(input, `/workers/workers/${encodeURIComponent(input.workerName)}`);
-  if (!isRecord(worker) || worker.name !== input.workerName || !WORKER_ID.test(String(worker.id)) ||
-      !Array.isArray(worker.tags) || !worker.tags.includes('ankka-mcp-gateway')) invalid('session_conflict');
+  const workerResult = v.safeParse(
+    currentWorkerSchema,
+    await providerResult(input, `/workers/workers/${encodeURIComponent(input.workerName)}`),
+  );
+  if (!workerResult.success || workerResult.output.name !== input.workerName ||
+      !WORKER_ID.test(workerResult.output.id) ||
+      !workerResult.output.tags.includes('ankka-mcp-gateway')) invalid('session_conflict');
+  const worker = workerResult.output;
   const deployment = activeDeployment(await providerResult(
     input, `/workers/scripts/${encodeURIComponent(input.workerName)}/deployments`,
   ));
   const version = await providerResult(
-    input, `/workers/workers/${String(worker.id)}/versions/${deployment.versionId}`,
+    input, `/workers/workers/${worker.id}/versions/${deployment.versionId}`,
   );
-  if (!isRecord(version) || version.id !== deployment.versionId) invalid('session_conflict');
+  const versionResult = v.safeParse(currentVersionSchema, version);
+  if (!versionResult.success || versionResult.output.id !== deployment.versionId) {
+    invalid('session_conflict');
+  }
   const bindings = exactCurrentBindings(version);
   if (bindings.ANKKA_GATEWAY_RELEASE !== input.from.release ||
       bindings.ANKKA_GATEWAY_RELEASE_SHA256 !== input.from.artifactSha256 ||
@@ -218,7 +313,7 @@ async function inspectCurrent(input: RuntimeUpdateRelayInput): Promise<CurrentRu
       bindings.ANKKA_UPDATE_PUBLIC_KEY !== input.releaseBundle.publicKey) invalid('session_conflict');
   return Object.freeze({
     worker: Object.freeze({
-      kind: 'worker', accountId: input.accountId, workerName: input.workerName, workerId: String(worker.id),
+      kind: 'worker', accountId: input.accountId, workerName: input.workerName, workerId: worker.id,
     }),
     versionId: deployment.versionId,
     deploymentId: deployment.deploymentId,
@@ -226,9 +321,9 @@ async function inspectCurrent(input: RuntimeUpdateRelayInput): Promise<CurrentRu
   });
 }
 
-function subdomainState(value: unknown, expected: boolean): void {
-  const state = { enabled: expected, previews_enabled: false };
-  if (!isRecord(value) || canonicalJson(value) !== canonicalJson(state)) {
+function subdomainState(value: BoundaryValue, expected: boolean): void {
+  const result = v.safeParse(subdomainStateSchema, value);
+  if (!result.success || result.output.enabled !== expected) {
     invalid('session_conflict');
   }
 }
@@ -241,9 +336,10 @@ async function readSubdomain(input: RuntimeUpdateRelayInput, expected: boolean):
 }
 
 async function verifyAccountSubdomain(input: RuntimeUpdateRelayInput): Promise<void> {
-  const value = await providerResult(input, '/workers/subdomain');
-  if (!isRecord(value) || !exactKeys(value, ['subdomain']) ||
-      value.subdomain !== input.workersSubdomain) invalid('session_conflict');
+  const result = v.safeParse(accountSubdomainSchema, await providerResult(input, '/workers/subdomain'));
+  if (!result.success || result.output.subdomain !== input.workersSubdomain) {
+    invalid('session_conflict');
+  }
 }
 
 async function verifyManagementDomain(
@@ -255,11 +351,15 @@ async function verifyManagementDomain(
     page: '1',
     per_page: '50',
   });
-  const value = await providerResult(input, `/workers/domains?${query.toString()}`);
-  if (!Array.isArray(value) || value.length !== 1 || !isRecord(value[0])) {
+  const result = v.safeParse(
+    workerDomainsSchema,
+    await providerResult(input, `/workers/domains?${query.toString()}`),
+  );
+  if (!result.success || result.output.length !== 1) {
     invalid('session_conflict');
   }
-  const domain = value[0];
+  const domain = result.output.at(0);
+  if (domain === undefined) invalid('session_conflict');
   if (domain.hostname !== management.hostname || domain.service !== input.workerName ||
       (domain.environment !== undefined && domain.environment !== 'production')) {
     invalid('session_conflict');
@@ -305,7 +405,7 @@ async function hmac(actionKey: string, body: string): Promise<string> {
 
 async function control(
   input: RuntimeUpdateRelayInput,
-  command: Record<string, unknown>,
+  command: JsonObject,
   versionOverride?: string,
 ): Promise<Response> {
   const body = canonicalJson({
@@ -328,7 +428,7 @@ async function control(
   return input.transport(runtimeUrl(input), { method: 'POST', headers, body, redirect: 'manual' });
 }
 
-async function requireControl(input: RuntimeUpdateRelayInput, command: Record<string, unknown>): Promise<void> {
+async function requireControl(input: RuntimeUpdateRelayInput, command: JsonObject): Promise<void> {
   const response = await control(input, command);
   if (response.status !== 200 || response.redirected) {
     await response.body?.cancel();
@@ -365,8 +465,9 @@ async function rawDeployment(
     method: 'POST',
     body: JSON.stringify({ annotations: { 'workers/message': message }, strategy: 'percentage', versions }),
   });
-  if (!isRecord(result) || !UUID.test(String(result.id))) invalid('session_conflict');
-  return String(result.id);
+  const parsed = v.safeParse(deploymentResultSchema, result);
+  if (!parsed.success || !UUID.test(parsed.output.id)) invalid('session_conflict');
+  return parsed.output.id;
 }
 
 async function verifyRawActive(
@@ -374,12 +475,16 @@ async function verifyRawActive(
   deploymentId: string,
   versions: readonly { readonly version_id: string; readonly percentage: number }[],
 ): Promise<void> {
-  const result = await providerResult(input, `/workers/scripts/${encodeURIComponent(input.workerName)}/deployments`);
-  if (!isRecord(result) || !Array.isArray(result.deployments) || result.deployments.length < 1) {
+  const result = v.safeParse(
+    activeDeploymentsSchema,
+    await providerResult(input, `/workers/scripts/${encodeURIComponent(input.workerName)}/deployments`),
+  );
+  if (!result.success || result.output.deployments.length < 1) {
     invalid('session_conflict');
   }
-  const active = result.deployments[0];
-  if (!isRecord(active) || active.id !== deploymentId || !Array.isArray(active.versions) ||
+  const active = result.output.deployments.at(0);
+  if (active === undefined) invalid('session_conflict');
+  if (active.id !== deploymentId ||
       canonicalJson(active.versions) !== canonicalJson(versions.map((version) => ({
         percentage: version.percentage, version_id: version.version_id,
       })))) invalid('session_conflict');
@@ -435,7 +540,7 @@ export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promis
   let targetVersionId: string | null = null;
   let staged = false;
   let controlMayBeStarted = false;
-  let operationError: unknown = null;
+  let operationError: Error | null = null;
   let compensationConfirmed = false;
   try {
     await verifyAccountSubdomain(input);
@@ -477,7 +582,9 @@ export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promis
     await progress(input, 'health_verified', oldVersionId, targetVersionId);
     await requireControl(input, { command: 'complete', fromVersionId: oldVersionId, toVersionId: targetVersionId });
   } catch (error) {
-    operationError = error;
+    operationError = error instanceof Error
+      ? error
+      : new DeployError(409, 'session_conflict');
     if (staged && oldVersionId) {
       try {
         const versions = [{ version_id: oldVersionId, percentage: 100 }] as const;

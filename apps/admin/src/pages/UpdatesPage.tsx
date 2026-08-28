@@ -31,7 +31,7 @@ export function UpdatesPage() {
       <PageHeader
         eyebrow="Signed software"
         title="Updates"
-        description="Only signed Worker code, management assets, and non-secret release metadata change. Sources, Access policies, DNS, credentials, and Durable Object data remain unchanged."
+        description="Only signed Worker code and management asset changes persist. Sources, Access policies, DNS, credentials, and Durable Object data remain unchanged."
         action={
           <Button variant="secondary" className="pressable" loading={isBusy} onClick={() => void refreshUpdate()}>
             Check again

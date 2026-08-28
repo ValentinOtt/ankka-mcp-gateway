@@ -17,16 +17,29 @@ const MAX_TREE_BYTES = 64 * 1024 * 1024;
 const MAX_TREE_PATH_CONTEXTS = 1_000_000;
 const MAX_BLOB_PATHS = 2_000_000;
 const MAX_GIT_OUTPUT = 128 * 1024 * 1024;
+const RETIRED_PRODUCT_NAME_LABEL = 'retired gateway product name';
 
 const args = process.argv.slice(2);
 let root = process.cwd();
+let retiredProductNameBaseline;
 
 for (let index = 0; index < args.length; index += 1) {
-  if (args[index] !== '--repo' || !args[index + 1]) {
-    throw new Error('Usage: check-public-history.mjs [--repo <path>]');
+  const argument = args[index];
+  const value = args[index + 1];
+  if (argument === '--repo' && value) {
+    root = path.resolve(value);
+    index += 1;
+    continue;
   }
-  root = path.resolve(args[index + 1]);
-  index += 1;
+  if (argument === '--allow-retired-product-name-through' && value) {
+    retiredProductNameBaseline = value;
+    index += 1;
+    continue;
+  }
+  throw new Error(
+    'Usage: check-public-history.mjs [--repo <path>] ' +
+    '[--allow-retired-product-name-through <commit>]',
+  );
 }
 
 const failures = new Set();
@@ -61,8 +74,34 @@ if (objectIds.length > 0) {
   }
 }
 
+const commitIds = objectIds.filter((objectId) => objectInfo.get(objectId).objectType === 'commit');
+const baseline = resolveRetiredProductNameBaseline(retiredProductNameBaseline, objectInfo);
+const baselineCommitIds = baseline === undefined
+  ? new Set()
+  : new Set(git(['rev-list', baseline]).trim().split('\n').filter(Boolean));
+const baselineObjectIds = baseline === undefined
+  ? new Set()
+  : new Set(
+      git(['rev-list', '--objects', baseline, '--no-object-names'])
+        .trim()
+        .split('\n')
+        .filter(Boolean),
+    );
+const strictCommitIds = new Set(
+  commitIds.filter((objectId) => !baselineCommitIds.has(objectId)),
+);
+const strictTreeRoots = new Set(
+  git(['log', '--all', '--format=%H%x09%T'])
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => line.split('\t'))
+    .filter(([commitId]) => strictCommitIds.has(commitId))
+    .map(([, treeId]) => treeId),
+);
 const treeIds = objectIds.filter((objectId) => objectInfo.get(objectId).objectType === 'tree');
 const pathsByObject = enumerateReachableTreePaths(treeIds, objectInfo);
+const strictPathsByObject = enumerateReachableTreePaths(treeIds, objectInfo, strictTreeRoots);
 let checkedBlobs = 0;
 
 for (const objectId of objectIds) {
@@ -70,7 +109,14 @@ for (const objectId of objectIds) {
   if (objectType !== 'blob') continue;
 
   const objectPaths = [...(pathsByObject.get(objectId) ?? [])].sort(lexicalCompare);
-  for (const objectPath of objectPaths) inspectReachablePath(objectId, objectPath);
+  const strictPaths = strictPathsByObject.get(objectId) ?? new Set();
+  for (const objectPath of objectPaths) {
+    inspectReachablePath(
+      objectId,
+      objectPath,
+      baselineObjectIds.has(objectId) && !strictPaths.has(objectPath),
+    );
+  }
 
   const classifications = objectPaths.map((objectPath) => classifyPublicPath(objectPath));
   const textualPaths = objectPaths.filter((_, index) => classifications[index] === 'text');
@@ -128,13 +174,18 @@ for (const objectId of objectIds) {
 
   checkedBlobs += 1;
   const location = blobLocation(objectId, objectPaths);
-  inspectText(content, location);
+  inspectText(
+    content,
+    location,
+    baselineObjectIds.has(objectId) && strictPaths.size === 0,
+  );
   const generatedLabel = generatedReleaseArtifactLabel(content);
   if (generatedLabel !== null) failures.add(`${location} contains ${generatedLabel}`);
 }
 
-const commitIds = objectIds.filter((objectId) => objectInfo.get(objectId).objectType === 'commit');
-for (const objectId of commitIds) inspectMetadataObject(objectId, 'commit');
+for (const objectId of commitIds) {
+  inspectMetadataObject(objectId, 'commit', baselineCommitIds.has(objectId));
+}
 
 const tagIds = objectIds.filter((objectId) => objectInfo.get(objectId).objectType === 'tag');
 for (const objectId of tagIds) inspectMetadataObject(objectId, 'annotated tag');
@@ -174,7 +225,7 @@ if (failures.size > 0) {
   );
 }
 
-function enumerateReachableTreePaths(treeIds, info) {
+function enumerateReachableTreePaths(treeIds, info, requestedRoots) {
   const totalTreeBytes = treeIds.reduce((total, objectId) => total + info.get(objectId).size, 0);
   if (!Number.isSafeInteger(totalTreeBytes) || totalTreeBytes > MAX_TREE_BYTES) {
     failures.add('reachable tree metadata exceeds the bounded public-history inspection limit');
@@ -197,11 +248,13 @@ function enumerateReachableTreePaths(treeIds, info) {
     }
   }
 
-  const roots = new Set(
-    git(['log', '--all', '--format=%T']).trim().split('\n').filter(Boolean),
-  );
-  for (const treeId of treeIds) {
-    if (!childTreeIds.has(treeId)) roots.add(treeId);
+  const roots = requestedRoots === undefined
+    ? new Set(git(['log', '--all', '--format=%T']).trim().split('\n').filter(Boolean))
+    : new Set(requestedRoots);
+  if (requestedRoots === undefined) {
+    for (const treeId of treeIds) {
+      if (!childTreeIds.has(treeId)) roots.add(treeId);
+    }
   }
 
   const result = new Map();
@@ -312,7 +365,7 @@ function parseTree(treeId, bytes, objectIdBytes) {
   return entries;
 }
 
-function inspectReachablePath(objectId, objectPath) {
+function inspectReachablePath(objectId, objectPath, allowRetiredProductName = false) {
   const displayPath = safeDisplayLocation(objectPath, 'path');
   const basename = path.posix.basename(objectPath);
   if (
@@ -323,11 +376,12 @@ function inspectReachablePath(objectId, objectPath) {
     failures.add(`${displayPath} is forbidden generated output in reachable history`);
   }
   for (const label of findForbiddenContentLabels(objectPath)) {
+    if (allowRetiredProductName && label === RETIRED_PRODUCT_NAME_LABEL) continue;
     failures.add(`blob ${objectId} has a reachable path containing ${label}`);
   }
 }
 
-function inspectMetadataObject(objectId, label) {
+function inspectMetadataObject(objectId, label, allowRetiredProductName = false) {
   const { size } = objectInfo.get(objectId);
   if (size > MAX_PUBLIC_TEXT_BYTES) {
     failures.add(`${label} ${objectId} exceeds the bounded text inspection limit`);
@@ -341,13 +395,29 @@ function inspectMetadataObject(objectId, label) {
     failures.add(`${label} ${objectId} is not valid UTF-8`);
     return;
   }
-  inspectText(content, `${label} ${objectId}`);
+  inspectText(content, `${label} ${objectId}`, allowRetiredProductName);
 }
 
-function inspectText(text, location) {
+function inspectText(text, location, allowRetiredProductName = false) {
   for (const label of findForbiddenContentLabels(text)) {
+    if (allowRetiredProductName && label === RETIRED_PRODUCT_NAME_LABEL) continue;
     failures.add(`${location} contains ${label}`);
   }
+}
+
+function resolveRetiredProductNameBaseline(value, info) {
+  if (value === undefined) return undefined;
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value)) {
+    failImmediately('retired-product-name baseline must be a full commit object ID');
+  }
+  if (info.get(value)?.objectType !== 'commit') {
+    failImmediately('retired-product-name baseline is not a reachable commit');
+  }
+  const headCommitIds = new Set(git(['rev-list', 'HEAD']).trim().split('\n').filter(Boolean));
+  if (!headCommitIds.has(value)) {
+    failImmediately('retired-product-name baseline is not an ancestor of HEAD');
+  }
+  return value;
 }
 
 function blobLocation(objectId, objectPaths) {

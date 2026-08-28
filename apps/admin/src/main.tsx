@@ -11,15 +11,21 @@ import './styles.css'
 const root = document.getElementById('root')
 if (!root) throw new Error('Missing root element')
 const previewApi = createPreviewGatewayAdminApi()
+const application = (
+  <>
+    <WebMcpTools />
+    <RouterProvider router={router} />
+  </>
+)
+const gateway = previewApi === undefined
+  ? <GatewayProvider>{application}</GatewayProvider>
+  : <GatewayProvider api={previewApi}>{application}</GatewayProvider>
 
 createRoot(root).render(
   <StrictMode>
     <TooltipProvider>
       <Toasty>
-        <GatewayProvider api={previewApi}>
-          <WebMcpTools />
-          <RouterProvider router={router} />
-        </GatewayProvider>
+        {gateway}
       </Toasty>
     </TooltipProvider>
   </StrictMode>,
