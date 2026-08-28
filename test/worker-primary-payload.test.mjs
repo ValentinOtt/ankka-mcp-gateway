@@ -1090,7 +1090,7 @@ test('management API discovers and applies a customer-owned MCP source through o
       status: 'draft',
     });
 
-    const oauthPrepared = await worker.fetch(new Request('https://manage.example.com/api/source-actions', {
+    const sourceActionPreparedResponse = await worker.fetch(new Request('https://manage.example.com/api/source-actions', {
       method: 'POST',
       headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -1099,32 +1099,35 @@ test('management API discovers and applies a customer-owned MCP source through o
         sourceId: oauthDraft.id,
       }),
     }), env);
-    assert.equal(oauthPrepared.status, 200);
-    const oauthAuthorization = await oauthPrepared.json();
-    const oauthHandoff = new URL(oauthAuthorization.handoffUrl);
-    const oauthClaim = JSON.parse(Buffer.from(oauthHandoff.hash.slice(1), 'base64url').toString('utf8'));
-    const oauthBody = canonicalJson({
+    assert.equal(sourceActionPreparedResponse.status, 200);
+    const sourceActionAuthorization = await sourceActionPreparedResponse.json();
+    const sourceActionHandoff = new URL(sourceActionAuthorization.handoffUrl);
+    const sourceActionClaim = JSON.parse(Buffer.from(
+      sourceActionHandoff.hash.slice(1),
+      'base64url',
+    ).toString('utf8'));
+    const sourceActionBody = canonicalJson({
       schemaVersion: 1,
-      actionId: oauthClaim.actionId,
-      actionKey: oauthClaim.actionKey,
-      actorEmail: oauthClaim.actorEmail,
-      accountId: oauthClaim.accountId,
+      actionId: sourceActionClaim.actionId,
+      actionKey: sourceActionClaim.actionKey,
+      actorEmail: sourceActionClaim.actorEmail,
+      accountId: sourceActionClaim.accountId,
       issuedAt: Date.now(),
-      expiresAt: oauthClaim.expiresAt,
+      expiresAt: sourceActionClaim.expiresAt,
       cloudflareAccessToken: 'ephemeral-oauth-source-action-grant',
     });
-    const oauthSignature = `sha256=${createHmac(
-      'sha256', Buffer.from(oauthClaim.actionKey, 'base64url'),
-    ).update(oauthBody).digest('hex')}`;
+    const sourceActionSignature = `sha256=${createHmac(
+      'sha256', Buffer.from(sourceActionClaim.actionKey, 'base64url'),
+    ).update(sourceActionBody).digest('hex')}`;
     const oauthApplied = await worker.fetch(new Request(
       'https://ankka-gateway-test.tenant.workers.dev/__ankka/source-action',
       {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-ankka-source-action-signature': oauthSignature,
+          'x-ankka-source-action-signature': sourceActionSignature,
         },
-        body: oauthBody,
+        body: sourceActionBody,
       },
     ), env);
     assert.equal(oauthApplied.status, 200, await oauthApplied.clone().text());

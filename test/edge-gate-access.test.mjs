@@ -14,10 +14,43 @@ import {
   assessPrivateBypassApplication,
   assessPrivateInstallerApplication,
   bypassApplicationBody,
+  isCloudflareAccessLoginUrl,
   protectedInstallerApplicationBody,
 } from '../apps/installer/scripts/edge-gate/access-contract.mjs';
 
 const execFileAsync = promisify(execFile);
+
+test('Access login redirects require the exact Cloudflare HTTPS authority', () => {
+  for (const value of [
+    'https://cloudflareaccess.com/cdn-cgi/access/login',
+    'https://proof.cloudflareaccess.com/cdn-cgi/access/login?redirect_url=https%3A%2F%2Fexample.com',
+    'HTTPS://TEAM.CLOUDFLAREACCESS.COM/cdn-cgi/access/login',
+  ]) {
+    assert.equal(isCloudflareAccessLoginUrl(value), true, value);
+  }
+
+  for (const value of [
+    '',
+    'not a URL',
+    '//proof.cloudflareaccess.com/cdn-cgi/access/login',
+    'http://proof.cloudflareaccess.com/cdn-cgi/access/login',
+    'https://proof.cloudflareaccess.com:443/cdn-cgi/access/login',
+    'https://proof.cloudflareaccess.com:8443/cdn-cgi/access/login',
+    'https://user@proof.cloudflareaccess.com/cdn-cgi/access/login',
+    'https://user:password@proof.cloudflareaccess.com/cdn-cgi/access/login',
+    'https://cloudflareaccess.com.evil.example/cdn-cgi/access/login',
+    'https://evilcloudflareaccess.com/cdn-cgi/access/login',
+    'https://example.invalid/?next=https://proof.cloudflareaccess.com/cdn-cgi/access/login',
+    'https://proof.cloudflareaccess.com@example.invalid/cdn-cgi/access/login',
+    'https://proof.cloudflareaccess.com./cdn-cgi/access/login',
+    'https://proof..cloudflareaccess.com/cdn-cgi/access/login',
+    'https://-proof.cloudflareaccess.com/cdn-cgi/access/login',
+    'https://proof.cloudflareaccess.com\\@example.invalid/cdn-cgi/access/login',
+    ' https://proof.cloudflareaccess.com/cdn-cgi/access/login',
+  ]) {
+    assert.equal(isCloudflareAccessLoginUrl(value), false, value);
+  }
+});
 
 test('Access bypasses only the OAuth callback and exact signed release channels', () => {
   assert.deepEqual(RELEASE_CHANNEL_PATHS, [

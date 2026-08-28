@@ -30,12 +30,11 @@ import {
   RELEASE_CHANNEL_PATHS,
   assessPrivateBypassApplication,
   assessPrivateInstallerApplication,
+  isCloudflareAccessLoginUrl,
 } from './access-contract.mjs';
 
 const API = 'https://api.cloudflare.com/client/v4';
 const ZONE = 'ankka.ai';
-const ACCESS_LOGIN = 'cloudflareaccess.com';
-
 const results = [];
 function record(item, verdict, detail) { results.push({ item, verdict, detail }); }
 
@@ -75,7 +74,7 @@ function policiesOf(app) {
 function isAccessRedirect(observation) {
   return typeof observation.status === 'number' &&
     observation.status >= 300 && observation.status < 400 &&
-    observation.location.includes(ACCESS_LOGIN);
+    isCloudflareAccessLoginUrl(observation.location);
 }
 
 function applicationDomainMatches(domain, target) {
