@@ -15,3 +15,12 @@ Notable public product and repository changes are recorded here.
 - Document the customer credential boundary, no-telemetry runtime, and
   identifier-free hosted-installer analytics.
 - Add public-source, license, history, and clean-build checks.
+- Scope the public-history check to the publishable surface (checked-out
+  history, origin refs, and tags) so private-history remotes in a working
+  clone no longer fail the gate.
+- Build each app once per `npm run check` and add `npm run check:fast` for
+  local iteration.
+- Warn on local toolchain drift instead of failing every npm command;
+  continuous integration still enforces the exact pinned toolchain.
+- Group Dependabot version updates into weekly combined pull requests
+  (non-major npm updates together; action updates together).

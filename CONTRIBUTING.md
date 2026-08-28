@@ -5,11 +5,14 @@ commit, fixture, comment, screenshot, and test output must be safe to publish.
 
 ## Set up the project
 
-Development uses exactly Node.js `22.23.2` and npm `10.9.8`. The `.nvmrc`,
-`packageManager`, and `devEngines` fields are the source of truth.
+Development is pinned to Node.js `22.23.2` and npm `10.9.8`. The `.nvmrc`,
+`packageManager`, and `devEngines` fields are the source of truth; use any
+Node manager that reads `.nvmrc` (nvm, fnm, mise). A drifted local toolchain
+warns on npm commands and fails `npm run check`; continuous integration
+enforces the exact versions on every pull request.
 
 ```sh
-nvm install
+nvm install   # or: fnm install / mise install
 nvm use
 npm ci
 npm run check
@@ -18,6 +21,10 @@ npm run check
 Use `npm ci` for normal setup and verification. Use `npm install` only when
 intentionally changing dependencies, and commit the manifest and lockfile
 changes together.
+
+While iterating, `npm run check:fast` runs the lint, typecheck, public
+boundary, and unit-test subset in well under a minute. `npm run check` is the
+full release gate and matches what continuous integration runs.
 
 For local interface work, run:
 
