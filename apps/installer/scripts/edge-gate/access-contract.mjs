@@ -17,6 +17,39 @@ export const RELEASE_CHANNEL_PATHS = Object.freeze([
   '/api/releases/stable',
 ]);
 
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+
+/**
+ * Accept only an absolute HTTPS redirect to Cloudflare Access itself.
+ * Inspecting the raw authority as well as URL's parsed fields deliberately
+ * rejects credentials, explicit ports (including `:443`), and parser aliases.
+ */
+export function isCloudflareAccessLoginUrl(value) {
+  if (
+    typeof value !== 'string' || value.length === 0 || value.length > 2048 ||
+    value !== value.trim() || /[\u0000-\u001f\u007f\\]/u.test(value)
+  ) return false;
+  const authorityMatch = /^https:\/\/([^/?#]+)(?:[/?#]|$)/iu.exec(value);
+  if (!authorityMatch || authorityMatch[1].includes('@') || authorityMatch[1].includes(':')) {
+    return false;
+  }
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (
+    url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.port !== '' ||
+    authorityMatch[1].toLowerCase() !== url.hostname.toLowerCase()
+  ) return false;
+  const hostname = url.hostname.toLowerCase();
+  const labels = hostname.split('.');
+  return hostname.length <= 253 && labels.length >= 2 &&
+    labels.at(-2) === 'cloudflareaccess' && labels.at(-1) === 'com' &&
+    labels.every((label) => DNS_LABEL.test(label));
+}
+
 function privateInstallerApplication(accessHost) {
   return Object.freeze({
     key: 'protected installer',

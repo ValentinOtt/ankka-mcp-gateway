@@ -28,6 +28,10 @@ const ORDER = [
   'dns_record',
 ];
 
+function assertDoesNotInclude(value, forbidden) {
+  assert.equal(value.includes(forbidden), false);
+}
+
 class MemoryReceiptStore {
   constructor() {
     this.value = null;
@@ -349,7 +353,7 @@ test('preview is zero-write, sanitized, and binds the complete reverse cleanup',
 
   const serialized = JSON.stringify(preview);
   for (const forbidden of [ACCOUNT_ID, ZONE_ID, HOSTNAME, ENDPOINT, EMAIL, SENSITIVE]) {
-    assert.doesNotMatch(serialized, new RegExp(forbidden.replaceAll('.', '\\.')));
+    assertDoesNotInclude(serialized, forbidden);
   }
   assert.equal(Object.hasOwn(preview, 'internal'), false);
   assert.equal(Object.hasOwn(preview, 'planId'), false);
@@ -396,7 +400,7 @@ test('exact approval runs apply, no-op reapply, verification, and reverse uninst
     kind === 'portal_access_policy');
   assert.equal(portalPolicy.provider.parentId, portalApplication.provider.id);
   assert.ok(progress.some(({ stage, status }) => stage === 'uninstall' && status === 'verified'));
-  assert.doesNotMatch(JSON.stringify({ result, progress }), new RegExp(SENSITIVE));
+  assertDoesNotInclude(JSON.stringify({ result, progress }), SENSITIVE);
 });
 
 test('inspection hold exposes only the installed hostname and cleanup starts after release', async () => {
@@ -495,7 +499,7 @@ test('timed-out inspection hold is aborted and still runs exact reverse cleanup'
       assert.ok(error instanceof CanaryLifecycleError);
       assert.equal(error.code, 'lifecycle_failed');
       assert.equal(error.cleanup, 'removed');
-      assert.doesNotMatch(error.message, new RegExp(SENSITIVE));
+      assertDoesNotInclude(error.message, SENSITIVE);
       return true;
     },
   );
@@ -1276,7 +1280,7 @@ test('synthetic fixture proof is mandatory before planning or writing', async ()
     (error) => {
       assert.ok(error instanceof CanaryLifecycleError);
       assert.equal(error.code, 'synthetic_upstream_invalid');
-      assert.doesNotMatch(error.message, new RegExp(SENSITIVE));
+      assertDoesNotInclude(error.message, SENSITIVE);
       return true;
     },
   );
@@ -1303,7 +1307,7 @@ test('failed installed verification still cleans up receipt-owned resources', as
       assert.ok(error instanceof CanaryLifecycleError);
       assert.equal(error.code, 'lifecycle_failed');
       assert.equal(error.cleanup, 'removed');
-      assert.doesNotMatch(error.message, new RegExp(SENSITIVE));
+      assertDoesNotInclude(error.message, SENSITIVE);
       return true;
     },
   );
@@ -1633,7 +1637,7 @@ test('residue warning dominates an earlier installed-verification failure', asyn
       assert.ok(error instanceof CanaryLifecycleError);
       assert.equal(error.code, 'residue_detected');
       assert.equal(error.cleanup, 'removed');
-      assert.doesNotMatch(error.message, new RegExp(SENSITIVE));
+      assertDoesNotInclude(error.message, SENSITIVE);
       return true;
     },
   );

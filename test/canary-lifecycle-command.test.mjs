@@ -44,6 +44,10 @@ const LOCK_METADATA = Object.freeze({
   operationId: 'canary-lifecycle',
 });
 
+function assertDoesNotInclude(value, forbidden) {
+  assert.equal(value.includes(forbidden), false);
+}
+
 class MemoryStore {
   constructor() {
     this.value = null;
@@ -303,7 +307,7 @@ test('command reads token and Access email only from closures and renders a safe
   assert.match(result.output, /READY FOR REVIEW/);
   assert.match(result.output, /No Cloudflare resources were changed/);
   for (const forbidden of [TOKEN, EMAIL, ACCOUNT_ID, ZONE_ID, HOSTNAME, ENDPOINT, RECEIPT_PATH]) {
-    assert.doesNotMatch(result.output, new RegExp(forbidden.replaceAll('.', '\\.')));
+    assertDoesNotInclude(result.output, forbidden);
   }
   assert.equal(deps.testProvider.mutations, 0);
 });
@@ -317,7 +321,7 @@ test('JSON preview contains approval evidence but no secret or selected target v
   assert.match(parsed.approvalId, /^canary-lifecycle-/);
   assert.match(parsed.targetConfirmationId, /^canary-target-/);
   for (const forbidden of [TOKEN, EMAIL, ACCOUNT_ID, ZONE_ID, HOSTNAME, ENDPOINT]) {
-    assert.doesNotMatch(result.output, new RegExp(forbidden.replaceAll('.', '\\.')));
+    assertDoesNotInclude(result.output, forbidden);
   }
 });
 
@@ -453,7 +457,7 @@ test('secret-reader and factory failures expose only fixed errors', async () => 
     (error) => {
       assert.ok(error instanceof CanaryLifecycleCommandError);
       assert.equal(error.code, 'secret_unavailable');
-      assert.doesNotMatch(error.message, new RegExp(TOKEN));
+      assertDoesNotInclude(error.message, TOKEN);
       return true;
     },
   );
@@ -465,7 +469,7 @@ test('secret-reader and factory failures expose only fixed errors', async () => 
     (error) => {
       assert.ok(error instanceof CanaryLifecycleCommandError);
       assert.equal(error.code, 'runtime_not_configured');
-      assert.doesNotMatch(error.message, new RegExp(TOKEN));
+      assertDoesNotInclude(error.message, TOKEN);
       return true;
     },
   );
@@ -590,7 +594,7 @@ test('partial-install cleanup has dedicated redacted preview/result rendering an
   assert.doesNotMatch(resultOutput, /Interactive Portal/);
   assert.equal(lifecycleResultExitCode(result), 0);
   for (const forbidden of [ACCOUNT_ID, ZONE_ID, HOSTNAME, ENDPOINT, TOKEN, EMAIL, RECEIPT_PATH]) {
-    assert.doesNotMatch(`${previewOutput}\n${resultOutput}`, new RegExp(forbidden.replaceAll('.', '\\.')));
+    assertDoesNotInclude(`${previewOutput}\n${resultOutput}`, forbidden);
   }
 });
 
@@ -616,7 +620,7 @@ test('lock inspection is secret-free and exposes only sanitized operation metada
     lockRemoved: false,
   });
   assert.match(result.output, /STALE CANDIDATE/);
-  assert.match(result.output, new RegExp(LOCK_ID));
+  assert.equal(result.output.includes(LOCK_ID), true);
   for (const forbidden of [
     LOCK_METADATA.ownerId,
     String(LOCK_METADATA.pid),
@@ -624,7 +628,7 @@ test('lock inspection is secret-free and exposes only sanitized operation metada
     TOKEN,
     EMAIL,
   ]) {
-    assert.doesNotMatch(result.output, new RegExp(forbidden.replaceAll('.', '\\.')));
+    assertDoesNotInclude(result.output, forbidden);
   }
   assert.equal(store.recoveries.length, 0);
 });

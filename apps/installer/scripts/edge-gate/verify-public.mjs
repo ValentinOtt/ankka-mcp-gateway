@@ -28,6 +28,7 @@ import {
   OAUTH_CALLBACK_PATH,
   RELEASE_CHANNEL_PATHS,
   classifyAccessApplicationForInstaller,
+  isCloudflareAccessLoginUrl,
 } from './access-contract.mjs';
 import {
   RELEASE_ENVELOPE_SCHEMA_VERSION,
@@ -38,7 +39,6 @@ import {
 
 const API = 'https://api.cloudflare.com/client/v4';
 const ZONE = 'ankka.ai';
-const ACCESS_LOGIN = 'cloudflareaccess.com';
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{20,256}$/u;
 const CHANNEL_PATTERN = /^(?:canary|stable)$/u;
 const RELEASE_PATTERN = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
@@ -325,7 +325,7 @@ export function verifyPublicReleaseDescriptor(input, expected) {
 function isAccessRedirect(response) {
   const location = response.headers.get('location') ?? '';
   return response.status >= 300 && response.status < 400 &&
-    location.toLowerCase().includes(ACCESS_LOGIN);
+    isCloudflareAccessLoginUrl(location);
 }
 
 async function anonymousProbe(fetchImpl, pathname, { accept, method = 'GET' }) {

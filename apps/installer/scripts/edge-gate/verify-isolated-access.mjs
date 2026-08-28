@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 import {
   classifyAccessApplicationForHostname,
   createIsolatedPrivateAccessContract,
+  isCloudflareAccessLoginUrl,
 } from './access-contract.mjs';
 import {
   parseIsolatedCanaryTarget,
@@ -16,7 +17,6 @@ import {
 } from '../isolated-canary-target.mjs';
 
 const API = 'https://api.cloudflare.com/client/v4';
-const ACCESS_LOGIN = 'cloudflareaccess.com';
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{20,256}$/u;
 const MAX_TOKEN_BYTES = 512;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -169,7 +169,7 @@ function verifyConfiguration(applications, contract) {
 function isAccessRedirect(response) {
   const location = response.headers.get('location') ?? '';
   return response.status >= 300 && response.status < 400 &&
-    location.toLowerCase().includes(ACCESS_LOGIN);
+    isCloudflareAccessLoginUrl(location);
 }
 
 function requireApplicationJson(response) {

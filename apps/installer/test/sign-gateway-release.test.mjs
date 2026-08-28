@@ -27,7 +27,7 @@ const RELEASE = 'gateway-v1.2.3';
 const CHANNEL = 'canary';
 const KEY_ID = 'gateway-release-canary-1';
 
-const REQUIRED_OAUTH_SCOPES = Object.freeze([
+const EXPECTED_CLOUDFLARE_SCOPE_IDS = Object.freeze([
   'access-acct.write',
   'access.write',
   'account-settings.read',
@@ -215,7 +215,7 @@ async function releaseFixture(overrides = {}) {
     },
     cloudflare: CLOUDFLARE,
     components,
-    oauthScopeIds: REQUIRED_OAUTH_SCOPES,
+    oauthScopeIds: EXPECTED_CLOUDFLARE_SCOPE_IDS,
     release: RELEASE,
     schemaVersion: 1,
     sourceCommit: '0123456789abcdef0123456789abcdef01234567',
