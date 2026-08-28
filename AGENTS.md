@@ -43,7 +43,9 @@ they are explicitly documented as non-secret.
 - Keep the dependency graph small.
 - Record the origin and license of any transferred or vendored material in
   `ORIGINS.md` and `THIRD_PARTY_NOTICES.md`.
-- Run `npm run check` before committing.
+- Run `npm run check:fast` while developing. The full `npm run check` release
+  gate runs in continuous integration on every pull request and must pass
+  before merge.
 - Never commit `.env`, `.dev.vars`, Cloudflare account/resource IDs, API tokens,
   Terraform state, private keys, or generated deployment output.
 - Production deployment credentials, signing keys, and CI authority remain

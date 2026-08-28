@@ -63,10 +63,11 @@ The management dashboard and MCP Portal must use different hostnames.
 
 ## Run locally
 
-Development is pinned to Node.js `22.23.2` and npm `10.9.8`.
+Development is pinned to Node.js `22.23.2` and npm `10.9.8`; any Node manager
+that reads `.nvmrc` works.
 
 ```sh
-nvm install
+nvm install   # or: fnm install / mise install
 nvm use
 npm ci
 npm run check
