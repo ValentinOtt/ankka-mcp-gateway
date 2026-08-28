@@ -2,36 +2,39 @@
 
 ## Reporting a vulnerability
 
-Please do not open a public issue for a suspected vulnerability or exposed
-credential. Use the repository's
-[private vulnerability report](https://github.com/ValentinOtt/ankka-mcp-gateway/security/advisories/new).
-If that form is unavailable, open an issue titled `Private reporting
-unavailable` with no vulnerability detail, credential, customer identifier, or
-private locator. Maintainers will restore the private intake before asking for
-technical details.
+Do not open a public issue for a suspected vulnerability or exposed
+credential. Use GitHub's
+[private vulnerability reporting](https://github.com/ValentinOtt/ankka-mcp-gateway/security/advisories/new).
 
-Never include real provider credentials, Cloudflare tokens, customer data, or
-production identifiers in a report. If a real credential has been exposed,
-revoke or rotate it immediately; deleting a file or rewriting Git history is
-not sufficient.
+If private reporting is unavailable, open the detail-free
+[Private reporting unavailable issue form](https://github.com/ValentinOtt/ankka-mcp-gateway/issues/new?template=private-reporting-unavailable.yml).
+Do not include technical details, credentials, customer information, private
+hostnames, or provider identifiers. Maintainers will restore a private channel
+before requesting more information.
+
+If a credential may be exposed, revoke or rotate it immediately. Deleting a
+file or rewriting Git history does not revoke a credential.
 
 ## Supported versions
 
-The project is pre-release, and its initial public launch is a preview. Until an
-independent security review is complete and a stable support policy has been
-chosen and documented, only the latest commit on `main` is in scope for
-security fixes. No preview deployment is production-supported, and repository
-visibility or a signed preview artifact does not imply stable support.
+There is no production-supported release yet. During the public preview,
+security fixes target the latest preview release and `main`. Repository
+visibility or a signed preview artifact does not imply production support.
 
-## Credential boundary
+## Security boundary
 
-MCP source-provider credentials must be authorized and stored in the customer's
-Cloudflare account. They must not be submitted to an Ankka API, committed to
-this repository, placed in gateway configuration, or emitted in logs and
-errors. The separate Cloudflare installer grant is operation-scoped and exists
-only in the connected callback's request-local memory. A reviewed action may
-forward it once to the exact HMAC-authenticated customer Worker; it is never
-persisted, logged, sent to any other destination, or reused.
+- Upstream provider credentials must be authorized and stored in the
+  customer's Cloudflare account.
+- MCP source credentials must not be submitted to an Ankka API, committed to
+  this repository, placed in configuration, or emitted in logs, errors,
+  analytics, tests, or support material.
+- The hosted installer uses a short-lived, operation-scoped Cloudflare OAuth
+  grant. The grant exists only in request-local memory for the
+  customer-approved operation and is not persisted or reused.
+- Customer gateway sources are read-only and use exact tool allowlists.
+- Customer-deployed gateways send no telemetry to Ankka.
+- Updates require signed release evidence and explicit customer approval.
+  Removal additionally requires customer-owned, receipt-bound authority.
 
-See [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) for the current trust model
-and known limitations.
+See [the security model](docs/SECURITY_MODEL.md) for the complete trust and
+authorization design.

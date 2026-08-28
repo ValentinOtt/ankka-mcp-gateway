@@ -1,22 +1,24 @@
 # Code of conduct
 
-Ankka MCP Gateway welcomes constructive participation focused on secure,
+Ankka MCP Gateway welcomes constructive participation in secure,
 customer-owned MCP infrastructure.
 
 Be respectful, specific, and patient. Critique ideas and implementations rather
-than people. Harassment, discrimination, threats, sexualized conduct, deliberate
-disruption, doxxing, or publishing another person's credentials, customer data,
-private infrastructure details, or security findings are not acceptable.
+than people. Harassment, discrimination, threats, sexualized conduct,
+deliberate disruption, doxxing, or publishing another person's credentials,
+customer data, private infrastructure details, or security findings are not
+acceptable.
 
 Report ordinary project problems through the repository's issue forms. Report
 security vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
-For a private conduct incident, use the same GitHub private-report form and
-prefix the title with `Conduct:`; during preview it is the project's single
-private maintainer intake. If the form is unavailable, open a detail-free issue
-requesting that private reporting be restored. Include only the information
-needed to investigate, and never put another person's private information in a
-public issue.
+For a private conduct incident, use the same private intake and prefix the title
+with `Conduct:`. If that intake is unavailable, open only a detail-free
+request for it to be restored.
+
+Repository maintainers receive conduct reports and restrict their contents to
+the people needed to investigate and respond. Conduct reports are triaged
+separately from vulnerability reports.
 
 Maintainers may edit or remove contributions, limit participation, or ban an
-account when necessary to protect contributors, users, or the project. They will
-apply this policy in good faith and with proportionate action.
+account when necessary to protect contributors and users. They will apply this
+policy in good faith and proportionately.

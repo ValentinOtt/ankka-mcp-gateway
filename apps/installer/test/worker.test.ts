@@ -1051,7 +1051,7 @@ describe('hosted deploy Worker boundary', () => {
       receipt: {
         receiptId: `receipt-${'e'.repeat(24)}`,
         managementUrl: 'https://manage.example.com/',
-        portalUrl: 'https://mcp.example.com/',
+        portalUrl: 'https://mcp.example.com/mcp',
       },
     });
     expect(payload.deployment.operations.find(({ id }: { id: string }) => id === 'revoke')).toEqual({

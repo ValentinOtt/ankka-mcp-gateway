@@ -10,6 +10,6 @@
 
 process.stderr.write(
   'Retired: the exact-payload canary was a completed one-off probe, not a receipt-bound operator workflow. ' +
-  'Use the approval-bound canary lifecycle or reviewed hosted-installer runbook.\n',
+  'Use the receipt-bound installer design documented in docs/ARCHITECTURE.md.\n',
 );
 process.exitCode = 1;

@@ -1,7 +1,6 @@
 /**
- * Proves the revised §5 control: Cloudflare Access in front of the private
- * installer, with only the OAuth callback and exact signed release channels
- * deliberately excluded.
+ * Proves the isolated private-installer Access contract, with only the OAuth
+ * callback and exact signed release channels deliberately excluded.
  *
  * Two kinds of evidence, because configuration alone is not protection:
  *
@@ -123,16 +122,13 @@ async function main() {
     }));
     const anyBypass = bypassApps.some((entry) => entry.applications.length > 0);
 
-    // Access was removed deliberately on 2026-08-24 so the unfinished installer
-    // could be looked at without a login. That is a decision, not a defect, but
-    // it is still an unmet gate: this reports the posture instead of a bare
-    // MISSING, and still exits non-zero, because a verifier that goes green on
-    // "we chose not to" is how an audit passes something that never enforced.
+    // Absence is reported explicitly and remains non-zero. This isolated
+    // verifier must never treat a missing control as a successful posture.
     if (!anyBypass && !installerApp) {
       record(
         'access protection',
         'NOT ENFORCED',
-        `no Access application for ${ACCESS_HOST}; removed deliberately, see runbook §5`,
+        `no Access application for ${ACCESS_HOST}; isolated private protection is absent`,
       );
     }
 
@@ -240,7 +236,7 @@ async function main() {
   }
 
   const width = Math.max(...results.map((entry) => entry.item.length));
-  process.stdout.write('--- runbook §5 (Access) ---\n');
+  process.stdout.write('--- isolated private Access verification ---\n');
   for (const entry of results) {
     process.stdout.write(`  ${entry.item.padEnd(width)}  ${entry.verdict.padEnd(13)} ${entry.detail}\n`);
   }

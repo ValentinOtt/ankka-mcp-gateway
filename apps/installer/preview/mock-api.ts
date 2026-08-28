@@ -151,7 +151,7 @@ function deployment(scenario: InstallerScenario) {
       releaseSha256: plan.release.sha256,
       appliedAt: '2026-08-27T12:30:00.000Z',
       managementUrl: 'https://manage.example.com/',
-      portalUrl: 'https://mcp.example.com/',
+      portalUrl: 'https://mcp.example.com/mcp',
       grantRevocation: 'confirmed',
     } : null,
   }

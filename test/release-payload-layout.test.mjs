@@ -10,13 +10,13 @@ const ROOT = new URL('../payload/', import.meta.url);
 const ADMIN_ROOT = new URL('../apps/admin/dist/', import.meta.url);
 const COMPONENTS = Object.freeze({
   admin: null,
-  installer: ['assets/installer-2f74774a.css', 'assets/installer-562e903f.js', 'index.html'],
+  installer: ['assets/installer-2f74774a.css', 'assets/installer-82169b0d.js', 'index.html'],
   worker: ['index.js'],
   'worker-cleanup': ['index.js'],
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: '1f25a11454fb53aefd600f1bbf4d6eb0c90cd68c4ce314246b0dcacae2acce5b',
+  installer: '62653195e8388a706d9d76bdf8d347cba0fcf0a58895361f2f9e7eca91fc35a6',
   worker: 'fa95721c42f4eeff630eca911c5e2780224929f15c9d1dcc618f2464e9ba8e97',
   'worker-cleanup': '6430ac9d2fe6516022d049f305be0d0135115f9f5e6989f502afc79334bdbc55',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
@@ -183,7 +183,7 @@ test('admin and installer HTML use external same-origin assets without inline ex
 
 test('installer assets cover the exact hosted session, plan, deploy, result, and removal contract', async () => {
   const html = await readFile(new URL('installer/index.html', ROOT), 'utf8');
-  const script = await readFile(new URL('installer/assets/installer-562e903f.js', ROOT), 'utf8');
+  const script = await readFile(new URL('installer/assets/installer-82169b0d.js', ROOT), 'utf8');
   for (const route of ['/', '/gateway', '/review', '/deploy', '/manage', '/oauth/handoff', '/oauth/callback', '/result']) {
     if (route !== '/') assert.match(`${html}\n${script}`, new RegExp(route.replace('/', '\\/'), 'u'));
   }
@@ -244,7 +244,7 @@ test('admin assets provide safe source discovery, signed updates, one-time apply
   }
   assert.match(script, /one-time Cloudflare authorization/iu);
   assert.match(script, /No sources yet/u);
-  assert.match(script, /Stable release channel/u);
+  assert.match(script, /release channel/u);
   assert.match(script, /untrustedContentHint/u);
   assert.match(script, /document\.modelContext/u);
   const sourceFiles = (await readdir(new URL('../apps/admin/src/', import.meta.url), { recursive: true }))

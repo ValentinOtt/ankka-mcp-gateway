@@ -11,7 +11,7 @@ describe('retired exact-payload canary', () => {
   it('fails before credentials, provider output, or network access', async () => {
     expect(
       (await readdir(new URL('../scripts/exact-payload-canary/', import.meta.url))).sort(),
-    ).toEqual(['README.md', 'run.mjs']);
+    ).toEqual(['run.mjs']);
     const source = await readFile(runner, 'utf8');
     expect(source).not.toMatch(
       /(?:CLOUDFLARE_API_TOKEN|\bfetch\s*\(|client\/v4|\bspawn\s*\(|method:\s*['"](?:PUT|POST|DELETE)['"])/u,
