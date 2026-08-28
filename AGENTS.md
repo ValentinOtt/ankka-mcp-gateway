@@ -1,7 +1,7 @@
 # Agent instructions
 
-This repository is designed to become public. Treat every commit, test fixture,
-comment, and Git revision as publishable.
+Treat this as a public repository. Every commit, test fixture, comment, and Git
+revision must be publishable.
 
 ## Product boundary
 

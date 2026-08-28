@@ -7,10 +7,9 @@ CLOUDFLARE_OAUTH_CLIENT_SECRET=<cloudflare-oauth-client-secret>
 DEPLOY_SESSION_ENCRYPTION_KEY=<32-random-bytes-as-base64-or-base64url>
 BOOTSTRAP_NONCE_DERIVATION_KEY=<distinct-32-random-bytes-as-base64-or-base64url>
 
-# Release automation will eventually set this signed envelope. The checked-in
-# public-key registry is intentionally empty in this scaffold, so adding only
-# an env value cannot enable deployment.
-# Protocol-v2 signatures are channel-bound, so the expected channel is required
-# alongside the envelope and must be exactly `canary` or `stable`.
+# Optional inputs for the fail-closed local release-provider scaffold. They are
+# useful for parser tests only: the checked-in public-key registry is empty and
+# the reviewed runtime uses a compile-time exact release pin, so these values
+# cannot enable deployment. The channel must be `canary` or `stable`.
 GATEWAY_RELEASE_CHANNEL=canary
 GATEWAY_RELEASE_ENVELOPE_JSON=<ed25519-signed-release-envelope-json>

@@ -222,9 +222,9 @@ test('human plan output is concise and does not print private input details', as
 
   assert.match(result.stdout, /^Plan: \S+/);
   assert.match(result.stdout, /Required provider capabilities/);
-  assert.match(result.stdout, /Cloudflare OAuth scope IDs: pending disposable-account canary verification/);
+  assert.match(result.stdout, /OAuth consent: not requested by offline planning/);
   assert.match(result.stdout, /Changes \(/);
-  assert.match(result.stdout, /Uninstall preview, non-authoritative \(/);
+  assert.match(result.stdout, /Removal preview, non-authoritative \(/);
   assert.doesNotMatch(result.stdout, /owner@example\.com/);
   assert.doesNotMatch(result.stdout, /context\.example\.com/);
   assert.equal(result.stderr, '');

@@ -1,44 +1,46 @@
 # Hosted installer analytics
 
-Ankka collects a deliberately small setup funnel on the Ankka-hosted installer
-at `https://deploy.ankka.ai`. Collection is enabled by default on that hosted
-service. Running the public source yourself does not send these events to
-Ankka, and customer-deployed gateways never receive this analytics binding.
+An active, maintainer-approved Ankka-hosted installer records a small product
+funnel by default. The checked-in disabled and rollback builds have no analytics
+binding and emit no events. Running this source yourself does not send events
+to Ankka, and customer-deployed gateways never receive the binding.
 
-This is product telemetry, not an authorization, audit, billing, support, or
-security log. It is useful for directional questions such as whether people
-reach planning, authorization, installation, and removal, and at which stage a
-flow completes unsuccessfully.
+The installer shows this notice:
+
+> Ankka keeps fixed setup event, public release/channel, coarse outcome, and
+> flow fields for three months in Cloudflare Analytics Engine—without user,
+> session, or Cloudflare-account identifiers. Cloudflare separately processes
+> hosted-zone reliability data. Customer gateways do not report usage to
+> Ankka.
 
 ## Destination and retention
 
-The reviewed hosted Worker writes directly to the Cloudflare Workers Analytics
-Engine dataset `ankka_installer_funnel_v1` in Ankka's Cloudflare account. There
-is no browser beacon or public event-ingestion endpoint. Ankka does not export
-or copy the dataset or send it to any additional analytics processor; query
-credentials are read-only, remain outside the Worker, and are not published.
-Cloudflare processes and stores the dataset and currently retains Analytics
-Engine data for three months; see Cloudflare's
+The hosted Worker writes directly to the Cloudflare Workers Analytics Engine
+dataset `ankka_installer_funnel_v1` in Ankka's Cloudflare account. There is no
+browser beacon or public ingestion endpoint, and Ankka does not export the
+dataset to another analytics processor.
+
+Cloudflare documents Analytics Engine retention as three months. See
 [Analytics Engine limits](https://developers.cloudflare.com/analytics/analytics-engine/limits/).
 
-An analytics write is best-effort and non-authoritative. A missing binding,
-invalid build label, quota problem, or provider failure drops the event and
-cannot delay, fail, retry, approve, or change an installation or removal.
+Writes are best-effort and non-authoritative. A missing binding, invalid build
+label, quota issue, or provider failure drops the event and cannot delay,
+approve, retry, fail, or change a customer operation.
 
 ## Exact schema
 
-Cloudflare supplies the row timestamp. The Worker writes only:
+Cloudflare supplies the timestamp. The Worker writes only:
 
 | Column | Meaning | Allowed values |
 | --- | --- | --- |
-| `index1` | sampling key | the exact event from the event allowlist below |
+| `index1` | event | one event from the allowlist below |
 | `blob1` | public signed release | `gateway-vX.Y.Z` |
-| `blob2` | public release channel | `canary` or `stable` |
+| `blob2` | release channel | `canary` or `stable` |
 | `blob3` | outcome | `none`, `succeeded`, `failed`, `denied`, or `existing_gateway` |
 | `blob4` | flow | `none`, `fresh_install`, `same_session_removal`, or `returning_removal` |
 | `double1` | count | exactly `1` |
 
-The event allowlist is:
+Allowed events:
 
 - `installer_session_created`
 - `discovery_authorization_created`
@@ -51,65 +53,47 @@ The event allowlist is:
 - `removal_authorization_created`
 - `removal_completed`
 
-Milestones are emitted only by server-authoritative code after the corresponding
-state transition is accepted. Completion events are emitted after the final
-result has been stored. There is no browser-controlled event name or payload.
+Events are emitted only by server-authoritative code after the corresponding
+state transition. The browser cannot supply an event name or payload.
 
-The dataset must never contain an IP address, country or colo, user or session
-identifier (raw or hashed), request identifier, email, Cloudflare account or
-zone identifier, hostname, gateway or installation identifier, plan or attempt
-identifier, credential, OAuth state/code/token, request URL/path/query,
-referrer, user agent, duration, free-form error, or arbitrary dimension.
+## Data that is not collected
 
-Rows are timestamped, so the dataset is identifier-free rather than guaranteed
-anonymous: at very low volume, timing may still correlate with information
-held elsewhere. Ankka must not join it to OAuth, support, or infrastructure
-records to reconstruct an individual journey.
+The dataset has no field for:
 
-## Interpreting counts
+- IP address, country, colo, user agent, or referrer;
+- user, visitor, session, request, email, or customer identifier, including
+  hashed identifiers;
+- Cloudflare account, zone, hostname, gateway, installation, plan, or provider
+  resource;
+- URL, path, query, OAuth state, code, token, or other credential;
+- duration, free-form error, or arbitrary property.
 
-Counts describe accepted milestones and attempts, not unique people. A new
-installer session can be bot-inflated, authorization can be retried, and there
-is intentionally no per-session correlation. Do not use this dataset for
-billing, individual behavior, exact cohort conversion, or security decisions.
+Rows are timestamped, so low-volume events may still correlate in time with
+information held elsewhere. Ankka must not join the dataset to OAuth, support,
+or infrastructure records to reconstruct an individual journey.
 
-Analytics Engine can sample rows. Queries must weight the count with
-`_sample_interval`, for example:
+Counts are attempts and accepted milestones, not unique people. The data is not
+used for billing, individual tracking, authorization, support decisions, or
+security decisions.
 
-```sql
-SELECT
-  index1 AS event,
-  blob3 AS outcome,
-  blob4 AS flow,
-  SUM(_sample_interval * double1) AS events
-FROM ankka_installer_funnel_v1
-WHERE timestamp >= NOW() - INTERVAL '7' DAY
-GROUP BY event, outcome, flow
-ORDER BY event, outcome, flow
-```
+## Network Error Logging
 
-## Network Error Logging is separate
+Cloudflare Network Error Logging (NEL) is separate from the product funnel.
+NEL remains enabled for Ankka's hosted zone. Cloudflare adds `NEL` and
+`Report-To` headers to browser responses, and browsers may send reports about
+last-mile failures to Cloudflare. Application code does not set those headers
+or receive the browser reports.
 
-Cloudflare Network Error Logging remains enabled on the Ankka-owned hosted
-zone. Cloudflare may add `NEL` and `Report-To` headers and process browser
-reports about last-mile connectivity. NEL is useful for DNS, TCP, TLS, and
-protocol failures that never reach the Worker; it is not the product funnel
-above. Cloudflare documents its fields, destination, and privacy behavior in
-the [Network Error Logging overview](https://developers.cloudflare.com/network-error-logging/).
+Cloudflare documents that reports can include request and network-failure
+metadata, that it derives coarse network location from the client address, and
+that it discards the client address after processing. See Cloudflare's
+[Network Error Logging documentation](https://developers.cloudflare.com/network-error-logging/).
 
-The public-preview preflight on 2026-08-28 observed the same valid Cloudflare
-policy on the installer root, callback error, and both release-channel
-responses: a Cloudflare-operated report destination and a seven-day browser
-policy lifetime. No report token or provider resource identifier was retained.
-Cloudflare documents report fields for request URL/referrer, method, phase,
-protocol, status, elapsed time, sampling fraction, and network-error type. It
-also states that client IP is used only in volatile memory for the lifetime of
-the report request, is not logged in the NEL pipeline, and reports are not
-shared with third parties. The header lifetime is not report retention;
-Cloudflare does not state retention for derived non-PII operational data on
-that page. The owner explicitly accepts that residual provider-metadata and
-unspecified aggregate-retention boundary while NEL remains enabled. Application
-source does not set either header.
+The three-month retention above applies only to Ankka's Analytics Engine funnel
+rows. Ankka does not receive or store NEL reports. Cloudflare documents the
+immediate disposal of the client IP address, but the cited page does not state a
+retention period for the remaining NEL data; that processing is governed by
+Cloudflare's service and policies.
 
-Neither hosted analytics mechanism changes the customer-runtime contract:
-customer-deployed gateway Workers send no telemetry to Ankka.
+NEL is not configured in customer gateway code. A customer's own Cloudflare
+zone may independently apply its own reporting policy.

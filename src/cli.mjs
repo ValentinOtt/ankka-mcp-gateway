@@ -219,12 +219,12 @@ function renderPlan(plan) {
     '',
     `Required provider capabilities (${list(plan.requiredCapabilities).length}):`,
     ...renderList(plan.requiredCapabilities, describeCapability),
-    '  Cloudflare OAuth scope IDs: pending disposable-account canary verification; do not wire consent yet.',
+    '  OAuth consent: not requested by offline planning.',
     '',
     `Changes (${list(plan.changes).length}):`,
     ...renderList(plan.changes, describeAction),
     '',
-    `Uninstall preview, non-authoritative (${list(plan.uninstall).length}):`,
+    `Removal preview, non-authoritative (${list(plan.uninstall).length}):`,
     ...renderList(plan.uninstall, describeAction),
   ];
   return lines.join('\n');

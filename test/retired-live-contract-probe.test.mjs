@@ -14,7 +14,7 @@ const runner = new URL(
 test('the legacy account-wide live probe fails before credentials or network access', async () => {
   assert.deepEqual(
     (await readdir(new URL('../apps/installer/scripts/live-contract-probe/', import.meta.url))).sort(),
-    ['README.md', 'run.mjs'],
+    ['run.mjs'],
   );
   const source = await readFile(runner, 'utf8');
   assert.doesNotMatch(

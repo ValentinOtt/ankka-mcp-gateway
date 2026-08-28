@@ -365,31 +365,3 @@ test('checked-in public verifier has no state-changing HTTP method', async () =>
   assert.doesNotMatch(source, /CLOUDFLARE_API_TOKEN/u);
   assert.match(source, /--api-token-stdin/u);
 });
-
-test('public transition documentation keeps the lifecycle and edge gates together', async () => {
-  const [runbook, checklist, customer, installer] = await Promise.all([
-    readFile(new URL('../apps/installer/REVIEWED_CANARY_RUNBOOK.md', import.meta.url), 'utf8'),
-    readFile(new URL('../docs/PUBLIC_RELEASE_CHECKLIST.md', import.meta.url), 'utf8'),
-    readFile(new URL('../docs/CUSTOMER_SELF_SERVICE.md', import.meta.url), 'utf8'),
-    readFile(new URL('../apps/installer/README.md', import.meta.url), 'utf8'),
-  ]);
-  for (const pattern of [
-    /retained Ed25519 key/u,
-    /rate_limited/u,
-    /abuse_controls_unavailable/u,
-    /live OAuth client is already permanently \*\*Public\*\*/u,
-    /Logpush/u,
-    /Network Error Logging remains enabled/u,
-    /no-Access disabled shell/u,
-    /do not\s+create or delete an application/u,
-    /verify-public\.mjs/u,
-    /fresh unrelated Cloudflare account/u,
-  ]) assert.match(runbook, pattern);
-  assert.match(
-    checklist,
-    /Never create or recreate Access on `deploy\.ankka\.ai` as part of rollback/u,
-  );
-  assert.match(checklist, /valid[\s\S]{0,80}Ed25519 descriptor/u);
-  assert.match(customer, /Absence of Access alone is not evidence/u);
-  assert.match(installer, /live host has no Ankka\s+Access application/u);
-});

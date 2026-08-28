@@ -51,7 +51,7 @@ const DISCOVERY_FAILURE_MESSAGES = Object.freeze({
   oauth_denied: 'Cloudflare authorization was declined. Create a fresh sign-in link when you are ready.',
   oauth_exchange_failed: 'Cloudflare returned to the installer, but the authorization code exchange failed. Check that the deployed OAuth client ID and secret belong to the same Cloudflare OAuth client.',
   oauth_grant_invalid: 'Cloudflare returned a grant that did not contain exactly the requested read-only discovery permissions. Approve every permission shown on a fresh sign-in.',
-  oauth_revoke_failed: 'Discovery stopped because automatic grant revocation could not be confirmed. Revoke Ankka MCP Gateway in Cloudflare Connected Applications before retrying.',
+  oauth_revoke_failed: 'Automatic grant revocation could not be confirmed. Revoke Ankka MCP Gateway in Cloudflare Connected Applications before starting a mutation.',
   target_account_ambiguous: 'Cloudflare returned an account list the installer could not safely use.',
   target_zone_invalid: 'Cloudflare returned an active-zone list the installer could not safely use.',
   oauth_state_invalid: 'The Cloudflare sign-in response no longer matched this installer session. Create one fresh link and complete it in the same browser session.',
@@ -740,7 +740,7 @@ function renderWelcome() {
   if (ready) {
     const target = selectedDiscoveryTarget() ?? state.discovery.targets?.[0];
     if (state.discovery.grantRevocation === 'unconfirmed') {
-      showNotice('Cloudflare discovery finished, but automatic grant revocation was not confirmed. Revoke Ankka MCP Gateway in Cloudflare Connected Applications before continuing.', 'error');
+      showNotice('Cloudflare discovery finished, but automatic grant revocation was not confirmed. Revoke Ankka MCP Gateway in Cloudflare Connected Applications before starting a mutation.', 'error');
     } else {
       showNotice(target
         ? `Connected to ${target.accountName} · ${target.zoneName}. The discovery grant was revoked.`
@@ -903,7 +903,7 @@ async function registerAgentTools() {
   const tools = [
     {
       name: 'begin_cloudflare_discovery',
-      description: 'Create a short-lived, read-only Cloudflare authorization handoff link that discovers the user email, accounts, and active zones. Return the link to the user; do not open or approve it for them. The grant is revoked immediately after discovery.',
+      description: 'Create a short-lived, read-only Cloudflare authorization handoff link that discovers the user email, accounts, and active zones. Return the link to the user; do not open or approve it for them. Revocation is attempted immediately after discovery, and the local grant copy is always discarded.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: {
         readOnlyHint: false,
@@ -1248,7 +1248,7 @@ async function start() {
         window.history.replaceState(null, '', '/manage');
         state.route = '/manage';
         render();
-        showNotice('Cloudflare authorized. Applying the source in your account…', 'success');
+        showNotice('Cloudflare authorized. Completing the approved gateway action…', 'success');
         window.addEventListener('load', () => window.location.replace(management.managementUrl), { once: true });
         return;
       }

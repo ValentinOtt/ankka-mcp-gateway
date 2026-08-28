@@ -12,6 +12,6 @@
 
 process.stderr.write(
   'Retired: this live-contract probe was not bound to one exact reviewed receipt. ' +
-  'Use the approval-bound canary lifecycle or reviewed hosted-installer runbook.\n',
+  'Use the receipt-bound installer design documented in docs/ARCHITECTURE.md.\n',
 );
 process.exitCode = 1;

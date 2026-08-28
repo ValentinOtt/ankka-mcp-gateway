@@ -404,7 +404,7 @@ function deployment(
           releaseSha256: plan.releaseArtifactSha256,
           appliedAt: new Date(session.result.completedAt).toISOString(),
           managementUrl: `https://${plan.gatewayConfiguration.managementHostname}/`,
-          portalUrl: `https://${plan.gatewayConfiguration.portalHostname}/`,
+          portalUrl: `https://${plan.gatewayConfiguration.portalHostname}/mcp`,
         }
       : null,
   };

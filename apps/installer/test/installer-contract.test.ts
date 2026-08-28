@@ -165,7 +165,7 @@ describe('installer UI/server cross-contract', () => {
       releaseSha256: manifest.artifact.treeSha256,
       appliedAt: new Date(NOW + 50).toISOString(),
       managementUrl: 'https://manage.example.com/',
-      portalUrl: 'https://mcp.example.com/',
+      portalUrl: 'https://mcp.example.com/mcp',
     });
     expect(Object.keys(response.deployment?.receipt ?? {}).sort()).toEqual([
       'appliedAt',
@@ -204,7 +204,7 @@ describe('installer UI/server cross-contract', () => {
       receipt: {
         receiptId: `receipt-${'e'.repeat(24)}`,
         managementUrl: 'https://manage.example.com/',
-        portalUrl: 'https://mcp.example.com/',
+        portalUrl: 'https://mcp.example.com/mcp',
       },
     });
     expect(response.deployment?.operations

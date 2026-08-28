@@ -1,19 +1,12 @@
 # Contributing
 
-The repository is prepared and maintained as public source. Every contribution,
-fixture, comment, and revision must be safe to publish even while preview
-deployment gates are still being validated.
+Thank you for helping improve Ankka MCP Gateway. This is public source, so every
+commit, fixture, comment, screenshot, and test output must be safe to publish.
 
-## Contributor toolchain
+## Set up the project
 
-Development, verification, and release tooling use exactly Node.js `22.23.2`
-and npm `10.9.8`. The `.nvmrc`, `packageManager`, and `devEngines` fields are
-the machine-readable source of truth. The broader `engines.node` range is only
-the runtime compatibility floor; it does not relax the contributor pin.
-
-From a clean checkout, install and select the pinned Node release (which ships
-the required npm version), then reproduce the lockfile installation without
-rewriting it:
+Development uses exactly Node.js `22.23.2` and npm `10.9.8`. The `.nvmrc`,
+`packageManager`, and `devEngines` fields are the source of truth.
 
 ```sh
 nvm install
@@ -22,16 +15,41 @@ npm ci
 npm run check
 ```
 
-Use `npm ci` for clean verification, CI, release review, and ordinary local
-setup. Use `npm install` only when intentionally changing dependencies, and
-include the resulting `package.json` and `package-lock.json` changes together.
+Use `npm ci` for normal setup and verification. Use `npm install` only when
+intentionally changing dependencies, and commit the manifest and lockfile
+changes together.
 
-1. Do not copy files or Git history from a private repository without explicit
-   ownership and license review.
-2. Use synthetic organizations, hostnames, resource IDs, and provider payloads.
-3. Never add secrets or customer data, including in tests and screenshots.
-4. Keep the read-only and customer-credential-custody invariants intact.
-5. Run `npm run check` with the pinned toolchain before opening a pull request.
+For local interface work, run:
 
-For transferred or vendored material, update `ORIGINS.md` and
-`THIRD_PARTY_NOTICES.md` in the same change.
+```sh
+npm run dev:ui
+```
+
+The local studio uses synthetic data and does not contact Cloudflare.
+
+## Contribution expectations
+
+- Keep changes within the documented customer-runtime and hosted-installer
+  product boundary.
+- Exact tool allowlists are mandatory.
+- Any move beyond read-only sources requires a separate capability,
+  authorization, and audit design.
+- Never add credentials, customer data, private hostnames, provider resource
+  identifiers, private repository history, or generated release output.
+- Use synthetic values in tests, examples, screenshots, and bug reports.
+- Keep dependencies small and justify new production packages.
+- Update tests and the smallest relevant public document when behavior changes.
+- Record transferred or vendored material in [ORIGINS.md](ORIGINS.md) and
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Before opening a pull request, run `npm run check` from a clean checkout and
+describe any effect on credential custody, authorization, telemetry, updates,
+rollback, or removal.
+
+Use the repository's issue forms for bug reports and feature proposals. Keep
+all reports synthetic and follow [the code of conduct](CODE_OF_CONDUCT.md).
+Contributions are made under this repository's Apache-2.0 license; there is no
+separate CLA or DCO process at this time.
+
+For security reports, follow [SECURITY.md](SECURITY.md) instead of opening a
+public issue.

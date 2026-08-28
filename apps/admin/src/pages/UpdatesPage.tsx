@@ -24,13 +24,14 @@ export function UpdatesPage() {
 
   const statusLabel = update.status === 'available' ? 'Update available'
     : update.status === 'unavailable' ? 'Channel unavailable' : 'Up to date'
+  const channelLabel = update.channel === 'stable' ? 'Stable' : 'Canary'
 
   return (
     <div>
       <PageHeader
         eyebrow="Signed software"
         title="Updates"
-        description="Only signed Worker code and management assets change. Sources, Access policies, DNS, credentials, and Durable Object data remain in your Cloudflare account."
+        description="Only signed Worker code, management assets, and non-secret release metadata change. Sources, Access policies, DNS, credentials, and Durable Object data remain unchanged."
         action={
           <Button variant="secondary" className="pressable" loading={isBusy} onClick={() => void refreshUpdate()}>
             Check again
@@ -49,7 +50,7 @@ export function UpdatesPage() {
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-kumo-line px-5 py-5 sm:px-6">
           <div>
             <p className="text-xs font-medium text-kumo-subtle">Gateway runtime</p>
-            <h2 className="mt-1 text-base font-semibold text-kumo-strong">Stable release channel</h2>
+            <h2 className="mt-1 text-base font-semibold text-kumo-strong">{channelLabel} release channel</h2>
           </div>
           <StatusPill tone={update.status === 'available' ? 'attention' : update.status === 'unavailable' ? 'waiting' : 'ready'}>
             {statusLabel}
@@ -63,7 +64,7 @@ export function UpdatesPage() {
           </div>
           <div className="bg-white px-5 py-5 sm:px-6">
             <dt className="text-xs font-medium text-kumo-subtle">Channel</dt>
-            <dd className="mt-1.5 font-mono text-sm text-kumo-strong">{update.available?.release ?? update.current?.release ?? 'Unavailable'}</dd>
+            <dd className="mt-1.5 font-mono text-sm text-kumo-strong">{update.channel}</dd>
           </div>
           <div className="bg-white px-5 py-5 sm:px-6">
             <dt className="text-xs font-medium text-kumo-subtle">Classification</dt>

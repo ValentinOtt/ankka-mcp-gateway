@@ -32,7 +32,7 @@ export function OverviewPage() {
       <PageHeader
         eyebrow="Customer-owned gateway"
         title={status.gateway.name}
-        description="Manage approved MCP sources and software updates from the Worker running inside your Cloudflare account. Credentials and operational state never transit Ankka."
+        description="Manage approved MCP sources and software updates from the Worker running inside your Cloudflare account. MCP source credentials stay in Cloudflare, and the gateway sends no telemetry to Ankka."
         action={
           <Button variant="secondary" className="pressable" loading={isLoading} onClick={() => void reload()}>
             Refresh
@@ -84,16 +84,16 @@ export function OverviewPage() {
           </div>
           <h2 className="mt-5 text-lg font-semibold tracking-[-0.02em] text-kumo-strong">Your account stays in control</h2>
           <p className="mt-2 text-pretty text-sm leading-6 text-kumo-subtle">
-            Cloudflare owns the runtime, login surface, policies, DNS, credentials, and logs.
+            Your Cloudflare account controls the runtime, login surface, policies, DNS, MCP source credentials, and logs.
           </p>
           <div className="mt-6 space-y-4 border-t border-kumo-line pt-5">
             <div className="flex gap-3">
               <LockKey size={17} className="mt-0.5 shrink-0 text-kumo-subtle" />
-              <p className="text-xs leading-5 text-kumo-subtle"><strong className="text-kumo-strong">Credentials</strong><br />Never stored by Ankka</p>
+              <p className="text-xs leading-5 text-kumo-subtle"><strong className="text-kumo-strong">MCP source credentials</strong><br />Never stored by Ankka</p>
             </div>
             <div className="flex gap-3">
               <ShieldCheck size={17} className="mt-0.5 shrink-0 text-kumo-subtle" />
-              <p className="text-xs leading-5 text-kumo-subtle"><strong className="text-kumo-strong">Telemetry</strong><br />Off by default</p>
+              <p className="text-xs leading-5 text-kumo-subtle"><strong className="text-kumo-strong">Telemetry</strong><br />No Ankka telemetry</p>
             </div>
           </div>
         </aside>

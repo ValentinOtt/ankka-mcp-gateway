@@ -1,199 +1,190 @@
 # Customer self-service
 
-Ankka MCP Gateway is installed into and operated from your Cloudflare account.
-The hosted installer coordinates a reviewed action, but Cloudflare resources,
-Access policies, logs, source configuration, and upstream credentials remain
-under your control.
+Ankka MCP Gateway is designed to install into and operate from your Cloudflare
+account. Your MCP Portal, management Worker, Access policies, logs, source
+configuration, and upstream credentials remain under your control.
 
-The public source tree is fail-closed. Installation and removal are available
-only from a reviewed installer release that explicitly enables those
-capabilities and pins an exact signed gateway release. A preview or disabled
-installer must not be treated as production deployment authority.
+> **Availability:** customer self-service is not yet open for general use.
+> `https://deploy.ankka.ai` may show an unavailable preview while the first
+> signed public release is prepared. Do not use the current service for a
+> production account.
 
-An active reviewed hosted installer also requires its three Worker-native rate
-limit bindings. New anonymous sessions are keyed by a purpose-separated HMAC of
-the transient Cloudflare client address. Authenticated session polling and
-mutations use separate HMAC purposes over the opaque session ID, so neither raw
-addresses nor session IDs are logged, stored, or sent to a limiter. The
-fixed-length session cookie also carries a truncated HMAC so the Worker can
-reject random cookie spray before resolving a Durable Object. These cost
-controls do not replace OAuth, CSRF, or receipt ownership.
+## What you will need
 
-The live public-cutover host and an optional isolated private canary are
-intentionally different. `deploy.ankka.ai` remains without an Ankka Access
-application and serves the disabled shell until the final activation gate.
-Private Access tooling may be used only for a separately approved isolated
-canary; it is not temporarily installed on the live host and is not recreated
-during public rollback.
+When the public preview opens, installation will require:
 
-Absence of Access alone is not evidence that the service is ready. Before
-activation, the public preflight performs a complete Access-app read, proves
-zero selector can cover the live hostname, and confirms cookie-free requests
-reach the exact disabled shell without an Access redirect. After activation,
-the full public gate repeats the Access read, requires the reviewed installer
-to report `mutationsEnabled: true`, loads its signed root, and verifies the
-exact channel-bound Ed25519 release descriptor. It also checks that the
-callback and both fixed release paths reach the application without an Access
-redirect. Cloudflare Network Error Logging remains enabled on the Ankka-owned
-hosted zone, so its edge may add
-`NEL`/`Report-To`; those headers are permitted platform metadata, not public-gate
-success evidence. The session-path observation is `HEAD` and does not mint
-customer state. A final browser run must come from an unrelated fresh
-Cloudflare account. Until those checks in the
-[public release checklist](PUBLIC_RELEASE_CHECKLIST.md) are green, treat
-`https://deploy.ankka.ai` as preview or unavailable rather than customer-ready.
-
-Customer-deployed gateways have a separate, testable no-Ankka-telemetry
-boundary. Their signed release contract disables Workers metrics, dependency
-instrumentation, and observability for the primary, cleanup, and retirement
-variants. Deployment requires `logpush: false` and no tail consumers, and the
-application payload emits no analytics beacon or `NEL`/`Report-To` header. Its
-only routine Ankka-origin request is anonymous signed release discovery: it
-sends no account, hostname, user, cookie, authorization, or referrer. A
-customer’s Cloudflare zone may independently add its own platform reporting
-headers after the Worker responds; Ankka neither configures nor receives those
-reports.
-
-The Ankka-hosted installer itself records a fixed, identifier-free setup funnel
-by default, separately from NEL. It contains milestone, public release/channel,
-coarse outcome, and flow fields only; it never receives a customer-gateway
-event. See [Hosted installer analytics](HOSTED_INSTALLER_ANALYTICS.md) for the
-exact destination, schema, retention, limitations, and event allowlist. Using
-the public source without Ankka's hosted installer does not write to Ankka's
-dataset.
-
-## Before you start
-
-You need:
-
-- a Cloudflare account with an active zone for the gateway hostnames;
-- permission to create Workers, Durable Objects, DNS, Access applications and
-  policies, and Cloudflare MCP Portal resources in the selected account;
+- a Cloudflare account with an active zone;
 - Cloudflare Zero Trust configured for that account;
-- one hostname for the employee-facing MCP Portal and a different hostname for
-  the customer-resident management dashboard; and
-- the primary administrator email and any additional administrator emails that
-  should initially be allowed through Cloudflare Access. These addresses also
-  form the initial Portal audience.
+- permission to create Workers, Durable Objects, DNS, Access applications and
+  policies, and MCP Portal resources;
+- one hostname for the employee MCP Portal;
+- a different hostname for the management dashboard; and
+- the initial administrators, who also form the initial Portal audience.
 
 The browser flow uses Cloudflare OAuth. Do not create an API token for Ankka,
-paste credentials into the wizard, or place credentials in URLs or
-configuration. Ankka never needs an upstream provider token.
+paste a provider credential into the installer, or put credentials in a URL or
+configuration file.
 
-## Install a gateway
+## Cloudflare permissions
 
-1. Open `https://deploy.ankka.ai` and choose **Sign in with Cloudflare**.
-2. Select the intended Cloudflare account and active zone. Discovery is
-   read-only; selecting a target does not create or change resources.
-3. Enter a gateway name, the employee-facing Portal hostname, the separate
-   management hostname, and the exact primary and additional administrators.
-4. Review the complete portal-only plan. The current first-run wizard creates
-   the customer Worker, Durable Object, dashboard assets, management Access
-   application and policy, then the Portal, Portal Access application and
-   policy, and DNS record. It does not ask for or install an upstream source.
-5. Choose **Authorize with Cloudflare**, review Cloudflare's consent screen,
-   and approve the short-lived operation-scoped grant. The installer journals
-   progress before each write and does not persist the grant.
-6. Keep the result page open until it reports success. Save the displayed MCP
-   URL and management URL.
-7. In the customer dashboard, add the first MCP source. Use a public HTTPS MCP
-   URL or a standards-compliant per-user OAuth source, then review and freeze
-   the exact read-only tool allowlist. Wildcard tools and credential-bearing
-   URLs are rejected. After applying the source, connect an MCP client to the
-   Portal URL and complete Cloudflare Access with an allowed identity.
+The first sign-in is read-only and requests exactly:
 
-If the installer detects an existing coherent Ankka gateway, it performs no
-writes and does not adopt or overwrite it. Open the linked customer management
-dashboard to manage or remove that installation.
+- `account-settings.read`
+- `memberships.read`
+- `user-details.read`
+- `zone.read`
 
-## Operate the gateway
+After discovery, the installer attempts bounded provider-side revocation and
+always discards its local copy. Installation and every later Cloudflare
+resource mutation use a separate, short-lived grant requesting exactly:
 
-Open the management URL and authenticate through the customer's Cloudflare
-Access policy.
+- `access-acct.write`
+- `access.write`
+- `account-settings.read`
+- `dns.write`
+- `mcp-portals.write`
+- `memberships.read`
+- `user-details.read`
+- `workers-routes.read`
+- `workers-scripts.write`
+- `zone.read`
 
-- **Overview** shows the installed release, MCP endpoint, audience, source
-  state, and custody boundary.
-- **Sources** discovers a public MCP catalogue or records an independently
-  verified protected source, freezes an exact tool allowlist, and creates a
-  one-time Cloudflare authorization for the reviewed change.
-- **Updates** verifies the installed signed release channel and prepares an
-  explicit update or rollback. Updates replace only Worker code and management
-  assets; sources, Access, DNS, credentials, and Durable Object data stay in
-  place.
+If Cloudflare does not confirm discovery-grant revocation, the installer tells
+you to revoke Ankka MCP Gateway in Cloudflare Connected Applications before
+starting a mutation.
 
-Saving a source draft changes only customer-owned Durable Object state.
-Applying a source, updating, rolling back, or removing the gateway always
-requires a new short-lived Cloudflare authorization. Per-user upstream OAuth
-happens through the customer's Portal; Ankka does not receive those tokens.
+Compare Cloudflare's consent screen with these lists. Stop if a permission is
+missing or unexpected; the installer also rejects any release that asks for a
+different set.
 
-## Remove a gateway
+## Installation flow
 
-1. In the browser that you will use for removal, open the hosted installer and
-   complete its read-only Cloudflare discovery for the account. Enter the same
-   gateway name and hostnames. The fresh preflight scans the candidate sets
-   twice; a coherent existing installation produces a secret-free summary and
-   performs no Cloudflare writes. A collision or incomplete match stops instead
-   of being adopted.
-2. Follow the summary's link to the customer management dashboard and
-   authenticate through Cloudflare Access. Keep this in the same browser so the
-   one-time handoff remains bound to the detected installer session.
-3. On **Overview**, choose **Review teardown plan**. The dashboard creates a
-   one-time handoff bound to the Access-verified actor, selected account, and
-   installation. The handoff contains no Cloudflare credential.
-4. Review the installation identity and bounded removal steps in the installer.
-5. Approve the plan, choose **Authorize with Cloudflare**, and approve the new
-   short-lived grant.
-6. Leave the result page open while the journal-backed teardown runs. The
-   gateway verifies receipt ownership before every deletion and stops on
-   conflicting or ambiguous state. Cleanup and retirement code comes from the
-   exact immutable release reported by the installed gateway, not whichever
-   release is currently promoted on its update channel. Before deletion, the
-   installer proves that the active Cloudflare version and deployment match
-   every exact module byte and expected plaintext binding from that bundle; a
-   matching Worker tag alone is not accepted. The Versions API does not expose
-   an immutable static-asset manifest or content digest, so active asset content
-   is not used as teardown release authority.
-7. Confirm that the result reports removal and zero Ankka-managed residue. The
-   employee MCP URL and management URL should no longer resolve to the removed
-   gateway.
+In the current hosted browser flow, the public installer is designed to:
 
-If the preflight finds only a partial or conflicting installation, or the
-management Access boundary cannot authenticate an administrator, self-service
-stops. Do not force a fresh install over it; repair the customer-owned Access
-boundary or use a separately reviewed manual recovery with provider-state
-evidence.
+1. ask you to sign in with Cloudflare;
+2. discover your eligible accounts and active zones without making changes;
+3. collect the gateway name, two hostnames, and initial administrators;
+4. show the complete secret-free deployment plan;
+5. request a short-lived Cloudflare grant only after you approve that plan;
+6. create and verify the customer management surface and an empty MCP Portal; and
+7. return the MCP URL and management URL.
 
-The teardown removes only resources proven to belong to that installation. It
-does not delete unrelated Cloudflare resources or upstream provider accounts.
-A separately configured advanced source credential or OAuth client remains
-customer-managed and may require its own provider-side revocation. Cloudflare
-also retains an Advanced Certificate after the management Custom Domain is
-removed; it is outside the reviewed OAuth scope set and must be reviewed or
-removed manually in Cloudflare.
+The browser flow does not add an upstream MCP source. The signed installation
+contract also supports one explicitly reviewed initial source with an exact
+tool allowlist, but the browser UI does not expose that option. Ordinary
+self-service users add the first source from the customer dashboard after the
+gateway is ready.
 
-## Recovery and support evidence
+If discovery finds an existing or conflicting installation, the installer
+stops instead of adopting or overwriting it.
 
-Do not delete a pending receipt, journal, recovery record, or installation
-authority to make an error disappear. Those records are what let a retry prove
-whether a resource was created or removed before an interrupted request.
+## Managing the gateway
 
-If an action stops:
+Open the management URL and authenticate through your Cloudflare Access policy.
 
-1. keep the result page open and use a retry only when the page offers one. If
-   the customer Worker is still available, the installer may reuse the current
-   reviewed action or require a fresh dashboard action. If the journal proves
-   that the customer gateway was already removed, the installer instead offers
-   a hosted recovery plan for up to 24 hours; that path requires a fresh
-   Cloudflare authorization but no longer depends on the removed dashboard or
-   its one-time action key;
-2. record the displayed stable error code, installation ID, and release when
-   shown; and
-3. verify provider state before any manual change.
+- **Overview** shows gateway status, the MCP URL, current release, audience,
+  source state, and the removal entry point.
+- **Sources** discovers a public MCP catalogue or records a
+  standards-compliant per-user OAuth source, saves an exact tool allowlist, and
+  prepares an exact apply action for customer review.
+- **Updates** checks the installed signed release channel and prepares an
+  update or rollback.
 
-Never send OAuth codes, access tokens, cookies, private keys, raw provider
-responses, or credential-bearing screenshots as support evidence. The product
-is designed to expose stable, secret-free status and recovery codes instead.
+Saving a source draft changes only customer-owned Durable Object state. Applying
+a source, updating, rolling back, or removing the gateway requires a new
+short-lived Cloudflare authorization.
 
-For the exact release and promotion status, see the
-[first public release checklist](PUBLIC_RELEASE_CHECKLIST.md). For update
-semantics and recovery behavior, see [Gateway updates and rollback](UPDATES.md).
+Upstream per-user OAuth is handled by Cloudflare Portal. Ankka does not receive
+those tokens.
+
+## Supported MCP sources
+
+Source discovery supports Streamable HTTP responses as JSON or server-sent
+events. It prefers MCP protocol `2026-07-28` and falls back to the compatible
+`2025-06-18` initialize and session flow. Tool pagination is bounded, and the
+Worker retains no upstream MCP session after discovery.
+
+A protected source is recognized only from the standard Bearer
+`WWW-Authenticate` challenge with a public HTTPS `resource_metadata` URL.
+Credential-bearing URLs, private-network endpoints, custom credential headers,
+and manually supplied bearer tokens are rejected.
+
+## Connecting an MCP client
+
+Use the employee-facing MCP Portal URL returned after installation. The client
+must support the MCP transport exposed by Cloudflare and complete the
+customer's Cloudflare Access flow.
+
+Only sources and exact tools approved by the customer are exposed. An MCP tool
+name or description is not proof that the operation is safe; upstream
+authorization remains authoritative.
+
+## Updates and rollback
+
+Updates are never automatic. A customer administrator reviews the signed
+release and approves a new Cloudflare authorization.
+
+An ordinary update persists only Worker code, management assets, and two
+non-secret release-identity text bindings. It preserves Portal configuration,
+Access, DNS, sources, credentials, resource and secret bindings, compatibility
+settings, and Durable Object data. Rollback restores a previous Worker version
+and its release identity without rolling back data. See
+[Gateway updates and rollback](UPDATES.md) for the temporary, authenticated
+action route used during the operation.
+
+## Removing a gateway
+
+The original successful installer session can prepare a same-session removal
+plan until the deadline shown by the installer. The initial session lasts 30
+minutes; interrupted-operation recovery may be retained for at most 24
+additional hours. A returning customer instead starts with fresh, read-only
+existing-gateway detection and then opens a receipt-bound handoff from the
+customer dashboard.
+
+Both paths show the exact teardown plan and require a new Cloudflare
+authorization before any deletion.
+
+Deletion authority comes from the checksum-valid receipt stored by the
+customer gateway, not from a hostname, resource name, or provider identifier.
+The flow removes only resources proven to belong to that installation and
+stops on drift or ambiguity.
+
+Cloudflare retains the Advanced Certificate after the management Custom Domain
+is removed. That certificate is outside Ankka's OAuth scope and must be reviewed
+or removed manually in Cloudflare.
+
+Other unrelated Cloudflare resources and upstream provider accounts are not
+removed. Provider-side credentials or OAuth clients configured outside the
+gateway may need separate revocation.
+
+## Experimental browser tools
+
+When a browser provides `document.modelContext`, the installer and customer
+dashboard register WebMCP tools as a progressive enhancement. Browsers without
+that API keep the normal interface.
+
+Installer tools are `begin_cloudflare_discovery`, `configure_gateway`,
+`create_review_plan`, `get_installer_status`, `begin_authorization`,
+`create_removal_plan`, and `begin_removal`.
+
+Dashboard tools are `list_mcp_sources`, `discover_mcp_source`,
+`save_mcp_source_draft`, `apply_mcp_source`, `check_gateway_update`,
+`review_gateway_update`, `apply_gateway_update`,
+`rollback_gateway_update`, and `review_gateway_teardown`.
+
+These tools call the same same-origin APIs as the visible interface. They add
+no independent mutation authority. A mutation tool can prepare a short-lived
+handoff URL, but the user must review the action and approve Cloudflare consent;
+an agent must not request, receive, or approve the user's token.
+
+## Troubleshooting safely
+
+Keep any pending receipt or recovery record until provider state is understood.
+Deleting recovery state can make a safe retry impossible.
+
+Share only the fixed public error code and non-sensitive release information.
+Never send OAuth codes, access tokens, cookies, private keys, account or
+resource identifiers, raw provider responses, or credential-bearing
+screenshots.
+
+Report security issues through [private vulnerability reporting](../SECURITY.md).
