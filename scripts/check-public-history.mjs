@@ -19,6 +19,12 @@ const MAX_BLOB_PATHS = 2_000_000;
 const MAX_GIT_OUTPUT = 128 * 1024 * 1024;
 const RETIRED_PRODUCT_NAME_LABEL = 'retired gateway product name';
 
+// The publishable surface: the checked-out history, every ref already on the
+// public origin remote, and tags (release tags are published). Other remotes
+// and other local branches may legitimately hold private history.
+const PUBLIC_REV_SCOPE = ['HEAD', '--remotes=origin', '--tags'];
+const PUBLIC_REF_PATTERNS = ['refs/remotes/origin', 'refs/tags'];
+
 const args = process.argv.slice(2);
 let root = process.cwd();
 let retiredProductNameBaseline;
@@ -44,7 +50,7 @@ for (let index = 0; index < args.length; index += 1) {
 
 const failures = new Set();
 const objectIds = [...new Set(
-  git(['rev-list', '--objects', '--all', '--no-object-names'])
+  git(['rev-list', '--objects', '--no-object-names', ...PUBLIC_REV_SCOPE])
     .trim()
     .split('\n')
     .filter(Boolean),
@@ -91,7 +97,7 @@ const strictCommitIds = new Set(
   commitIds.filter((objectId) => !baselineCommitIds.has(objectId)),
 );
 const strictTreeRoots = new Set(
-  git(['log', '--all', '--format=%H%x09%T'])
+  git(['log', ...PUBLIC_REV_SCOPE, '--format=%H%x09%T'])
     .trim()
     .split('\n')
     .filter(Boolean)
@@ -193,11 +199,21 @@ for (const objectId of tagIds) inspectMetadataObject(objectId, 'annotated tag');
 const refLines = git([
   'for-each-ref',
   '--format=%(objectname)%09%(objecttype)%09%(refname)',
+  ...PUBLIC_REF_PATTERNS,
 ]).trim().split('\n').filter(Boolean);
+try {
+  const headRefName = git(['symbolic-ref', '--quiet', 'HEAD']).trim();
+  if (headRefName) {
+    const headObjectId = git(['rev-parse', 'HEAD']).trim();
+    refLines.push(`${headObjectId}\tcommit\t${headRefName}`);
+  }
+} catch {
+  // A detached HEAD publishes no branch name of its own.
+}
 for (const line of refLines) {
   const [objectId, , refName] = line.split('\t');
   if (!objectId || !refName) {
-    failures.add('a locally available ref has invalid metadata');
+    failures.add('a publishable ref has invalid metadata');
     continue;
   }
   const displayRef = safeDisplayLocation(refName, 'ref');
@@ -221,7 +237,7 @@ if (failures.size > 0) {
   console.log(
     `Public-history check passed for ${checkedBlobs} reachable text blobs, ` +
     `${commitIds.length} commits, ${tagIds.length} annotated tags, and ` +
-    `${refLines.length} locally available refs.`,
+    `${refLines.length} publishable refs.`,
   );
 }
 
@@ -249,7 +265,7 @@ function enumerateReachableTreePaths(treeIds, info, requestedRoots) {
   }
 
   const roots = requestedRoots === undefined
-    ? new Set(git(['log', '--all', '--format=%T']).trim().split('\n').filter(Boolean))
+    ? new Set(git(['log', ...PUBLIC_REV_SCOPE, '--format=%T']).trim().split('\n').filter(Boolean))
     : new Set(requestedRoots);
   if (requestedRoots === undefined) {
     for (const treeId of treeIds) {

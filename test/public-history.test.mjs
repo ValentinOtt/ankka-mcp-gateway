@@ -199,6 +199,39 @@ test('public-history check rejects generated shapes, output directories, symlink
   }
 });
 
+test('public-history check scans only the publishable surface', async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), 'ankka-public-history-scope-'));
+  const gitEnv = fixtureGitEnv();
+  const token = `gh${'p'}_${'f'.repeat(36)}`;
+
+  try {
+    git(fixture, ['init', '--quiet'], gitEnv);
+    await writeFile(path.join(fixture, 'README.md'), '# Safe fixture\n');
+    git(fixture, ['add', 'README.md'], gitEnv);
+    git(fixture, ['commit', '--quiet', '-m', 'safe'], gitEnv);
+
+    git(fixture, ['switch', '--quiet', '-c', 'private-work'], gitEnv);
+    await writeFile(path.join(fixture, 'private.txt'), `${token}\n`);
+    git(fixture, ['add', 'private.txt'], gitEnv);
+    git(fixture, ['commit', '--quiet', '-m', 'private material'], gitEnv);
+    const privateCommit = gitOutput(fixture, ['rev-parse', 'HEAD'], gitEnv).trim();
+    git(fixture, ['switch', '--quiet', '-'], gitEnv);
+    git(fixture, ['branch', '--quiet', '-D', 'private-work'], gitEnv);
+    git(fixture, ['update-ref', 'refs/remotes/private-mirror/main', privateCommit], gitEnv);
+
+    const scoped = run(fixture);
+    assert.equal(scoped.status, 0, scoped.stderr);
+
+    git(fixture, ['update-ref', 'refs/remotes/origin/feature', privateCommit], gitEnv);
+    const publishable = run(fixture);
+    assert.equal(publishable.status, 1);
+    assert.match(publishable.stderr, /private\.txt contains GitHub token/u);
+    assert.equal(publishable.stderr.includes(token), false);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test('public-history check grandfathers only retired naming in an exact public baseline', async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), 'ankka-public-history-baseline-'));
   const gitEnv = fixtureGitEnv();
