@@ -24,3 +24,8 @@ Notable public product and repository changes are recorded here.
   continuous integration still enforces the exact pinned toolchain.
 - Group Dependabot version updates into weekly combined pull requests
   (non-major npm updates together; action updates together).
+- Extend hosted-installer analytics to a session-scoped funnel (schema v2):
+  a page-view event plus an opaque per-session key, country, browser family,
+  and page-view referrer host on every event — still with no cookies, no IP
+  or raw user-agent storage, and no identifier that outlives the session.
+  Self-hosted deployments continue to send nothing.

@@ -27,7 +27,7 @@ The installer implements:
 - secret-free customer configuration and plan review;
 - signed release verification;
 - bounded installation, progress, recovery, and removal coordination; and
-- fixed identifier-free hosted analytics.
+- fixed session-scoped hosted analytics.
 
 The customer's management Worker, Durable Object, MCP Portal, Access policies,
 DNS, logs, and upstream credentials remain in the customer's account.

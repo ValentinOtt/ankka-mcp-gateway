@@ -477,7 +477,10 @@ describe('hosted deploy Worker boundary', () => {
     const browser = await createBrowserSession(worker, workerEnv);
     expect(points).toEqual([{
       indexes: ['installer_session_created'],
-      blobs: ['gateway-v1.2.3', 'canary', 'none', 'none'],
+      blobs: [
+        'gateway-v1.2.3', 'canary', 'none', 'none',
+        expect.stringMatching(/^[a-f0-9]{16}$/u), 'ZZ', 'none', 'none',
+      ],
       doubles: [1],
     }]);
 

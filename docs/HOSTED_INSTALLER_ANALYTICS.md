@@ -1,22 +1,27 @@
 # Hosted installer analytics
 
-An active, maintainer-approved Ankka-hosted installer records a small product
-funnel by default. The checked-in disabled and rollback builds have no analytics
-binding and emit no events. Running this source yourself does not send events
-to Ankka, and customer-deployed gateways never receive the binding.
+An active, maintainer-approved Ankka-hosted installer records a session-scoped
+product funnel by default. The checked-in disabled and rollback builds have no
+analytics binding and emit no events. Running this source yourself does not
+send events to Ankka, and customer-deployed gateways never receive the
+binding. Preferring no analytics is a supported choice: deploy from this
+repository instead of the hosted installer.
 
 The installer shows this notice:
 
-> Ankka keeps fixed setup event, public release/channel, coarse outcome, and
-> flow fields for three months in Cloudflare Analytics Engine—without user,
-> session, or Cloudflare-account identifiers. Cloudflare separately processes
-> hosted-zone reliability data. Customer gateways do not report usage to
-> Ankka.
+> Ankka keeps setup funnel events—page view and setup steps with public
+> release/channel, coarse outcome and flow, a per-session key, country,
+> browser family, and, for page views, the referring site—for three months in
+> Cloudflare Analytics Engine. Analytics set no cookies and store no IP
+> address, raw user agent, or identifier that outlives the session. Cloudflare
+> separately processes hosted-zone reliability data. Customer gateways do not
+> report usage to Ankka. Prefer no analytics? Deploy from the public source
+> repository instead.
 
 ## Destination and retention
 
 The hosted Worker writes directly to the Cloudflare Workers Analytics Engine
-dataset `ankka_installer_funnel_v1` in Ankka's Cloudflare account. There is no
+dataset `ankka_installer_funnel_v2` in Ankka's Cloudflare account. There is no
 browser beacon or public ingestion endpoint, and Ankka does not export the
 dataset to another analytics processor.
 
@@ -38,10 +43,15 @@ Cloudflare supplies the timestamp. The Worker writes only:
 | `blob2` | release channel | `canary` or `stable` |
 | `blob3` | outcome | `none`, `succeeded`, `failed`, `denied`, or `existing_gateway` |
 | `blob4` | flow | `none`, `fresh_install`, `same_session_removal`, or `returning_removal` |
+| `blob5` | session | 16 hex characters or `none` |
+| `blob6` | country | ISO 3166-1 alpha-2 code or `ZZ` |
+| `blob7` | browser | `none`, `chromium`, `firefox`, `safari`, or `other` |
+| `blob8` | referrer | external hostname, `direct`, or `none` |
 | `double1` | count | exactly `1` |
 
 Allowed events:
 
+- `installer_page_viewed`
 - `installer_session_created`
 - `discovery_authorization_created`
 - `discovery_completed`
@@ -54,27 +64,50 @@ Allowed events:
 - `removal_completed`
 
 Events are emitted only by server-authoritative code after the corresponding
-state transition. The browser cannot supply an event name or payload.
+state transition. The browser cannot supply an event name, payload, or any
+context column.
+
+## Session context
+
+The context columns are derived server-side from the request being handled and
+degrade to fixed fallbacks (`none`, `ZZ`, `direct`) instead of widening:
+
+- `session` is a non-cryptographic digest of the installer session identifier.
+  It groups one session's funnel rows and carries neither the session
+  credential nor any cross-session identity. It expires with the session and
+  is `none` before a session exists.
+- `country` is the coarse request country Cloudflare derives at the edge. The
+  client IP address is not stored.
+- `browser` is a five-value browser family. The raw user-agent string is not
+  stored.
+- `referrer` is recorded only on `installer_page_viewed`: the external
+  referring hostname, `direct` without a referrer, or `none` for a same-host
+  or unparseable value. Referrer paths and queries are never read. Every
+  other event records `none`.
+
+Analytics set no cookies and add nothing to the browser: every column comes
+from the request the installer is already handling.
 
 ## Data that is not collected
 
 The dataset has no field for:
 
-- IP address, country, colo, user agent, or referrer;
-- user, visitor, session, request, email, or customer identifier, including
-  hashed identifiers;
+- IP address, colo, raw user agent, or referrer path or query;
+- user, visitor, email, or customer identifier, or any identifier that
+  outlives the installer session, including hashed forms of those;
 - Cloudflare account, zone, hostname, gateway, installation, plan, or provider
   resource;
 - URL, path, query, OAuth state, code, token, or other credential;
 - duration, free-form error, or arbitrary property.
 
-Rows are timestamped, so low-volume events may still correlate in time with
-information held elsewhere. Ankka must not join the dataset to OAuth, support,
-or infrastructure records to reconstruct an individual journey.
+The per-session key could in principle be recomputed from the operational
+session record while both exist. Ankka must not combine the dataset with
+OAuth, support, or infrastructure records to identify or profile a person;
+the funnel is used only in aggregate.
 
-Counts are attempts and accepted milestones, not unique people. The data is not
-used for billing, individual tracking, authorization, support decisions, or
-security decisions.
+Counts are attempts and accepted milestones, not unique people. The data is
+not used for billing, individual tracking, authorization, support decisions,
+or security decisions.
 
 ## Network Error Logging
 

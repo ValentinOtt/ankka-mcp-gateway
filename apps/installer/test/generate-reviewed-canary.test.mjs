@@ -180,7 +180,7 @@ describe('offline reviewed canary artifact generator', () => {
       expect(canary).toContain(`HOSTED_INSTALLER_ANALYTICS_RELEASE = "${PIN.release}"`);
       expect(canary.match(/^\[\[analytics_engine_datasets\]\]$/gmu)).toHaveLength(1);
       expect(canary).toContain('binding = "HOSTED_INSTALLER_ANALYTICS"');
-      expect(canary).toContain('dataset = "ankka_installer_funnel_v1"');
+      expect(canary).toContain('dataset = "ankka_installer_funnel_v2"');
       expect(canary.match(/^\[\[ratelimits\]\]$/gmu)).toHaveLength(3);
       expect(canary).toContain('name = "ANONYMOUS_SESSION_RATE_LIMIT"');
       expect(canary).toContain('namespace_id = "588230349"');

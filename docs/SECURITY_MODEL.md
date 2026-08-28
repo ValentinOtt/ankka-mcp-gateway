@@ -107,10 +107,13 @@ Customer-deployed gateways send no telemetry to Ankka. Their routine Ankka
 request is anonymous signed-release discovery and carries no account,
 hostname, user, cookie, authorization, or referrer.
 
-The optional Ankka-hosted installer has a separate product funnel without user,
-session, request, or customer identifiers. Cloudflare separately adds Network
-Error Logging headers to hosted-zone browser responses, and browsers may send
-the resulting reliability reports to Cloudflare. The exact product fields,
+The optional Ankka-hosted installer has a separate session-scoped product
+funnel: an opaque per-session key with coarse request context (country,
+browser family, and the page-view referrer host), set without cookies and
+without customer identifiers, IP or raw user-agent storage, or any identifier
+that outlives the installer session. Cloudflare separately adds Network Error
+Logging headers to hosted-zone browser responses, and browsers may send the
+resulting reliability reports to Cloudflare. The exact product fields,
 destination, retention, exclusions, and user notice are public in
 [Hosted installer analytics](HOSTED_INSTALLER_ANALYTICS.md). Neither mechanism
 is installed in the customer gateway.

@@ -40,7 +40,7 @@
             <article><h2>Ready for sources</h2><p>The portal starts empty. Add sources and explicit tool allowlists later from your management page.</p></article>
             <article><h2>Reversible canary</h2><p>The retained result offers a bounded removal plan during the recovery window.</p></article>
           </div>
-          <div class="callout" role="note"><strong>Hosted analytics</strong><p>Ankka keeps fixed setup event, public release/channel, coarse outcome, and flow fields for three months in Cloudflare Analytics Engine—without user, session, or Cloudflare-account identifiers. Cloudflare separately processes hosted-zone reliability data. Customer gateways do not report usage to Ankka.</p></div>
+          <div class="callout" role="note"><strong>Hosted analytics</strong><p>Ankka keeps setup funnel events—page view and setup steps with public release/channel, coarse outcome and flow, a per-session key, country, browser family, and, for page views, the referring site—for three months in Cloudflare Analytics Engine. Analytics set no cookies and store no IP address, raw user agent, or identifier that outlives the session. Cloudflare separately processes hosted-zone reliability data. Customer gateways do not report usage to Ankka. Prefer no analytics? Deploy from the public source repository instead.</p></div>
           <div class="button-row"><button id="discover-cloudflare" class="primary-button" type="button">Connect Cloudflare</button></div>
           <div id="discovery-handoff" class="callout" hidden><strong>Continue in your browser</strong><p>Open or copy this short-lived read-only discovery link. Return here after Cloudflare finishes.</p><a id="discovery-link" class="primary-button" target="_blank" rel="noopener noreferrer" hidden>Open Cloudflare sign-in</a></div>
         </section>
@@ -126,11 +126,14 @@
       </main>
     </div>
 
-    <footer><p>The hosted installer keeps fixed setup event, public release/channel,
-      coarse outcome, and flow fields for three months without user, session, or
-      Cloudflare-account identifiers. Cloudflare separately processes hosted-zone
-      reliability data. Customer gateways do not report usage to Ankka. Session data
-      expires automatically.</p></footer>
+    <footer><p>The hosted installer keeps setup funnel events—page view and setup
+      steps with public release/channel, coarse outcome and flow, a per-session key,
+      country, browser family, and, for page views, the referring site—for three
+      months. Analytics set no cookies and store no IP address, raw user agent, or
+      identifier that outlives the session. Cloudflare separately processes
+      hosted-zone reliability data. Customer gateways do not report usage to Ankka.
+      Prefer no analytics? Deploy from the public source repository instead. Session
+      data expires automatically.</p></footer>
     <!-- Classic and parser-blocking by design: it starts progress polling while
          the OAuth callback keeps streaming heartbeats after this HTML shell. -->
     <script src="/assets/installer-3e59f085.js"></script>
