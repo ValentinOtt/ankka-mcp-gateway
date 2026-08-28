@@ -1,0 +1,18 @@
+# Signed release payloads use the exact checkout bytes. Normalize all text to
+# LF so one clean commit produces the same bytes on every supported platform.
+* text=auto eol=lf
+
+# Binary formats must never be line-ending transformed.
+*.avif binary
+*.gif binary
+*.ico binary
+*.jpeg binary
+*.jpg binary
+*.otf binary
+*.pdf binary
+*.png binary
+*.ttf binary
+*.wasm binary
+*.webp binary
+*.woff binary
+*.woff2 binary

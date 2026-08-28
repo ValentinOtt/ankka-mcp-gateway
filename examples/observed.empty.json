@@ -1,0 +1,10 @@
+{
+  "target": {
+    "accountId": "example-account-id",
+    "zoneId": "example-zone-id",
+    "zoneName": "example.com",
+    "zoneStatus": "active",
+    "zeroTrustReady": true
+  },
+  "resources": []
+}

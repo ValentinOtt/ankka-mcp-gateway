@@ -1,0 +1,34 @@
+{
+  "name": "@ankka/gateway-admin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "tsc --noEmit && vite build && node ../../scripts/write-admin-license-bundle.mjs",
+    "dev": "vite --host 127.0.0.1 --port 5730 --strictPort",
+    "preview": "vite preview --host 127.0.0.1 --port 5730 --strictPort",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cloudflare/kumo": "^2.9.2",
+    "@phosphor-icons/react": "^2.1.10",
+    "@tanstack/react-router": "^1.170.23",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^5.2.0",
+    "jsdom": "^26.1.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^6.0.3",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.10"
+  }
+}

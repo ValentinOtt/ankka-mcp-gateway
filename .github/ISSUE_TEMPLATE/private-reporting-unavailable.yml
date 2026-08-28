@@ -1,0 +1,15 @@
+name: Private reporting unavailable
+description: Tell maintainers only that the private security or conduct intake cannot be opened.
+title: "Private reporting unavailable"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include vulnerability details, conduct details, credentials, customer information, private infrastructure, or personal data here. Submit this issue only to ask maintainers to restore the private reporting form.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Public-data confirmation
+      options:
+        - label: I am reporting only that private intake is unavailable, with no sensitive or incident details.
+          required: true

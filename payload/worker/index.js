@@ -1,0 +1,4424 @@
+const API_ORIGIN = 'https://api.cloudflare.com';
+const BOOTSTRAP_PATH = '/__ankka/bootstrap';
+const SOURCE_ACTION_PATH = '/__ankka/source-action';
+const RUNTIME_ACTION_PATH = '/__ankka/runtime-action';
+const TEARDOWN_ACTION_PATH = '/__ankka/teardown-action';
+const UPDATE_CHANNEL_ORIGIN = 'https://deploy.ankka.ai';
+const RELEASE_ENVELOPE_SCHEMA_VERSION = 2;
+const RELEASE_SIGNATURE_CONTEXT = 'ankka-mcp-gateway-release-envelope-v2';
+const INTERNAL_BOOTSTRAP_PATH = '/bootstrap';
+const INTERNAL_PUBLISH_PATH = '/publish-status';
+const INTERNAL_CONTROL_PATH = '/management-control';
+const INTERNAL_ACTIONS_PATH = '/source-actions';
+const INTERNAL_UPDATES_PATH = '/runtime-updates';
+const INTERNAL_TEARDOWNS_PATH = '/teardown-actions';
+const INTERNAL_TEARDOWN_ROOT_PATH = '/teardown-root';
+const INTERNAL_STATUS_PATH = '/status';
+const INTERNAL_SOURCES_PATH = '/sources';
+const STORAGE_KEY = 'ankka-mcp-gateway/uninstall-state/v1';
+const STATUS_KEY = 'ankka-mcp-gateway/public-status/v1';
+const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
+const CONTROL_KEY = 'ankka-mcp-gateway/management-control/v1';
+const ACTIONS_KEY = 'ankka-mcp-gateway/source-actions/v1';
+const UPDATES_KEY = 'ankka-mcp-gateway/runtime-updates/v1';
+const TEARDOWNS_KEY = 'ankka-mcp-gateway/teardown-actions/v1';
+const MANAGER = 'ankka-mcp-gateway';
+const PORTAL_CNAME_TARGET = 'gateway.agents.cloudflare.com';
+const REQUEST_LIMIT_BYTES = 96 * 1024;
+const PROVIDER_RESPONSE_LIMIT_BYTES = 64 * 1024;
+const MCP_RESPONSE_LIMIT_BYTES = 256 * 1024;
+const MCP_REQUEST_LIMIT_BYTES = 32 * 1024;
+const MCP_MAX_PAGES = 8;
+const MCP_MAX_TOOLS = 128;
+const REQUEST_LIFETIME_SECONDS = 5 * 60;
+const MAX_CLOCK_SKEW_SECONDS = 30;
+const MAX_PROVIDER_PAGES = 20;
+const PROVIDER_PAGE_SIZE = 100;
+const RESOURCE_ORDER = Object.freeze([
+  'mcp_server',
+  'source_access_application',
+  'source_access_policy',
+  'portal',
+  'portal_access_application',
+  'portal_access_policy',
+  'dns_record',
+]);
+const PORTAL_RESOURCE_ORDER = Object.freeze([
+  'portal',
+  'portal_access_application',
+  'portal_access_policy',
+  'dns_record',
+]);
+const UPDATE_OAUTH_SCOPES = Object.freeze([
+  'access-acct.write', 'access.write', 'account-settings.read', 'dns.write',
+  'mcp-portals.write', 'memberships.read', 'user-details.read', 'workers-routes.read',
+  'workers-scripts.write', 'zone.read',
+]);
+const APPROVED_UPDATE_CLOUDFLARE_CONTRACT = Object.freeze({
+  assets: Object.freeze({
+    binding: 'ASSETS', notFoundHandling: 'single-page-application',
+    payloadDirectory: 'payload/admin', runWorkerFirst: Object.freeze(['/__ankka/*', '/api/*']),
+  }),
+  compatibilityDate: '2026-08-08',
+  compatibilityFlags: Object.freeze([]),
+  dependenciesInstrumentation: Object.freeze({ enabled: false }),
+  durableObjects: Object.freeze({
+    bindings: Object.freeze([Object.freeze({ binding: 'ADMIN_STATE', className: 'AdminState' })]),
+    exports: Object.freeze({
+      AdminState: Object.freeze({ storage: 'sqlite', type: 'durable-object' }),
+    }),
+  }),
+  mainModule: 'index.js',
+  observability: Object.freeze({ enabled: false }),
+  previewUrls: false,
+  publicBindings: Object.freeze({
+    secrets: Object.freeze([Object.freeze({ lifecycle: 'bootstrap-only', name: 'ANKKA_BOOTSTRAP_NONCE' })]),
+    variables: Object.freeze([
+      'ADMIN_EMAILS', 'ANKKA_GATEWAY_RELEASE', 'ANKKA_GATEWAY_RELEASE_SHA256',
+      'CF_ACCESS_AUD', 'CF_ACCESS_ISSUER', 'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_ZONE_ID',
+      'CLOUDFLARE_ZONE_NAME', 'ANKKA_UPDATE_CHANNEL', 'ANKKA_UPDATE_KEY_ID',
+      'ANKKA_UPDATE_PUBLIC_KEY', 'ZERO_TRUST_READY',
+    ]),
+  }),
+  sendMetrics: false,
+  workersDev: false,
+  workerVariants: Object.freeze({
+    cleanup: Object.freeze({
+      component: 'workerCleanup', compatibilityDate: '2026-08-08', compatibilityFlags: Object.freeze([]),
+      dependenciesInstrumentation: Object.freeze({ enabled: false }),
+      durableObjects: Object.freeze({
+        bindings: Object.freeze([Object.freeze({ binding: 'ADMIN_STATE', className: 'AdminState' })]),
+        exports: Object.freeze({ AdminState: Object.freeze({ storage: 'sqlite', type: 'durable-object' }) }),
+      }),
+      mainModule: 'index.js', observability: Object.freeze({ enabled: false }),
+      payloadDirectory: 'payload/worker-cleanup', previewUrls: false,
+      publicBindings: Object.freeze({
+        secrets: Object.freeze([Object.freeze({ lifecycle: 'uninstall-attempt', name: 'ANKKA_UNINSTALL_NONCE' })]),
+        variables: Object.freeze([
+          'ANKKA_GATEWAY_RELEASE', 'ANKKA_GATEWAY_RELEASE_SHA256', 'CLOUDFLARE_ACCOUNT_ID',
+          'CLOUDFLARE_ZONE_ID', 'CLOUDFLARE_ZONE_NAME', 'ZERO_TRUST_READY',
+        ]),
+      }),
+      publicPath: '/__ankka/uninstall', sendMetrics: false, workersDev: false,
+    }),
+    retirement: Object.freeze({
+      component: 'workerRetirement', compatibilityDate: '2026-08-08', compatibilityFlags: Object.freeze([]),
+      dependenciesInstrumentation: Object.freeze({ enabled: false }),
+      durableObjects: Object.freeze({
+        bindings: Object.freeze([]),
+        exports: Object.freeze({ AdminState: Object.freeze({ state: 'deleted', type: 'durable-object' }) }),
+      }),
+      mainModule: 'index.js', observability: Object.freeze({ enabled: false }),
+      payloadDirectory: 'payload/worker-retirement', previewUrls: false,
+      publicBindings: Object.freeze({ secrets: Object.freeze([]), variables: Object.freeze([]) }),
+      sendMetrics: false, workersDev: false,
+    }),
+  }),
+});
+const HASH = /^sha256:[a-f0-9]{64}$/u;
+const INSTALLATION_ID = /^acg-[a-f0-9]{24}$/u;
+const PLAN_ID = /^plan-[a-f0-9]{24}$/u;
+const REQUEST_ID = /^[A-Za-z0-9_-]{22}$/u;
+const RELEASE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,79}$/u;
+const RESOURCE_KEY = /^[a-z][a-z0-9-]{0,31}$/u;
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
+const ACCOUNT_ID = /^[a-f0-9]{32}$/u;
+const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+const NONCE = /^[A-Za-z0-9_-]{43}$/u;
+const SIGNATURE = /^sha256=[a-f0-9]{64}$/u;
+const EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u;
+const TOOL = /^[A-Za-z0-9_.:/-]{1,128}$/u;
+const SOURCE_ID = /^source-[a-f0-9]{16}$/u;
+const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u;
+const KEY_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
+const PUBLIC_KEY = /^[A-Za-z0-9_-]{43}$/u;
+const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+const VERSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
+const CONTROL = /[\u0000-\u001f\u007f]/u;
+const PUBLIC_HEADERS = Object.freeze({
+  'cache-control': 'no-store',
+  'content-type': 'application/json; charset=utf-8',
+  'cross-origin-resource-policy': 'same-origin',
+  'permissions-policy': 'camera=(), geolocation=(), microphone=(), payment=(), usb=()',
+  'referrer-policy': 'no-referrer',
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+});
+
+function compareText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function isRecord(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  try {
+    if (Object.getPrototypeOf(value) !== Object.prototype) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    return Object.values(descriptors).every((descriptor) => (
+      descriptor.enumerable === true && 'value' in descriptor
+    ));
+  } catch {
+    return false;
+  }
+}
+
+function exactKeys(value, expected) {
+  if (!isRecord(value)) return false;
+  const actual = Object.keys(value).sort(compareText);
+  const keys = [...expected].sort(compareText);
+  return actual.length === keys.length && actual.every((key, index) => key === keys[index]);
+}
+
+function isPlainData(value, seen = new Set()) {
+  if (value === null || ['boolean', 'number', 'string'].includes(typeof value)) {
+    return typeof value !== 'number' || Number.isFinite(value);
+  }
+  if (typeof value !== 'object' || seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.every((entry) => isPlainData(entry, seen));
+  if (!isRecord(value)) return false;
+  return Object.values(value).every((entry) => isPlainData(entry, seen));
+}
+
+function canonicalJson(value) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort(compareText)
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(',')}}`;
+  }
+  throw new TypeError('canonical_json_invalid');
+}
+
+function base64UrlEncode(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+}
+
+function base64UrlDecode(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]*$/u.test(value)) return null;
+  try {
+    const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    return base64UrlEncode(bytes) === value ? bytes : null;
+  } catch {
+    return null;
+  }
+}
+
+function randomBase64Url(byteLength) {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  try { return base64UrlEncode(bytes); } finally { bytes.fill(0); }
+}
+
+async function sha256(value) {
+  const digest = new Uint8Array(await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(typeof value === 'string' ? value : canonicalJson(value)),
+  ));
+  const result = `sha256:${[...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+  digest.fill(0);
+  return result;
+}
+
+async function sha256Hex(value) {
+  return (await sha256(value)).slice('sha256:'.length);
+}
+
+function fixedJson(status, body, headers = {}) {
+  return new Response(canonicalJson(body), {
+    status,
+    headers: { ...PUBLIC_HEADERS, ...headers },
+  });
+}
+
+function rejected(status = 400) {
+  return fixedJson(status, { schemaVersion: 1, error: 'bootstrap_rejected', retryable: false });
+}
+
+function recovery(reason) {
+  return fixedJson(409, {
+    schemaVersion: 1,
+    error: reason,
+    retryable: reason === 'bootstrap_recovery_required',
+  });
+}
+
+function hostname(value) {
+  if (
+    typeof value !== 'string' || value.length > 253 || value !== value.toLowerCase() ||
+    value.includes(':') || /^(?:\d+\.)+\d+$/u.test(value)
+  ) return false;
+  const labels = value.split('.');
+  return labels.length >= 2 && labels.every((label) => HOST_LABEL.test(label));
+}
+
+function normalizedEmail(value) {
+  if (typeof value !== 'string') return null;
+  const email = value.trim().toLowerCase();
+  return email.length <= 254 && EMAIL.test(email) ? email : null;
+}
+
+function exactSortedUniqueStrings(value, parser, maximum, minimum = 0) {
+  if (!Array.isArray(value) || value.length < minimum || value.length > maximum) return null;
+  const parsed = [];
+  for (const entry of value) {
+    const item = parser(entry);
+    if (item === null) return null;
+    parsed.push(item);
+  }
+  const sorted = [...new Set(parsed)].sort(compareText);
+  if (sorted.length !== parsed.length || canonicalJson(sorted) !== canonicalJson(parsed)) return null;
+  return Object.freeze(sorted);
+}
+
+function canonicalBase64Url32(value) {
+  if (typeof value !== 'string' || !NONCE.test(value)) return null;
+  let decoded;
+  try {
+    const raw = atob(`${value.replaceAll('-', '+').replaceAll('_', '/')}=`);
+    decoded = Uint8Array.from(raw, (character) => character.charCodeAt(0));
+  } catch {
+    return null;
+  }
+  if (decoded.byteLength !== 32 || decoded.every((byte) => byte === 0)) {
+    decoded.fill(0);
+    return null;
+  }
+  const canonical = btoa(String.fromCharCode(...decoded))
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/u, '');
+  if (canonical !== value) {
+    decoded.fill(0);
+    return null;
+  }
+  return decoded;
+}
+
+function hexBytes(value) {
+  if (typeof value !== 'string' || !SIGNATURE.test(value)) return null;
+  return Uint8Array.from(value.slice('sha256='.length).match(/../gu) ?? [], (hex) => (
+    Number.parseInt(hex, 16)
+  ));
+}
+
+async function verifyHmac(rawBody, encodedNonce, signatureHeader) {
+  const keyBytes = canonicalBase64Url32(encodedNonce);
+  const signature = hexBytes(signatureHeader);
+  if (!keyBytes || !signature || signature.byteLength !== 32) {
+    keyBytes?.fill(0);
+    signature?.fill(0);
+    return false;
+  }
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'],
+    );
+    return await crypto.subtle.verify(
+      'HMAC', key, signature, new TextEncoder().encode(rawBody),
+    );
+  } catch {
+    return false;
+  } finally {
+    keyBytes.fill(0);
+    signature.fill(0);
+  }
+}
+
+async function readBoundedText(request, limit) {
+  const declared = request.headers.get('content-length');
+  if (declared !== null) {
+    const size = Number(declared);
+    if (!Number.isSafeInteger(size) || size < 0 || size > limit) return null;
+  }
+  if (!request.body) return null;
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value.byteLength > limit - total) {
+        try { await reader.cancel(); } catch { /* The size failure is authoritative. */ }
+        return null;
+      }
+      if (value.byteLength > 0) {
+        chunks.push(value.slice());
+        total += value.byteLength;
+      }
+    }
+    if (total === 0) return null;
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      return null;
+    } finally {
+      bytes.fill(0);
+    }
+  } catch {
+    try { await reader.cancel(); } catch { /* The fixed rejection remains authoritative. */ }
+    return null;
+  } finally {
+    for (const chunk of chunks) chunk.fill(0);
+    try { reader.releaseLock(); } catch { /* The fixed rejection remains authoritative. */ }
+  }
+}
+
+class SourceDiscoveryError extends Error {
+  constructor(status, code) {
+    super(code);
+    this.name = 'SourceDiscoveryError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function sourceFailure(error) {
+  return error instanceof SourceDiscoveryError
+    ? error
+    : new SourceDiscoveryError(502, 'source_unreachable');
+}
+
+function validSourceLabel(value) {
+  return typeof value === 'string' && value.length >= 2 && value.length <= 80 &&
+    value.trim() === value && !CONTROL.test(value);
+}
+
+function publicMcpUrl(value) {
+  if (typeof value !== 'string' || value.length > 2048) return null;
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  const blockedSuffixes = ['.internal', '.invalid', '.local', '.localhost', '.onion', '.test'];
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || url.search || url.hash ||
+      url.pathname === '/' || url.pathname.length > 1024 || !hostname(url.hostname) ||
+      url.hostname === 'localhost' || blockedSuffixes.some((suffix) => url.hostname.endsWith(suffix))) return null;
+  return url.href;
+}
+
+function hasStandardOauthChallenge(response) {
+  const challenge = response.headers.get('www-authenticate');
+  if (typeof challenge !== 'string' || !/^\s*Bearer(?:\s|$)/iu.test(challenge)) return false;
+  const match = challenge.match(/(?:^|[\s,])resource_metadata=(?:"([^"\r\n]+)"|([^,\s]+))/iu);
+  const value = match?.[1] ?? match?.[2];
+  if (!value || value.length > 2048) return false;
+  let url;
+  try { url = new URL(value); } catch { return false; }
+  const blockedSuffixes = ['.internal', '.invalid', '.local', '.localhost', '.onion', '.test'];
+  return url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.hash &&
+    hostname(url.hostname) && url.hostname !== 'localhost' &&
+    !blockedSuffixes.some((suffix) => url.hostname.endsWith(suffix));
+}
+
+function parseJsonRpcMessage(serialized, contentType, requestId) {
+  const candidates = [];
+  if (contentType.startsWith('application/json')) {
+    try { candidates.push(JSON.parse(serialized)); } catch { return null; }
+  } else if (contentType.startsWith('text/event-stream')) {
+    for (const event of serialized.split(/\r?\n\r?\n/u)) {
+      const data = event.split(/\r?\n/u)
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n');
+      if (!data) continue;
+      try { candidates.push(JSON.parse(data)); } catch { return null; }
+    }
+  } else {
+    return null;
+  }
+  return candidates.find((candidate) => isRecord(candidate) && candidate.jsonrpc === '2.0' &&
+    candidate.id === requestId) ?? null;
+}
+
+async function mcpPost(endpoint, message, headers = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8_000);
+  let response;
+  try {
+    response = await fetch(new Request(endpoint, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json, text/event-stream',
+        'content-type': 'application/json',
+        ...headers,
+      },
+      body: canonicalJson(message),
+      redirect: 'manual',
+      signal: controller.signal,
+    }));
+  } catch {
+    throw new SourceDiscoveryError(502, 'source_unreachable');
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!(response instanceof Response) || response.redirected || response.status >= 300 && response.status < 400) {
+    if (response instanceof Response) await discardBody(response);
+    throw new SourceDiscoveryError(502, 'source_protocol_invalid');
+  }
+  if (response.status === 401 || response.status === 403) {
+    const standardOauth = response.status === 401 && hasStandardOauthChallenge(response);
+    await discardBody(response);
+    throw new SourceDiscoveryError(
+      401,
+      standardOauth ? 'source_authentication_required' : 'source_authentication_unsupported',
+    );
+  }
+  if (!response.ok) {
+    await discardBody(response);
+    throw new SourceDiscoveryError(
+      [400, 405, 415, 422, 501].includes(response.status) ? 409 : 502,
+      [400, 405, 415, 422, 501].includes(response.status)
+        ? 'source_protocol_unsupported'
+        : 'source_unreachable',
+    );
+  }
+  const serialized = await readBoundedText(response, MCP_RESPONSE_LIMIT_BYTES);
+  if (serialized === null) throw new SourceDiscoveryError(502, 'source_response_invalid');
+  const parsed = parseJsonRpcMessage(
+    serialized,
+    (response.headers.get('content-type') ?? '').toLowerCase(),
+    message.id,
+  );
+  if (!parsed) throw new SourceDiscoveryError(502, 'source_response_invalid');
+  return Object.freeze({ parsed, sessionId: response.headers.get('mcp-session-id') });
+}
+
+async function mcpNotification(endpoint, message, headers = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8_000);
+  let response;
+  try {
+    response = await fetch(new Request(endpoint, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json, text/event-stream',
+        'content-type': 'application/json',
+        ...headers,
+      },
+      body: canonicalJson(message),
+      redirect: 'manual',
+      signal: controller.signal,
+    }));
+  } catch {
+    throw new SourceDiscoveryError(502, 'source_unreachable');
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!(response instanceof Response) || response.redirected || ![200, 202, 204].includes(response.status)) {
+    if (response instanceof Response) await discardBody(response);
+    throw new SourceDiscoveryError(502, 'source_response_invalid');
+  }
+  await discardBody(response);
+}
+
+function requireMcpResult(message, allowUnsupported = false) {
+  if (!isRecord(message) || message.jsonrpc !== '2.0') {
+    throw new SourceDiscoveryError(502, 'source_response_invalid');
+  }
+  if (isRecord(message.error)) {
+    throw new SourceDiscoveryError(
+      allowUnsupported ? 409 : 502,
+      allowUnsupported ? 'source_protocol_unsupported' : 'source_response_invalid',
+    );
+  }
+  if (!isRecord(message.result)) throw new SourceDiscoveryError(502, 'source_response_invalid');
+  return message.result;
+}
+
+function safeToolSummary(value) {
+  if (!isRecord(value) || typeof value.name !== 'string' || !TOOL.test(value.name)) return null;
+  const optionalText = (input, maximum) => (
+    typeof input === 'string' && input.length <= maximum && !CONTROL.test(input) ? input : null
+  );
+  const annotations = isRecord(value.annotations) ? value.annotations : {};
+  const hint = (name) => typeof annotations[name] === 'boolean' ? annotations[name] : null;
+  const readOnlyHint = hint('readOnlyHint');
+  const destructiveHint = hint('destructiveHint');
+  return Object.freeze({
+    name: value.name,
+    title: optionalText(value.title, 160),
+    description: optionalText(value.description, 2_000),
+    readOnlyHint,
+    destructiveHint,
+    openWorldHint: hint('openWorldHint'),
+    defaultSelected: readOnlyHint === true && destructiveHint === false,
+  });
+}
+
+function collectToolPage(result, tools, names) {
+  if (!Array.isArray(result.tools) || result.tools.length > MCP_MAX_TOOLS) {
+    throw new SourceDiscoveryError(502, 'source_tool_list_invalid');
+  }
+  for (const candidate of result.tools) {
+    const tool = safeToolSummary(candidate);
+    if (!tool || names.has(tool.name) || tools.length >= MCP_MAX_TOOLS) {
+      throw new SourceDiscoveryError(502, 'source_tool_list_invalid');
+    }
+    names.add(tool.name);
+    tools.push(tool);
+  }
+  if (!Object.hasOwn(result, 'nextCursor')) return undefined;
+  if (typeof result.nextCursor !== 'string' || result.nextCursor.length > 2048 || CONTROL.test(result.nextCursor)) {
+    throw new SourceDiscoveryError(502, 'source_tool_list_invalid');
+  }
+  return result.nextCursor;
+}
+
+function modernRequestMeta() {
+  return {
+    'io.modelcontextprotocol/clientInfo': {
+      name: 'ankka-mcp-gateway',
+      version: '1.0.0',
+    },
+  };
+}
+
+async function discoverModernMcpTools(endpoint) {
+  const tools = [];
+  const names = new Set();
+  let cursor;
+  for (let page = 0; page < MCP_MAX_PAGES; page += 1) {
+    const id = page + 1;
+    const params = { _meta: modernRequestMeta() };
+    if (cursor !== undefined) params.cursor = cursor;
+    const response = await mcpPost(endpoint, {
+      jsonrpc: '2.0', id, method: 'tools/list', params,
+    }, {
+      'mcp-protocol-version': '2026-07-28',
+      'mcp-method': 'tools/list',
+    });
+    cursor = collectToolPage(requireMcpResult(response.parsed, true), tools, names);
+    if (cursor === undefined) return Object.freeze({ protocolVersion: '2026-07-28', tools: Object.freeze(tools) });
+  }
+  throw new SourceDiscoveryError(502, 'source_tool_list_invalid');
+}
+
+function safeSessionId(value) {
+  return typeof value === 'string' && /^[\x21-\x7e]{1,256}$/u.test(value) ? value : null;
+}
+
+async function discoverLegacyMcpTools(endpoint) {
+  const initialized = await mcpPost(endpoint, {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'ankka-mcp-gateway', version: '1.0.0' },
+    },
+  }, { 'mcp-method': 'initialize' });
+  const result = requireMcpResult(initialized.parsed);
+  if (typeof result.protocolVersion !== 'string' ||
+      !/^2025-(?:03-26|06-18|11-25)$/u.test(result.protocolVersion)) {
+    throw new SourceDiscoveryError(502, 'source_protocol_unsupported');
+  }
+  const sessionId = initialized.sessionId === null ? null : safeSessionId(initialized.sessionId);
+  if (initialized.sessionId !== null && !sessionId) {
+    throw new SourceDiscoveryError(502, 'source_response_invalid');
+  }
+  const baseHeaders = {
+    'mcp-protocol-version': result.protocolVersion,
+    ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+  };
+  await mcpNotification(endpoint, {
+    jsonrpc: '2.0', method: 'notifications/initialized',
+  }, { ...baseHeaders, 'mcp-method': 'notifications/initialized' });
+  const tools = [];
+  const names = new Set();
+  let cursor;
+  for (let page = 0; page < MCP_MAX_PAGES; page += 1) {
+    const id = page + 2;
+    const params = cursor === undefined ? {} : { cursor };
+    const response = await mcpPost(endpoint, {
+      jsonrpc: '2.0', id, method: 'tools/list', params,
+    }, { ...baseHeaders, 'mcp-method': 'tools/list' });
+    cursor = collectToolPage(requireMcpResult(response.parsed), tools, names);
+    if (cursor === undefined) return Object.freeze({
+      protocolVersion: result.protocolVersion,
+      tools: Object.freeze(tools),
+    });
+  }
+  throw new SourceDiscoveryError(502, 'source_tool_list_invalid');
+}
+
+async function discoverMcpTools(value) {
+  const endpoint = publicMcpUrl(value);
+  if (!endpoint) throw new SourceDiscoveryError(400, 'source_url_invalid');
+  try {
+    const discovered = await discoverModernMcpTools(endpoint);
+    return Object.freeze({ endpoint, ...discovered });
+  } catch (error) {
+    const stable = sourceFailure(error);
+    if (stable.code !== 'source_protocol_unsupported') throw stable;
+  }
+  try {
+    const discovered = await discoverLegacyMcpTools(endpoint);
+    return Object.freeze({ endpoint, ...discovered });
+  } catch (error) {
+    const stable = sourceFailure(error);
+    if (stable.code === 'source_protocol_unsupported') {
+      throw new SourceDiscoveryError(502, 'source_response_invalid');
+    }
+    throw stable;
+  }
+}
+
+async function inspectMcpSource(value) {
+  const endpoint = publicMcpUrl(value);
+  if (!endpoint) throw new SourceDiscoveryError(400, 'source_url_invalid');
+  try {
+    const discovered = await discoverMcpTools(endpoint);
+    return Object.freeze({ authMode: 'none', ...discovered });
+  } catch (error) {
+    const stable = sourceFailure(error);
+    if (stable.code !== 'source_authentication_required') throw stable;
+    return Object.freeze({
+      authMode: 'oauth',
+      endpoint,
+      protocolVersion: '2026-07-28',
+      tools: Object.freeze([]),
+    });
+  }
+}
+
+async function verifyManagedSource(source) {
+  const inspected = await inspectMcpSource(source.url);
+  if (inspected.authMode !== source.authMode) {
+    throw new SourceDiscoveryError(409, 'source_authentication_changed');
+  }
+  if (source.authMode === 'none') {
+    const available = new Set(inspected.tools.map((tool) => tool.name));
+    if (source.enabledTools.some((tool) => !available.has(tool))) {
+      throw new SourceDiscoveryError(409, 'source_tools_changed');
+    }
+  }
+  return inspected;
+}
+
+function parseEnvironment(env, requireNonce = false) {
+  if (!env || typeof env !== 'object') return null;
+  const value = {
+    accountId: env.CLOUDFLARE_ACCOUNT_ID,
+    zoneId: env.CLOUDFLARE_ZONE_ID,
+    zoneName: env.CLOUDFLARE_ZONE_NAME,
+    release: env.ANKKA_GATEWAY_RELEASE,
+    releaseSha256: env.ANKKA_GATEWAY_RELEASE_SHA256,
+    zeroTrustReady: env.ZERO_TRUST_READY,
+    bootstrapNonce: env.ANKKA_BOOTSTRAP_NONCE,
+  };
+  if (
+    typeof value.accountId !== 'string' || !ACCOUNT_ID.test(value.accountId) ||
+    typeof value.zoneId !== 'string' || !ACCOUNT_ID.test(value.zoneId) ||
+    !hostname(value.zoneName) || typeof value.release !== 'string' || !RELEASE.test(value.release) ||
+    typeof value.releaseSha256 !== 'string' || !HASH.test(value.releaseSha256) ||
+    value.zeroTrustReady !== 'true' ||
+    (requireNonce && (typeof value.bootstrapNonce !== 'string' || !NONCE.test(value.bootstrapNonce)))
+  ) return null;
+  return Object.freeze(value);
+}
+
+function parseManagementEnvironment(env) {
+  const base = parseEnvironment(env, false);
+  if (!base || typeof env.ANKKA_WORKER_NAME !== 'string' || !WORKER_NAME.test(env.ANKKA_WORKER_NAME) ||
+      typeof env.ANKKA_WORKERS_SUBDOMAIN !== 'string' || !HOST_LABEL.test(env.ANKKA_WORKERS_SUBDOMAIN) ||
+      !hostname(env.ANKKA_MANAGEMENT_HOSTNAME) || !['canary', 'stable'].includes(env.ANKKA_UPDATE_CHANNEL) ||
+      typeof env.ANKKA_UPDATE_KEY_ID !== 'string' || !KEY_ID.test(env.ANKKA_UPDATE_KEY_ID) ||
+      typeof env.ANKKA_UPDATE_PUBLIC_KEY !== 'string' || !PUBLIC_KEY.test(env.ANKKA_UPDATE_PUBLIC_KEY)) return null;
+  return Object.freeze({
+    ...base,
+    workerName: env.ANKKA_WORKER_NAME,
+    workersSubdomain: env.ANKKA_WORKERS_SUBDOMAIN,
+    managementHostname: env.ANKKA_MANAGEMENT_HOSTNAME,
+    updateChannel: env.ANKKA_UPDATE_CHANNEL,
+    updateKeyId: env.ANKKA_UPDATE_KEY_ID,
+    updatePublicKey: env.ANKKA_UPDATE_PUBLIC_KEY,
+  });
+}
+
+function exactReleaseIdentity(environment) {
+  return Object.freeze({
+    schemaVersion: 1,
+    channel: environment.updateChannel,
+    release: environment.release,
+    keyId: environment.updateKeyId,
+    publicKey: environment.updatePublicKey,
+    artifactSha256: environment.releaseSha256.slice('sha256:'.length),
+  });
+}
+
+function updateSemver(value) {
+  const match = /^gateway-v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(value);
+  return match ? match.slice(1).map(Number) : null;
+}
+
+function compareUpdateRelease(left, right) {
+  const a = updateSemver(left);
+  const b = updateSemver(right);
+  if (!a || !b) return null;
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+  }
+  return 0;
+}
+
+function parseUpdateFile(value, component) {
+  if (!exactKeys(value, ['byteSize', 'contentType', 'path', 'sha256']) ||
+      !Number.isSafeInteger(value.byteSize) || value.byteSize < 0 || value.byteSize > 8 * 1024 * 1024 ||
+      typeof value.contentType !== 'string' || value.contentType.length < 1 || value.contentType.length > 128 ||
+      typeof value.path !== 'string' || !value.path.startsWith(`payload/${component}/`) ||
+      value.path.includes('\\') || value.path.split('/').some((pathPart) => !pathPart || pathPart === '.' || pathPart === '..') ||
+      typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.sha256)) return null;
+  return Object.freeze({ ...value });
+}
+
+async function parseUpdateComponent(value, component) {
+  if (!exactKeys(value, ['byteSize', 'fileCount', 'files', 'treeSha256']) ||
+      !Number.isSafeInteger(value.byteSize) || value.byteSize < 0 || value.byteSize > 32 * 1024 * 1024 ||
+      !Number.isSafeInteger(value.fileCount) || value.fileCount < 1 || value.fileCount > 10_000 ||
+      !Array.isArray(value.files) || value.files.length !== value.fileCount ||
+      typeof value.treeSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.treeSha256)) return null;
+  const files = value.files.map((file) => parseUpdateFile(file, component));
+  if (files.some((file) => file === null) || files.some((file, index) => index > 0 && files[index - 1].path >= file.path) ||
+      files.reduce((sum, file) => sum + file.byteSize, 0) !== value.byteSize ||
+      await sha256Hex(canonicalJson(files)) !== value.treeSha256) return null;
+  return Object.freeze({ ...value, files: Object.freeze(files) });
+}
+
+async function parseSignedUpdateManifest(serialized) {
+  if (typeof serialized !== 'string' || serialized.length < 1 || serialized.length > 8 * 1024 * 1024) return null;
+  let value;
+  try { value = JSON.parse(serialized); } catch { return null; }
+  if (!isPlainData(value) || canonicalJson(value) !== serialized || !exactKeys(value, [
+    'artifact', 'cloudflare', 'components', 'oauthScopeIds', 'release', 'schemaVersion', 'sourceCommit',
+  ]) || value.schemaVersion !== 1 || !updateSemver(value.release) ||
+      typeof value.sourceCommit !== 'string' || !/^[a-f0-9]{40}$/u.test(value.sourceCommit) ||
+      canonicalJson(value.cloudflare) !== canonicalJson(APPROVED_UPDATE_CLOUDFLARE_CONTRACT) ||
+      canonicalJson(value.oauthScopeIds) !== canonicalJson(UPDATE_OAUTH_SCOPES) ||
+      !exactKeys(value.artifact, ['byteSize', 'fileCount', 'treeSha256']) ||
+      !Number.isSafeInteger(value.artifact.byteSize) || value.artifact.byteSize < 1 ||
+      value.artifact.byteSize > 32 * 1024 * 1024 ||
+      !Number.isSafeInteger(value.artifact.fileCount) || value.artifact.fileCount < 1 ||
+      value.artifact.fileCount > 10_000 || typeof value.artifact.treeSha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/u.test(value.artifact.treeSha256) || !exactKeys(value.components, [
+        'admin', 'installer', 'worker', 'workerCleanup', 'workerRetirement',
+      ])) return null;
+  const components = {};
+  for (const [name, directory] of [
+    ['admin', 'admin'], ['installer', 'installer'], ['worker', 'worker'],
+    ['workerCleanup', 'worker-cleanup'], ['workerRetirement', 'worker-retirement'],
+  ]) {
+    components[name] = await parseUpdateComponent(value.components[name], directory);
+    if (!components[name]) return null;
+  }
+  const files = Object.values(components).flatMap((component) => component.files)
+    .sort((left, right) => compareText(left.path, right.path));
+  if (files.length !== value.artifact.fileCount ||
+      files.reduce((sum, file) => sum + file.byteSize, 0) !== value.artifact.byteSize ||
+      await sha256Hex(canonicalJson(files)) !== value.artifact.treeSha256) return null;
+  return Object.freeze({ ...value, components: Object.freeze(components) });
+}
+
+async function verifyUpdateEnvelope(value, environment) {
+  if (!exactKeys(value, [
+    'algorithm', 'channel', 'keyId', 'manifest', 'schemaVersion', 'signature', 'signatureContext',
+  ]) || value.algorithm !== 'ed25519' || value.channel !== environment.updateChannel ||
+      value.keyId !== environment.updateKeyId || value.schemaVersion !== RELEASE_ENVELOPE_SCHEMA_VERSION ||
+      value.signatureContext !== RELEASE_SIGNATURE_CONTEXT ||
+      typeof value.manifest !== 'string' || typeof value.signature !== 'string' ||
+      !/^[A-Za-z0-9_-]{86}$/u.test(value.signature)) return null;
+  const publicBytes = base64UrlDecode(environment.updatePublicKey);
+  const signatureBytes = base64UrlDecode(value.signature);
+  if (!publicBytes || publicBytes.byteLength !== 32 || !signatureBytes || signatureBytes.byteLength !== 64) return null;
+  try {
+    const key = await crypto.subtle.importKey('raw', publicBytes, { name: 'Ed25519' }, false, ['verify']);
+    const statement = canonicalJson({
+      channel: value.channel,
+      keyId: value.keyId,
+      manifest: value.manifest,
+      schemaVersion: RELEASE_ENVELOPE_SCHEMA_VERSION,
+      signatureContext: RELEASE_SIGNATURE_CONTEXT,
+    });
+    if (!await crypto.subtle.verify(
+      'Ed25519', key, signatureBytes, new TextEncoder().encode(statement),
+    )) return null;
+  } catch { return null; } finally { publicBytes.fill(0); signatureBytes.fill(0); }
+  return parseSignedUpdateManifest(value.manifest);
+}
+
+async function parseUpdateChannel(value, environment) {
+  if (!exactKeys(value, ['channel', 'classification', 'notes', 'release', 'schemaVersion', 'verification']) ||
+      value.schemaVersion !== 1 || value.channel !== environment.updateChannel ||
+      !exactKeys(value.release, ['artifactSha256', 'id', 'sourceCommit']) || !updateSemver(value.release.id) ||
+      typeof value.release.artifactSha256 !== 'string' || !HASH.test(value.release.artifactSha256) ||
+      typeof value.release.sourceCommit !== 'string' || !/^[a-f0-9]{40}$/u.test(value.release.sourceCommit) ||
+      !exactKeys(value.classification, ['changes', 'excludes', 'kind', 'updaterProtocol']) ||
+      value.classification.kind !== 'normal' || value.classification.updaterProtocol !== 2 ||
+      canonicalJson(value.classification.changes) !== canonicalJson(['customer_worker_code', 'management_assets']) ||
+      canonicalJson(value.classification.excludes) !== canonicalJson([
+        'access_policies', 'credentials', 'dns', 'durable_object_migrations',
+        'mcp_portal_configuration', 'sources', 'tool_allowlists',
+      ]) || !Array.isArray(value.notes) || value.notes.length < 1 || value.notes.length > 8 ||
+      value.notes.some((note) => typeof note !== 'string' || note.length < 1 || note.length > 512)) return null;
+  const manifest = await verifyUpdateEnvelope(value.verification, environment);
+  if (!manifest || manifest.release !== value.release.id ||
+      `sha256:${manifest.artifact.treeSha256}` !== value.release.artifactSha256 ||
+      manifest.sourceCommit !== value.release.sourceCommit) return null;
+  return Object.freeze({
+    schemaVersion: 1,
+    channel: value.channel,
+    release: Object.freeze({ ...value.release }),
+    classification: Object.freeze({
+      kind: 'normal', updaterProtocol: 2,
+      changes: Object.freeze([...value.classification.changes]),
+      excludes: Object.freeze([...value.classification.excludes]),
+    }),
+    notes: Object.freeze([...value.notes]),
+    verification: Object.freeze({ ...value.verification }),
+    manifest,
+  });
+}
+
+async function discoverRuntimeUpdate(env) {
+  const environment = parseManagementEnvironment(env);
+  if (!environment) return null;
+  let response;
+  try {
+    response = await fetch(`${UPDATE_CHANNEL_ORIGIN}/api/releases/${environment.updateChannel}`, {
+      method: 'GET', headers: { accept: 'application/json' }, redirect: 'manual',
+    });
+  } catch { return null; }
+  if (!response.ok || response.redirected ||
+      !response.headers.get('content-type')?.toLowerCase().startsWith('application/json')) return null;
+  const serialized = await readBoundedText(response, 8 * 1024 * 1024);
+  let value;
+  try { value = serialized === null ? null : JSON.parse(serialized); } catch { value = null; }
+  const channel = await parseUpdateChannel(value, environment);
+  if (!channel) return null;
+  const comparison = compareUpdateRelease(environment.release, channel.release.id);
+  if (comparison === null) return null;
+  return Object.freeze({ environment, channel, comparison });
+}
+
+function parseSettings(value) {
+  if (!exactKeys(value, ['schemaVersion', 'connect', 'access', 'sources']) || value.schemaVersion !== 1 ||
+      !exactKeys(value.connect, ['name', 'hostname', 'codeMode']) ||
+      typeof value.connect.name !== 'string' || value.connect.name.length < 2 || value.connect.name.length > 80 ||
+      value.connect.name.trim() !== value.connect.name || CONTROL.test(value.connect.name) ||
+      !hostname(value.connect.hostname) || value.connect.codeMode !== 'default_on' ||
+      !exactKeys(value.access, ['adminEmails', 'memberEmails']) ||
+      !Array.isArray(value.sources) || value.sources.length > 1) return null;
+  const adminEmails = exactSortedUniqueStrings(value.access.adminEmails, normalizedEmail, 1, 1);
+  const memberEmails = exactSortedUniqueStrings(value.access.memberEmails, normalizedEmail, 50);
+  if (!adminEmails || !memberEmails || adminEmails.some((email) => memberEmails.includes(email))) return null;
+  if (value.sources.length === 0) {
+    return Object.freeze({
+      schemaVersion: 1,
+      connect: Object.freeze({ name: value.connect.name, hostname: value.connect.hostname, codeMode: 'default_on' }),
+      access: Object.freeze({ adminEmails, memberEmails }),
+      sources: Object.freeze([]),
+    });
+  }
+  const source = value.sources[0];
+  if (
+      !exactKeys(source, ['id', 'label', 'url', 'authentication', 'enabledTools']) ||
+      source.id !== 'company-context' || typeof source.label !== 'string' || source.label.length < 2 ||
+      source.label.length > 80 || source.label.trim() !== source.label || CONTROL.test(source.label) ||
+      !exactKeys(source.authentication, ['mode', 'onBehalfOfUser']) ||
+      source.authentication.mode !== 'none' || source.authentication.onBehalfOfUser !== false) return null;
+  let sourceUrl;
+  try { sourceUrl = new URL(source.url); } catch { return null; }
+  if (sourceUrl.protocol !== 'https:' || sourceUrl.username || sourceUrl.password || sourceUrl.port ||
+      sourceUrl.search || sourceUrl.hash || sourceUrl.pathname === '/' || !hostname(sourceUrl.hostname) ||
+      sourceUrl.toString() !== source.url) return null;
+  const enabledTools = exactSortedUniqueStrings(
+    source.enabledTools,
+    (entry) => typeof entry === 'string' && TOOL.test(entry) ? entry : null,
+    64,
+    1,
+  );
+  if (!enabledTools) return null;
+  return Object.freeze({
+    schemaVersion: 1,
+    connect: Object.freeze({ name: value.connect.name, hostname: value.connect.hostname, codeMode: 'default_on' }),
+    access: Object.freeze({ adminEmails, memberEmails }),
+    sources: Object.freeze([Object.freeze({
+      id: 'company-context',
+      label: source.label,
+      url: sourceUrl.toString(),
+      authentication: Object.freeze({ mode: 'none', onBehalfOfUser: false }),
+      enabledTools,
+    })]),
+  });
+}
+
+async function stableResourceKey(prefix, installationId, logicalId) {
+  const digest = await sha256Hex({ installationId, prefix, logicalId });
+  const hint = logicalId
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/gu, '-')
+    .replace(/^-+|-+$/gu, '');
+  const hintLength = Math.max(0, 32 - prefix.length - 10);
+  if (hint && hintLength > 0) return `${prefix}-${hint.slice(0, hintLength)}-${digest.slice(0, 8)}`;
+  return `${prefix}-${digest.slice(0, 32 - prefix.length - 1)}`;
+}
+
+function marker(installationId, key) {
+  return `acg:v1:${installationId}:${key}`;
+}
+
+async function buildDesiredResources(settings, installationId) {
+  const source = settings.sources[0] ?? null;
+  const allowedEmails = [...settings.access.adminEmails, ...settings.access.memberEmails].sort(compareText);
+  const identitiesHash = await sha256({ emails: allowedEmails });
+  const metadata = { manager: MANAGER, installationId };
+  const emailAllowPolicy = {
+    identitiesRef: 'access.allowedEmails',
+    identityType: 'email',
+    identityCount: allowedEmails.length,
+    identitiesHash,
+  };
+  const mcpKey = source === null ? null : await stableResourceKey('mcp', installationId, source.id);
+  const sourceApplicationKey = source === null ? null : await stableResourceKey('source-app', installationId, source.id);
+  const sourceAccessKey = source === null ? null : await stableResourceKey('source-access', installationId, source.id);
+  const portalKey = await stableResourceKey('portal', installationId, settings.connect.hostname);
+  const portalApplicationKey = await stableResourceKey('portal-app', installationId, settings.connect.hostname);
+  const portalAccessKey = await stableResourceKey('portal-access', installationId, settings.connect.hostname);
+  const dnsKey = await stableResourceKey('dns', installationId, settings.connect.hostname);
+  const sourceMappings = source === null ? [] : [{
+    sourceResourceKey: mcpKey,
+    defaultDisabled: true,
+    allowedTools: [...source.enabledTools].sort(compareText),
+    onBehalfOfUser: source.authentication.onBehalfOfUser,
+  }];
+  const sourceSpecifications = source === null ? [] : [
+    {
+      kind: 'mcp_server', key: mcpKey, desired: {
+        metadata, sourceId: source.id, name: source.label, endpoint: source.url,
+        capabilityMode: 'read_only', secureWebGateway: false,
+        toolPolicy: { defaultDisabled: true, allowedTools: [...source.enabledTools].sort(compareText) },
+        authentication: {
+          mode: source.authentication.mode,
+          onBehalfOfUser: source.authentication.onBehalfOfUser,
+          credentialCustody: 'customer',
+        },
+      },
+    },
+    { kind: 'source_access_application', key: sourceApplicationKey, desired: {
+      metadata, sourceResourceKey: mcpKey, applicationType: 'mcp',
+    } },
+    { kind: 'source_access_policy', key: sourceAccessKey, desired: {
+      metadata, sourceApplicationResourceKey: sourceApplicationKey,
+      defaultAction: 'deny', allow: emailAllowPolicy,
+    } },
+  ];
+  const specifications = [
+    ...sourceSpecifications,
+    { kind: 'portal', key: portalKey, desired: {
+      metadata, name: settings.connect.name, hostname: settings.connect.hostname,
+      capabilityMode: 'read_only', codeMode: settings.connect.codeMode,
+      secureWebGateway: false, sourceMappings,
+    } },
+    { kind: 'portal_access_application', key: portalApplicationKey, desired: {
+      metadata, portalResourceKey: portalKey, name: settings.connect.name,
+      hostname: settings.connect.hostname, applicationType: 'mcp_portal',
+      destination: { type: 'public', uri: settings.connect.hostname },
+      authentication: {
+        mode: 'managed_oauth',
+        dynamicClientRegistration: { enabled: true, allowAnyOnLocalhost: true, allowAnyOnLoopback: true },
+        grant: { accessTokenLifetime: '15m', sessionDuration: '336h' },
+      },
+    } },
+    { kind: 'portal_access_policy', key: portalAccessKey, desired: {
+      metadata, portalApplicationResourceKey: portalApplicationKey,
+      defaultAction: 'deny', allow: emailAllowPolicy,
+    } },
+    { kind: 'dns_record', key: dnsKey, desired: {
+      metadata, recordType: 'CNAME', hostname: settings.connect.hostname,
+      content: PORTAL_CNAME_TARGET, proxied: true, dependsOnResourceKey: portalKey,
+    } },
+  ];
+  return Object.freeze(await Promise.all(specifications.map(async (resource) => Object.freeze({
+    ...resource,
+    desiredHash: await sha256({
+      schemaVersion: 1, kind: resource.kind, key: resource.key, desired: resource.desired,
+    }),
+  }))));
+}
+
+async function expectedEvidence(settings, target, release) {
+  const installationDigest = await sha256Hex({
+    hostname: settings.connect.hostname,
+    accountId: target.accountId,
+    zoneId: target.zoneId,
+  });
+  const installationId = `acg-${installationDigest.slice(0, 24)}`;
+  const resources = await buildDesiredResources(settings, installationId);
+  const desiredHash = await sha256({ schemaVersion: 1, installationId, resources });
+  const configurationHash = await sha256({
+    schemaVersion: 1, settingsRevision: 1, settings, target, release,
+  });
+  return Object.freeze({ configurationHash, installationId, desiredHash, resources });
+}
+
+async function parseClaim(value, environment, nowMs) {
+  if (!exactKeys(value, [
+    'schemaVersion', 'requestId', 'issuedAt', 'expiresAt', 'settingsRevision',
+    'settings', 'target', 'release', 'expected', 'cloudflareAccessToken',
+  ])) return null;
+  if (
+    value.schemaVersion !== 1 || typeof value.requestId !== 'string' || !REQUEST_ID.test(value.requestId) ||
+    !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
+    value.expiresAt <= value.issuedAt || value.expiresAt - value.issuedAt > REQUEST_LIFETIME_SECONDS ||
+    value.settingsRevision !== 1 ||
+    !exactKeys(value.target, ['accountId', 'zoneId', 'zoneName']) ||
+    value.target.accountId !== environment.accountId || value.target.zoneId !== environment.zoneId ||
+    value.target.zoneName !== environment.zoneName ||
+    !exactKeys(value.release, ['id', 'artifactSha256']) || value.release.id !== environment.release ||
+    value.release.artifactSha256 !== environment.releaseSha256 ||
+    !exactKeys(value.expected, ['configurationHash', 'installationId', 'desiredHash']) ||
+    typeof value.expected.configurationHash !== 'string' || !HASH.test(value.expected.configurationHash) ||
+    typeof value.expected.installationId !== 'string' || !INSTALLATION_ID.test(value.expected.installationId) ||
+    typeof value.expected.desiredHash !== 'string' || !HASH.test(value.expected.desiredHash) ||
+    typeof value.cloudflareAccessToken !== 'string' || value.cloudflareAccessToken.length === 0 ||
+    value.cloudflareAccessToken.length > 16 * 1024 || value.cloudflareAccessToken.trim() !== value.cloudflareAccessToken ||
+    CONTROL.test(value.cloudflareAccessToken)
+  ) return null;
+  const now = Math.floor(nowMs / 1_000);
+  if (value.issuedAt > now + MAX_CLOCK_SKEW_SECONDS || value.expiresAt < now ||
+      now - value.issuedAt > REQUEST_LIFETIME_SECONDS) return null;
+  const settings = parseSettings(value.settings);
+  if (!settings) return null;
+  const target = Object.freeze({ ...value.target });
+  const release = Object.freeze({ ...value.release });
+  const derived = await expectedEvidence(settings, target, release);
+  if (value.expected.configurationHash !== derived.configurationHash ||
+      value.expected.installationId !== derived.installationId ||
+      value.expected.desiredHash !== derived.desiredHash) return null;
+  return Object.freeze({
+    schemaVersion: 1,
+    requestId: value.requestId,
+    issuedAt: value.issuedAt,
+    expiresAt: value.expiresAt,
+    settingsRevision: 1,
+    settings,
+    target,
+    release,
+    expected: Object.freeze({ ...value.expected }),
+    resources: derived.resources,
+    cloudflareAccessToken: value.cloudflareAccessToken,
+  });
+}
+
+async function verifyBootstrapRequest(request, env, nowMs) {
+  if (!(request instanceof Request) || request.method !== 'POST') return null;
+  const contentType = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
+  if (contentType !== 'application/json' || request.headers.has('authorization') ||
+      request.headers.has('cookie') || request.headers.has('referer') || request.headers.has('origin')) return null;
+  const environment = parseEnvironment(env, true);
+  if (!environment) return null;
+  const signature = request.headers.get('x-ankka-bootstrap-signature');
+  const rawBody = await readBoundedText(request, REQUEST_LIMIT_BYTES);
+  if (!rawBody || !await verifyHmac(rawBody, environment.bootstrapNonce, signature)) return null;
+  let parsed;
+  try { parsed = JSON.parse(rawBody); } catch { return null; }
+  if (!isPlainData(parsed) || canonicalJson(parsed) !== rawBody) return null;
+  const claim = await parseClaim(parsed, environment, nowMs);
+  if (!claim) return null;
+  return Object.freeze({ rawBody, claim, signature });
+}
+
+async function discardBody(response) {
+  try { await response.body?.cancel(); } catch { /* Provider status remains authoritative. */ }
+}
+
+async function readBoundedProviderJson(response) {
+  const declared = response.headers.get('content-length');
+  if (declared !== null) {
+    const size = Number(declared);
+    if (!Number.isSafeInteger(size) || size < 0 || size > PROVIDER_RESPONSE_LIMIT_BYTES) return null;
+  }
+  const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
+  if (contentType !== 'application/json' || !response.body) return null;
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value.byteLength > PROVIDER_RESPONSE_LIMIT_BYTES - total) {
+        try { await reader.cancel(); } catch { /* The bound remains authoritative. */ }
+        return null;
+      }
+      chunks.push(value.slice());
+      total += value.byteLength;
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    try {
+      const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      return isPlainData(parsed) ? parsed : null;
+    } catch {
+      return null;
+    } finally {
+      bytes.fill(0);
+    }
+  } finally {
+    for (const chunk of chunks) chunk.fill(0);
+    try { reader.releaseLock(); } catch { /* Provider parsing remains authoritative. */ }
+  }
+}
+
+function providerUrl(path) {
+  return new URL(`/client/v4${path}`, API_ORIGIN);
+}
+
+async function providerCall(path, token, init = {}) {
+  let response;
+  try {
+    response = await fetch(new Request(providerUrl(path), {
+      ...init,
+      headers: {
+        accept: 'application/json',
+        authorization: `Bearer ${token}`,
+        ...(init.body ? { 'content-type': 'application/json' } : {}),
+      },
+      redirect: 'manual',
+    }));
+  } catch {
+    return Object.freeze({ status: 'unknown', result: null });
+  }
+  if (!(response instanceof Response) || response.redirected ||
+      (response.status >= 300 && response.status < 400)) {
+    if (response instanceof Response) await discardBody(response);
+    return Object.freeze({ status: 'unknown', result: null });
+  }
+  if (response.status === 404) {
+    await discardBody(response);
+    return Object.freeze({ status: 'absent', result: null });
+  }
+  if (response.status === 401 || response.status === 403) {
+    await discardBody(response);
+    return Object.freeze({ status: 'auth', result: null });
+  }
+  if (response.status === 429 || response.status >= 500) {
+    await discardBody(response);
+    return Object.freeze({ status: 'unknown', result: null });
+  }
+  if (response.status === 204) {
+    await discardBody(response);
+    return Object.freeze({ status: 'ok', result: null });
+  }
+  if (response.status !== 200 && response.status !== 201) {
+    await discardBody(response);
+    return Object.freeze({ status: 'blocked', result: null });
+  }
+  let envelope;
+  try { envelope = await readBoundedProviderJson(response); } catch { envelope = null; }
+  if (!isRecord(envelope) || envelope.success !== true || !Object.hasOwn(envelope, 'result')) {
+    return Object.freeze({ status: 'unknown', result: null });
+  }
+  return Object.freeze({ status: 'ok', result: envelope.result });
+}
+
+async function providerList(path, token, query = {}) {
+  const values = [];
+  for (let page = 1; page <= MAX_PROVIDER_PAGES; page += 1) {
+    const url = new URL(providerUrl(path));
+    url.searchParams.set('page', String(page));
+    url.searchParams.set('per_page', String(PROVIDER_PAGE_SIZE));
+    for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
+    const relative = `${url.pathname.slice('/client/v4'.length)}${url.search}`;
+    const response = await providerCall(relative, token);
+    if (response.status !== 'ok' || !Array.isArray(response.result)) return response;
+    values.push(...response.result);
+    if (response.result.length < PROVIDER_PAGE_SIZE) return Object.freeze({ status: 'ok', result: values });
+  }
+  return Object.freeze({ status: 'unknown', result: null });
+}
+
+function safeProviderId(value) {
+  return typeof value === 'string' && SAFE_ID.test(value) ? value : null;
+}
+
+function exactOne(values, predicate) {
+  if (!Array.isArray(values)) return null;
+  const matches = values.filter((value) => isRecord(value) && predicate(value));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function toolProjection(names) {
+  return names.map((name) => ({ name, enabled: true }));
+}
+
+function emailRules(settings) {
+  return [...settings.access.adminEmails, ...settings.access.memberEmails]
+    .sort(compareText)
+    .map((email) => ({ email: { email } }));
+}
+
+function resource(state, kind) {
+  return state.desiredResources.find((entry) => entry.kind === kind) ?? null;
+}
+
+function locator(state, kind) {
+  return state.resources.find((entry) => entry.kind === kind)?.provider ?? null;
+}
+
+function resultId(value) {
+  return isRecord(value) ? safeProviderId(value.id) : null;
+}
+
+function mcpMatches(value, desired) {
+  const oauth = desired.desired.authentication.mode === 'oauth';
+  return isRecord(value) && value.id === desired.key && value.hostname === desired.desired.endpoint &&
+    value.description === marker(desired.desired.metadata.installationId, desired.key) &&
+    value.auth_type === (oauth ? 'oauth' : 'unauthenticated') && value.secure_web_gateway === false &&
+    (!oauth || value.is_shared_oauth_callback_enabled === true);
+}
+
+function portalMatches(value, desired, serverId) {
+  if (!isRecord(value) || value.id !== desired.key || value.hostname !== desired.desired.hostname ||
+      value.name !== desired.desired.name || value.description !== marker(
+        desired.desired.metadata.installationId, desired.key,
+      ) || value.code_mode !== 'default_on' || value.secure_web_gateway !== false ||
+      (value.servers !== undefined && !Array.isArray(value.servers))) return false;
+  if (desired.desired.sourceMappings.length === 0) {
+    return value.servers === undefined || value.servers.length === 0;
+  }
+  if (!Array.isArray(value.servers)) return false;
+  const mapping = desired.desired.sourceMappings.find((candidate) => candidate.sourceResourceKey === serverId);
+  return Boolean(mapping) && value.servers.some((server) => isRecord(server) &&
+    (server.server_id === serverId || server.id === serverId) &&
+    server.default_disabled === true && server.on_behalf === mapping.onBehalfOfUser);
+}
+
+function exactDestination(value, expected) {
+  if (!Array.isArray(value.destinations) || value.destinations.length !== 1) return false;
+  const destination = value.destinations[0];
+  return isRecord(destination) && exactKeys(destination, Object.keys(expected)) &&
+    Object.entries(expected).every(([key, entry]) => destination[key] === entry);
+}
+
+/**
+ * An Access application that claims this installation's MCP server or Portal
+ * hostname, or carries the name this installation creates. Any candidate that
+ * is not the exact receipt-owned application is a collision, never adopted.
+ */
+function accessApplicationCandidate(value, kind, state) {
+  if (!isRecord(value) || !safeProviderId(value.id)) return false;
+  const destinations = Array.isArray(value.destinations) ? value.destinations : [];
+  if (kind === 'source_access_application') {
+    const server = locator(state, 'mcp_server');
+    const desired = resource(state, kind);
+    return value.name === marker(state.installationId, desired.key) || (
+      value.type === 'mcp' && server !== null && destinations.some((destination) => (
+        isRecord(destination) && destination.type === 'via_mcp_server_portal' &&
+        destination.mcp_server_id === server.id
+      ))
+    );
+  }
+  const host = state.settings.connect.hostname;
+  return value.name === state.settings.connect.name || (value.type === 'mcp_portal' && (
+    value.domain === host || destinations.some((destination) => (
+      isRecord(destination) && destination.type === 'public' && destination.uri === host
+    ))
+  ));
+}
+
+function accessApplicationIdentityMatches(value, kind, state) {
+  if (!isRecord(value) || !safeProviderId(value.id)) return false;
+  if (kind === 'source_access_application') {
+    const server = locator(state, 'mcp_server');
+    const desired = resource(state, kind);
+    return value.type === 'mcp' && server !== null &&
+      value.name === marker(state.installationId, desired.key) &&
+      (value.domain === undefined || value.domain === null) &&
+      exactDestination(value, { type: 'via_mcp_server_portal', mcp_server_id: server.id });
+  }
+  const host = state.settings.connect.hostname;
+  return value.type === 'mcp_portal' && value.name === state.settings.connect.name &&
+    value.domain === host && exactDestination(value, { type: 'public', uri: host }) &&
+    managedOauthMatches(value);
+}
+
+function managedOauthMatches(value) {
+  const oauth = isRecord(value) ? value.oauth_configuration : null;
+  const registration = isRecord(oauth) ? oauth.dynamic_client_registration : null;
+  const grant = isRecord(oauth) ? oauth.grant : null;
+  return isRecord(oauth) && oauth.enabled === true && isRecord(registration) &&
+    registration.enabled === true && registration.allow_any_on_localhost === true &&
+    registration.allow_any_on_loopback === true && isRecord(grant) &&
+    grant.access_token_lifetime === '15m' && grant.session_duration === '336h';
+}
+
+function policyMatches(value, desired, settings) {
+  if (!isRecord(value) || !safeProviderId(value.id) || value.decision !== 'allow' ||
+      typeof value.name !== 'string' || !value.name.endsWith(` [${marker(
+        desired.desired.metadata.installationId, desired.key,
+      )}]`) || !Array.isArray(value.include)) return false;
+  const emails = [];
+  for (const rule of value.include) {
+    const email = isRecord(rule) && isRecord(rule.email) ? normalizedEmail(rule.email.email) : null;
+    if (!email) return false;
+    emails.push(email);
+  }
+  return canonicalJson([...new Set(emails)].sort(compareText)) === canonicalJson(
+    [...settings.access.adminEmails, ...settings.access.memberEmails].sort(compareText),
+  );
+}
+
+function dnsMatches(value, desired) {
+  return isRecord(value) && safeProviderId(value.id) && value.type === 'CNAME' &&
+    value.name === desired.desired.hostname && value.content === PORTAL_CNAME_TARGET &&
+    value.proxied === true && value.comment === marker(
+      desired.desired.metadata.installationId, desired.key,
+    );
+}
+
+async function discoverResource(state, kind, token) {
+  const desired = resource(state, kind);
+  if (!desired) return Object.freeze({ status: 'conflict', provider: null });
+  const account = encodeURIComponent(state.target.accountId);
+  const zone = encodeURIComponent(state.target.zoneId);
+  if (kind === 'mcp_server') {
+    const response = await providerCall(
+      `/accounts/${account}/access/ai-controls/mcp/servers/${encodeURIComponent(desired.key)}`,
+      token,
+    );
+    return response.status === 'ok' && mcpMatches(response.result, desired)
+      ? Object.freeze({ status: 'present', provider: Object.freeze({ id: desired.key }) })
+      : Object.freeze({ status: response.status === 'absent' ? 'absent' : response.status, provider: null });
+  }
+  if (kind === 'portal') {
+    const server = locator(state, 'mcp_server');
+    if (!server && desired.desired.sourceMappings.length !== 0) {
+      return Object.freeze({ status: 'conflict', provider: null });
+    }
+    const response = await providerCall(
+      `/accounts/${account}/access/ai-controls/mcp/portals/${encodeURIComponent(desired.key)}`,
+      token,
+    );
+    return response.status === 'ok' && portalMatches(response.result, desired, server?.id ?? null)
+      ? Object.freeze({ status: 'present', provider: Object.freeze({ id: desired.key }) })
+      : Object.freeze({ status: response.status === 'absent' ? 'absent' : response.status, provider: null });
+  }
+  if (kind === 'source_access_application' || kind === 'portal_access_application') {
+    const response = await providerList(`/accounts/${account}/access/apps`, token);
+    if (response.status !== 'ok') return Object.freeze({ status: response.status, provider: null });
+    const candidates = response.result.filter((value) => accessApplicationCandidate(value, kind, state));
+    if (candidates.length === 0) return Object.freeze({ status: 'absent', provider: null });
+    if (candidates.length > 1) return Object.freeze({ status: 'conflict', provider: null });
+    // The exact application shape, including Managed OAuth, is proven on the
+    // single-application read; the list is only used to bound the candidate set.
+    const read = await providerCall(
+      `/accounts/${account}/access/apps/${encodeURIComponent(candidates[0].id)}`,
+      token,
+    );
+    if (read.status !== 'ok') {
+      return Object.freeze({ status: read.status === 'absent' ? 'unknown' : read.status, provider: null });
+    }
+    if (!isRecord(read.result) || read.result.id !== candidates[0].id ||
+        !accessApplicationIdentityMatches(read.result, kind, state)) {
+      return Object.freeze({ status: 'conflict', provider: null });
+    }
+    return Object.freeze({ status: 'present', provider: Object.freeze({ id: read.result.id }) });
+  }
+  if (kind === 'source_access_policy' || kind === 'portal_access_policy') {
+    const parentKind = kind === 'source_access_policy'
+      ? 'source_access_application'
+      : 'portal_access_application';
+    const parent = locator(state, parentKind);
+    if (!parent) return Object.freeze({ status: 'conflict', provider: null });
+    const response = await providerList(
+      `/accounts/${account}/access/apps/${encodeURIComponent(parent.id)}/policies`,
+      token,
+    );
+    if (response.status !== 'ok') return Object.freeze({ status: response.status, provider: null });
+    const match = exactOne(response.result, (value) => policyMatches(value, desired, state.settings));
+    return match
+      ? Object.freeze({ status: 'present', provider: Object.freeze({ id: match.id, parentId: parent.id }) })
+      : Object.freeze({ status: 'absent', provider: null });
+  }
+  const response = await providerList(`/zones/${zone}/dns_records`, token, {
+    'name.exact': desired.desired.hostname,
+    match: 'all',
+  });
+  if (response.status !== 'ok') return Object.freeze({ status: response.status, provider: null });
+  const match = exactOne(response.result, (value) => dnsMatches(value, desired));
+  return match
+    ? Object.freeze({ status: 'present', provider: Object.freeze({ id: match.id }) })
+    : Object.freeze({ status: 'absent', provider: null });
+}
+
+async function createResource(state, kind, token) {
+  const desired = resource(state, kind);
+  const account = encodeURIComponent(state.target.accountId);
+  const zone = encodeURIComponent(state.target.zoneId);
+  if (!desired) return Object.freeze({ status: 'conflict', provider: null });
+  let path;
+  let body;
+  if (kind === 'source_access_application') {
+    const server = locator(state, 'mcp_server');
+    if (!server) return Object.freeze({ status: 'conflict', provider: null });
+    path = `/accounts/${account}/access/apps`;
+    body = {
+      name: marker(state.installationId, desired.key),
+      type: 'mcp',
+      destinations: [{ type: 'via_mcp_server_portal', mcp_server_id: server.id }],
+    };
+  } else if (kind === 'portal_access_application') {
+    if (!locator(state, 'portal')) return Object.freeze({ status: 'conflict', provider: null });
+    const application = desired.desired;
+    path = `/accounts/${account}/access/apps`;
+    body = {
+      name: application.name,
+      type: 'mcp_portal',
+      domain: application.hostname,
+      destinations: [{ type: application.destination.type, uri: application.destination.uri }],
+      oauth_configuration: {
+        enabled: true,
+        dynamic_client_registration: {
+          enabled: application.authentication.dynamicClientRegistration.enabled,
+          allow_any_on_localhost: application.authentication.dynamicClientRegistration.allowAnyOnLocalhost,
+          allow_any_on_loopback: application.authentication.dynamicClientRegistration.allowAnyOnLoopback,
+        },
+        grant: {
+          access_token_lifetime: application.authentication.grant.accessTokenLifetime,
+          session_duration: application.authentication.grant.sessionDuration,
+        },
+      },
+    };
+  } else if (kind === 'mcp_server') {
+    const oauth = desired.desired.authentication.mode === 'oauth';
+    path = `/accounts/${account}/access/ai-controls/mcp/servers`;
+    body = {
+      id: desired.key,
+      name: desired.desired.name,
+      hostname: desired.desired.endpoint,
+      auth_type: oauth ? 'oauth' : 'unauthenticated',
+      ...(oauth ? { is_shared_oauth_callback_enabled: true } : {}),
+      secure_web_gateway: false,
+      description: marker(state.installationId, desired.key),
+      updated_tools: toolProjection(desired.desired.toolPolicy.allowedTools),
+    };
+  } else if (kind === 'portal') {
+    const server = locator(state, 'mcp_server');
+    if (!server && desired.desired.sourceMappings.length !== 0) {
+      return Object.freeze({ status: 'conflict', provider: null });
+    }
+    path = `/accounts/${account}/access/ai-controls/mcp/portals`;
+    body = {
+      id: desired.key,
+      name: desired.desired.name,
+      hostname: desired.desired.hostname,
+      code_mode: 'default_on',
+      secure_web_gateway: false,
+      description: marker(state.installationId, desired.key),
+      ...(server ? { servers: [{
+        server_id: server.id,
+        default_disabled: true,
+        on_behalf: state.settings.sources[0].authentication.onBehalfOfUser,
+        updated_tools: toolProjection(state.settings.sources[0].enabledTools),
+      }] } : {}),
+    };
+  } else if (kind === 'source_access_policy' || kind === 'portal_access_policy') {
+    const parentKind = kind === 'source_access_policy'
+      ? 'source_access_application'
+      : 'portal_access_application';
+    const parent = locator(state, parentKind);
+    if (!parent) return Object.freeze({ status: 'conflict', provider: null });
+    path = `/accounts/${account}/access/apps/${encodeURIComponent(parent.id)}/policies`;
+    body = {
+      name: `${kind === 'source_access_policy' ? state.settings.sources[0].label : state.settings.connect.name} users [${marker(state.installationId, desired.key)}]`,
+      decision: 'allow',
+      include: emailRules(state.settings),
+      exclude: [],
+      require: [],
+    };
+  } else {
+    path = `/zones/${zone}/dns_records`;
+    body = {
+      type: 'CNAME',
+      name: desired.desired.hostname,
+      content: PORTAL_CNAME_TARGET,
+      proxied: true,
+      ttl: 1,
+      comment: marker(state.installationId, desired.key),
+    };
+  }
+  const response = await providerCall(path, token, { method: 'POST', body: canonicalJson(body) });
+  if (response.status !== 'ok') return Object.freeze({ status: response.status, provider: null });
+  const id = resultId(response.result);
+  if (!id) return Object.freeze({ status: 'unknown', provider: null });
+  const parent = kind === 'source_access_policy'
+    ? locator(state, 'source_access_application')
+    : kind === 'portal_access_policy'
+      ? locator(state, 'portal_access_application')
+      : null;
+  return Object.freeze({
+    status: 'submitted',
+    provider: Object.freeze({ id, ...(parent ? { parentId: parent.id } : {}) }),
+  });
+}
+
+function receiptResource(state, desired, provider) {
+  const policy = desired.kind === 'source_access_policy' || desired.kind === 'portal_access_policy';
+  return Object.freeze({
+    kind: desired.kind,
+    key: desired.key,
+    provider,
+    desiredHash: desired.desiredHash,
+    marker: marker(state.installationId, desired.key),
+    ...(policy ? { identityHash: state.accessPolicy.identitiesHash } : {}),
+  });
+}
+
+function validStoredState(value, claim) {
+  return exactKeys(value, [
+    'schemaVersion', 'status', 'installationId', 'approvedPlanId', 'configurationHash',
+    'desiredHash', 'release', 'target', 'settings', 'accessPolicy', 'desiredResources',
+    'resources', 'pending', 'receipt',
+  ]) && value.schemaVersion === 1 && ['installing', 'ready'].includes(value.status) &&
+    value.installationId === claim.expected.installationId && PLAN_ID.test(value.approvedPlanId) &&
+    value.configurationHash === claim.expected.configurationHash &&
+    value.desiredHash === claim.expected.desiredHash &&
+    canonicalJson(value.release) === canonicalJson(claim.release) &&
+    canonicalJson(value.target) === canonicalJson(claim.target) &&
+    canonicalJson(value.settings) === canonicalJson(claim.settings) &&
+    canonicalJson(value.desiredResources) === canonicalJson(claim.resources) &&
+    Array.isArray(value.resources) && value.resources.length <= claim.resources.length;
+}
+
+function parseProviderLocator(value, policy) {
+  if (!exactKeys(value, policy ? ['id', 'parentId'] : ['id'])) return null;
+  if (!safeProviderId(value.id) || (policy && !safeProviderId(value.parentId))) return null;
+  return Object.freeze({ id: value.id, ...(policy ? { parentId: value.parentId } : {}) });
+}
+
+async function parseReadyReceipt(value, claim) {
+  const resourceOrder = claim.resources.map((resourceValue) => resourceValue.kind);
+  if (canonicalJson(resourceOrder) !== canonicalJson(
+    claim.settings.sources.length === 0 ? PORTAL_RESOURCE_ORDER : RESOURCE_ORDER,
+  )) return null;
+  if (!exactKeys(value, [
+    'schemaVersion', 'manager', 'installationId', 'state', 'revision', 'release',
+    'target', 'accessPolicy', 'desiredHash', 'resources', 'pending', 'checksum',
+  ]) || value.schemaVersion !== 1 || value.manager !== MANAGER || value.state !== 'ready' ||
+      value.installationId !== claim.expected.installationId || value.revision !== resourceOrder.length + 1 ||
+      value.release !== claim.release.id || value.desiredHash !== claim.expected.desiredHash ||
+      value.pending !== null || typeof value.checksum !== 'string' || !HASH.test(value.checksum) ||
+      canonicalJson(value.target) !== canonicalJson({
+        ...claim.target, hostname: claim.settings.connect.hostname,
+      }) || !exactKeys(value.accessPolicy, ['identityType', 'identityCount', 'identitiesHash']) ||
+      value.accessPolicy.identityType !== 'email' ||
+      value.accessPolicy.identityCount !== claim.settings.access.adminEmails.length +
+        claim.settings.access.memberEmails.length ||
+      value.accessPolicy.identitiesHash !== await sha256({
+        emails: [...claim.settings.access.adminEmails, ...claim.settings.access.memberEmails]
+          .sort(compareText),
+      }) || !Array.isArray(value.resources) || value.resources.length !== resourceOrder.length) return null;
+  const parsedResources = [];
+  const locators = new Set();
+  for (let index = 0; index < resourceOrder.length; index += 1) {
+    const resourceValue = value.resources[index];
+    const desired = claim.resources[index];
+    const kind = resourceOrder[index];
+    const policy = kind === 'source_access_policy' || kind === 'portal_access_policy';
+    if (!exactKeys(resourceValue, policy
+      ? ['kind', 'key', 'provider', 'desiredHash', 'marker', 'identityHash']
+      : ['kind', 'key', 'provider', 'desiredHash', 'marker'])) return null;
+    const provider = parseProviderLocator(resourceValue.provider, policy);
+    if (!provider || resourceValue.kind !== kind || desired.kind !== kind ||
+        resourceValue.key !== desired.key || !RESOURCE_KEY.test(resourceValue.key) ||
+        resourceValue.desiredHash !== desired.desiredHash ||
+        resourceValue.marker !== marker(value.installationId, desired.key) ||
+        (policy && resourceValue.identityHash !== value.accessPolicy.identitiesHash)) return null;
+    const locatorKey = `${kind}\u0000${provider.parentId ?? ''}\u0000${provider.id}`;
+    if (locators.has(locatorKey)) return null;
+    locators.add(locatorKey);
+    parsedResources.push(Object.freeze({
+      kind, key: desired.key, provider, desiredHash: desired.desiredHash,
+      marker: resourceValue.marker,
+      ...(policy ? { identityHash: resourceValue.identityHash } : {}),
+    }));
+  }
+  const sourceApplication = parsedResources.find((resourceValue) => resourceValue.kind === 'source_access_application');
+  const sourcePolicy = parsedResources.find((resourceValue) => resourceValue.kind === 'source_access_policy');
+  const portalApplication = parsedResources.find((resourceValue) => resourceValue.kind === 'portal_access_application');
+  const portalPolicy = parsedResources.find((resourceValue) => resourceValue.kind === 'portal_access_policy');
+  if (!portalApplication || !portalPolicy || portalPolicy.provider.parentId !== portalApplication.provider.id ||
+      (sourceApplication
+        ? !sourcePolicy || sourcePolicy.provider.parentId !== sourceApplication.provider.id ||
+          sourceApplication.provider.id === portalApplication.provider.id
+        : sourcePolicy !== undefined)) return null;
+  const unsigned = {
+    schemaVersion: 1,
+    manager: MANAGER,
+    installationId: value.installationId,
+    state: 'ready',
+    revision: resourceOrder.length + 1,
+    release: value.release,
+    target: value.target,
+    accessPolicy: value.accessPolicy,
+    desiredHash: value.desiredHash,
+    resources: parsedResources,
+    pending: null,
+  };
+  if (await sha256(unsigned) !== value.checksum) return null;
+  return Object.freeze({ ...unsigned, checksum: value.checksum });
+}
+
+async function initialState(claim) {
+  const allowedEmails = [...claim.settings.access.adminEmails, ...claim.settings.access.memberEmails]
+    .sort(compareText);
+  return {
+    schemaVersion: 1,
+    status: 'installing',
+    installationId: claim.expected.installationId,
+    approvedPlanId: `plan-${claim.expected.configurationHash.slice('sha256:'.length, 'sha256:'.length + 24)}`,
+    configurationHash: claim.expected.configurationHash,
+    desiredHash: claim.expected.desiredHash,
+    release: claim.release,
+    target: claim.target,
+    settings: claim.settings,
+    accessPolicy: {
+      identityType: 'email',
+      identityCount: allowedEmails.length,
+      identitiesHash: await sha256({ emails: allowedEmails }),
+    },
+    desiredResources: claim.resources,
+    resources: [],
+    pending: null,
+    receipt: null,
+  };
+}
+
+async function readyReceipt(state) {
+  const unsigned = {
+    schemaVersion: 1,
+    manager: MANAGER,
+    installationId: state.installationId,
+    state: 'ready',
+    revision: state.resources.length + 1,
+    release: state.release.id,
+    target: { ...state.target, hostname: state.settings.connect.hostname },
+    accessPolicy: state.accessPolicy,
+    desiredHash: state.desiredHash,
+    resources: state.resources,
+    pending: null,
+  };
+  return Object.freeze({ ...unsigned, checksum: await sha256(unsigned) });
+}
+
+function readyResponse(state, applyInvoked, resumed) {
+  return fixedJson(200, {
+    schemaVersion: 1,
+    status: 'ready',
+    installationId: state.installationId,
+    approvedPlanId: state.approvedPlanId,
+    configurationHash: state.configurationHash,
+    desiredHash: state.desiredHash,
+    settingsRevision: 1,
+    release: state.release,
+    gateway: {
+      hostname: state.settings.connect.hostname,
+      mcpUrl: `https://${state.settings.connect.hostname}/mcp`,
+    },
+    receipt: {
+      revision: state.receipt.revision,
+      resourceCount: state.receipt.resources.length,
+      evidence: state.receipt,
+    },
+    applyInvoked,
+    resumed,
+  });
+}
+
+async function save(storage, value) {
+  await storage.put(STORAGE_KEY, value);
+}
+
+function providerFailure(status) {
+  if (status === 'auth') return recovery('bootstrap_requires_repair');
+  if (status === 'unknown') return recovery('bootstrap_recovery_required');
+  return recovery('bootstrap_requires_repair');
+}
+
+async function processBootstrap(request, env, storage) {
+  const rawBody = await request.text();
+  const environment = parseEnvironment(env, true);
+  const signature = request.headers.get('x-ankka-bootstrap-signature');
+  if (!environment || !await verifyHmac(rawBody, environment.bootstrapNonce, signature)) return rejected();
+  let parsed;
+  try { parsed = JSON.parse(rawBody); } catch { return rejected(); }
+  if (!isPlainData(parsed) || canonicalJson(parsed) !== rawBody) return rejected();
+  const claim = await parseClaim(parsed, environment, Date.now());
+  if (!claim) return rejected();
+  let stored;
+    try { stored = await storage.get(STORAGE_KEY); } catch { return recovery('bootstrap_recovery_required'); }
+    const resumed = stored !== undefined;
+    if (stored !== undefined && stored?.state === 'ready') {
+      const receipt = await parseReadyReceipt(stored, claim);
+      if (!receipt) return recovery('bootstrap_request_mismatch');
+      return readyResponse({
+        ...await initialState(claim),
+        status: 'ready',
+        resources: receipt.resources,
+        receipt,
+      }, false, true);
+    }
+    let state = stored === undefined ? await initialState(claim) : stored;
+    if (stored !== undefined && !validStoredState(state, claim)) return recovery('bootstrap_request_mismatch');
+    if (state.status === 'ready') return readyResponse(state, false, true);
+    if (stored === undefined) {
+      try { await save(storage, state); } catch { return recovery('bootstrap_recovery_required'); }
+    }
+    let applyInvoked = false;
+    for (const kind of state.desiredResources.map((resourceValue) => resourceValue.kind)) {
+      if (locator(state, kind)) continue;
+      const desired = resource(state, kind);
+      if (!desired) return recovery('bootstrap_requires_repair');
+      if (state.pending !== null) {
+        if (!exactKeys(state.pending, ['kind', 'key', 'requestId', 'phase']) ||
+            state.pending.kind !== kind || state.pending.key !== desired.key ||
+            !REQUEST_ID.test(state.pending.requestId) ||
+            !['send_armed', 'submitted', 'not_applied'].includes(state.pending.phase)) {
+          return recovery('bootstrap_requires_repair');
+        }
+        const observed = await discoverResource(state, kind, claim.cloudflareAccessToken);
+        if (observed.status === 'present') {
+          state = {
+            ...state,
+            resources: [...state.resources, receiptResource(state, desired, observed.provider)],
+            pending: null,
+          };
+          try { await save(storage, state); } catch { return recovery('bootstrap_recovery_required'); }
+          continue;
+        }
+        if (observed.status !== 'absent') return providerFailure(observed.status);
+        if (state.pending.requestId === claim.requestId) return recovery('bootstrap_recovery_required');
+        state = { ...state, pending: null };
+        try { await save(storage, state); } catch { return recovery('bootstrap_recovery_required'); }
+      }
+
+      const before = await discoverResource(state, kind, claim.cloudflareAccessToken);
+      if (before.status === 'present') return recovery('bootstrap_requires_repair');
+      if (before.status !== 'absent') return providerFailure(before.status);
+      state = {
+        ...state,
+        pending: { kind, key: desired.key, requestId: claim.requestId, phase: 'send_armed' },
+      };
+      try { await save(storage, state); } catch { return recovery('bootstrap_recovery_required'); }
+      const created = await createResource(state, kind, claim.cloudflareAccessToken);
+      if (created.status !== 'submitted') return providerFailure(created.status);
+      applyInvoked = true;
+      state = { ...state, pending: { ...state.pending, phase: 'submitted' } };
+      try { await save(storage, state); } catch { return recovery('bootstrap_recovery_required'); }
+      const after = await discoverResource(state, kind, claim.cloudflareAccessToken);
+      if (after.status !== 'present') return providerFailure(after.status);
+      if (after.provider.id !== created.provider.id ||
+          (created.provider.parentId ?? '') !== (after.provider.parentId ?? '')) {
+        return recovery('bootstrap_requires_repair');
+      }
+      state = {
+        ...state,
+        resources: [...state.resources, receiptResource(state, desired, after.provider)],
+        pending: null,
+      };
+      try { await save(storage, state); } catch { return recovery('bootstrap_recovery_required'); }
+    }
+  try {
+    state = { ...state, status: 'ready', receipt: await readyReceipt(state), pending: null };
+    await save(storage, state.receipt);
+    return readyResponse(state, applyInvoked, resumed);
+  } catch {
+    return recovery('bootstrap_recovery_required');
+  }
+}
+
+function safePublicStatus(value) {
+  if (!isRecord(value) || !exactKeys(value, [
+    'schemaVersion', 'status', 'release', 'gateway', 'source', 'access', 'updatedAt',
+  ]) || value.schemaVersion !== 1 || value.status !== 'ready' ||
+      typeof value.release !== 'string' || !RELEASE.test(value.release) ||
+      !exactKeys(value.gateway, ['name', 'hostname', 'mcpUrl', 'capabilityMode', 'codeMode']) ||
+      typeof value.gateway.name !== 'string' || !hostname(value.gateway.hostname) ||
+      value.gateway.mcpUrl !== `https://${value.gateway.hostname}/mcp` ||
+      value.gateway.capabilityMode !== 'read_only' || value.gateway.codeMode !== 'default_on' ||
+      (value.source !== null && (
+        !exactKeys(value.source, ['label', 'endpoint', 'enabledTools']) ||
+        typeof value.source.label !== 'string' || typeof value.source.endpoint !== 'string' ||
+        !Array.isArray(value.source.enabledTools)
+      )) ||
+      !exactKeys(value.access, ['administratorCount', 'memberCount']) ||
+      !Number.isSafeInteger(value.access.administratorCount) || !Number.isSafeInteger(value.access.memberCount) ||
+      typeof value.updatedAt !== 'string') return null;
+  return Object.freeze(structuredClone(value));
+}
+
+function publicStatusFromReadyResponse(body) {
+  return {
+    schemaVersion: 1,
+    status: 'ready',
+    release: body.release.id,
+    gateway: {
+      name: body.settings.connect.name,
+      hostname: body.settings.connect.hostname,
+      mcpUrl: `https://${body.settings.connect.hostname}/mcp`,
+      capabilityMode: 'read_only',
+      codeMode: 'default_on',
+    },
+    source: body.settings.sources.length === 0 ? null : {
+      label: body.settings.sources[0].label,
+      endpoint: body.settings.sources[0].url,
+      enabledTools: [...body.settings.sources[0].enabledTools],
+    },
+    access: {
+      administratorCount: body.settings.access.adminEmails.length,
+      memberCount: body.settings.access.memberEmails.length,
+    },
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function safeManagementControl(value) {
+  if (!exactKeys(value, [
+    'schemaVersion', 'installationId', 'accountId', 'portal', 'audienceEmails', 'sourceOwnership',
+  ]) || value.schemaVersion !== 1 || !INSTALLATION_ID.test(value.installationId) ||
+      !ACCOUNT_ID.test(value.accountId) || !exactKeys(value.portal, [
+        'id', 'name', 'hostname', 'marker',
+      ]) || !safeProviderId(value.portal.id) || !validSourceLabel(value.portal.name) ||
+      !hostname(value.portal.hostname) || typeof value.portal.marker !== 'string' ||
+      !value.portal.marker.startsWith(`acg:v1:${value.installationId}:`) ||
+      !RESOURCE_KEY.test(value.portal.marker.slice(`acg:v1:${value.installationId}:`.length))) {
+    return null;
+  }
+  const audienceEmails = exactSortedUniqueStrings(value.audienceEmails, normalizedEmail, 51, 1);
+  if (!audienceEmails || !Array.isArray(value.sourceOwnership) || value.sourceOwnership.length > 32) return null;
+  const sourceOwnership = [];
+  const sourceProviderLocators = new Set();
+  for (const source of value.sourceOwnership) {
+    if (!exactKeys(source, ['sourceId', 'resources']) || !SOURCE_ID.test(source.sourceId) ||
+        !Array.isArray(source.resources) || source.resources.length !== 3) return null;
+    const resources = source.resources.map(safeSourceActionResource);
+    if (resources.some((resourceValue) => resourceValue === null) || resources.some((resourceValue) => (
+      resourceValue.marker !== marker(value.installationId, resourceValue.key)
+    )) || resources[2].provider.parentId !== resources[1].provider.id) return null;
+    for (const resourceValue of resources) {
+      const locatorKey = teardownProviderLocatorKey(resourceValue);
+      if (sourceProviderLocators.has(locatorKey)) return null;
+      sourceProviderLocators.add(locatorKey);
+    }
+    sourceOwnership.push(Object.freeze({ sourceId: source.sourceId, resources: Object.freeze(resources) }));
+  }
+  if (new Set(sourceOwnership.map((source) => source.sourceId)).size !== sourceOwnership.length ||
+      new Set(sourceOwnership.map((source) => source.resources[0].provider.id)).size !== sourceOwnership.length) return null;
+  return Object.freeze({
+    schemaVersion: 1,
+    installationId: value.installationId,
+    accountId: value.accountId,
+    portal: Object.freeze({ ...value.portal }),
+    audienceEmails,
+    sourceOwnership: Object.freeze(sourceOwnership),
+  });
+}
+
+function readyResource(body, kind) {
+  const resources = body?.receipt?.evidence?.resources;
+  if (!Array.isArray(resources)) return null;
+  const matches = resources.filter((resourceValue) => isRecord(resourceValue) && resourceValue.kind === kind);
+  return matches.length === 1 && isRecord(matches[0].provider) ? matches[0] : null;
+}
+
+async function managementControlFromReadyResponse(claim, ready, env) {
+  const environment = parseManagementEnvironment(env);
+  const portal = readyResource(ready, 'portal');
+  if (!environment || !portal) return null;
+  let sourceOwnership = [];
+  if (claim.settings.sources.length > 0) {
+    const server = readyResource(ready, 'mcp_server');
+    const application = readyResource(ready, 'source_access_application');
+    const policy = readyResource(ready, 'source_access_policy');
+    const sourceUrl = publicMcpUrl(claim.settings.sources[0].url);
+    if (!server || !application || !policy || !sourceUrl) return null;
+    sourceOwnership = [{
+      sourceId: `source-${(await sha256Hex(sourceUrl)).slice(0, 16)}`,
+      resources: [server, application, policy],
+    }];
+  }
+  return safeManagementControl({
+    schemaVersion: 1,
+    installationId: claim.expected.installationId,
+    accountId: environment.accountId,
+    portal: {
+      id: portal.provider.id,
+      name: claim.settings.connect.name,
+      hostname: claim.settings.connect.hostname,
+      marker: marker(claim.expected.installationId, portal.key),
+    },
+    audienceEmails: [
+      ...claim.settings.access.adminEmails,
+      ...claim.settings.access.memberEmails,
+    ].sort(compareText),
+    sourceOwnership,
+  });
+}
+
+function toolName(value) {
+  return typeof value === 'string' && TOOL.test(value) ? value : null;
+}
+
+function safeManagedSource(value) {
+  const legacy = exactKeys(value, ['id', 'label', 'url', 'enabledTools', 'status']);
+  const current = exactKeys(value, ['id', 'label', 'url', 'authMode', 'enabledTools', 'status']);
+  if ((!legacy && !current) ||
+      typeof value.id !== 'string' || !SOURCE_ID.test(value.id) ||
+      !validSourceLabel(value.label) || !publicMcpUrl(value.url) ||
+      (value.status !== 'installed' && value.status !== 'draft')) return null;
+  const authMode = legacy ? 'none' : value.authMode;
+  if (authMode !== 'none' && authMode !== 'oauth') return null;
+  const enabledTools = exactSortedUniqueStrings(value.enabledTools, toolName, 64, 1);
+  if (!enabledTools) return null;
+  return Object.freeze({
+    id: value.id,
+    label: value.label,
+    url: publicMcpUrl(value.url),
+    authMode,
+    enabledTools,
+    status: value.status,
+  });
+}
+
+function safeManagementSources(value) {
+  if (!exactKeys(value, ['schemaVersion', 'revision', 'applyMode', 'sources']) ||
+      value.schemaVersion !== 1 || !Number.isSafeInteger(value.revision) || value.revision < 1 ||
+      value.revision > Number.MAX_SAFE_INTEGER || value.applyMode !== 'oauth_per_action' ||
+      !Array.isArray(value.sources) || value.sources.length > 32) return null;
+  const sources = value.sources.map(safeManagedSource);
+  if (sources.some((source) => source === null)) return null;
+  const ids = new Set(sources.map((source) => source.id));
+  const urls = new Set(sources.map((source) => source.url));
+  if (ids.size !== sources.length || urls.size !== sources.length) return null;
+  return Object.freeze({
+    schemaVersion: 1,
+    revision: value.revision,
+    applyMode: 'oauth_per_action',
+    sources: Object.freeze(sources),
+  });
+}
+
+async function initialManagementSources(status) {
+  if (status.source === null) {
+    return safeManagementSources({
+      schemaVersion: 1,
+      revision: 1,
+      applyMode: 'oauth_per_action',
+      sources: [],
+    });
+  }
+  const url = publicMcpUrl(status.source.endpoint);
+  if (!url) return null;
+  const record = {
+    schemaVersion: 1,
+    revision: 1,
+    applyMode: 'oauth_per_action',
+    sources: [{
+      id: `source-${(await sha256Hex(url)).slice(0, 16)}`,
+      label: status.source.label,
+      url,
+      authMode: 'none',
+      enabledTools: [...status.source.enabledTools].sort(compareText),
+      status: 'installed',
+    }],
+  };
+  return safeManagementSources(record);
+}
+
+function parseSourceSave(value) {
+  if (!exactKeys(value, ['schemaVersion', 'revision', 'source']) || value.schemaVersion !== 1 ||
+      !Number.isSafeInteger(value.revision) || value.revision < 1 ||
+      !exactKeys(value.source, ['label', 'url', 'authMode', 'enabledTools']) ||
+      !validSourceLabel(value.source.label)) return null;
+  const url = publicMcpUrl(value.source.url);
+  const authMode = value.source.authMode;
+  const enabledTools = exactSortedUniqueStrings(value.source.enabledTools, toolName, 64, 1);
+  if (!url || !enabledTools || (authMode !== 'none' && authMode !== 'oauth')) return null;
+  return Object.freeze({
+    revision: value.revision,
+    source: Object.freeze({ label: value.source.label, url, authMode, enabledTools }),
+  });
+}
+
+async function saveDraftSource(current, input) {
+  if (input.revision !== current.revision) return null;
+  const existing = current.sources.find((source) => source.url === input.source.url);
+  if (existing?.status === 'installed') return null;
+  const id = existing?.id ?? `source-${(await sha256Hex(input.source.url)).slice(0, 16)}`;
+  const source = {
+    id,
+    label: input.source.label,
+    url: input.source.url,
+    authMode: input.source.authMode,
+    enabledTools: [...input.source.enabledTools],
+    status: 'draft',
+  };
+  const sources = existing
+    ? current.sources.map((candidate) => candidate.id === id ? source : candidate)
+    : [...current.sources, source];
+  if (sources.length > 32) return null;
+  sources.sort((left, right) => compareText(left.id, right.id));
+  return safeManagementSources({
+    schemaVersion: 1,
+    revision: current.revision + 1,
+    applyMode: 'oauth_per_action',
+    sources,
+  });
+}
+
+const SOURCE_ACTION_RESOURCE_ORDER = Object.freeze([
+  'mcp_server', 'source_access_application', 'source_access_policy',
+]);
+
+function safeSourceActionResource(value, index) {
+  const kind = SOURCE_ACTION_RESOURCE_ORDER[index];
+  const policy = kind === 'source_access_policy';
+  if (!exactKeys(value, policy
+    ? ['kind', 'key', 'provider', 'desiredHash', 'marker', 'identityHash']
+    : ['kind', 'key', 'provider', 'desiredHash', 'marker']) || value.kind !== kind ||
+      !RESOURCE_KEY.test(value.key) || typeof value.desiredHash !== 'string' || !HASH.test(value.desiredHash) ||
+      typeof value.marker !== 'string' || !value.marker.startsWith('acg:v1:') ||
+      (policy && (typeof value.identityHash !== 'string' || !HASH.test(value.identityHash)))) return null;
+  const provider = parseProviderLocator(value.provider, policy);
+  if (!provider) return null;
+  return Object.freeze({ ...value, provider });
+}
+
+function safeSourceActionPending(value) {
+  if (value === null) return null;
+  if (!exactKeys(value, ['kind', 'phase', 'provider']) ||
+      !SOURCE_ACTION_RESOURCE_ORDER.includes(value.kind) ||
+      (value.phase !== 'send_armed' && value.phase !== 'submitted')) return false;
+  const policy = value.kind === 'source_access_policy';
+  const provider = value.provider === null ? null : parseProviderLocator(value.provider, policy);
+  if (value.phase === 'send_armed' ? value.provider !== null : !provider) return false;
+  return Object.freeze({ kind: value.kind, phase: value.phase, provider });
+}
+
+function safePortalUpdate(value) {
+  if (value === null) return null;
+  if (!exactKeys(value, ['phase', 'desiredHash']) ||
+      (value.phase !== 'send_armed' && value.phase !== 'submitted') ||
+      typeof value.desiredHash !== 'string' || !HASH.test(value.desiredHash)) return false;
+  return Object.freeze({ ...value });
+}
+
+function safeSourceAction(value) {
+  if (!exactKeys(value, [
+    'schemaVersion', 'actionId', 'sourceId', 'sourceRevision', 'actorEmail', 'issuedAt',
+    'expiresAt', 'status', 'actionKeyHash', 'sourceHash', 'resources', 'pending', 'portalUpdate', 'failureCode',
+  ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) || !SOURCE_ID.test(value.sourceId) ||
+      !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
+      !normalizedEmail(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
+      !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
+      value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
+      !['authorization_required', 'applying', 'succeeded', 'failed', 'recovery_required'].includes(value.status) ||
+      typeof value.actionKeyHash !== 'string' || !HASH.test(value.actionKeyHash) ||
+      typeof value.sourceHash !== 'string' || !HASH.test(value.sourceHash) ||
+      !Array.isArray(value.resources) || value.resources.length > SOURCE_ACTION_RESOURCE_ORDER.length ||
+      (value.failureCode !== null && (typeof value.failureCode !== 'string' ||
+        !/^[a-z][a-z0-9_]{0,63}$/u.test(value.failureCode)))) return null;
+  const resources = value.resources.map(safeSourceActionResource);
+  const pending = safeSourceActionPending(value.pending);
+  const portalUpdate = safePortalUpdate(value.portalUpdate);
+  if (resources.some((resourceValue) => resourceValue === null) || pending === false || portalUpdate === false ||
+      resources.some((resourceValue, index) => resourceValue.kind !== SOURCE_ACTION_RESOURCE_ORDER[index]) ||
+      (pending && pending.kind !== SOURCE_ACTION_RESOURCE_ORDER[resources.length]) ||
+      (portalUpdate && resources.length !== SOURCE_ACTION_RESOURCE_ORDER.length)) return null;
+  return Object.freeze({
+    ...value,
+    actorEmail: normalizedEmail(value.actorEmail),
+    resources: Object.freeze(resources),
+    pending,
+    portalUpdate,
+  });
+}
+
+function safeSourceActions(value) {
+  if (!exactKeys(value, ['schemaVersion', 'revision', 'actions']) || value.schemaVersion !== 1 ||
+      !Number.isSafeInteger(value.revision) || value.revision < 1 ||
+      !Array.isArray(value.actions) || value.actions.length > 16) return null;
+  const actions = value.actions.map(safeSourceAction);
+  if (actions.some((action) => action === null) ||
+      new Set(actions.map((action) => action.actionId)).size !== actions.length) return null;
+  return Object.freeze({ schemaVersion: 1, revision: value.revision, actions: Object.freeze(actions) });
+}
+
+function publicSourceAction(action) {
+  return Object.freeze({
+    schemaVersion: 1,
+    actionId: action.actionId,
+    sourceId: action.sourceId,
+    status: action.status,
+    expiresAt: new Date(action.expiresAt).toISOString(),
+    failureCode: action.failureCode,
+  });
+}
+
+function parseSourceActionPrepare(value) {
+  if (!exactKeys(value, [
+    'schemaVersion', 'actionId', 'sourceId', 'sourceRevision', 'actorEmail',
+    'issuedAt', 'expiresAt', 'actionKeyHash', 'sourceHash',
+  ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) || !SOURCE_ID.test(value.sourceId) ||
+      !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
+      !normalizedEmail(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
+      !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
+      value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
+      typeof value.actionKeyHash !== 'string' || !HASH.test(value.actionKeyHash) ||
+      typeof value.sourceHash !== 'string' || !HASH.test(value.sourceHash)) return null;
+  return Object.freeze({ ...value, actorEmail: normalizedEmail(value.actorEmail) });
+}
+
+async function prepareSourceAction(storage, input) {
+  const parsed = parseSourceActionPrepare(input);
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  if (!parsed || !sources || !control || parsed.sourceRevision !== sources.revision) return null;
+  const source = sources.sources.find((candidate) => candidate.id === parsed.sourceId);
+  if (!source || source.status !== 'draft') return null;
+  const current = safeSourceActions(await storage.get(ACTIONS_KEY)) ?? Object.freeze({
+    schemaVersion: 1, revision: 1, actions: Object.freeze([]),
+  });
+  const previous = [...current.actions].reverse().find((action) => action.sourceId === parsed.sourceId &&
+    !['failed', 'succeeded'].includes(action.status));
+  if (previous && previous.expiresAt > parsed.issuedAt &&
+      (previous.status === 'authorization_required' || previous.status === 'applying')) return null;
+  const retained = current.actions.filter((action) => action.expiresAt > parsed.issuedAt &&
+    action.actionId !== previous?.actionId &&
+    !(action.sourceId === parsed.sourceId && ['failed', 'succeeded'].includes(action.status)));
+  const action = safeSourceAction({
+    ...parsed,
+    status: 'authorization_required',
+    resources: previous?.resources ?? [],
+    pending: previous?.pending ?? null,
+    portalUpdate: previous?.portalUpdate ?? null,
+    failureCode: null,
+  });
+  if (!action) return null;
+  const updated = safeSourceActions({
+    schemaVersion: 1,
+    revision: current.revision + 1,
+    actions: [...retained, action],
+  });
+  if (!updated) return null;
+  await storage.put(ACTIONS_KEY, updated);
+  return action;
+}
+
+async function managedSourceHash(source) {
+  return sha256({
+    id: source.id,
+    label: source.label,
+    url: source.url,
+    authMode: source.authMode,
+    enabledTools: source.enabledTools,
+  });
+}
+
+async function storedSourceActionContext(storage, actionId) {
+  const actions = safeSourceActions(await storage.get(ACTIONS_KEY));
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  const action = actions?.actions.find((candidate) => candidate.actionId === actionId) ?? null;
+  return actions && sources && control && action ? Object.freeze({ actions, sources, control, action }) : null;
+}
+
+async function persistSourceAction(storage, action) {
+  const parsed = safeSourceAction(action);
+  const actions = safeSourceActions(await storage.get(ACTIONS_KEY));
+  if (!parsed || !actions) return null;
+  const index = actions.actions.findIndex((candidate) => candidate.actionId === parsed.actionId);
+  if (index < 0) return null;
+  const updated = safeSourceActions({
+    schemaVersion: 1,
+    revision: actions.revision + 1,
+    actions: actions.actions.map((candidate, candidateIndex) => candidateIndex === index ? parsed : candidate),
+  });
+  if (!updated) return null;
+  await storage.put(ACTIONS_KEY, updated);
+  return parsed;
+}
+
+async function cancelSourceAction(storage, actionId, actorEmail, now) {
+  const actions = safeSourceActions(await storage.get(ACTIONS_KEY));
+  const action = actions?.actions.find((candidate) => candidate.actionId === actionId);
+  if (!actions || !action || action.actorEmail !== normalizedEmail(actorEmail) ||
+      !Number.isSafeInteger(now) || now < action.issuedAt || now > action.expiresAt ||
+      action.status !== 'authorization_required') return null;
+  return persistSourceAction(storage, {
+    ...action,
+    status: 'failed',
+    failureCode: 'source_action_denied',
+  });
+}
+
+function sameProvider(left, right) {
+  return left && right && left.id === right.id && (left.parentId ?? '') === (right.parentId ?? '');
+}
+
+async function actionDesiredState(control, sources, action) {
+  const source = sources.sources.find((candidate) => candidate.id === action.sourceId);
+  if (!source || (source.status !== 'draft' && source.status !== 'installed') ||
+      await managedSourceHash(source) !== action.sourceHash) return null;
+  const settings = {
+    schemaVersion: 1,
+    connect: { name: control.portal.name, hostname: control.portal.hostname, codeMode: 'default_on' },
+    access: { adminEmails: [...control.audienceEmails], memberEmails: [] },
+    sources: [{
+      id: source.id,
+      label: source.label,
+      url: source.url,
+      authentication: {
+        mode: source.authMode,
+        onBehalfOfUser: source.authMode === 'oauth',
+      },
+      enabledTools: [...source.enabledTools],
+    }],
+  };
+  const desiredResources = (await buildDesiredResources(settings, control.installationId)).slice(0, 3);
+  return Object.freeze({
+    installationId: control.installationId,
+    target: Object.freeze({ accountId: control.accountId }),
+    settings: Object.freeze(settings),
+    accessPolicy: Object.freeze({ identitiesHash: await sha256({ emails: control.audienceEmails }) }),
+    desiredResources: Object.freeze(desiredResources),
+    resources: action.resources,
+    source,
+  });
+}
+
+function actionRecovery(code = 'source_action_recovery_required') {
+  return fixedJson(409, { schemaVersion: 1, error: code, retryable: true });
+}
+
+async function failSourceAction(storage, action, code, terminal = false) {
+  const updated = await persistSourceAction(storage, {
+    ...action,
+    status: terminal ? 'failed' : 'recovery_required',
+    failureCode: code,
+  });
+  return updated ? actionRecovery(code) : actionRecovery('source_action_state_unavailable');
+}
+
+function sourceActionClaim(value, environment, action, nowMs) {
+  if (!exactKeys(value, [
+    'schemaVersion', 'actionId', 'actionKey', 'actorEmail', 'accountId',
+    'issuedAt', 'expiresAt', 'cloudflareAccessToken',
+  ]) || value.schemaVersion !== 1 || value.actionId !== action.actionId ||
+      typeof value.actionKey !== 'string' || !NONCE.test(value.actionKey) ||
+      normalizedEmail(value.actorEmail) !== action.actorEmail || value.accountId !== environment.accountId ||
+      !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
+      value.expiresAt !== action.expiresAt || value.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 ||
+      value.issuedAt < action.issuedAt || value.expiresAt <= nowMs ||
+      typeof value.cloudflareAccessToken !== 'string' || value.cloudflareAccessToken.length < 20 ||
+      value.cloudflareAccessToken.length > 16 * 1024 || CONTROL.test(value.cloudflareAccessToken)) return null;
+  return value;
+}
+
+async function parseSourceActionRequest(request, env, storage, nowMs) {
+  if (!(request instanceof Request) || request.method !== 'POST' || request.headers.has('authorization') ||
+      request.headers.has('cookie') || request.headers.has('referer') || request.headers.has('origin') ||
+      request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return null;
+  const environment = parseManagementEnvironment(env);
+  const rawBody = await readBoundedText(request, REQUEST_LIMIT_BYTES);
+  if (!environment || !rawBody) return null;
+  let parsed;
+  try { parsed = JSON.parse(rawBody); } catch { return null; }
+  if (!isPlainData(parsed) || canonicalJson(parsed) !== rawBody || !ACTION_ID.test(parsed.actionId)) return null;
+  const context = await storedSourceActionContext(storage, parsed.actionId);
+  if (!context || context.action.status !== 'authorization_required') return null;
+  const claim = sourceActionClaim(parsed, environment, context.action, nowMs);
+  if (!claim || await sha256(claim.actionKey) !== context.action.actionKeyHash ||
+      !await verifyHmac(rawBody, claim.actionKey, request.headers.get('x-ankka-source-action-signature'))) return null;
+  return Object.freeze({ ...context, claim });
+}
+
+function portalServerMappings(control, sources, action) {
+  const actionServer = action.resources[0]?.provider?.id;
+  const ownership = actionServer && !control.sourceOwnership.some((entry) => entry.sourceId === action.sourceId)
+    ? [...control.sourceOwnership, {
+      sourceId: action.sourceId,
+      resources: action.resources,
+    }]
+    : [...control.sourceOwnership];
+  const mappings = [];
+  for (const entry of ownership.sort((left, right) => compareText(left.sourceId, right.sourceId))) {
+    const source = sources.sources.find((candidate) => candidate.id === entry.sourceId);
+    const serverId = entry.resources?.[0]?.provider?.id;
+    if (!source || !safeProviderId(serverId)) return null;
+    mappings.push(Object.freeze({
+      server_id: serverId,
+      default_disabled: true,
+      on_behalf: source.authMode === 'oauth',
+      updated_tools: source.enabledTools.map((name) => Object.freeze({ name, enabled: true })),
+    }));
+  }
+  return Object.freeze(mappings);
+}
+
+function normalizedPortalMappings(value) {
+  if (!isRecord(value) || !Array.isArray(value.servers)) return null;
+  const mappings = [];
+  for (const mapping of value.servers) {
+    if (!isRecord(mapping)) return null;
+    const serverId = safeProviderId(mapping.server_id ?? mapping.id);
+    if (!serverId || mapping.default_disabled !== true || typeof mapping.on_behalf !== 'boolean' ||
+        !Array.isArray(mapping.updated_tools) ||
+        (Object.hasOwn(mapping, 'updated_prompts') &&
+          (!Array.isArray(mapping.updated_prompts) || mapping.updated_prompts.length !== 0))) return null;
+    const tools = [];
+    for (const tool of mapping.updated_tools) {
+      if (!exactKeys(tool, ['name', 'enabled']) || !toolName(tool.name) || tool.enabled !== true) return null;
+      tools.push(Object.freeze({ name: tool.name, enabled: true }));
+    }
+    tools.sort((left, right) => compareText(left.name, right.name));
+    if (new Set(tools.map((tool) => tool.name)).size !== tools.length) return null;
+    mappings.push(Object.freeze({
+      server_id: serverId,
+      default_disabled: true,
+      on_behalf: mapping.on_behalf,
+      updated_tools: Object.freeze(tools),
+    }));
+  }
+  mappings.sort((left, right) => compareText(left.server_id, right.server_id));
+  return new Set(mappings.map((mapping) => mapping.server_id)).size === mappings.length
+    ? Object.freeze(mappings)
+    : null;
+}
+
+function portalStaticMatches(value, control) {
+  return isRecord(value) && value.id === control.portal.id && value.name === control.portal.name &&
+    value.hostname === control.portal.hostname && value.description === control.portal.marker &&
+    value.code_mode === 'default_on' && value.secure_web_gateway === false;
+}
+
+function portalExact(value, control, mappings) {
+  const observed = normalizedPortalMappings(value);
+  const expected = [...mappings].map((mapping) => ({
+    ...mapping,
+    updated_tools: [...mapping.updated_tools].sort((left, right) => compareText(left.name, right.name)),
+  })).sort((left, right) => compareText(left.server_id, right.server_id));
+  return portalStaticMatches(value, control) && observed !== null && canonicalJson(observed) === canonicalJson(expected);
+}
+
+async function finalizeSourceAction(storage, context, action) {
+  const ownership = Object.freeze({
+    sourceId: action.sourceId,
+    resources: action.resources,
+  });
+  let control = safeManagementControl(await storage.get(CONTROL_KEY));
+  let sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  if (!control || !sources) return null;
+  const retained = control.sourceOwnership.find((entry) => entry.sourceId === ownership.sourceId);
+  if (retained && canonicalJson(retained) !== canonicalJson(ownership)) return null;
+  if (!retained) {
+    control = safeManagementControl({
+      ...control,
+      sourceOwnership: [...control.sourceOwnership, ownership].sort((left, right) => compareText(left.sourceId, right.sourceId)),
+    });
+    if (!control) return null;
+    await storage.put(CONTROL_KEY, control);
+  }
+  const source = sources.sources.find((candidate) => candidate.id === action.sourceId);
+  if (!source || await managedSourceHash(source) !== action.sourceHash ||
+      (source.status !== 'draft' && source.status !== 'installed')) return null;
+  if (source.status === 'draft') {
+    sources = safeManagementSources({
+      ...sources,
+      revision: sources.revision + 1,
+      sources: sources.sources.map((candidate) => candidate.id === source.id
+        ? { ...candidate, status: 'installed' }
+        : candidate),
+    });
+    if (!sources) return null;
+    await storage.put(SOURCES_KEY, sources);
+  }
+  return persistSourceAction(storage, {
+    ...action,
+    status: 'succeeded',
+    pending: null,
+    portalUpdate: null,
+    failureCode: null,
+  });
+}
+
+async function processSourceAction(request, env, storage, nowMs = Date.now()) {
+  const parsed = await parseSourceActionRequest(request, env, storage, nowMs);
+  if (!parsed) return fixedJson(400, { schemaVersion: 1, error: 'source_action_rejected', retryable: false });
+  let { action } = parsed;
+  const desiredState = await actionDesiredState(parsed.control, parsed.sources, action);
+  if (!desiredState) return failSourceAction(storage, action, 'source_action_drift');
+  try { await verifyManagedSource(desiredState.source); } catch {
+    return failSourceAction(storage, action, 'source_discovery_failed');
+  }
+  action = await persistSourceAction(storage, { ...action, status: 'applying', failureCode: null });
+  if (!action) return actionRecovery('source_action_state_unavailable');
+  for (let index = 0; index < SOURCE_ACTION_RESOURCE_ORDER.length; index += 1) {
+    const kind = SOURCE_ACTION_RESOURCE_ORDER[index];
+    const state = { ...desiredState, resources: action.resources };
+    const desired = resource(state, kind);
+    if (!desired) return failSourceAction(storage, action, 'source_action_invalid');
+    if (action.resources.length > index) {
+      const observed = await discoverResource(state, kind, parsed.claim.cloudflareAccessToken);
+      if (observed.status !== 'present' || !sameProvider(observed.provider, action.resources[index].provider)) {
+        return failSourceAction(storage, action, 'source_resource_drift');
+      }
+      continue;
+    }
+    if (action.pending) {
+      const observed = await discoverResource(state, kind, parsed.claim.cloudflareAccessToken);
+      if (observed.status === 'absent') {
+        action = await persistSourceAction(storage, { ...action, pending: null });
+        if (!action) return actionRecovery('source_action_state_unavailable');
+      } else if (observed.status !== 'present' ||
+          (action.pending.provider && !sameProvider(observed.provider, action.pending.provider))) {
+        return failSourceAction(storage, action, 'source_action_recovery_required');
+      } else {
+        action = await persistSourceAction(storage, {
+          ...action,
+          resources: [...action.resources, receiptResource(state, desired, observed.provider)],
+          pending: null,
+        });
+        if (!action) return actionRecovery('source_action_state_unavailable');
+        continue;
+      }
+    }
+    const baseline = await discoverResource(state, kind, parsed.claim.cloudflareAccessToken);
+    if (baseline.status !== 'absent') return failSourceAction(
+      storage,
+      action,
+      baseline.status === 'auth' ? 'source_action_authorization_failed' : 'source_resource_collision',
+      baseline.status === 'auth',
+    );
+    action = await persistSourceAction(storage, {
+      ...action,
+      pending: { kind, phase: 'send_armed', provider: null },
+    });
+    if (!action) return actionRecovery('source_action_state_unavailable');
+    const created = await createResource(state, kind, parsed.claim.cloudflareAccessToken);
+    if (created.status !== 'submitted') return failSourceAction(storage, action, 'source_action_recovery_required');
+    action = await persistSourceAction(storage, {
+      ...action,
+      pending: { kind, phase: 'submitted', provider: created.provider },
+    });
+    if (!action) return actionRecovery('source_action_state_unavailable');
+    const after = await discoverResource({ ...desiredState, resources: action.resources }, kind, parsed.claim.cloudflareAccessToken);
+    if (after.status !== 'present' || !sameProvider(after.provider, created.provider)) {
+      return failSourceAction(storage, action, 'source_action_recovery_required');
+    }
+    action = await persistSourceAction(storage, {
+      ...action,
+      resources: [...action.resources, receiptResource(state, desired, after.provider)],
+      pending: null,
+    });
+    if (!action) return actionRecovery('source_action_state_unavailable');
+  }
+  const refreshed = await storedSourceActionContext(storage, action.actionId);
+  if (!refreshed) return actionRecovery('source_action_state_unavailable');
+  action = refreshed.action;
+  const mappings = portalServerMappings(refreshed.control, refreshed.sources, action);
+  if (!mappings) return failSourceAction(storage, action, 'source_action_drift');
+  const portalBody = {
+    name: refreshed.control.portal.name,
+    hostname: refreshed.control.portal.hostname,
+    code_mode: 'default_on',
+    secure_web_gateway: false,
+    description: refreshed.control.portal.marker,
+    servers: mappings,
+  };
+  const desiredHash = await sha256(portalBody);
+  const portalPath = `/accounts/${encodeURIComponent(refreshed.control.accountId)}/access/ai-controls/mcp/portals/${encodeURIComponent(refreshed.control.portal.id)}`;
+  let live = await providerCall(portalPath, parsed.claim.cloudflareAccessToken);
+  if (live.status !== 'ok' || !portalStaticMatches(live.result, refreshed.control)) {
+    return failSourceAction(storage, action, 'portal_drift');
+  }
+  if (!portalExact(live.result, refreshed.control, mappings)) {
+    if (action.portalUpdate) {
+      if (action.portalUpdate.desiredHash !== desiredHash) {
+        return failSourceAction(storage, action, 'source_action_drift');
+      }
+      const baselineMappings = portalServerMappings(
+        refreshed.control,
+        refreshed.sources,
+        { ...action, resources: [] },
+      );
+      if (!baselineMappings || !portalExact(live.result, refreshed.control, baselineMappings)) {
+        return failSourceAction(storage, action, 'portal_drift');
+      }
+      action = await persistSourceAction(storage, { ...action, portalUpdate: null });
+      if (!action) return actionRecovery('source_action_state_unavailable');
+    }
+    action = await persistSourceAction(storage, {
+      ...action,
+      portalUpdate: { phase: 'send_armed', desiredHash },
+    });
+    if (!action) return actionRecovery('source_action_state_unavailable');
+    const updated = await providerCall(portalPath, parsed.claim.cloudflareAccessToken, {
+      method: 'PUT', body: canonicalJson(portalBody),
+    });
+    if (updated.status !== 'ok') return failSourceAction(storage, action, 'source_action_recovery_required');
+    action = await persistSourceAction(storage, {
+      ...action,
+      portalUpdate: { phase: 'submitted', desiredHash },
+    });
+    if (!action) return actionRecovery('source_action_state_unavailable');
+    live = await providerCall(portalPath, parsed.claim.cloudflareAccessToken);
+    if (live.status !== 'ok' || !portalExact(live.result, refreshed.control, mappings)) {
+      return failSourceAction(storage, action, 'source_action_recovery_required');
+    }
+  } else if (action.portalUpdate?.desiredHash !== desiredHash && action.portalUpdate !== null) {
+    return failSourceAction(storage, action, 'source_action_drift');
+  }
+  const completed = await finalizeSourceAction(storage, refreshed, action);
+  return completed
+    ? fixedJson(200, publicSourceAction(completed))
+    : actionRecovery('source_action_state_unavailable');
+}
+
+const RUNTIME_ACTION_STAGES = Object.freeze([
+  'authorized', 'current_verified', 'assets_uploaded', 'candidate_created',
+  'candidate_staged', 'candidate_verified', 'activated', 'health_verified', 'rolled_back',
+]);
+
+function runtimeVersion(value) {
+  if (!exactKeys(value, ['artifactSha256', 'release', 'versionId']) || !updateSemver(value.release) ||
+      typeof value.artifactSha256 !== 'string' || !HASH.test(value.artifactSha256) ||
+      !(value.versionId === null || (typeof value.versionId === 'string' && VERSION_ID.test(value.versionId)))) return null;
+  return Object.freeze({ ...value });
+}
+
+function safeRuntimeAction(value) {
+  if (!exactKeys(value, [
+    'actionId', 'actionKeyHash', 'actorEmail', 'expiresAt', 'failureCode', 'from', 'fromVersionId',
+    'issuedAt', 'operation', 'schemaVersion', 'stage', 'status', 'to', 'toVersionId',
+  ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) ||
+      typeof value.actionKeyHash !== 'string' || !HASH.test(value.actionKeyHash) ||
+      normalizedEmail(value.actorEmail) !== value.actorEmail || !Number.isSafeInteger(value.issuedAt) ||
+      !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
+      value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
+      !['update', 'rollback'].includes(value.operation) ||
+      !['authorization_required', 'applying', 'succeeded', 'failed', 'recovery_required'].includes(value.status) ||
+      !(value.stage === null || RUNTIME_ACTION_STAGES.includes(value.stage)) ||
+      !(value.failureCode === null || (typeof value.failureCode === 'string' &&
+        /^[a-z][a-z0-9_]{0,79}$/u.test(value.failureCode))) ||
+      !(value.fromVersionId === null || VERSION_ID.test(value.fromVersionId)) ||
+      !(value.toVersionId === null || VERSION_ID.test(value.toVersionId))) return null;
+  const from = runtimeVersion(value.from);
+  const to = runtimeVersion(value.to);
+  return from && to ? Object.freeze({ ...value, from, to }) : null;
+}
+
+function safeRuntimeUpdates(value) {
+  if (!exactKeys(value, ['actions', 'current', 'previous', 'revision', 'schemaVersion']) ||
+      value.schemaVersion !== 1 || !Number.isSafeInteger(value.revision) || value.revision < 1 ||
+      !Array.isArray(value.actions) || value.actions.length > 12) return null;
+  const current = runtimeVersion(value.current);
+  const previous = value.previous === null ? null : runtimeVersion(value.previous);
+  const actions = value.actions.map(safeRuntimeAction);
+  if (!current || (value.previous !== null && !previous) || actions.some((action) => !action) ||
+      new Set(actions.map((action) => action.actionId)).size !== actions.length) return null;
+  return Object.freeze({ schemaVersion: 1, revision: value.revision, current, previous, actions: Object.freeze(actions) });
+}
+
+function initialRuntimeUpdates(environment) {
+  return safeRuntimeUpdates({
+    schemaVersion: 1, revision: 1,
+    current: { release: environment.release, artifactSha256: environment.releaseSha256, versionId: null },
+    previous: null, actions: [],
+  });
+}
+
+async function runtimeUpdates(storage, environment) {
+  const retained = safeRuntimeUpdates(await storage.get(UPDATES_KEY));
+  if (retained) return retained;
+  const initial = initialRuntimeUpdates(environment);
+  if (!initial) return null;
+  await storage.put(UPDATES_KEY, initial);
+  return initial;
+}
+
+function publicRuntimeAction(action) {
+  return Object.freeze({
+    schemaVersion: 1, actionId: action.actionId, operation: action.operation,
+    status: action.status, stage: action.stage,
+    from: Object.freeze({ release: action.from.release, artifactSha256: action.from.artifactSha256 }),
+    to: Object.freeze({ release: action.to.release, artifactSha256: action.to.artifactSha256 }),
+    expiresAt: new Date(action.expiresAt).toISOString(), failureCode: action.failureCode,
+  });
+}
+
+async function saveRuntimeUpdates(storage, state) {
+  const parsed = safeRuntimeUpdates(state);
+  if (!parsed) return null;
+  await storage.put(UPDATES_KEY, parsed);
+  return parsed;
+}
+
+async function prepareRuntimeAction(storage, environment, input) {
+  if (!exactKeys(input, [
+    'actionId', 'actionKeyHash', 'actorEmail', 'expiresAt', 'issuedAt', 'operation', 'to',
+  ]) || !ACTION_ID.test(input.actionId) || typeof input.actionKeyHash !== 'string' ||
+      !HASH.test(input.actionKeyHash) || normalizedEmail(input.actorEmail) !== input.actorEmail ||
+      !Number.isSafeInteger(input.issuedAt) || !Number.isSafeInteger(input.expiresAt) ||
+      input.expiresAt <= input.issuedAt || input.expiresAt - input.issuedAt > 10 * 60 * 1000 ||
+      !['update', 'rollback'].includes(input.operation)) return null;
+  const state = await runtimeUpdates(storage, environment);
+  const to = runtimeVersion(input.to);
+  if (!state || !to || state.current.release !== environment.release ||
+      state.current.artifactSha256 !== environment.releaseSha256 ||
+      (input.operation === 'update' && compareUpdateRelease(state.current.release, to.release) !== -1) ||
+      (input.operation === 'rollback' && (!state.previous || canonicalJson(state.previous) !== canonicalJson(to)))) {
+    return null;
+  }
+  const active = state.actions.find((action) =>
+    !['succeeded', 'failed'].includes(action.status) && action.expiresAt > input.issuedAt);
+  if (active) return null;
+  const action = safeRuntimeAction({
+    schemaVersion: 1, actionId: input.actionId, actionKeyHash: input.actionKeyHash,
+    actorEmail: input.actorEmail, issuedAt: input.issuedAt, expiresAt: input.expiresAt,
+    operation: input.operation, from: state.current, to, status: 'authorization_required',
+    stage: null, failureCode: null, fromVersionId: state.current.versionId, toVersionId: to.versionId,
+  });
+  if (!action) return null;
+  const updated = await saveRuntimeUpdates(storage, {
+    ...state, revision: state.revision + 1,
+    actions: [...state.actions.filter((candidate) => candidate.expiresAt > input.issuedAt), action].slice(-12),
+  });
+  return updated ? action : null;
+}
+
+async function updateRuntimeAction(storage, environment, actionId, transform) {
+  const state = await runtimeUpdates(storage, environment);
+  const index = state?.actions.findIndex((action) => action.actionId === actionId) ?? -1;
+  if (!state || index < 0) return null;
+  const action = safeRuntimeAction(transform(state.actions[index], state));
+  if (!action) return null;
+  const actions = state.actions.map((candidate, candidateIndex) => candidateIndex === index ? action : candidate);
+  const next = await saveRuntimeUpdates(storage, {
+    ...state, revision: state.revision + 1, actions,
+    ...(action.status === 'succeeded' ? {
+      current: { ...action.to, versionId: action.toVersionId },
+      previous: { ...action.from, versionId: action.fromVersionId },
+    } : {}),
+  });
+  if (next && action.status === 'succeeded') {
+    const status = safePublicStatus(await storage.get(STATUS_KEY));
+    if (!status) return null;
+    await storage.put(STATUS_KEY, Object.freeze({
+      ...status,
+      release: action.to.release,
+      updatedAt: new Date().toISOString(),
+    }));
+  }
+  return next ? action : null;
+}
+
+async function processRuntimeActionControl(request, env, storage, nowMs = Date.now()) {
+  const environment = parseManagementEnvironment(env);
+  const rawBody = await readBoundedText(request, 32 * 1024);
+  if (!environment || request.method !== 'POST' || !rawBody || request.headers.has('authorization') ||
+      request.headers.has('cookie') || request.headers.has('origin') || request.headers.has('referer') ||
+      request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+    return fixedJson(400, { schemaVersion: 1, error: 'runtime_action_rejected' });
+  }
+  let value;
+  try { value = JSON.parse(rawBody); } catch { value = null; }
+  if (!isPlainData(value) || canonicalJson(value) !== rawBody || !ACTION_ID.test(value?.actionId)) {
+    return fixedJson(400, { schemaVersion: 1, error: 'runtime_action_rejected' });
+  }
+  const state = await runtimeUpdates(storage, environment);
+  const action = state?.actions.find((candidate) => candidate.actionId === value.actionId);
+  if (!action || typeof value.actionKey !== 'string' || !NONCE.test(value.actionKey) ||
+      await sha256(value.actionKey) !== action.actionKeyHash ||
+      !await verifyHmac(rawBody, value.actionKey, request.headers.get('x-ankka-runtime-action-signature')) ||
+      !Number.isSafeInteger(value.issuedAt) || value.issuedAt < action.issuedAt ||
+      value.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 || value.expiresAt !== action.expiresAt ||
+      value.expiresAt <= nowMs || value.operation !== action.operation) {
+    return fixedJson(400, { schemaVersion: 1, error: 'runtime_action_rejected' });
+  }
+  let updated = null;
+  if (value.command === 'begin' && exactKeys(value, [
+    'actionId', 'actionKey', 'command', 'expiresAt', 'issuedAt', 'operation', 'schemaVersion',
+  ]) && value.schemaVersion === 1 && action.status === 'authorization_required') {
+    updated = await updateRuntimeAction(storage, environment, action.actionId, (current) => ({
+      ...current, status: 'applying', stage: 'authorized', failureCode: null,
+    }));
+  } else if (value.command === 'progress' && exactKeys(value, [
+    'actionId', 'actionKey', 'command', 'expiresAt', 'fromVersionId', 'issuedAt', 'operation',
+    'schemaVersion', 'stage', 'toVersionId',
+  ]) && value.schemaVersion === 1 && action.status === 'applying' &&
+      RUNTIME_ACTION_STAGES.includes(value.stage) &&
+      (value.fromVersionId === null || VERSION_ID.test(value.fromVersionId)) &&
+      (value.toVersionId === null || VERSION_ID.test(value.toVersionId))) {
+    updated = await updateRuntimeAction(storage, environment, action.actionId, (current) => ({
+      ...current, stage: value.stage, fromVersionId: value.fromVersionId, toVersionId: value.toVersionId,
+    }));
+  } else if (value.command === 'complete' && exactKeys(value, [
+    'actionId', 'actionKey', 'command', 'expiresAt', 'fromVersionId', 'issuedAt', 'operation',
+    'schemaVersion', 'toVersionId',
+  ]) && value.schemaVersion === 1 && action.status === 'applying' &&
+      VERSION_ID.test(value.fromVersionId) && VERSION_ID.test(value.toVersionId)) {
+    updated = await updateRuntimeAction(storage, environment, action.actionId, (current) => ({
+      ...current, status: 'succeeded', stage: 'health_verified', failureCode: null,
+      fromVersionId: value.fromVersionId, toVersionId: value.toVersionId,
+    }));
+  } else if (value.command === 'fail' && exactKeys(value, [
+    'actionId', 'actionKey', 'command', 'expiresAt', 'failureCode', 'issuedAt', 'operation',
+    'recoveryRequired', 'schemaVersion',
+  ]) && value.schemaVersion === 1 && action.status === 'applying' &&
+      typeof value.failureCode === 'string' && /^[a-z][a-z0-9_]{0,79}$/u.test(value.failureCode) &&
+      typeof value.recoveryRequired === 'boolean') {
+    updated = await updateRuntimeAction(storage, environment, action.actionId, (current) => ({
+      ...current, status: value.recoveryRequired ? 'recovery_required' : 'failed',
+      failureCode: value.failureCode,
+    }));
+  } else if (value.command === 'probe' && exactKeys(value, [
+    'actionId', 'actionKey', 'command', 'expiresAt', 'issuedAt', 'operation', 'schemaVersion',
+    'targetArtifactSha256', 'targetRelease',
+  ]) && value.schemaVersion === 1 && action.status === 'applying' &&
+      value.targetRelease === action.to.release && value.targetArtifactSha256 === action.to.artifactSha256 &&
+      request.headers.get('x-ankka-runtime-probe-version') === 'verified') {
+    return new Response(null, { status: 204, headers: { ...PUBLIC_HEADERS, 'x-ankka-runtime-action': 'ready' } });
+  }
+  return updated ? fixedJson(200, publicRuntimeAction(updated)) :
+    fixedJson(409, { schemaVersion: 1, error: 'runtime_action_conflict' });
+}
+
+function safeTeardownAction(value) {
+  if (!exactKeys(value, [
+    'schemaVersion', 'actionId', 'actionKeyHash', 'actorEmail', 'installationId',
+    'issuedAt', 'expiresAt', 'status', 'failureCode',
+  ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) ||
+      typeof value.actionKeyHash !== 'string' || !HASH.test(value.actionKeyHash) ||
+      normalizedEmail(value.actorEmail) !== value.actorEmail ||
+      !INSTALLATION_ID.test(value.installationId) || !Number.isSafeInteger(value.issuedAt) ||
+      !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
+      value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
+      !['authorization_required', 'applying', 'gateway_removed', 'failed', 'recovery_required'].includes(value.status) ||
+      (value.failureCode !== null && (typeof value.failureCode !== 'string' ||
+        !/^[a-z][a-z0-9_]{0,63}$/u.test(value.failureCode)))) return null;
+  return Object.freeze({ ...value });
+}
+
+function safeTeardownActions(value) {
+  if (!exactKeys(value, ['schemaVersion', 'revision', 'actions']) || value.schemaVersion !== 1 ||
+      !Number.isSafeInteger(value.revision) || value.revision < 1 || !Array.isArray(value.actions) ||
+      value.actions.length > 8) return null;
+  const actions = value.actions.map(safeTeardownAction);
+  if (actions.some((action) => action === null) ||
+      new Set(actions.map((action) => action.actionId)).size !== actions.length) return null;
+  return Object.freeze({ schemaVersion: 1, revision: value.revision, actions: Object.freeze(actions) });
+}
+
+function publicTeardownAction(action) {
+  return Object.freeze({
+    schemaVersion: 1,
+    actionId: action.actionId,
+    status: action.status,
+    expiresAt: new Date(action.expiresAt).toISOString(),
+    failureCode: action.failureCode,
+  });
+}
+
+async function safePersistedReadyReceipt(value, environment, installationId) {
+  if (!isRecord(value) || !exactKeys(value, [
+    'schemaVersion', 'manager', 'installationId', 'state', 'revision', 'release',
+    'target', 'accessPolicy', 'desiredHash', 'resources', 'pending', 'checksum',
+  ]) || value.schemaVersion !== 1 || value.manager !== MANAGER || value.state !== 'ready' ||
+      value.installationId !== installationId || !RELEASE.test(value.release) ||
+      typeof value.desiredHash !== 'string' || !HASH.test(value.desiredHash) || value.pending !== null ||
+      typeof value.checksum !== 'string' || !HASH.test(value.checksum) || !isRecord(value.target) ||
+      !exactKeys(value.target, ['accountId', 'zoneId', 'zoneName', 'hostname']) ||
+      value.target.accountId !== environment.accountId || value.target.zoneId !== environment.zoneId ||
+      value.target.zoneName !== environment.zoneName || !hostname(value.target.hostname) ||
+      !isRecord(value.accessPolicy) || !exactKeys(value.accessPolicy, [
+        'identityType', 'identityCount', 'identitiesHash',
+      ]) || value.accessPolicy.identityType !== 'email' ||
+      !Number.isSafeInteger(value.accessPolicy.identityCount) || value.accessPolicy.identityCount < 1 ||
+      typeof value.accessPolicy.identitiesHash !== 'string' || !HASH.test(value.accessPolicy.identitiesHash) ||
+      !Array.isArray(value.resources)) return null;
+  const kinds = value.resources.map((resource) => isRecord(resource) ? resource.kind : null);
+  const expectedOrder = [RESOURCE_ORDER, PORTAL_RESOURCE_ORDER].find((candidate) =>
+    canonicalJson(candidate) === canonicalJson(kinds));
+  if (!expectedOrder || value.revision !== expectedOrder.length + 1) return null;
+  const resources = [];
+  const locators = new Set();
+  const accessApplicationIds = new Set();
+  for (let index = 0; index < expectedOrder.length; index += 1) {
+    const resource = value.resources[index];
+    const kind = expectedOrder[index];
+    const policy = kind === 'source_access_policy' || kind === 'portal_access_policy';
+    if (!exactKeys(resource, policy
+      ? ['kind', 'key', 'provider', 'desiredHash', 'marker', 'identityHash']
+      : ['kind', 'key', 'provider', 'desiredHash', 'marker']) || resource.kind !== kind ||
+        !RESOURCE_KEY.test(resource.key) || typeof resource.desiredHash !== 'string' ||
+        !HASH.test(resource.desiredHash) || resource.marker !== marker(installationId, resource.key) ||
+        (policy && resource.identityHash !== value.accessPolicy.identitiesHash)) return null;
+    const provider = parseProviderLocator(resource.provider, policy);
+    if (!provider) return null;
+    const locatorKey = `${kind}\u0000${provider.parentId ?? ''}\u0000${provider.id}`;
+    if (locators.has(locatorKey)) return null;
+    locators.add(locatorKey);
+    if (kind === 'source_access_application' || kind === 'portal_access_application') {
+      if (accessApplicationIds.has(provider.id)) return null;
+      accessApplicationIds.add(provider.id);
+    }
+    resources.push(Object.freeze({ ...resource, provider }));
+  }
+  const sourceApplication = resources.find((resource) => resource.kind === 'source_access_application');
+  const sourcePolicy = resources.find((resource) => resource.kind === 'source_access_policy');
+  const portalApplication = resources.find((resource) => resource.kind === 'portal_access_application');
+  const portalPolicy = resources.find((resource) => resource.kind === 'portal_access_policy');
+  if (!portalApplication || !portalPolicy || portalPolicy.provider.parentId !== portalApplication.provider.id ||
+      (sourceApplication ? sourcePolicy?.provider.parentId !== sourceApplication.provider.id : sourcePolicy)) return null;
+  const receipt = Object.freeze({ ...value, resources: Object.freeze(resources) });
+  const { checksum, ...unsigned } = receipt;
+  return await sha256(unsigned) === checksum ? receipt : null;
+}
+
+async function storedTeardownRoot(storage, environment, installationId) {
+  const value = await storage.get(STORAGE_KEY);
+  const receipt = await safePersistedReadyReceipt(value, environment, installationId);
+  if (receipt) return Object.freeze({
+    schemaVersion: 1, status: 'ready', installationId, receipt, teardown: null,
+  });
+  if (!isRecord(value) || !exactKeys(value, [
+    'schemaVersion', 'status', 'installationId', 'receipt', 'teardown',
+  ]) || value.schemaVersion !== 1 || !['tearing_down', 'removed'].includes(value.status) ||
+      value.installationId !== installationId) return null;
+  const retainedReceipt = await safePersistedReadyReceipt(value.receipt, environment, installationId);
+  if (!retainedReceipt) return null;
+  return Object.freeze({ ...value, receipt: retainedReceipt });
+}
+
+async function rootTeardownEvidence(storage, environment, installationId) {
+  const root = await storedTeardownRoot(storage, environment, installationId);
+  return root ? Object.freeze({
+    schemaVersion: 1,
+    installationId,
+    root: Object.freeze({ receipt: root.receipt }),
+  }) : null;
+}
+
+function teardownResourceKey(resource) {
+  return `${resource.kind}\u0000${resource.provider.parentId ?? ''}\u0000${resource.provider.id}`;
+}
+
+function teardownProviderLocatorKey(resource) {
+  if (resource.kind === 'source_access_application' || resource.kind === 'portal_access_application') {
+    return `access_application\u0000${resource.provider.id}`;
+  }
+  if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
+    return `access_policy\u0000${resource.provider.parentId}\u0000${resource.provider.id}`;
+  }
+  return `${resource.kind}\u0000${resource.provider.id}`;
+}
+
+function sameTeardownResourceAuthority(left, right) {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
+function teardownResources(root, sourceOwnership) {
+  if (!Array.isArray(root.receipt?.resources) || !Array.isArray(sourceOwnership)) return null;
+  const receiptSources = root.receipt.resources.filter((resource) => (
+    SOURCE_ACTION_RESOURCE_ORDER.includes(resource.kind)
+  ));
+  const extras = [];
+  let receiptSourceOwner = null;
+  const sourceIds = new Set();
+  const orderedOwnership = [...sourceOwnership].sort((left, right) => (
+    compareText(left?.sourceId ?? '', right?.sourceId ?? '')
+  ));
+  for (const source of orderedOwnership) {
+    if (!exactKeys(source, ['sourceId', 'resources']) || !SOURCE_ID.test(source.sourceId) ||
+        !Array.isArray(source.resources) || source.resources.length !== SOURCE_ACTION_RESOURCE_ORDER.length) return null;
+    if (sourceIds.has(source.sourceId)) return null;
+    sourceIds.add(source.sourceId);
+    const resources = source.resources.map(safeSourceActionResource);
+    if (resources.some((resource) => resource === null)) return null;
+    if (receiptSources.length > 0 && resources.every((resource, index) => (
+      sameTeardownResourceAuthority(resource, receiptSources[index])
+    ))) {
+      // The initially configured source is deliberately represented in both
+      // the immutable root receipt and management ownership. Only an exact
+      // full-resource alias is accepted; a partial or drifted locator overlap
+      // is an authority conflict.
+      if (receiptSourceOwner !== null) return null;
+      receiptSourceOwner = source.sourceId;
+      continue;
+    }
+    extras.push(...resources);
+  }
+  if ((receiptSources.length > 0) !== (receiptSourceOwner !== null)) return null;
+  const seenProviderLocators = new Set();
+  const ordered = [];
+  // Day-two sources depend on the original Portal graph, so remove them first
+  // in deterministic reverse source/resource order, then unwind the receipt.
+  for (const resource of [...extras].reverse().concat([...root.receipt.resources].reverse())) {
+    const locatorKey = teardownProviderLocatorKey(resource);
+    if (seenProviderLocators.has(locatorKey)) return null;
+    seenProviderLocators.add(locatorKey);
+    ordered.push(Object.freeze(structuredClone(resource)));
+  }
+  return Object.freeze({
+    resources: Object.freeze(ordered),
+    receiptSourceOwner,
+  });
+}
+
+function teardownSettings(control, source, sourceId) {
+  return Object.freeze({
+    schemaVersion: 1,
+    connect: Object.freeze({
+      name: control.portal.name,
+      hostname: control.portal.hostname,
+      codeMode: 'default_on',
+    }),
+    access: Object.freeze({ adminEmails: control.audienceEmails, memberEmails: Object.freeze([]) }),
+    sources: Object.freeze(source === null ? [] : [Object.freeze({
+      id: sourceId,
+      label: source.label,
+      url: source.url,
+      authentication: Object.freeze({
+        mode: source.authMode,
+        onBehalfOfUser: source.authMode === 'oauth',
+      }),
+      enabledTools: source.enabledTools,
+    })]),
+  });
+}
+
+function teardownReceiptResourceMatchesDesired(actual, desired, identityHash) {
+  const policy = actual.kind === 'source_access_policy' || actual.kind === 'portal_access_policy';
+  return actual.kind === desired.kind && actual.key === desired.key &&
+    actual.desiredHash === desired.desiredHash &&
+    actual.marker === marker(desired.desired.metadata.installationId, desired.key) &&
+    (!policy || actual.identityHash === identityHash) &&
+    ((actual.kind !== 'mcp_server' && actual.kind !== 'portal') || actual.provider.id === desired.key);
+}
+
+async function teardownAuthorityState(root, rawControl, rawSources, environment) {
+  const control = safeManagementControl(rawControl);
+  const sources = safeManagementSources(rawSources);
+  if (!control || !sources || control.installationId !== root.installationId ||
+      control.accountId !== environment.accountId ||
+      root.receipt.target.accountId !== environment.accountId ||
+      root.receipt.target.zoneId !== environment.zoneId ||
+      root.receipt.target.zoneName !== environment.zoneName ||
+      control.portal.hostname !== root.receipt.target.hostname) return null;
+  const portalReceipt = root.receipt.resources.find((resource) => resource.kind === 'portal');
+  if (!portalReceipt || control.portal.id !== portalReceipt.provider.id ||
+      control.portal.marker !== portalReceipt.marker) return null;
+  const layout = teardownResources(root, control.sourceOwnership);
+  if (!layout) return null;
+  const installedSources = sources.sources.filter((source) => source.status === 'installed');
+  const installedIds = installedSources.map((source) => source.id).sort(compareText);
+  const ownershipIds = control.sourceOwnership.map((ownership) => ownership.sourceId).sort(compareText);
+  if (canonicalJson(installedIds) !== canonicalJson(ownershipIds)) return null;
+  const audienceHash = await sha256({ emails: control.audienceEmails });
+  if (root.receipt.accessPolicy.identityCount !== control.audienceEmails.length ||
+      root.receipt.accessPolicy.identitiesHash !== audienceHash) return null;
+
+  const receiptSource = layout.receiptSourceOwner === null
+    ? null
+    : installedSources.find((source) => source.id === layout.receiptSourceOwner) ?? null;
+  if ((layout.receiptSourceOwner !== null) !== (receiptSource !== null)) return null;
+  const rootSettings = teardownSettings(control, receiptSource, 'company-context');
+  const rootDesired = await buildDesiredResources(rootSettings, root.installationId);
+  if (rootDesired.length !== root.receipt.resources.length ||
+      root.receipt.desiredHash !== await sha256({
+        schemaVersion: 1,
+        installationId: root.installationId,
+        resources: rootDesired,
+      })) return null;
+  const entries = new Map();
+  const rootState = Object.freeze({
+    installationId: root.installationId,
+    target: root.receipt.target,
+    settings: rootSettings,
+    accessPolicy: Object.freeze({ identitiesHash: audienceHash }),
+    desiredResources: rootDesired,
+    resources: root.receipt.resources,
+  });
+  for (let index = 0; index < root.receipt.resources.length; index += 1) {
+    const actual = root.receipt.resources[index];
+    const desired = rootDesired[index];
+    if (!teardownReceiptResourceMatchesDesired(actual, desired, audienceHash)) return null;
+    entries.set(teardownResourceKey(actual), Object.freeze({ desired, state: rootState }));
+  }
+  for (const ownership of control.sourceOwnership) {
+    if (ownership.sourceId === layout.receiptSourceOwner) continue;
+    const source = installedSources.find((candidate) => candidate.id === ownership.sourceId);
+    if (!source) return null;
+    const settings = teardownSettings(control, source, source.id);
+    const desiredResources = (await buildDesiredResources(settings, root.installationId)).slice(0, 3);
+    const state = Object.freeze({
+      installationId: root.installationId,
+      target: root.receipt.target,
+      settings,
+      accessPolicy: Object.freeze({ identitiesHash: audienceHash }),
+      desiredResources: Object.freeze(desiredResources),
+      resources: ownership.resources,
+    });
+    for (let index = 0; index < ownership.resources.length; index += 1) {
+      const actual = ownership.resources[index];
+      const desired = desiredResources[index];
+      const key = teardownResourceKey(actual);
+      if (entries.has(key) || !teardownReceiptResourceMatchesDesired(actual, desired, audienceHash)) return null;
+      entries.set(key, Object.freeze({ desired, state }));
+    }
+  }
+  if (entries.size !== layout.resources.length) return null;
+  const portalMappings = portalServerMappings(control, sources, Object.freeze({
+    sourceId: '',
+    resources: Object.freeze([]),
+  }));
+  if (!portalMappings) return null;
+  return Object.freeze({
+    control,
+    sources,
+    resources: layout.resources,
+    entries,
+    portalMappings,
+  });
+}
+
+function teardownProviderPath(resource, target) {
+  const account = encodeURIComponent(target.accountId);
+  const zone = encodeURIComponent(target.zoneId);
+  const id = encodeURIComponent(resource.provider.id);
+  if (resource.kind === 'mcp_server') {
+    return `/accounts/${account}/access/ai-controls/mcp/servers/${id}`;
+  }
+  if (resource.kind === 'portal') {
+    return `/accounts/${account}/access/ai-controls/mcp/portals/${id}`;
+  }
+  if (resource.kind === 'source_access_application' || resource.kind === 'portal_access_application') {
+    return `/accounts/${account}/access/apps/${id}`;
+  }
+  if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
+    return `/accounts/${account}/access/apps/${encodeURIComponent(resource.provider.parentId)}/policies/${id}`;
+  }
+  return `/zones/${zone}/dns_records/${id}`;
+}
+
+function teardownPolicyMatches(value, desired, settings) {
+  if (!isRecord(value) || !safeProviderId(value.id) || value.decision !== 'allow' ||
+      value.name !== `${desired.kind === 'source_access_policy'
+        ? settings.sources[0]?.label
+        : settings.connect.name} users [${marker(
+        desired.desired.metadata.installationId,
+        desired.key,
+      )}]` || !Array.isArray(value.include) || !Array.isArray(value.exclude) ||
+      value.exclude.length !== 0 || !Array.isArray(value.require) || value.require.length !== 0) return false;
+  const emails = [];
+  for (const rule of value.include) {
+    const email = isRecord(rule) && exactKeys(rule, ['email']) && isRecord(rule.email) &&
+      exactKeys(rule.email, ['email']) ? normalizedEmail(rule.email.email) : null;
+    if (!email) return false;
+    emails.push(email);
+  }
+  return emails.length === settings.access.adminEmails.length &&
+    new Set(emails).size === emails.length && canonicalJson(emails.sort(compareText)) ===
+      canonicalJson([...settings.access.adminEmails].sort(compareText));
+}
+
+function teardownOwnershipMatches(resource, result, authority) {
+  if (!isRecord(result) || result.id !== resource.provider.id) return false;
+  const entry = authority.entries.get(teardownResourceKey(resource));
+  if (!entry) return false;
+  if (resource.kind === 'mcp_server') {
+    return mcpMatches(result, entry.desired);
+  }
+  if (resource.kind === 'portal') {
+    return portalExact(result, authority.control, authority.portalMappings);
+  }
+  if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
+    return teardownPolicyMatches(result, entry.desired, entry.state.settings);
+  }
+  if (resource.kind === 'dns_record') {
+    return dnsMatches(result, entry.desired);
+  }
+  return accessApplicationIdentityMatches(result, resource.kind, entry.state);
+}
+
+async function teardownResourceRead(root, resource, authority, token) {
+  const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token);
+  if (response.status === 'absent' || response.status === 'auth' || response.status === 'unknown') {
+    return response.status;
+  }
+  if (response.status !== 'ok') return 'conflict';
+  return teardownOwnershipMatches(resource, response.result, authority) ? 'present' : 'conflict';
+}
+
+async function teardownResourceDelete(root, resource, token) {
+  const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token, { method: 'DELETE' });
+  if (response.status === 'ok') return 'submitted';
+  return response.status;
+}
+
+function safeRootTeardown(value, root, resources, resourcesHash) {
+  if (!isRecord(value) || !exactKeys(value, [
+    'schemaVersion', 'installationId', 'resourcesHash', 'status', 'removedKeys', 'pending', 'removedAt',
+  ]) || value.schemaVersion !== 1 || value.installationId !== root.installationId ||
+      value.resourcesHash !== resourcesHash || !['applying', 'removed'].includes(value.status) ||
+      !Array.isArray(value.removedKeys) || value.removedKeys.some((key, index) =>
+        typeof key !== 'string' || key !== teardownResourceKey(resources[index])) ||
+      value.removedKeys.length > resources.length ||
+      !(value.removedAt === null || Number.isSafeInteger(value.removedAt))) return null;
+  let pending = null;
+  if (value.pending !== null) {
+    if (value.removedKeys.length >= resources.length ||
+        !exactKeys(value.pending, ['key', 'requestId', 'phase']) ||
+        value.pending.key !== teardownResourceKey(resources[value.removedKeys.length]) ||
+        !REQUEST_ID.test(value.pending.requestId) ||
+        !['send_armed', 'submitted', 'not_applied'].includes(value.pending.phase)) return null;
+    pending = Object.freeze({ ...value.pending });
+  }
+  if ((value.status === 'removed') !== (value.removedKeys.length === resources.length &&
+      pending === null && Number.isSafeInteger(value.removedAt))) return null;
+  return Object.freeze({ ...value, removedKeys: Object.freeze([...value.removedKeys]), pending });
+}
+
+async function processRootTeardownApply(storage, environment, input, nowMs = Date.now()) {
+  if (!isRecord(input) || !exactKeys(input, [
+    'schemaVersion', 'actionId', 'installationId', 'requestId', 'control', 'sources',
+    'cloudflareAccessToken', 'issuedAt', 'expiresAt',
+  ]) || input.schemaVersion !== 1 || !ACTION_ID.test(input.actionId) ||
+      !INSTALLATION_ID.test(input.installationId) || !REQUEST_ID.test(input.requestId) ||
+      typeof input.cloudflareAccessToken !== 'string' || input.cloudflareAccessToken.length < 20 ||
+      input.cloudflareAccessToken.length > 16 * 1024 || CONTROL.test(input.cloudflareAccessToken) ||
+      !Number.isSafeInteger(input.issuedAt) || !Number.isSafeInteger(input.expiresAt) ||
+      input.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 || input.expiresAt <= nowMs) return null;
+  let root = await storedTeardownRoot(storage, environment, input.installationId);
+  if (!root) return null;
+  const authority = await teardownAuthorityState(root, input.control, input.sources, environment);
+  const resources = authority?.resources ?? null;
+  const resourcesHash = authority ? await sha256({
+    schemaVersion: 1,
+    resources,
+    control: authority.control,
+    sources: authority.sources,
+  }) : null;
+  if (!authority || !resources || !resourcesHash) return null;
+  let teardown = root.teardown === undefined ? null : safeRootTeardown(
+    root.teardown, root, resources, resourcesHash,
+  );
+  if (root.status === 'ready') {
+    if (teardown !== null) return null;
+    teardown = Object.freeze({
+      schemaVersion: 1,
+      installationId: root.installationId,
+      resourcesHash,
+      status: 'applying',
+      removedKeys: Object.freeze([]),
+      pending: null,
+      removedAt: null,
+    });
+    root = { ...root, status: 'tearing_down', teardown };
+    await storage.put(STORAGE_KEY, root);
+  } else if (!teardown) return null;
+  // Prove the complete graph before the first provider mutation. A resource
+  // outside the already removed prefix may be absent only at the one journaled
+  // ambiguous boundary; every other live resource must still have the exact
+  // receipt-owned shape. This prevents a late collision from causing a
+  // partial teardown before it is discovered.
+  for (let index = 0; index < resources.length; index += 1) {
+    const observed = await teardownResourceRead(
+      root, resources[index], authority, input.cloudflareAccessToken,
+    );
+    if (index < teardown.removedKeys.length) {
+      if (observed !== 'absent') return null;
+      continue;
+    }
+    if (index === teardown.removedKeys.length && teardown.pending !== null) {
+      if (observed !== 'absent' && observed !== 'present') return null;
+      continue;
+    }
+    if (observed !== 'present') return null;
+  }
+  if (teardown.status === 'removed') return Object.freeze({
+    schemaVersion: 1, status: 'removed', installationId: root.installationId,
+    removedResourceCount: resources.length, resumed: true,
+  });
+  let resumed = teardown.removedKeys.length > 0 || teardown.pending !== null;
+  while (teardown.removedKeys.length < resources.length) {
+    const resource = resources[teardown.removedKeys.length];
+    const key = teardownResourceKey(resource);
+    const observed = await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken);
+    if (observed === 'absent') {
+      teardown = { ...teardown, pending: null, removedKeys: [...teardown.removedKeys, key] };
+      root = { ...root, teardown };
+      await storage.put(STORAGE_KEY, root);
+      continue;
+    }
+    if (observed !== 'present') return null;
+    if (teardown.pending && teardown.pending.requestId === input.requestId &&
+        teardown.pending.phase !== 'not_applied') return null;
+    if (teardown.pending) {
+      teardown = { ...teardown, pending: { ...teardown.pending, phase: 'not_applied' } };
+      root = { ...root, teardown };
+      await storage.put(STORAGE_KEY, root);
+    }
+    teardown = { ...teardown, pending: { key, requestId: input.requestId, phase: 'send_armed' } };
+    root = { ...root, teardown };
+    await storage.put(STORAGE_KEY, root);
+    const deleted = await teardownResourceDelete(root, resource, input.cloudflareAccessToken);
+    if (deleted === 'auth' || deleted === 'blocked') {
+      teardown = { ...teardown, pending: { ...teardown.pending, phase: 'not_applied' } };
+      await storage.put(STORAGE_KEY, { ...root, teardown });
+      return null;
+    }
+    if (deleted === 'unknown') return null;
+    teardown = { ...teardown, pending: { ...teardown.pending, phase: 'submitted' } };
+    root = { ...root, teardown };
+    await storage.put(STORAGE_KEY, root);
+    if (await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken) !== 'absent') return null;
+    teardown = { ...teardown, pending: null, removedKeys: [...teardown.removedKeys, key] };
+    root = { ...root, teardown };
+    await storage.put(STORAGE_KEY, root);
+  }
+  teardown = { ...teardown, status: 'removed', pending: null, removedAt: nowMs };
+  root = { ...root, status: 'removed', teardown };
+  await storage.put(STORAGE_KEY, root);
+  return Object.freeze({
+    schemaVersion: 1, status: 'removed', installationId: root.installationId,
+    removedResourceCount: resources.length, resumed,
+  });
+}
+
+async function rootTeardownAuthority(storage, environment, installationId, env) {
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  if (!control || !sources || control.installationId !== installationId ||
+      control.accountId !== environment.accountId) return null;
+  const rootStub = adminStateStub(env, `v1:${installationId}`);
+  if (!rootStub) return null;
+  let rootEvidence;
+  try {
+    const response = await rootStub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWN_ROOT_PATH}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: canonicalJson({ schemaVersion: 1, installationId }),
+    }));
+    rootEvidence = response instanceof Response && response.status === 200 ? await response.json() : null;
+  } catch { rootEvidence = null; }
+  if (!isRecord(rootEvidence) || rootEvidence.schemaVersion !== 1 ||
+      rootEvidence.installationId !== installationId || !isRecord(rootEvidence.root) ||
+      rootEvidence.root.receipt?.target?.hostname !== control.portal.hostname) return null;
+  const root = Object.freeze({
+    schemaVersion: 1,
+    status: 'ready',
+    installationId,
+    receipt: rootEvidence.root.receipt,
+    teardown: null,
+  });
+  if (!await teardownAuthorityState(root, control, sources, environment)) return null;
+  return Object.freeze({
+    ...rootEvidence,
+    control,
+    sources,
+    runtime: Object.freeze({
+      release: environment.release,
+      artifactSha256: environment.releaseSha256,
+      updateChannel: environment.updateChannel,
+      updateKeyId: environment.updateKeyId,
+      updatePublicKey: environment.updatePublicKey,
+      accountId: environment.accountId,
+      zoneId: environment.zoneId,
+      zoneName: environment.zoneName,
+      workerName: environment.workerName,
+      workersSubdomain: environment.workersSubdomain,
+      managementHostname: environment.managementHostname,
+    }),
+  });
+}
+
+async function prepareTeardownAction(storage, environment, input, env) {
+  if (!exactKeys(input, [
+    'schemaVersion', 'actionId', 'actionKeyHash', 'actorEmail', 'installationId', 'issuedAt', 'expiresAt',
+  ]) || input.schemaVersion !== 1) return null;
+  const candidate = safeTeardownAction({ ...input, status: 'authorization_required', failureCode: null });
+  if (!candidate || !await rootTeardownAuthority(storage, environment, candidate.installationId, env)) return null;
+  const current = safeTeardownActions(await storage.get(TEARDOWNS_KEY)) ?? Object.freeze({
+    schemaVersion: 1, revision: 1, actions: Object.freeze([]),
+  });
+  const active = current.actions.find((action) => action.expiresAt > candidate.issuedAt &&
+    (action.status === 'authorization_required' || action.status === 'applying'));
+  if (active) return null;
+  const retained = current.actions.filter((action) => action.expiresAt > candidate.issuedAt);
+  const next = safeTeardownActions({
+    schemaVersion: 1,
+    revision: current.revision + 1,
+    actions: [...retained, candidate],
+  });
+  if (!next) return null;
+  await storage.put(TEARDOWNS_KEY, next);
+  return candidate;
+}
+
+async function processTeardownActionProof(request, env, storage, nowMs = Date.now()) {
+  if (!(request instanceof Request) || request.method !== 'POST' || request.headers.has('authorization') ||
+      request.headers.has('cookie') || request.headers.has('referer') || request.headers.has('origin') ||
+      request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return null;
+  const environment = parseManagementEnvironment(env);
+  const rawBody = await readBoundedText(request, REQUEST_LIMIT_BYTES);
+  if (!environment || !rawBody) return null;
+  let value;
+  try { value = JSON.parse(rawBody); } catch { return null; }
+  if (!isPlainData(value) || canonicalJson(value) !== rawBody || !exactKeys(value, [
+    'schemaVersion', 'command', 'actionId', 'actionKey', 'actorEmail', 'accountId',
+    'installationId', 'issuedAt', 'expiresAt',
+  ]) || value.schemaVersion !== 1 || value.command !== 'prove' || !ACTION_ID.test(value.actionId) ||
+      !NONCE.test(value.actionKey) || normalizedEmail(value.actorEmail) !== value.actorEmail ||
+      value.accountId !== environment.accountId || !INSTALLATION_ID.test(value.installationId) ||
+      !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
+      value.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 || value.expiresAt <= nowMs) return null;
+  const actions = safeTeardownActions(await storage.get(TEARDOWNS_KEY));
+  const action = actions?.actions.find((candidate) => candidate.actionId === value.actionId);
+  if (!actions || !action || !['authorization_required', 'applying', 'gateway_removed'].includes(action.status) ||
+      action.actorEmail !== value.actorEmail || action.installationId !== value.installationId ||
+      action.expiresAt !== value.expiresAt || value.issuedAt < action.issuedAt ||
+      await sha256(value.actionKey) !== action.actionKeyHash ||
+      !await verifyHmac(rawBody, value.actionKey, request.headers.get('x-ankka-teardown-action-signature'))) {
+    return null;
+  }
+  const authority = await rootTeardownAuthority(storage, environment, action.installationId, env);
+  if (!authority) return null;
+  // The proof response can be lost after the action is durably authorized but
+  // before the hosted session imports the receipt. Replaying the exact HMAC
+  // action is read-only and returns the same authority until gateway removal
+  // begins, so that narrow crash window remains recoverable.
+  if (action.status === 'applying' || action.status === 'gateway_removed') {
+    return Object.freeze({ schemaVersion: 1, actionId: action.actionId, status: 'authorized', authority });
+  }
+  const applying = safeTeardownAction({ ...action, status: 'applying', failureCode: null });
+  const next = applying && safeTeardownActions({
+    schemaVersion: 1,
+    revision: actions.revision + 1,
+    actions: actions.actions.map((candidate) => candidate.actionId === applying.actionId ? applying : candidate),
+  });
+  if (!applying || !next) return null;
+  await storage.put(TEARDOWNS_KEY, next);
+  return Object.freeze({ schemaVersion: 1, actionId: action.actionId, status: 'authorized', authority });
+}
+
+async function processTeardownActionApply(request, env, storage, nowMs = Date.now()) {
+  if (!(request instanceof Request) || request.method !== 'POST' || request.headers.has('authorization') ||
+      request.headers.has('cookie') || request.headers.has('referer') || request.headers.has('origin') ||
+      request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return null;
+  const environment = parseManagementEnvironment(env);
+  const rawBody = await readBoundedText(request, REQUEST_LIMIT_BYTES);
+  if (!environment || !rawBody) return null;
+  let value;
+  try { value = JSON.parse(rawBody); } catch { return null; }
+  if (!isPlainData(value) || canonicalJson(value) !== rawBody || !exactKeys(value, [
+    'schemaVersion', 'command', 'actionId', 'actionKey', 'actorEmail', 'accountId',
+    'installationId', 'requestId', 'cloudflareAccessToken', 'issuedAt', 'expiresAt',
+  ]) || value.schemaVersion !== 1 || value.command !== 'apply' || !ACTION_ID.test(value.actionId) ||
+      !NONCE.test(value.actionKey) || normalizedEmail(value.actorEmail) !== value.actorEmail ||
+      value.accountId !== environment.accountId || !INSTALLATION_ID.test(value.installationId) ||
+      !REQUEST_ID.test(value.requestId) || typeof value.cloudflareAccessToken !== 'string' ||
+      value.cloudflareAccessToken.length < 20 || value.cloudflareAccessToken.length > 16 * 1024 ||
+      CONTROL.test(value.cloudflareAccessToken) || !Number.isSafeInteger(value.issuedAt) ||
+      !Number.isSafeInteger(value.expiresAt) || value.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 ||
+      value.expiresAt <= nowMs) return null;
+  const actions = safeTeardownActions(await storage.get(TEARDOWNS_KEY));
+  const action = actions?.actions.find((candidate) => candidate.actionId === value.actionId);
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  if (!actions || !action || !control || !sources || !['applying', 'gateway_removed'].includes(action.status) ||
+      action.actorEmail !== value.actorEmail || action.installationId !== value.installationId ||
+      action.expiresAt !== value.expiresAt || control.installationId !== value.installationId ||
+      value.issuedAt < action.issuedAt || await sha256(value.actionKey) !== action.actionKeyHash ||
+      !await verifyHmac(rawBody, value.actionKey, request.headers.get('x-ankka-teardown-action-signature'))) {
+    return null;
+  }
+  const rootStub = adminStateStub(env, `v1:${action.installationId}`);
+  if (!rootStub) return null;
+  let removed;
+  try {
+    const response = await rootStub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWN_ROOT_PATH}/apply`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: canonicalJson({
+        schemaVersion: 1,
+        actionId: action.actionId,
+        installationId: action.installationId,
+        requestId: value.requestId,
+        control,
+        sources,
+        cloudflareAccessToken: value.cloudflareAccessToken,
+        issuedAt: value.issuedAt,
+        expiresAt: value.expiresAt,
+      }),
+    }));
+    removed = response instanceof Response && response.status === 200 ? await response.json() : null;
+  } catch { removed = null; }
+  if (!isRecord(removed) || removed.schemaVersion !== 1 || removed.status !== 'removed' ||
+      removed.installationId !== action.installationId || !Number.isSafeInteger(removed.removedResourceCount)) {
+    return null;
+  }
+  if (action.status !== 'gateway_removed') {
+    const updated = safeTeardownAction({ ...action, status: 'gateway_removed', failureCode: null });
+    const next = updated && safeTeardownActions({
+      schemaVersion: 1,
+      revision: actions.revision + 1,
+      actions: actions.actions.map((candidate) => candidate.actionId === action.actionId ? updated : candidate),
+    });
+    if (!updated || !next) return null;
+    await storage.put(TEARDOWNS_KEY, next);
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    actionId: action.actionId,
+    status: 'gateway_removed',
+    installationId: action.installationId,
+    removedResourceCount: removed.removedResourceCount,
+  });
+}
+
+export class AdminState {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.queue = Promise.resolve();
+  }
+
+  fetch(request) {
+    const operation = async () => {
+      const url = new URL(request.url);
+      if (url.pathname === INTERNAL_BOOTSTRAP_PATH) {
+        return processBootstrap(
+          request,
+          this.env,
+          this.state.storage,
+        );
+      }
+      if (url.pathname === INTERNAL_PUBLISH_PATH && request.method === 'PUT') {
+        const input = await request.json().catch(() => null);
+        const status = safePublicStatus(input);
+        if (!status) return fixedJson(400, { schemaVersion: 1, error: 'invalid_status' });
+        await this.state.storage.put(STATUS_KEY, status);
+        const retained = safeManagementSources(await this.state.storage.get(SOURCES_KEY));
+        if (!retained) {
+          const initial = await initialManagementSources(status);
+          if (!initial) return fixedJson(400, { schemaVersion: 1, error: 'invalid_status' });
+          await this.state.storage.put(SOURCES_KEY, initial);
+        }
+        return fixedJson(200, { schemaVersion: 1, accepted: true });
+      }
+      if (url.pathname === INTERNAL_CONTROL_PATH && request.method === 'PUT') {
+        const input = await request.json().catch(() => null);
+        const control = safeManagementControl(input);
+        if (!control) return fixedJson(400, { schemaVersion: 1, error: 'invalid_control' });
+        const retained = safeManagementControl(await this.state.storage.get(CONTROL_KEY));
+        if (retained && canonicalJson(retained) !== canonicalJson(control)) {
+          return fixedJson(409, { schemaVersion: 1, error: 'control_conflict' });
+        }
+        await this.state.storage.put(CONTROL_KEY, control);
+        return fixedJson(200, { schemaVersion: 1, accepted: true });
+      }
+      if (url.pathname === INTERNAL_CONTROL_PATH && request.method === 'GET') {
+        const control = safeManagementControl(await this.state.storage.get(CONTROL_KEY));
+        return control ? fixedJson(200, control) :
+          fixedJson(503, { schemaVersion: 1, error: 'control_unavailable' });
+      }
+      if (url.pathname === INTERNAL_TEARDOWN_ROOT_PATH && request.method === 'POST') {
+        const environment = parseManagementEnvironment(this.env);
+        const input = await request.json().catch(() => null);
+        const evidence = environment && exactKeys(input, ['schemaVersion', 'installationId']) &&
+          input.schemaVersion === 1 && INSTALLATION_ID.test(input.installationId)
+          ? await rootTeardownEvidence(this.state.storage, environment, input.installationId)
+          : null;
+        return evidence ? fixedJson(200, evidence) :
+          fixedJson(409, { schemaVersion: 1, error: 'teardown_root_unavailable' });
+      }
+      if (url.pathname === `${INTERNAL_TEARDOWN_ROOT_PATH}/apply` && request.method === 'POST') {
+        const environment = parseManagementEnvironment(this.env);
+        const input = await request.json().catch(() => null);
+        const removed = environment ? await processRootTeardownApply(
+          this.state.storage, environment, input,
+        ) : null;
+        return removed ? fixedJson(200, removed) :
+          fixedJson(409, { schemaVersion: 1, error: 'teardown_root_recovery_required' });
+      }
+      if (url.pathname === INTERNAL_ACTIONS_PATH && request.method === 'POST') {
+        const input = await request.json().catch(() => null);
+        const action = await prepareSourceAction(this.state.storage, input);
+        return action
+          ? fixedJson(200, publicSourceAction(action))
+          : fixedJson(409, { schemaVersion: 1, error: 'source_action_conflict' });
+      }
+      if (url.pathname === `${INTERNAL_ACTIONS_PATH}/apply` && request.method === 'POST') {
+        return processSourceAction(request, this.env, this.state.storage);
+      }
+      if (url.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`) && request.method === 'GET') {
+        const actionId = url.pathname.slice(`${INTERNAL_ACTIONS_PATH}/`.length);
+        const actions = safeSourceActions(await this.state.storage.get(ACTIONS_KEY));
+        const action = ACTION_ID.test(actionId)
+          ? actions?.actions.find((candidate) => candidate.actionId === actionId)
+          : null;
+        return action
+          ? fixedJson(200, publicSourceAction(action))
+          : fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
+      }
+      if (url.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`) && request.method === 'DELETE') {
+        const actionId = url.pathname.slice(`${INTERNAL_ACTIONS_PATH}/`.length);
+        const input = await request.json().catch(() => null);
+        const action = ACTION_ID.test(actionId) && exactKeys(input, ['actorEmail', 'now'])
+          ? await cancelSourceAction(this.state.storage, actionId, input.actorEmail, input.now)
+          : null;
+        return action
+          ? fixedJson(200, publicSourceAction(action))
+          : fixedJson(409, { schemaVersion: 1, error: 'source_action_conflict' });
+      }
+      if (url.pathname === INTERNAL_TEARDOWNS_PATH && request.method === 'POST') {
+        const environment = parseManagementEnvironment(this.env);
+        const input = await request.json().catch(() => null);
+        const action = environment
+          ? await prepareTeardownAction(this.state.storage, environment, input, this.env)
+          : null;
+        return action ? fixedJson(200, publicTeardownAction(action)) :
+          fixedJson(409, { schemaVersion: 1, error: 'teardown_action_conflict' });
+      }
+      if (url.pathname === `${INTERNAL_TEARDOWNS_PATH}/prove` && request.method === 'POST') {
+        const proof = await processTeardownActionProof(request, this.env, this.state.storage);
+        return proof ? fixedJson(200, proof) :
+          fixedJson(409, { schemaVersion: 1, error: 'teardown_action_rejected' });
+      }
+      if (url.pathname === `${INTERNAL_TEARDOWNS_PATH}/apply` && request.method === 'POST') {
+        const applied = await processTeardownActionApply(request, this.env, this.state.storage);
+        return applied ? fixedJson(200, applied) :
+          fixedJson(409, { schemaVersion: 1, error: 'teardown_action_recovery_required' });
+      }
+      if (url.pathname.startsWith(`${INTERNAL_TEARDOWNS_PATH}/`) && request.method === 'GET') {
+        const actionId = url.pathname.slice(`${INTERNAL_TEARDOWNS_PATH}/`.length);
+        const actions = safeTeardownActions(await this.state.storage.get(TEARDOWNS_KEY));
+        const action = ACTION_ID.test(actionId)
+          ? actions?.actions.find((candidate) => candidate.actionId === actionId)
+          : null;
+        return action ? fixedJson(200, publicTeardownAction(action)) :
+          fixedJson(404, { schemaVersion: 1, error: 'teardown_action_not_found' });
+      }
+      if (url.pathname === INTERNAL_UPDATES_PATH && request.method === 'GET') {
+        const environment = parseManagementEnvironment(this.env);
+        const updates = environment ? await runtimeUpdates(this.state.storage, environment) : null;
+        return updates ? fixedJson(200, {
+          schemaVersion: 1,
+          revision: updates.revision,
+          current: updates.current,
+          previous: updates.previous,
+        }) : fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
+      }
+      if (url.pathname === INTERNAL_UPDATES_PATH && request.method === 'POST') {
+        const environment = parseManagementEnvironment(this.env);
+        const input = await request.json().catch(() => null);
+        const action = environment ? await prepareRuntimeAction(this.state.storage, environment, input) : null;
+        return action ? fixedJson(200, publicRuntimeAction(action)) :
+          fixedJson(409, { schemaVersion: 1, error: 'runtime_action_conflict' });
+      }
+      if (url.pathname === `${INTERNAL_UPDATES_PATH}/control` && request.method === 'POST') {
+        return processRuntimeActionControl(request, this.env, this.state.storage);
+      }
+      if (url.pathname.startsWith(`${INTERNAL_UPDATES_PATH}/`) && request.method === 'GET') {
+        const environment = parseManagementEnvironment(this.env);
+        const actionId = url.pathname.slice(`${INTERNAL_UPDATES_PATH}/`.length);
+        const updates = environment ? await runtimeUpdates(this.state.storage, environment) : null;
+        const action = ACTION_ID.test(actionId)
+          ? updates?.actions.find((candidate) => candidate.actionId === actionId)
+          : null;
+        return action ? fixedJson(200, publicRuntimeAction(action)) :
+          fixedJson(404, { schemaVersion: 1, error: 'runtime_action_not_found' });
+      }
+      if (url.pathname === INTERNAL_STATUS_PATH && request.method === 'GET') {
+        const status = await this.state.storage.get(STATUS_KEY);
+        const parsed = safePublicStatus(status);
+        return parsed
+          ? fixedJson(200, parsed)
+          : fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
+      }
+      if (url.pathname === INTERNAL_SOURCES_PATH && request.method === 'GET') {
+        const sources = safeManagementSources(await this.state.storage.get(SOURCES_KEY));
+        return sources
+          ? fixedJson(200, sources)
+          : fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+      }
+      if (url.pathname === INTERNAL_SOURCES_PATH && request.method === 'PUT') {
+        const raw = await readBoundedText(request, MCP_REQUEST_LIMIT_BYTES);
+        let parsed;
+        try { parsed = raw === null ? null : JSON.parse(raw); } catch { parsed = null; }
+        const input = parseSourceSave(parsed);
+        const current = safeManagementSources(await this.state.storage.get(SOURCES_KEY));
+        if (!input || !current) return fixedJson(400, { schemaVersion: 1, error: 'source_invalid' });
+        const updated = await saveDraftSource(current, input);
+        if (!updated) return fixedJson(409, {
+          schemaVersion: 1,
+          error: 'source_conflict',
+          revision: current.revision,
+        });
+        await this.state.storage.put(SOURCES_KEY, updated);
+        return fixedJson(200, updated);
+      }
+      return fixedJson(404, { schemaVersion: 1, error: 'not_found' });
+    };
+    const result = this.queue.then(operation, operation);
+    this.queue = result.then(() => undefined, () => undefined);
+    return result;
+  }
+}
+
+function decodeBase64Url(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/u.test(value)) return null;
+  try {
+    const padding = '='.repeat((4 - value.length % 4) % 4);
+    const raw = atob(`${value.replaceAll('-', '+').replaceAll('_', '/')}${padding}`);
+    return Uint8Array.from(raw, (character) => character.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+
+function accessConfiguration(env) {
+  if (!env || typeof env !== 'object' || typeof env.CF_ACCESS_AUD !== 'string' ||
+      !/^[A-Za-z0-9_-]{8,256}$/u.test(env.CF_ACCESS_AUD) ||
+      typeof env.CF_ACCESS_ISSUER !== 'string') return null;
+  let issuer;
+  try { issuer = new URL(env.CF_ACCESS_ISSUER); } catch { return null; }
+  if (issuer.protocol !== 'https:' || issuer.username || issuer.password || issuer.search || issuer.hash ||
+      issuer.pathname !== '/' || !issuer.hostname.endsWith('.cloudflareaccess.com')) return null;
+  const emails = typeof env.ADMIN_EMAILS === 'string'
+    ? [...new Set(env.ADMIN_EMAILS.split(',').map(normalizedEmail).filter(Boolean))].sort(compareText)
+    : [];
+  if (emails.length < 1 || emails.length > 20) return null;
+  return Object.freeze({ aud: env.CF_ACCESS_AUD, issuer: issuer.origin, emails: Object.freeze(emails) });
+}
+
+async function verifyAccess(request, env, nowMs = Date.now()) {
+  const configuration = accessConfiguration(env);
+  const assertion = request.headers.get('cf-access-jwt-assertion');
+  const claimedEmail = normalizedEmail(request.headers.get('cf-access-authenticated-user-email'));
+  if (!configuration || !assertion || !claimedEmail || !configuration.emails.includes(claimedEmail)) return false;
+  const segments = assertion.split('.');
+  if (segments.length !== 3) return false;
+  const headerBytes = decodeBase64Url(segments[0]);
+  const payloadBytes = decodeBase64Url(segments[1]);
+  const signature = decodeBase64Url(segments[2]);
+  if (!headerBytes || !payloadBytes || !signature || headerBytes.byteLength > 4096 ||
+      payloadBytes.byteLength > 16 * 1024 || signature.byteLength > 1024) return false;
+  let header;
+  let payload;
+  try {
+    header = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(headerBytes));
+    payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payloadBytes));
+  } catch {
+    return false;
+  } finally {
+    headerBytes.fill(0);
+    payloadBytes.fill(0);
+  }
+  const now = Math.floor(nowMs / 1000);
+  const audiences = typeof payload.aud === 'string' ? [payload.aud] : payload.aud;
+  const email = normalizedEmail(payload.email);
+  if (!isRecord(header) || header.alg !== 'RS256' || typeof header.kid !== 'string' ||
+      !/^[A-Za-z0-9_.:-]{1,256}$/u.test(header.kid) || !isRecord(payload) ||
+      payload.iss !== configuration.issuer || !Array.isArray(audiences) ||
+      !audiences.includes(configuration.aud) || email !== claimedEmail ||
+      !Number.isSafeInteger(payload.exp) || payload.exp <= now ||
+      (Object.hasOwn(payload, 'nbf') && (!Number.isSafeInteger(payload.nbf) || payload.nbf > now + 30))) return false;
+  let response;
+  try {
+    response = await fetch(new Request(`${configuration.issuer}/cdn-cgi/access/certs`, {
+      method: 'GET', headers: { accept: 'application/json' }, redirect: 'manual',
+    }));
+  } catch { return false; }
+  if (!(response instanceof Response) || response.status !== 200 || response.redirected) {
+    if (response instanceof Response) await discardBody(response);
+    return false;
+  }
+  let jwks;
+  try { jwks = await readBoundedProviderJson(response); } catch { return false; }
+  if (!isRecord(jwks) || !Array.isArray(jwks.keys)) return false;
+  const keys = jwks.keys.filter((key) => isRecord(key) && key.kid === header.kid &&
+    key.kty === 'RSA' && key.alg === 'RS256' && key.use === 'sig');
+  if (keys.length !== 1) return false;
+  try {
+    const key = await crypto.subtle.importKey(
+      'jwk', keys[0], { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
+    );
+    const verified = await crypto.subtle.verify(
+      'RSASSA-PKCS1-v1_5', key, signature,
+      new TextEncoder().encode(`${segments[0]}.${segments[1]}`),
+    );
+    return verified ? email : false;
+  } catch {
+    return false;
+  } finally {
+    signature.fill(0);
+  }
+}
+
+function adminStateStub(env, name) {
+  if (!env.ADMIN_STATE || typeof env.ADMIN_STATE.idFromName !== 'function' ||
+      typeof env.ADMIN_STATE.get !== 'function') return null;
+  try {
+    const stub = env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName(name));
+    return stub && typeof stub.fetch === 'function' ? stub : null;
+  } catch {
+    return null;
+  }
+}
+
+async function handleBootstrap(request, env, nowMs = Date.now()) {
+  if (request.method !== 'POST') {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'POST' });
+  }
+  const verified = await verifyBootstrapRequest(request, env, nowMs);
+  if (!verified) return rejected();
+  const stub = adminStateStub(env, `v1:${verified.claim.expected.installationId}`);
+  if (!stub) return recovery('bootstrap_recovery_required');
+  let response;
+  try {
+    response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_BOOTSTRAP_PATH}`, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'x-ankka-bootstrap-signature': verified.signature,
+      },
+      body: verified.rawBody,
+      redirect: 'manual',
+    }));
+  } catch {
+    return recovery('bootstrap_recovery_required');
+  }
+  if (!(response instanceof Response) || response.status !== 200) return response instanceof Response
+    ? response
+    : recovery('bootstrap_recovery_required');
+  let ready;
+  try { ready = await response.clone().json(); } catch { return recovery('bootstrap_recovery_required'); }
+  if (!isRecord(ready) || ready.status !== 'ready') return recovery('bootstrap_recovery_required');
+  const index = adminStateStub(env, 'v1:management');
+  if (!index) return recovery('bootstrap_recovery_required');
+  const published = await index.fetch(new Request(`https://admin-state.invalid${INTERNAL_PUBLISH_PATH}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: canonicalJson(publicStatusFromReadyResponse(verified.claim)),
+  })).catch(() => null);
+  if (!(published instanceof Response) || published.status !== 200) {
+    return recovery('bootstrap_recovery_required');
+  }
+  const control = await managementControlFromReadyResponse(verified.claim, ready, env);
+  if (!control) return recovery('bootstrap_recovery_required');
+  const controlled = await index.fetch(new Request(`https://admin-state.invalid${INTERNAL_CONTROL_PATH}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: canonicalJson(control),
+  })).catch(() => null);
+  if (!(controlled instanceof Response) || controlled.status !== 200) {
+    return recovery('bootstrap_recovery_required');
+  }
+  return response;
+}
+
+async function handleStatus(request, env) {
+  if (request.method !== 'GET') {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET' });
+  }
+  if (!await verifyAccess(request, env)) {
+    return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  }
+  const environment = parseManagementEnvironment(env);
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
+  try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_STATUS_PATH}`));
+    return response instanceof Response
+      ? response
+      : fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
+  } catch {
+    return fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
+  }
+}
+
+async function handleRuntimeUpdate(request, env) {
+  if (request.method !== 'GET') {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET' });
+  }
+  if (!await verifyAccess(request, env)) {
+    return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  }
+  const environment = parseManagementEnvironment(env);
+  const stub = adminStateStub(env, 'v1:management');
+  let updateState = null;
+  try {
+    const response = stub ? await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_UPDATES_PATH}`)) : null;
+    updateState = response instanceof Response && response.status === 200 ? await response.json() : null;
+  } catch { updateState = null; }
+  const previous = runtimeVersion(updateState?.previous);
+  const current = runtimeVersion(updateState?.current);
+  const discovered = await discoverRuntimeUpdate(env);
+  if (!discovered) {
+    return fixedJson(200, {
+      schemaVersion: 1,
+      channel: environment?.updateChannel ?? 'stable',
+      status: 'unavailable',
+      current: current ? { release: current.release, artifactSha256: current.artifactSha256 } : null,
+      available: null,
+      rollback: previous ? {
+        available: true,
+        release: previous.release,
+        artifactSha256: previous.artifactSha256,
+        dataRollback: false,
+      } : { available: false },
+    });
+  }
+  const available = discovered.comparison < 0;
+  return fixedJson(200, {
+    schemaVersion: 1,
+    channel: discovered.channel.channel,
+    status: available ? 'available' : discovered.comparison === 0 ? 'up_to_date' : 'newer_than_channel',
+    current: {
+      release: discovered.environment.release,
+      artifactSha256: discovered.environment.releaseSha256,
+    },
+    available: available ? {
+      release: discovered.channel.release.id,
+      artifactSha256: discovered.channel.release.artifactSha256,
+      sourceCommit: discovered.channel.release.sourceCommit,
+      classification: discovered.channel.classification,
+      notes: discovered.channel.notes,
+    } : null,
+    rollback: previous ? {
+      available: true,
+      release: previous.release,
+      artifactSha256: previous.artifactSha256,
+      dataRollback: false,
+    } : { available: false },
+  });
+}
+
+function sameOriginMutation(request) {
+  const origin = request.headers.get('origin');
+  try { return origin === new URL(request.url).origin; } catch { return false; }
+}
+
+function sourceErrorResponse(error) {
+  const stable = sourceFailure(error);
+  return fixedJson(stable.status, { schemaVersion: 1, error: stable.code });
+}
+
+async function readJsonInput(request) {
+  const raw = await readBoundedText(request, MCP_REQUEST_LIMIT_BYTES);
+  if (raw === null) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return isPlainData(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function handleSourceDiscovery(request, env) {
+  if (request.method !== 'POST') {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'POST' });
+  }
+  if (!await verifyAccess(request, env)) {
+    return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  }
+  if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+  const input = await readJsonInput(request);
+  if (!exactKeys(input, ['url'])) return fixedJson(400, { schemaVersion: 1, error: 'source_url_invalid' });
+  try {
+    const discovered = await inspectMcpSource(input.url);
+    return fixedJson(200, {
+      schemaVersion: 1,
+      status: discovered.authMode === 'oauth' ? 'authorization_required' : 'discovered',
+      endpoint: discovered.endpoint,
+      protocolVersion: discovered.protocolVersion,
+      authentication: discovered.authMode,
+      tools: discovered.tools,
+    });
+  } catch (error) {
+    return sourceErrorResponse(error);
+  }
+}
+
+async function handleSources(request, env) {
+  if (request.method !== 'GET' && request.method !== 'PUT') {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET, PUT' });
+  }
+  if (!await verifyAccess(request, env)) {
+    return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  }
+  if (request.method === 'PUT' && !sameOriginMutation(request)) {
+    return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+  }
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+  if (request.method === 'GET') {
+    try {
+      const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_SOURCES_PATH}`));
+      return response instanceof Response
+        ? response
+        : fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+    } catch {
+      return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+    }
+  }
+  const input = parseSourceSave(await readJsonInput(request));
+  if (!input) return fixedJson(400, { schemaVersion: 1, error: 'source_invalid' });
+  try { await verifyManagedSource(input.source); } catch (error) { return sourceErrorResponse(error); }
+  try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_SOURCES_PATH}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: canonicalJson({ schemaVersion: 1, revision: input.revision, source: input.source }),
+    }));
+    return response instanceof Response
+      ? response
+      : fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+  } catch {
+    return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+  }
+}
+
+async function handleSourceActions(request, env) {
+  const actorEmail = await verifyAccess(request, env);
+  if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  const environment = parseManagementEnvironment(env);
+  let url;
+  try { url = new URL(request.url); } catch { return fixedJson(400, { schemaVersion: 1, error: 'source_action_invalid' }); }
+  if (!environment || url.hostname !== environment.managementHostname) {
+    return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+  }
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+  if (request.method === 'GET') {
+    const actionId = url.pathname.slice('/api/source-actions/'.length);
+    if (!ACTION_ID.test(actionId)) return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
+    try {
+      const response = await stub.fetch(new Request(
+        `https://admin-state.invalid${INTERNAL_ACTIONS_PATH}/${actionId}`,
+      ));
+      return response instanceof Response
+        ? response
+        : fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    } catch {
+      return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    }
+  }
+  if (request.method === 'DELETE') {
+    if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+    const actionId = url.pathname.slice('/api/source-actions/'.length);
+    if (!ACTION_ID.test(actionId)) return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
+    try {
+      const response = await stub.fetch(new Request(
+        `https://admin-state.invalid${INTERNAL_ACTIONS_PATH}/${actionId}`,
+        {
+          method: 'DELETE',
+          headers: { 'content-type': 'application/json' },
+          body: canonicalJson({ actorEmail, now: Date.now() }),
+        },
+      ));
+      return response instanceof Response
+        ? response
+        : fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    } catch {
+      return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    }
+  }
+  if (request.method !== 'POST') {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET, POST, DELETE' });
+  }
+  if (url.pathname !== '/api/source-actions') {
+    return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
+  }
+  if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+  const input = await readJsonInput(request);
+  if (!exactKeys(input, ['schemaVersion', 'revision', 'sourceId']) || input.schemaVersion !== 1 ||
+      !Number.isSafeInteger(input.revision) || input.revision < 1 || !SOURCE_ID.test(input.sourceId)) {
+    return fixedJson(400, { schemaVersion: 1, error: 'source_action_invalid' });
+  }
+  let sources;
+  try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_SOURCES_PATH}`));
+    sources = response instanceof Response && response.status === 200 ? await response.json() : null;
+  } catch { sources = null; }
+  const parsedSources = safeManagementSources(sources);
+  const source = parsedSources?.sources.find((candidate) => candidate.id === input.sourceId);
+  if (!parsedSources || parsedSources.revision !== input.revision || !source || source.status !== 'draft') {
+    return fixedJson(409, { schemaVersion: 1, error: 'source_action_conflict' });
+  }
+  try { await verifyManagedSource(source); } catch (error) { return sourceErrorResponse(error); }
+  const now = Date.now();
+  const expiresAt = now + 10 * 60 * 1000;
+  const actionId = `action_${randomBase64Url(24)}`;
+  const actionKey = randomBase64Url(32);
+  let prepared;
+  try {
+    prepared = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_ACTIONS_PATH}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: canonicalJson({
+        schemaVersion: 1,
+        actionId,
+        sourceId: source.id,
+        sourceRevision: parsedSources.revision,
+        actorEmail,
+        issuedAt: now,
+        expiresAt,
+        actionKeyHash: await sha256(actionKey),
+        sourceHash: await managedSourceHash(source),
+      }),
+    }));
+  } catch { prepared = null; }
+  if (!(prepared instanceof Response) || prepared.status !== 200) {
+    return fixedJson(409, { schemaVersion: 1, error: 'source_action_conflict' });
+  }
+  const managementOrigin = `https://${environment.managementHostname}`;
+  const claim = canonicalJson({
+    schemaVersion: 1,
+    actionId,
+    actionKey,
+    actorEmail,
+    accountId: environment.accountId,
+    workerName: environment.workerName,
+    workersSubdomain: environment.workersSubdomain,
+    managementOrigin,
+    releaseIdentity: exactReleaseIdentity(environment),
+    expiresAt,
+  });
+  const fragment = base64UrlEncode(new TextEncoder().encode(claim));
+  return fixedJson(200, {
+    schemaVersion: 1,
+    actionId,
+    status: 'authorization_required',
+    expiresAt: new Date(expiresAt).toISOString(),
+    handoffUrl: `https://deploy.ankka.ai/manage#${fragment}`,
+  });
+}
+
+async function handleSourceActionApply(request, env) {
+  if (request.method === 'HEAD') {
+    const environment = parseManagementEnvironment(env);
+    return environment
+      ? new Response(null, { status: 204, headers: { ...PUBLIC_HEADERS, 'x-ankka-source-action': 'ready' } })
+      : fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+  }
+  if (request.method !== 'POST') {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'HEAD, POST' });
+  }
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+  try {
+    const response = await stub.fetch(new Request(
+      `https://admin-state.invalid${INTERNAL_ACTIONS_PATH}/apply`,
+      request,
+    ));
+    return response instanceof Response
+      ? response
+      : fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+  } catch {
+    return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+  }
+}
+
+async function handleRuntimeActions(request, env) {
+  const actorEmail = await verifyAccess(request, env);
+  if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  const environment = parseManagementEnvironment(env);
+  let url;
+  try { url = new URL(request.url); } catch { return fixedJson(400, { schemaVersion: 1, error: 'runtime_action_invalid' }); }
+  if (!environment || url.hostname !== environment.managementHostname) {
+    return fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
+  }
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
+  if (request.method === 'GET') {
+    const actionId = url.pathname.slice('/api/update-actions/'.length);
+    if (!ACTION_ID.test(actionId)) return fixedJson(404, { schemaVersion: 1, error: 'runtime_action_not_found' });
+    try {
+      const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_UPDATES_PATH}/${actionId}`));
+      return response instanceof Response ? response :
+        fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
+    } catch { return fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' }); }
+  }
+  if (request.method !== 'POST' || url.pathname !== '/api/update-actions') {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET, POST' });
+  }
+  if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+  const input = await readJsonInput(request);
+  if (!exactKeys(input, ['operation', 'schemaVersion']) || input.schemaVersion !== 1 ||
+      !['update', 'rollback'].includes(input.operation)) {
+    return fixedJson(400, { schemaVersion: 1, error: 'runtime_action_invalid' });
+  }
+  let updateState;
+  try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_UPDATES_PATH}`));
+    updateState = response instanceof Response && response.status === 200 ? await response.json() : null;
+  } catch { updateState = null; }
+  const current = runtimeVersion(updateState?.current);
+  let to = input.operation === 'rollback' ? runtimeVersion(updateState?.previous) : null;
+  if (input.operation === 'update') {
+    const discovered = await discoverRuntimeUpdate(env);
+    if (!discovered || discovered.comparison >= 0) {
+      return fixedJson(409, { schemaVersion: 1, error: 'runtime_update_not_available' });
+    }
+    to = runtimeVersion({
+      release: discovered.channel.release.id,
+      artifactSha256: discovered.channel.release.artifactSha256,
+      versionId: null,
+    });
+  }
+  if (!current || !to) return fixedJson(409, { schemaVersion: 1, error: 'runtime_action_conflict' });
+  const now = Date.now();
+  const expiresAt = now + 10 * 60 * 1000;
+  const actionId = `action_${randomBase64Url(24)}`;
+  const actionKey = randomBase64Url(32);
+  let prepared;
+  try {
+    prepared = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_UPDATES_PATH}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: canonicalJson({
+        actionId, actionKeyHash: await sha256(actionKey), actorEmail, expiresAt, issuedAt: now,
+        operation: input.operation, to,
+      }),
+    }));
+  } catch { prepared = null; }
+  if (!(prepared instanceof Response) || prepared.status !== 200) {
+    return fixedJson(409, { schemaVersion: 1, error: 'runtime_action_conflict' });
+  }
+  const claim = canonicalJson({
+    schemaVersion: 2,
+    actionType: 'runtime_update',
+    actionId,
+    actionKey,
+    actorEmail,
+    accountId: environment.accountId,
+    workerName: environment.workerName,
+    workersSubdomain: environment.workersSubdomain,
+    managementOrigin: `https://${environment.managementHostname}`,
+    operation: input.operation,
+    from: current,
+    to,
+    expiresAt,
+  });
+  const fragment = base64UrlEncode(new TextEncoder().encode(claim));
+  return fixedJson(200, {
+    schemaVersion: 1, actionId, operation: input.operation,
+    status: 'authorization_required', expiresAt: new Date(expiresAt).toISOString(),
+    handoffUrl: `https://deploy.ankka.ai/manage#${fragment}`,
+  });
+}
+
+async function handleRuntimeActionApply(request, env) {
+  if (request.method === 'HEAD') {
+    return parseManagementEnvironment(env)
+      ? new Response(null, { status: 204, headers: { ...PUBLIC_HEADERS, 'x-ankka-runtime-action': 'ready' } })
+      : fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
+  }
+  if (request.method !== 'POST') {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'HEAD, POST' });
+  }
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
+  try {
+    let internal = request;
+    const raw = await readBoundedText(request.clone(), 32 * 1024);
+    let control = null;
+    try { control = raw === null ? null : JSON.parse(raw); } catch { control = null; }
+    if (control?.command === 'probe') {
+      const environment = parseManagementEnvironment(env);
+      if (!environment || control.targetRelease !== environment.release ||
+          control.targetArtifactSha256 !== environment.releaseSha256) {
+        return fixedJson(409, { schemaVersion: 1, error: 'runtime_probe_version_mismatch' });
+      }
+      const headers = new Headers(request.headers);
+      headers.set('x-ankka-runtime-probe-version', 'verified');
+      internal = new Request(request, { headers });
+    }
+    const response = await stub.fetch(new Request(
+      `https://admin-state.invalid${INTERNAL_UPDATES_PATH}/control`, internal,
+    ));
+    return response instanceof Response ? response :
+      fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
+  } catch { return fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' }); }
+}
+
+async function handleTeardownActions(request, env) {
+  const actorEmail = await verifyAccess(request, env);
+  if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  const environment = parseManagementEnvironment(env);
+  let url;
+  try { url = new URL(request.url); } catch {
+    return fixedJson(400, { schemaVersion: 1, error: 'teardown_action_invalid' });
+  }
+  if (!environment || url.hostname !== environment.managementHostname) {
+    return fixedJson(503, { schemaVersion: 1, error: 'teardown_actions_unavailable' });
+  }
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return fixedJson(503, { schemaVersion: 1, error: 'teardown_actions_unavailable' });
+  if (request.method === 'GET') {
+    const actionId = url.pathname.slice('/api/teardown-actions/'.length);
+    if (!ACTION_ID.test(actionId)) {
+      return fixedJson(404, { schemaVersion: 1, error: 'teardown_action_not_found' });
+    }
+    try {
+      const response = await stub.fetch(new Request(
+        `https://admin-state.invalid${INTERNAL_TEARDOWNS_PATH}/${actionId}`,
+      ));
+      return response instanceof Response ? response :
+        fixedJson(503, { schemaVersion: 1, error: 'teardown_actions_unavailable' });
+    } catch {
+      return fixedJson(503, { schemaVersion: 1, error: 'teardown_actions_unavailable' });
+    }
+  }
+  if (request.method !== 'POST' || url.pathname !== '/api/teardown-actions') {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET, POST' });
+  }
+  if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+  const input = await readJsonInput(request);
+  if (!exactKeys(input, ['schemaVersion']) || input.schemaVersion !== 1) {
+    return fixedJson(400, { schemaVersion: 1, error: 'teardown_action_invalid' });
+  }
+  let control;
+  try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_CONTROL_PATH}`));
+    control = response instanceof Response && response.status === 200 ? await response.json() : null;
+  } catch { control = null; }
+  const parsedControl = safeManagementControl(control);
+  if (!parsedControl || parsedControl.accountId !== environment.accountId) {
+    return fixedJson(409, { schemaVersion: 1, error: 'teardown_action_conflict' });
+  }
+  const now = Date.now();
+  const expiresAt = now + 10 * 60 * 1000;
+  const actionId = `action_${randomBase64Url(24)}`;
+  const actionKey = randomBase64Url(32);
+  let prepared;
+  try {
+    prepared = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWNS_PATH}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: canonicalJson({
+        schemaVersion: 1,
+        actionId,
+        actionKeyHash: await sha256(actionKey),
+        actorEmail,
+        installationId: parsedControl.installationId,
+        issuedAt: now,
+        expiresAt,
+      }),
+    }));
+  } catch { prepared = null; }
+  if (!(prepared instanceof Response) || prepared.status !== 200) {
+    return fixedJson(409, { schemaVersion: 1, error: 'teardown_action_conflict' });
+  }
+  const claim = canonicalJson({
+    schemaVersion: 3,
+    actionType: 'gateway_teardown',
+    actionId,
+    actionKey,
+    actorEmail,
+    accountId: environment.accountId,
+    installationId: parsedControl.installationId,
+    gatewayName: parsedControl.portal.name,
+    portalHostname: parsedControl.portal.hostname,
+    workerName: environment.workerName,
+    workersSubdomain: environment.workersSubdomain,
+    managementOrigin: `https://${environment.managementHostname}`,
+    expiresAt,
+  });
+  const fragment = base64UrlEncode(new TextEncoder().encode(claim));
+  return fixedJson(200, {
+    schemaVersion: 1,
+    actionId,
+    status: 'authorization_required',
+    expiresAt: new Date(expiresAt).toISOString(),
+    handoffUrl: `https://deploy.ankka.ai/manage#${fragment}`,
+  });
+}
+
+async function handleTeardownActionProof(request, env) {
+  if (request.method === 'HEAD') {
+    return parseManagementEnvironment(env)
+      ? new Response(null, { status: 204, headers: { ...PUBLIC_HEADERS, 'x-ankka-teardown-action': 'ready' } })
+      : fixedJson(503, { schemaVersion: 1, error: 'teardown_actions_unavailable' });
+  }
+  if (request.method !== 'POST') {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'HEAD, POST' });
+  }
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return fixedJson(503, { schemaVersion: 1, error: 'teardown_actions_unavailable' });
+  try {
+    let command = null;
+    try { command = (await request.clone().json())?.command ?? null; } catch { command = null; }
+    if (command !== 'prove' && command !== 'apply') {
+      return fixedJson(400, { schemaVersion: 1, error: 'teardown_action_rejected' });
+    }
+    const response = await stub.fetch(new Request(
+      `https://admin-state.invalid${INTERNAL_TEARDOWNS_PATH}/${command}`, request,
+    ));
+    return response instanceof Response ? response :
+      fixedJson(503, { schemaVersion: 1, error: 'teardown_actions_unavailable' });
+  } catch {
+    return fixedJson(503, { schemaVersion: 1, error: 'teardown_actions_unavailable' });
+  }
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname === BOOTSTRAP_PATH) return handleBootstrap(request, env);
+    if (url.pathname === SOURCE_ACTION_PATH) return handleSourceActionApply(request, env);
+    if (url.pathname === RUNTIME_ACTION_PATH) return handleRuntimeActionApply(request, env);
+    if (url.pathname === TEARDOWN_ACTION_PATH) return handleTeardownActionProof(request, env);
+    if (url.pathname === '/api/status') return handleStatus(request, env);
+    if (url.pathname === '/api/update') return handleRuntimeUpdate(request, env);
+    if (url.pathname === '/api/sources/discover') return handleSourceDiscovery(request, env);
+    if (url.pathname === '/api/sources') return handleSources(request, env);
+    if (url.pathname === '/api/source-actions' || url.pathname.startsWith('/api/source-actions/')) {
+      return handleSourceActions(request, env);
+    }
+    if (url.pathname === '/api/update-actions' || url.pathname.startsWith('/api/update-actions/')) {
+      return handleRuntimeActions(request, env);
+    }
+    if (url.pathname === '/api/teardown-actions' || url.pathname.startsWith('/api/teardown-actions/')) {
+      return handleTeardownActions(request, env);
+    }
+    if (url.pathname.startsWith('/api/')) {
+      return fixedJson(404, { schemaVersion: 1, error: 'not_found' });
+    }
+    return fixedJson(404, { schemaVersion: 1, error: 'not_found' });
+  },
+};

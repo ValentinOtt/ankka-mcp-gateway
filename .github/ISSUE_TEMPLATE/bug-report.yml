@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a reproducible gateway, installer, or management issue.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, OAuth codes, cookies, customer data, Cloudflare account/resource IDs, private hostnames, or unredacted provider responses. Use private vulnerability reporting for security issues.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Hosted installer
+        - Customer management portal
+        - Customer gateway Worker
+        - Offline CLI or canary tooling
+        - Release or update tooling
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Gateway release or source commit
+      placeholder: gateway-vX.Y.Z or a 40-character public commit
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observable, sanitized behavior and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use synthetic values only. Do not paste journals, tokens, IDs, private URLs, or provider bodies.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Fixed diagnostic codes
+      description: Include only the gateway's fixed public error codes and safe browser/CLI state.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Public-data confirmation
+      options:
+        - label: I removed credentials, customer data, private hostnames, account/resource IDs, OAuth material, cookies, and unredacted provider output.
+          required: true

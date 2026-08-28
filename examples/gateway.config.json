@@ -1,0 +1,28 @@
+{
+  "$schema": "../schema/gateway-config.schema.json",
+  "schemaVersion": 1,
+  "gateway": {
+    "name": "Example MCP Gateway",
+    "hostname": "mcp.example.com",
+    "codeMode": "default_on"
+  },
+  "policy": {
+    "capabilityMode": "read_only",
+    "credentialCustody": "customer",
+    "telemetry": "off"
+  },
+  "sources": [
+    {
+      "id": "company-context",
+      "label": "Company context",
+      "url": "https://context.example.com/mcp",
+      "authentication": {
+        "mode": "oauth",
+        "onBehalfOfUser": true
+      },
+      "enabledTools": [
+        "company_prepare"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+name: Feature request
+description: Propose a change within the customer-owned gateway boundary.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What customer or operator problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the smallest useful public contract and who owns its state and credentials.
+    validations:
+      required: true
+  - type: dropdown
+    id: capability
+    attributes:
+      label: Capability boundary
+      options:
+        - Read-only
+        - Write-capable (requires a separate authorization and audit design)
+        - No provider capability change
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and custody impact
+      description: Describe effects on credential transit/storage, tool allowlists, authorization, logs, and uninstall ownership.
+    validations:
+      required: true

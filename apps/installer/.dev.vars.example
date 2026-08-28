@@ -1,0 +1,16 @@
+# Non-secret OAuth client identifier. The deployed value also lives in
+# wrangler.toml so local and hosted callbacks use the same reviewed client.
+CLOUDFLARE_OAUTH_CLIENT_ID=97ef364689fbda8582a55237066a67a0
+
+# Add these with `wrangler secret put` in the hosted Worker. Never commit them.
+CLOUDFLARE_OAUTH_CLIENT_SECRET=<cloudflare-oauth-client-secret>
+DEPLOY_SESSION_ENCRYPTION_KEY=<32-random-bytes-as-base64-or-base64url>
+BOOTSTRAP_NONCE_DERIVATION_KEY=<distinct-32-random-bytes-as-base64-or-base64url>
+
+# Release automation will eventually set this signed envelope. The checked-in
+# public-key registry is intentionally empty in this scaffold, so adding only
+# an env value cannot enable deployment.
+# Protocol-v2 signatures are channel-bound, so the expected channel is required
+# alongside the envelope and must be exactly `canary` or `stable`.
+GATEWAY_RELEASE_CHANNEL=canary
+GATEWAY_RELEASE_ENVELOPE_JSON=<ed25519-signed-release-envelope-json>

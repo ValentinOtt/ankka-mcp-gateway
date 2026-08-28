@@ -1,0 +1,325 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  applyReturningUninstallAction,
+  relayReturningUninstallAction,
+} from '../src/returning-uninstall-action-relay';
+import type { ReturningUninstallImportedAuthority } from '../src/returning-uninstall-authority';
+
+const ACCOUNT_ID = 'a'.repeat(32);
+const ACTION_ID = `action_${'A'.repeat(32)}`;
+const ACTION_KEY = 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc';
+const ACCESS_TOKEN = 'returning-uninstall-access-token-value';
+const INSTALLATION_ID = `acg-${'d'.repeat(24)}`;
+const NOW = Date.UTC(2026, 7, 26, 0, 0, 0);
+const REQUEST_ID = 'R'.repeat(22);
+const WORKER_ID = 'b'.repeat(32);
+const VERSION_ID = '11111111-1111-4111-8111-111111111111';
+const DEPLOYMENT_ID = '22222222-2222-4222-8222-222222222222';
+
+function envelope(result: unknown, status = 200): Response {
+  return new Response(JSON.stringify({ success: status >= 200 && status < 300, result }), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function runtimeBindings(overrides: Readonly<Record<string, string>> = {}): readonly unknown[] {
+  const values: Record<string, string> = {
+    ADMIN_EMAILS: 'admin@example.com',
+    ANKKA_GATEWAY_RELEASE: 'gateway-v1.0.0',
+    ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${'1'.repeat(64)}`,
+    ANKKA_MANAGEMENT_HOSTNAME: 'manage.example.com',
+    ANKKA_UPDATE_CHANNEL: 'canary',
+    ANKKA_UPDATE_KEY_ID: 'release-test-v1',
+    ANKKA_UPDATE_PUBLIC_KEY: 'A'.repeat(43),
+    ANKKA_WORKERS_SUBDOMAIN: 'customer-workers',
+    ANKKA_WORKER_NAME: 'ankka-gateway-example',
+    CF_ACCESS_AUD: 'access-audience-tag',
+    CF_ACCESS_ISSUER: 'https://customer.cloudflareaccess.com',
+    CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
+    CLOUDFLARE_ZONE_ID: 'c'.repeat(32),
+    CLOUDFLARE_ZONE_NAME: 'example.com',
+    ZERO_TRUST_READY: 'true',
+    ...overrides,
+  };
+  return [
+    { name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' },
+    { name: 'ASSETS', type: 'assets' },
+    ...Object.entries(values).map(([name, text]) => ({ name, text, type: 'plain_text' })),
+  ];
+}
+
+function runtimePreflightResponse(
+  url: URL,
+  options: Readonly<{
+    bindingOverrides?: Readonly<Record<string, string>>;
+    workerTags?: readonly string[];
+  }> = {},
+): Response | null {
+  if (url.pathname.endsWith('/workers/subdomain')) return envelope({ subdomain: 'customer-workers' });
+  if (url.pathname.endsWith('/workers/domains')) return envelope([{
+    hostname: 'manage.example.com',
+    service: 'ankka-gateway-example',
+    environment: 'production',
+  }]);
+  if (url.pathname.endsWith('/workers/workers/ankka-gateway-example')) {
+    return envelope({
+      id: WORKER_ID,
+      name: 'ankka-gateway-example',
+      tags: options.workerTags ?? ['ankka-mcp-gateway'],
+    });
+  }
+  if (url.pathname.endsWith('/workers/scripts/ankka-gateway-example/deployments')) {
+    return envelope({ deployments: [{
+      id: DEPLOYMENT_ID,
+      versions: [{ percentage: 100, version_id: VERSION_ID }],
+    }] });
+  }
+  if (url.pathname.endsWith(`/workers/workers/${WORKER_ID}/versions/${VERSION_ID}`)) {
+    return envelope({
+      id: VERSION_ID,
+      main_module: 'index.js',
+      compatibility_date: '2026-08-08',
+      bindings: runtimeBindings(options.bindingOverrides),
+    });
+  }
+  return null;
+}
+
+function input(transport: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
+  return {
+    actionId: ACTION_ID,
+    actionKey: ACTION_KEY,
+    actorEmail: 'admin@example.com',
+    accountId: ACCOUNT_ID,
+    installationId: INSTALLATION_ID,
+    workerName: 'ankka-gateway-example',
+    workersSubdomain: 'customer-workers',
+    managementOrigin: 'https://manage.example.com',
+    portalHostname: 'mcp.example.com',
+    gatewayName: 'Example Gateway',
+    expiresAt: NOW + 10 * 60 * 1000,
+    accessToken: ACCESS_TOKEN,
+    transport,
+    now: () => NOW,
+  } as const;
+}
+
+function authority(
+  runtimeOverrides: Partial<ReturningUninstallImportedAuthority['runtime']> = {},
+): ReturningUninstallImportedAuthority {
+  return {
+    actionId: ACTION_ID,
+    actorEmail: 'admin@example.com',
+    installationId: INSTALLATION_ID,
+    // The immutable installation receipt can predate the currently active,
+    // independently signed runtime after an update.
+    receipt: {
+      installationId: INSTALLATION_ID,
+      release: 'gateway-v0.9.0',
+      target: { accountId: ACCOUNT_ID, hostname: 'mcp.example.com' },
+    },
+    control: {
+      audienceEmails: ['admin@example.com'],
+      portal: { hostname: 'mcp.example.com', name: 'Example Gateway' },
+    },
+    runtime: {
+      release: 'gateway-v1.0.0',
+      artifactSha256: `sha256:${'1'.repeat(64)}`,
+      updateChannel: 'canary',
+      updateKeyId: 'release-test-v1',
+      updatePublicKey: 'A'.repeat(43),
+      accountId: ACCOUNT_ID,
+      zoneId: 'c'.repeat(32),
+      zoneName: 'example.com',
+      workerName: 'ankka-gateway-example',
+      workersSubdomain: 'customer-workers',
+      managementHostname: 'manage.example.com',
+      ...runtimeOverrides,
+    },
+  } as unknown as ReturningUninstallImportedAuthority;
+}
+
+describe('returning uninstall customer-action relay', () => {
+  it('rejects an unrelated Worker before any route mutation or customer-control request', async () => {
+    let providerWrites = 0;
+    let customerCalls = 0;
+    const transport = async (requestInput: RequestInfo | URL, init: RequestInit = {}) => {
+      const request = new Request(requestInput, init);
+      const url = new URL(request.url);
+      if (url.origin !== 'https://api.cloudflare.com') {
+        customerCalls += 1;
+        throw new Error('customer route must not be reached');
+      }
+      expect(request.headers.get('authorization')).toBe(`Bearer ${ACCESS_TOKEN}`);
+      expect(request.redirect).toBe('manual');
+      const preflight = runtimePreflightResponse(url, { workerTags: ['customer-worker'] });
+      if (preflight) return preflight;
+      if (request.method === 'GET') return envelope({ enabled: false, previews_enabled: false });
+      providerWrites += 1;
+      throw new Error('provider write must not be reached');
+    };
+
+    await expect(relayReturningUninstallAction(input(transport)))
+      .rejects.toMatchObject({ code: 'session_conflict' });
+    expect(providerWrites).toBe(0);
+    expect(customerCalls).toBe(0);
+  });
+
+  it('rejects an emulated Worker with binding drift before relaying the grant', async () => {
+    let providerWrites = 0;
+    let customerCalls = 0;
+    const transport = async (requestInput: RequestInfo | URL, init: RequestInit = {}) => {
+      const request = new Request(requestInput, init);
+      const url = new URL(request.url);
+      if (url.origin !== 'https://api.cloudflare.com') {
+        customerCalls += 1;
+        throw new Error('customer route must not be reached');
+      }
+      const preflight = runtimePreflightResponse(url, {
+        bindingOverrides: { CLOUDFLARE_ACCOUNT_ID: 'e'.repeat(32) },
+      });
+      if (preflight) return preflight;
+      if (request.method === 'GET') return envelope({ enabled: false, previews_enabled: false });
+      providerWrites += 1;
+      throw new Error('provider write must not be reached');
+    };
+
+    await expect(applyReturningUninstallAction(input(transport), REQUEST_ID, authority(), async () => {
+      throw new Error('post-ready proof must not be reached');
+    }))
+      .rejects.toMatchObject({ code: 'session_conflict' });
+    expect(providerWrites).toBe(0);
+    expect(customerCalls).toBe(0);
+  });
+
+  it('rejects live bindings that do not match the imported runtime authority before route mutation', async () => {
+    let providerWrites = 0;
+    let customerCalls = 0;
+    const transport = async (requestInput: RequestInfo | URL, init: RequestInit = {}) => {
+      const request = new Request(requestInput, init);
+      const url = new URL(request.url);
+      if (url.origin !== 'https://api.cloudflare.com') {
+        customerCalls += 1;
+        throw new Error('customer route must not be reached');
+      }
+      const preflight = runtimePreflightResponse(url);
+      if (preflight) return preflight;
+      if (request.method === 'GET') return envelope({ enabled: false, previews_enabled: false });
+      providerWrites += 1;
+      throw new Error('provider write must not be reached');
+    };
+
+    await expect(applyReturningUninstallAction(input(transport), REQUEST_ID, authority({
+      artifactSha256: `sha256:${'2'.repeat(64)}`,
+    }), async () => {
+      throw new Error('post-ready proof must not be reached');
+    })).rejects.toMatchObject({ code: 'session_conflict' });
+    expect(providerWrites).toBe(0);
+    expect(customerCalls).toBe(0);
+  });
+
+  it('relays the grant once only after the receipt and current runtime match, then closes workers.dev', async () => {
+    let enabled = false;
+    let customerPosts = 0;
+    const providerWrites: boolean[] = [];
+    const transport = async (requestInput: RequestInfo | URL, init: RequestInit = {}) => {
+      const request = new Request(requestInput, init);
+      const url = new URL(request.url);
+      if (url.origin === 'https://api.cloudflare.com') {
+        expect(request.headers.get('authorization')).toBe(`Bearer ${ACCESS_TOKEN}`);
+        expect(request.redirect).toBe('manual');
+        const preflight = runtimePreflightResponse(url);
+        if (preflight) return preflight;
+        if (request.method === 'GET') return envelope({ enabled, previews_enabled: false });
+        const body = await request.json() as { enabled: boolean; previews_enabled: boolean };
+        expect(body.previews_enabled).toBe(false);
+        enabled = body.enabled;
+        providerWrites.push(enabled);
+        return envelope({ enabled, previews_enabled: false });
+      }
+      expect(url.href).toBe(
+        'https://ankka-gateway-example.customer-workers.workers.dev/__ankka/teardown-action',
+      );
+      expect(request.redirect).toBe('manual');
+      if (request.method === 'HEAD') {
+        expect(enabled).toBe(true);
+        return new Response(null, { status: 204, headers: { 'x-ankka-teardown-action': 'ready' } });
+      }
+      customerPosts += 1;
+      expect(enabled).toBe(true);
+      expect(request.headers.get('authorization')).toBeNull();
+      expect(request.headers.get('cookie')).toBeNull();
+      expect(request.headers.get('x-ankka-teardown-action-signature')).toMatch(/^sha256=[a-f0-9]{64}$/u);
+      const body = await request.json() as Record<string, unknown>;
+      expect(body).toMatchObject({
+        schemaVersion: 1,
+        command: 'apply',
+        actionId: ACTION_ID,
+        requestId: REQUEST_ID,
+        cloudflareAccessToken: ACCESS_TOKEN,
+      });
+      return new Response(JSON.stringify({
+        schemaVersion: 1,
+        actionId: ACTION_ID,
+        status: 'gateway_removed',
+        installationId: INSTALLATION_ID,
+        removedResourceCount: 4,
+      }), { headers: { 'content-type': 'application/json' } });
+    };
+
+    let postReadyProofs = 0;
+    await expect(applyReturningUninstallAction(input(transport), REQUEST_ID, authority(), async () => {
+      expect(enabled).toBe(true);
+      expect(customerPosts).toBe(0);
+      postReadyProofs += 1;
+    }))
+      .resolves.toEqual({
+        schemaVersion: 1,
+        actionId: ACTION_ID,
+        status: 'gateway_removed',
+        installationId: INSTALLATION_ID,
+        removedResourceCount: 4,
+      });
+    expect(customerPosts).toBe(1);
+    expect(postReadyProofs).toBe(1);
+    expect(providerWrites).toEqual([true, false]);
+    expect(enabled).toBe(false);
+  });
+
+  it('closes workers.dev without forwarding the grant when the post-readiness runtime proof drifts', async () => {
+    let enabled = false;
+    let customerPosts = 0;
+    const providerWrites: boolean[] = [];
+    const transport = async (requestInput: RequestInfo | URL, init: RequestInit = {}) => {
+      const request = new Request(requestInput, init);
+      const url = new URL(request.url);
+      if (url.origin === 'https://api.cloudflare.com') {
+        const preflight = runtimePreflightResponse(url);
+        if (preflight) return preflight;
+        if (request.method === 'GET') return envelope({ enabled, previews_enabled: false });
+        const body = await request.json() as { enabled: boolean; previews_enabled: boolean };
+        enabled = body.enabled;
+        providerWrites.push(enabled);
+        return envelope({ enabled, previews_enabled: false });
+      }
+      if (request.method === 'HEAD') {
+        expect(enabled).toBe(true);
+        return new Response(null, { status: 204, headers: { 'x-ankka-teardown-action': 'ready' } });
+      }
+      customerPosts += 1;
+      throw new Error('token-bearing customer request must not be reached');
+    };
+
+    await expect(applyReturningUninstallAction(
+      input(transport),
+      REQUEST_ID,
+      authority(),
+      async () => { throw new Error('active release changed'); },
+    )).rejects.toThrow('active release changed');
+    expect(customerPosts).toBe(0);
+    expect(providerWrites).toEqual([true, false]);
+    expect(enabled).toBe(false);
+  });
+});

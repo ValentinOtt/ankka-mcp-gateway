@@ -1,0 +1,55 @@
+{
+  "name": "@ankka/mcp-gateway",
+  "version": "0.0.0",
+  "description": "Customer-owned MCP gateway deployment kit for Ankka MCP Gateway.",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "packageManager": "npm@10.9.8",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ValentinOtt/ankka-mcp-gateway.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ValentinOtt/ankka-mcp-gateway/issues"
+  },
+  "homepage": "https://github.com/ValentinOtt/ankka-mcp-gateway#readme",
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "22.23.2",
+      "onFail": "error"
+    },
+    "packageManager": {
+      "name": "npm",
+      "version": "10.9.8",
+      "onFail": "error"
+    }
+  },
+  "scripts": {
+    "build": "npm run build:admin && npm run build --workspace @ankka/gateway-installer",
+    "build:admin": "npm run build --workspace @ankka/gateway-admin",
+    "canary:fixture:serve": "node fixtures/synthetic-mcp/server.mjs --host 127.0.0.1 --port 9610",
+    "canary:fixture:test": "node --test test/synthetic-mcp.test.mjs",
+    "check": "npm run check:toolchain && npm run test && npm run build && npm run check:boundary && npm run check:history",
+    "check:boundary": "node scripts/check-public-boundary.mjs",
+    "check:history": "node scripts/check-public-history.mjs",
+    "check:toolchain": "node scripts/check-toolchain.mjs",
+    "canary:preflight": "node src/cli.mjs canary preflight",
+    "dev:admin": "npm run dev --workspace @ankka/gateway-admin",
+    "dev:ui": "node scripts/dev-ui.mjs",
+    "plan": "node src/cli.mjs plan",
+    "plan:example": "node src/cli.mjs plan examples/gateway.config.json --observed examples/observed.empty.json --access examples/access-input.json",
+    "test": "npm run build:admin && npm run test:core && npm run test:apps",
+    "test:apps": "npm run test --workspaces --if-present",
+    "test:core": "node --test test/*.test.mjs",
+    "test:payload": "npm run build:admin && node --test test/release-payload-layout.test.mjs test/worker-primary-payload.test.mjs test/worker-uninstall-payload.test.mjs",
+    "validate": "node src/cli.mjs"
+  }
+}

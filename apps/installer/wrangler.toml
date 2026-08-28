@@ -1,0 +1,46 @@
+name = "ankka-gateway-deploy"
+main = "src/index.ts"
+compatibility_date = "2026-08-14"
+workers_dev = false
+preview_urls = false
+
+[vars]
+CLOUDFLARE_OAUTH_CLIENT_ID = "97ef364689fbda8582a55237066a67a0"
+
+# This service handles a short-lived OAuth authorization grant. Provider
+# request/response bodies must never enter Cloudflare logs or traces.
+[observability.logs]
+enabled = false
+invocation_logs = false
+
+[observability.traces]
+enabled = false
+head_sampling_rate = 0
+
+[[durable_objects.bindings]]
+name = "GATEWAY_DEPLOY_SESSION"
+class_name = "GatewayDeploySession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GatewayDeploySession"]
+
+# Declare the reviewed binding shape for schema checks and local experiments.
+# The checked-in entrypoint remains disabled and does not require or consume it.
+[[ratelimits]]
+name = "ANONYMOUS_SESSION_RATE_LIMIT"
+namespace_id = "588230349"
+simple = { limit = 6, period = 60 }
+
+[[ratelimits]]
+name = "SESSION_READ_RATE_LIMIT"
+namespace_id = "913742685"
+simple = { limit = 120, period = 60 }
+
+[[ratelimits]]
+name = "SESSION_MUTATION_RATE_LIMIT"
+namespace_id = "74228090"
+simple = { limit = 30, period = 60 }
+
+# Deliberately no production route. Only the create-only reviewed canary
+# generator emits the deploy.ankka.ai Custom Domain configuration.

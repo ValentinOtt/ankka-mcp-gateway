@@ -1,0 +1,78 @@
+export type DeployErrorCode =
+  | 'abuse_controls_unavailable'
+  | 'bad_request'
+  | 'callback_invalid'
+  | 'csrf_invalid'
+  | 'existing_gateway_detected'
+  | 'install_mutations_disabled'
+  | 'uninstall_mutations_disabled'
+  | 'internal_error'
+  | 'oauth_denied'
+  | 'oauth_exchange_failed'
+  | 'oauth_grant_invalid'
+  | 'oauth_revoke_failed'
+  | 'oauth_state_invalid'
+  | 'origin_invalid'
+  | 'rate_limited'
+  | 'release_invalid'
+  | 'release_unavailable'
+  | 'session_conflict'
+  | 'session_expired'
+  | 'session_invalid'
+  | 'target_account_ambiguous'
+  | 'target_zone_invalid';
+
+export const DEPLOY_ERROR_CODES: ReadonlySet<string> = new Set<DeployErrorCode>([
+  'abuse_controls_unavailable',
+  'bad_request',
+  'callback_invalid',
+  'csrf_invalid',
+  'existing_gateway_detected',
+  'install_mutations_disabled',
+  'uninstall_mutations_disabled',
+  'internal_error',
+  'oauth_denied',
+  'oauth_exchange_failed',
+  'oauth_grant_invalid',
+  'oauth_revoke_failed',
+  'oauth_state_invalid',
+  'origin_invalid',
+  'rate_limited',
+  'release_invalid',
+  'release_unavailable',
+  'session_conflict',
+  'session_expired',
+  'session_invalid',
+  'target_account_ambiguous',
+  'target_zone_invalid',
+]);
+
+export function isDeployErrorCode(value: unknown): value is DeployErrorCode {
+  return typeof value === 'string' && DEPLOY_ERROR_CODES.has(value);
+}
+
+/** Safe diagnostic vocabulary: fixed words, HTTP status classes, and RFC 6749 error codes only. */
+export const FAILURE_REASON_PATTERN = /^[a-z][a-z0-9_]{0,159}$/u;
+
+export function isFailureReason(value: unknown): value is string {
+  return typeof value === 'string' && FAILURE_REASON_PATTERN.test(value);
+}
+
+export class DeployError extends Error {
+  readonly code: DeployErrorCode;
+  readonly status: number;
+  /** Optional secret-free diagnostic reason surfaced in result detail text. */
+  readonly reason: string | null;
+
+  constructor(status: number, code: DeployErrorCode, reason: string | null = null) {
+    super(code);
+    this.name = 'DeployError';
+    this.status = status;
+    this.code = code;
+    this.reason = isFailureReason(reason) ? reason : null;
+  }
+}
+
+export function stableError(error: unknown): DeployError {
+  return error instanceof DeployError ? error : new DeployError(500, 'internal_error');
+}

@@ -1,0 +1,15 @@
+name = "ankka-gateway-deploy-reviewed-disabled-dry-run"
+main = "src/reviewed-entrypoint.ts"
+compatibility_date = "2026-08-14"
+workers_dev = false
+preview_urls = false
+
+# Deliberately no route, release-bucket binding, OAuth client ID, or secret.
+# This config exists only to compile/dry-run the false/null reviewed entrypoint.
+[observability.logs]
+enabled = false
+invocation_logs = false
+
+[observability.traces]
+enabled = false
+head_sampling_rate = 0
