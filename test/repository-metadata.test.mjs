@@ -54,9 +54,11 @@ test('contributor pins stay exact without narrowing the runtime engine floor', a
   ]);
   assert.equal(nodePin.trim(), '22.23.2');
   assert.equal(manifest.engines?.node, '>=22');
+  // Local drift warns so development continues; check:toolchain (run in CI
+  // and in the full check gate) still enforces the exact pinned toolchain.
   assert.deepEqual(manifest.devEngines, {
-    runtime: { name: 'node', version: '22.23.2', onFail: 'error' },
-    packageManager: { name: 'npm', version: '10.9.8', onFail: 'error' },
+    runtime: { name: 'node', version: '22.23.2', onFail: 'warn' },
+    packageManager: { name: 'npm', version: '10.9.8', onFail: 'warn' },
   });
   assert.equal(manifest.packageManager, 'npm@10.9.8');
   assert.match(contributing, /Node\.js `22\.23\.2`/u);
