@@ -33,7 +33,7 @@ const RELEASE = 'gateway-v9.9.9';
 const CHANNEL = 'canary';
 const REPOSITORY = 'example/ankka-mcp-gateway';
 const PKCS8_SEED_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
-const REVIEWED_GH_VERSION = 'gh version 2.97.0 (2026-08-27)\nhttps://github.com/cli/cli/releases/tag/v2.97.0\n';
+const REVIEWED_GH_VERSION = 'gh version 2.98.0 (2026-08-20)\nhttps://github.com/cli/cli/releases/tag/v2.98.0\n';
 
 let fixture;
 
