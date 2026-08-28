@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 import {
   OAUTH_COOKIE,
   PUBLIC_ORIGIN,
@@ -5,28 +7,20 @@ import {
   SESSION_COOKIE,
 } from '../src/constants';
 import { DeployError } from '../src/errors';
-import type { InstallExecutionInput } from '../src/install-executor';
-import type { UninstallExecutionInput } from '../src/uninstall-executor';
-import type { R2ReleaseBundleProvider, PinnedR2Release } from '../src/r2-release-provider';
+import type {
+  PinnedR2Release,
+  R2ReleaseBundleProvider,
+  R2ReleaseReadBucket,
+} from '../src/r2-release-provider';
 import type { VerifiedReleaseBundle, VerifiedReleasePayloadBlob } from '../src/release';
 import { REVIEWED_GATEWAY_DEPLOY_ACTIVATION } from '../src/reviewed-activation';
 import {
   createReviewedGatewayDeployEntrypoint,
   createReviewedGatewayDeployRuntime,
-  createSynchronousReviewedInstallExecutor,
-  createSynchronousReviewedUninstallExecutor,
   type ReviewedGatewayDeployEnv,
   type ReviewedRuntimeDependencies,
   type ReviewedRuntimeTransport,
 } from '../src/reviewed-runtime';
-import type {
-  ReviewedInstallExecutionInput,
-  ReviewedInstallProviderAdapter,
-} from '../src/reviewed-install-executor';
-import type {
-  ReviewedUninstallExecutionInput,
-  ReviewedUninstallProviderAdapter,
-} from '../src/reviewed-uninstall-executor';
 import {
   APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
   canonicalJson,
@@ -48,7 +42,7 @@ function hex(bytes: Uint8Array): string {
 }
 
 async function sha256(input: Uint8Array | string): Promise<string> {
-  const bytes = typeof input === 'string' ? encoder.encode(input) : input;
+  const bytes = v.is(v.string(), input) ? encoder.encode(input) : input;
   const owned = new Uint8Array(new ArrayBuffer(bytes.byteLength));
   owned.set(bytes);
   return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', owned)));
@@ -173,11 +167,11 @@ async function signedSnapshotFixture(): Promise<{
   };
 }
 
-function inertBucket(): R2Bucket {
+function inertBucket(): R2ReleaseReadBucket {
   return {
     get: async () => null,
-    list: async () => ({ objects: [], truncated: false, delimitedPrefixes: [] }) as R2Objects,
-  } as unknown as R2Bucket;
+    list: async () => ({ objects: [], truncated: false }),
+  };
 }
 
 function runtimeEnv(): ReviewedGatewayDeployEnv {
@@ -199,7 +193,7 @@ class SequencedProvider implements R2ReleaseBundleProvider {
     private failures = 0,
   ) {}
 
-  async loadVerifiedReleaseBundle(_bucket: R2Bucket): Promise<VerifiedReleaseBundle> {
+  async loadVerifiedReleaseBundle(_bucket: R2ReleaseReadBucket): Promise<VerifiedReleaseBundle> {
     this.calls += 1;
     if (this.failures > 0) {
       this.failures -= 1;
@@ -221,18 +215,17 @@ describe('reviewed runtime boundary', () => {
     expect(Object.isFrozen(REVIEWED_GATEWAY_DEPLOY_ACTIVATION)).toBe(true);
 
     let dependencyRead = false;
-    const dependencies = Object.defineProperty({}, 'releaseBundleProvider', {
-      enumerable: true,
-      get() {
+    const dependencies: ReviewedRuntimeDependencies = {
+      get releaseBundleProvider(): R2ReleaseBundleProvider {
         dependencyRead = true;
         throw new Error('disabled activation read a runtime dependency');
       },
-    }) as ReviewedRuntimeDependencies;
+    };
     const worker = createReviewedGatewayDeployEntrypoint(
       REVIEWED_GATEWAY_DEPLOY_ACTIVATION,
       dependencies,
     );
-    const poisonEnv = new Proxy({} as ReviewedGatewayDeployEnv, {
+    const poisonEnv = new Proxy(runtimeEnv(), {
       get() {
         throw new Error('disabled shell touched an environment binding');
       },
@@ -320,12 +313,12 @@ describe('reviewed runtime boundary', () => {
       headers: { 'cf-connecting-ip': '192.0.2.55' },
     }), activeEnv);
     expect(established.status).toBe(200);
-    const establishedPayload = await established.json() as { csrf: string };
+    const establishedPayload = v.parse(
+      v.looseObject({ csrf: v.string() }),
+      await established.json(),
+    );
     const establishedCookie = cookiePair(established.headers.get('set-cookie') ?? '', SESSION_COOKIE);
-    const missingMutationBinding = {
-      ...activeEnv,
-      SESSION_MUTATION_RATE_LIMIT: undefined,
-    } as ReviewedGatewayDeployEnv;
+    const { SESSION_MUTATION_RATE_LIMIT: _mutationBinding, ...missingMutationBinding } = activeEnv;
     const mutation = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
       method: 'PUT',
       headers: {
@@ -340,22 +333,19 @@ describe('reviewed runtime boundary', () => {
     expect(mutation.status).toBe(503);
     expect(await mutation.json()).toEqual({ code: 'abuse_controls_unavailable' });
 
-    const missingReadBinding = {
-      ...activeEnv,
-      SESSION_READ_RATE_LIMIT: undefined,
-    } as ReviewedGatewayDeployEnv;
+    const { SESSION_READ_RATE_LIMIT: _readBinding, ...missingReadBinding } = activeEnv;
     const read = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: establishedCookie },
     }), missingReadBinding);
     expect(read.status).toBe(503);
     expect(await read.json()).toEqual({ code: 'abuse_controls_unavailable' });
 
-    const missingBindings = {
-      ...activeEnv,
-      ANONYMOUS_SESSION_RATE_LIMIT: undefined,
-      SESSION_READ_RATE_LIMIT: undefined,
-      SESSION_MUTATION_RATE_LIMIT: undefined,
-    } as ReviewedGatewayDeployEnv;
+    const {
+      ANONYMOUS_SESSION_RATE_LIMIT: _anonymousBinding,
+      SESSION_READ_RATE_LIMIT: _allReadBinding,
+      SESSION_MUTATION_RATE_LIMIT: _allMutationBinding,
+      ...missingBindings
+    } = activeEnv;
 
     const session = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { 'cf-connecting-ip': '192.0.2.55' },
@@ -399,65 +389,6 @@ describe('reviewed runtime boundary', () => {
     expect(executeCalls).toBe(0);
   });
 
-  it('directly returns the reviewed executor promise with exact core inputs and stateless dependencies', async () => {
-    const coreInput = Object.freeze({ marker: 'exact-core-input' }) as unknown as InstallExecutionInput;
-    const providerAdapter = Object.freeze({ marker: 'stateless-provider' }) as unknown as ReviewedInstallProviderAdapter;
-    const transport = (async () => new Response(null, { status: 204 })) as ReviewedRuntimeTransport;
-    const completion = Promise.resolve({ installationId: `acg-${'b'.repeat(24)}` });
-    let received: ReviewedInstallExecutionInput | null = null;
-    const executor = createSynchronousReviewedInstallExecutor({
-      providerAdapter,
-      transport,
-      execute: (input) => {
-        received = input;
-        return completion;
-      },
-    });
-
-    const returned = executor.execute(coreInput);
-    expect(returned).toBe(completion);
-    await expect(returned).resolves.toEqual({ installationId: `acg-${'b'.repeat(24)}` });
-    expect(received).toMatchObject({
-      marker: 'exact-core-input',
-      provider: providerAdapter,
-      transport,
-    });
-  });
-
-  it('directly returns the reviewed uninstall promise with exact core inputs and stateless dependencies', async () => {
-    const coreInput = Object.freeze({ marker: 'exact-uninstall-input' }) as unknown as UninstallExecutionInput;
-    const providerAdapter = Object.freeze({ marker: 'stateless-uninstall-provider' }) as unknown as
-      ReviewedUninstallProviderAdapter;
-    const transport = (async () => new Response(null, { status: 204 })) as ReviewedRuntimeTransport;
-    const completion = Promise.resolve({
-      status: 'removed' as const,
-      installationId: `acg-${'c'.repeat(24)}`,
-      convergenceHash: `sha256:${'d'.repeat(64)}`,
-    });
-    let received: ReviewedUninstallExecutionInput | null = null;
-    const executor = createSynchronousReviewedUninstallExecutor({
-      providerAdapter,
-      transport,
-      execute: (input) => {
-        received = input;
-        return completion;
-      },
-    });
-
-    const returned = executor.execute(coreInput);
-    expect(returned).toBe(completion);
-    await expect(returned).resolves.toEqual({
-      status: 'removed',
-      installationId: `acg-${'c'.repeat(24)}`,
-      convergenceHash: `sha256:${'d'.repeat(64)}`,
-    });
-    expect(received).toMatchObject({
-      marker: 'exact-uninstall-input',
-      provider: providerAdapter,
-      transport,
-    });
-  });
-
   it('serves the signed installer immediately while reviewed execution owns the connected stream', async () => {
     const fixture = await signedSnapshotFixture();
     const provider = new SequencedProvider(fixture.bundle);
@@ -469,7 +400,7 @@ describe('reviewed runtime boundary', () => {
     const executorStarted = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
-    const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const transport: ReviewedRuntimeTransport = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
       if (url.pathname === '/oauth2/token') {
         return new Response(JSON.stringify({
@@ -498,7 +429,7 @@ describe('reviewed runtime boundary', () => {
       }
       if (url.pathname === '/oauth2/revoke') return Response.json({});
       return new Response(JSON.stringify({ url: url.toString(), method: init?.method }), { status: 404 });
-    }) as ReviewedRuntimeTransport;
+    };
     const worker = createReviewedGatewayDeployRuntime(fixture.pin, {
       releaseBundleProvider: provider,
       transport,
@@ -512,15 +443,18 @@ describe('reviewed runtime boundary', () => {
     const sessionResponse = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { 'cf-connecting-ip': '192.0.2.55' },
     }), workerEnv);
-    const session = await sessionResponse.json() as { csrf: string };
+    const session = v.parse(v.looseObject({ csrf: v.string() }), await sessionResponse.json());
     const sessionCookie = cookiePair(sessionResponse.headers.get('set-cookie') ?? '', SESSION_COOKIE);
-    const mutationHeaders = (json = true): HeadersInit => ({
-      origin: PUBLIC_ORIGIN,
-      'sec-fetch-site': 'same-origin',
-      'x-csrf-token': session.csrf,
-      cookie: sessionCookie,
-      ...(json ? { 'content-type': 'application/json' } : {}),
-    });
+    const mutationHeaders = (json = true): Headers => {
+      const headers = new Headers({
+        origin: PUBLIC_ORIGIN,
+        'sec-fetch-site': 'same-origin',
+        'x-csrf-token': session.csrf,
+        cookie: sessionCookie,
+      });
+      if (json) headers.set('content-type', 'application/json');
+      return headers;
+    };
     expect((await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/selection`, {
       method: 'PUT',
       headers: mutationHeaders(),
@@ -529,7 +463,9 @@ describe('reviewed runtime boundary', () => {
     const planResponse = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
       method: 'POST', headers: mutationHeaders(false),
     }), workerEnv);
-    const planPayload = await planResponse.json() as { plan: { planId: string; planHash: string } };
+    const planPayload = v.parse(v.looseObject({
+      plan: v.looseObject({ planId: v.string(), planHash: v.string() }),
+    }), await planResponse.json());
     const deployResponse = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
       method: 'POST',
       headers: mutationHeaders(),
@@ -538,7 +474,10 @@ describe('reviewed runtime boundary', () => {
         planHash: planPayload.plan.planHash,
       }),
     }), workerEnv);
-    const deploy = await deployResponse.json() as { authorizationUrl: string };
+    const deploy = v.parse(
+      v.looseObject({ authorizationUrl: v.string() }),
+      await deployResponse.json(),
+    );
     const state = new URL(deploy.authorizationUrl).searchParams.get('state');
     const oauthCookie = cookiePair(deployResponse.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
     const waitUntilTasks: Promise<unknown>[] = [];
@@ -549,7 +488,7 @@ describe('reviewed runtime boundary', () => {
       waitUntil(task: Promise<unknown>) {
         waitUntilTasks.push(task);
       },
-    } as ExecutionContext);
+    });
 
     expect(callback.status).toBe(200);
     expect(callback.headers.get('content-type')).toContain('text/html');

@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 const encoder = new TextEncoder();
 
 const DERIVATION_DOMAIN = 'ankka-mcp-gateway/bootstrap-nonce/v1';
@@ -14,6 +16,14 @@ const INPUT_KEYS = Object.freeze([
   'releaseArtifactSha256',
   'sessionId',
 ] as const);
+const INPUT_KEY_SET = new Set<string>(INPUT_KEYS);
+const nonceInputContainerSchema = v.object({});
+const bootstrapNonceInputSchema = v.strictObject({
+  installationId: v.pipe(v.string(), v.regex(INSTALLATION_ID)),
+  journalBindingHash: v.pipe(v.string(), v.regex(JOURNAL_BINDING_HASH)),
+  releaseArtifactSha256: v.pipe(v.string(), v.regex(RELEASE_ARTIFACT_SHA256)),
+  sessionId: v.pipe(v.string(), v.regex(SESSION_ID)),
+});
 
 export interface BootstrapNonceDerivationInput {
   readonly sessionId: string;
@@ -73,15 +83,16 @@ function decodeCanonicalBase64(value: string, variant: 'base64' | 'base64url'): 
   return bytes;
 }
 
-function decodeDerivationKey(value: unknown): Uint8Array<ArrayBuffer> {
-  if (typeof value !== 'string') invalid();
-  if (STANDARD_BASE64_KEY.test(value)) return decodeCanonicalBase64(value, 'base64');
-  if (BASE64URL_KEY.test(value)) return decodeCanonicalBase64(value, 'base64url');
+function decodeDerivationKey<Value>(value: Value): Uint8Array<ArrayBuffer> {
+  const result = v.safeParse(v.string(), value);
+  if (!result.success) invalid();
+  if (STANDARD_BASE64_KEY.test(result.output)) return decodeCanonicalBase64(result.output, 'base64');
+  if (BASE64URL_KEY.test(result.output)) return decodeCanonicalBase64(result.output, 'base64url');
   invalid();
 }
 
-function canonicalSessionId(value: unknown): value is string {
-  if (typeof value !== 'string' || !SESSION_ID.test(value)) return false;
+function canonicalSessionId(value: string): boolean {
+  if (!SESSION_ID.test(value)) return false;
   try {
     const bytes = decodeCanonicalBase64(value, 'base64url');
     bytes.fill(0);
@@ -91,38 +102,37 @@ function canonicalSessionId(value: unknown): value is string {
   }
 }
 
-function parseInput(value: unknown): BootstrapNonceDerivationInput {
+function parseInput<Value>(value: Value): BootstrapNonceDerivationInput {
   try {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) invalid();
+    if (!v.is(nonceInputContainerSchema, value)) invalid();
     if (Object.getPrototypeOf(value) !== Object.prototype) invalid();
     const ownKeys = Reflect.ownKeys(value);
     if (
       ownKeys.length !== INPUT_KEYS.length ||
-      ownKeys.some((key) => typeof key !== 'string' || !INPUT_KEYS.includes(key as (typeof INPUT_KEYS)[number]))
+      ownKeys.some((key) => !v.is(v.string(), key) || !INPUT_KEY_SET.has(key))
     ) invalid();
     const descriptors = Object.getOwnPropertyDescriptors(value);
-    if (INPUT_KEYS.some((key) => {
-      const descriptor = descriptors[key];
-      return descriptor === undefined || descriptor.enumerable !== true || !('value' in descriptor);
-    })) invalid();
-
-    const sessionId = descriptors.sessionId.value as unknown;
-    const journalBindingHash = descriptors.journalBindingHash.value as unknown;
-    const installationId = descriptors.installationId.value as unknown;
-    const releaseArtifactSha256 = descriptors.releaseArtifactSha256.value as unknown;
+    const installationId = descriptors.installationId;
+    const journalBindingHash = descriptors.journalBindingHash;
+    const releaseArtifactSha256 = descriptors.releaseArtifactSha256;
+    const sessionId = descriptors.sessionId;
     if (
-      !canonicalSessionId(sessionId) ||
-      typeof journalBindingHash !== 'string' || !JOURNAL_BINDING_HASH.test(journalBindingHash) ||
-      typeof installationId !== 'string' || !INSTALLATION_ID.test(installationId) ||
-      typeof releaseArtifactSha256 !== 'string' || !RELEASE_ARTIFACT_SHA256.test(releaseArtifactSha256)
+      installationId === undefined || installationId.enumerable !== true || !('value' in installationId) ||
+      journalBindingHash === undefined || journalBindingHash.enumerable !== true || !('value' in journalBindingHash) ||
+      releaseArtifactSha256 === undefined || releaseArtifactSha256.enumerable !== true ||
+        !('value' in releaseArtifactSha256) ||
+      sessionId === undefined || sessionId.enumerable !== true || !('value' in sessionId)
     ) invalid();
 
-    return Object.freeze({
-      sessionId,
-      journalBindingHash,
-      installationId,
-      releaseArtifactSha256,
+    const result = v.safeParse(bootstrapNonceInputSchema, {
+      installationId: installationId.value,
+      journalBindingHash: journalBindingHash.value,
+      releaseArtifactSha256: releaseArtifactSha256.value,
+      sessionId: sessionId.value,
     });
+    if (!result.success || !canonicalSessionId(result.output.sessionId)) invalid();
+
+    return Object.freeze(result.output);
   } catch {
     return invalid();
   }
@@ -149,9 +159,9 @@ function canonicalCommitment(input: BootstrapNonceDerivationInput): string {
  * nonce and therefore intentionally invalidates recovery for every pending
  * bootstrap operation. Rotation must wait until their recovery windows close.
  */
-export async function deriveBootstrapNonce(
-  encodedKey: unknown,
-  input: unknown,
+export async function deriveBootstrapNonce<Key, Input>(
+  encodedKey: Key,
+  input: Input,
 ): Promise<string> {
   const validated = parseInput(input);
   const keyBytes = decodeDerivationKey(encodedKey);

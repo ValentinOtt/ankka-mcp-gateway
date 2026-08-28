@@ -1,3 +1,16 @@
+import * as v from 'valibot';
+
+import { boundaryValueSchema, type BoundaryValue } from './boundary';
+import { canonicalJson } from './canonical-json';
+import {
+  parseAccountWorkersSubdomain,
+  parseActiveGatewayRuntime,
+  parseCurrentGatewayVersion,
+  parseCurrentGatewayWorker,
+  parseGatewayRuntimeBindings,
+  parseGatewayWorkerDomains,
+  parseGatewayWorkerSubdomainState,
+} from './cloudflare-gateway-runtime-state';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 import {
   prepareVerifiedWorkerRelease,
@@ -21,29 +34,19 @@ import type { VerifiedReleaseBundle } from './release';
 const ACCOUNT_ID = /^[a-f0-9]{32}$/u;
 const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u;
 const NONCE = /^[A-Za-z0-9_-]{43}$/u;
-const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
-const WORKER_ID = /^[a-f0-9]{32}$/u;
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u;
 const MAX_CUSTOMER_RESPONSE_BYTES = 64 * 1024;
-const BINDING_NAMES = Object.freeze([
-  'ADMIN_EMAILS',
-  'ANKKA_GATEWAY_RELEASE',
-  'ANKKA_GATEWAY_RELEASE_SHA256',
-  'ANKKA_MANAGEMENT_HOSTNAME',
-  'ANKKA_UPDATE_CHANNEL',
-  'ANKKA_UPDATE_KEY_ID',
-  'ANKKA_UPDATE_PUBLIC_KEY',
-  'ANKKA_WORKERS_SUBDOMAIN',
-  'ANKKA_WORKER_NAME',
-  'CF_ACCESS_AUD',
-  'CF_ACCESS_ISSUER',
-  'CLOUDFLARE_ACCOUNT_ID',
-  'CLOUDFLARE_ZONE_ID',
-  'CLOUDFLARE_ZONE_NAME',
-  'ZERO_TRUST_READY',
-] as const);
+const providerEnvelopeSchema = v.looseObject({
+  result: boundaryValueSchema,
+  success: v.literal(true),
+});
+const customerActionResultSchema = v.looseObject({
+  schemaVersion: v.literal(1),
+  actionId: v.string(),
+  status: v.literal('succeeded'),
+});
 
 export interface SourceActionRelayInput {
   readonly accessToken: string;
@@ -78,16 +81,6 @@ function conflict(): never {
   throw new DeployError(409, 'session_conflict');
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
 function validate(input: SourceActionRelayInput, now: number): URL {
   let management: URL;
   try { management = new URL(input.managementOrigin); } catch { invalid(); }
@@ -95,7 +88,7 @@ function validate(input: SourceActionRelayInput, now: number): URL {
       !DNS_LABEL.test(input.workersSubdomain) || !ACTION_ID.test(input.actionId) ||
       !NONCE.test(input.actionKey) || input.actorEmail !== input.actorEmail.toLowerCase() ||
       !EMAIL.test(input.actorEmail) || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= now ||
-      input.expiresAt > now + 10 * 60 * 1000 || typeof input.accessToken !== 'string' ||
+      input.expiresAt > now + 10 * 60 * 1000 || !v.is(v.string(), input.accessToken) ||
       input.accessToken.length < 20 || input.accessToken.length > 16 * 1024 ||
       management.protocol !== 'https:' || management.username !== '' || management.password !== '' ||
       management.port !== '' || management.pathname !== '/' || management.search !== '' || management.hash !== '') {
@@ -112,15 +105,16 @@ async function providerResult(
   input: SourceActionRelayInput,
   path: string,
   init: RequestInit,
-): Promise<unknown> {
+): Promise<BoundaryValue> {
   return withDeadline(async (signal) => {
+    const headers = new Headers({
+      accept: 'application/json',
+      authorization: `Bearer ${input.accessToken}`,
+    });
+    if (init.body !== undefined && init.body !== null) headers.set('content-type', 'application/json');
     const response = await input.transport(providerUrl(input.accountId, path), {
       ...init,
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${input.accessToken}`,
-        ...(init.body ? { 'content-type': 'application/json' } : {}),
-      },
+      headers,
       redirect: 'manual',
       signal,
     });
@@ -130,20 +124,20 @@ async function providerResult(
     }
     const serialized = await readBoundedText(response, 'oauth_grant_invalid', MAX_CUSTOMER_RESPONSE_BYTES);
     if (!response.ok) throw new DeployError(502, 'oauth_grant_invalid');
-    let envelope: unknown;
-    try { envelope = JSON.parse(serialized); } catch { throw new DeployError(502, 'oauth_grant_invalid'); }
-    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
-        (envelope as Record<string, unknown>).success !== true ||
-        !Object.hasOwn(envelope, 'result')) throw new DeployError(502, 'oauth_grant_invalid');
-    return (envelope as Record<string, unknown>).result;
+    try {
+      const envelope = v.safeParse(providerEnvelopeSchema, JSON.parse(serialized));
+      if (!envelope.success) throw new DeployError(502, 'oauth_grant_invalid');
+      return envelope.output.result;
+    } catch (error) {
+      if (error instanceof DeployError) throw error;
+      throw new DeployError(502, 'oauth_grant_invalid');
+    }
   }, 'oauth_grant_invalid');
 }
 
-function subdomainState(value: unknown, expected: boolean): void {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) invalid();
-  const record = value as Record<string, unknown>;
-  if (Object.keys(record).sort().join(',') !== 'enabled,previews_enabled' ||
-      record.enabled !== expected || record.previews_enabled !== false) {
+function subdomainState(value: BoundaryValue, expected: boolean): void {
+  const result = parseGatewayWorkerSubdomainState(value);
+  if (!result || result.enabled !== expected) {
     throw new DeployError(409, 'session_conflict');
   }
 }
@@ -167,9 +161,7 @@ async function setSubdomainState(input: SourceActionRelayInput, enabled: boolean
 
 async function verifyAccountSubdomain(input: SourceActionRelayInput): Promise<void> {
   const value = await providerResult(input, '/workers/subdomain', { method: 'GET' });
-  if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).join(',') !== 'subdomain' ||
-      (value as Record<string, unknown>).subdomain !== input.workersSubdomain) {
+  if (parseAccountWorkersSubdomain(value) !== input.workersSubdomain) {
     throw new DeployError(409, 'session_conflict');
   }
 }
@@ -184,14 +176,12 @@ async function verifyManagementDomain(
     per_page: '50',
   });
   const value = await providerResult(input, `/workers/domains?${path.toString()}`, { method: 'GET' });
-  if (!Array.isArray(value) || value.length !== 1) throw new DeployError(409, 'session_conflict');
-  const domain = value[0];
-  if (!domain || typeof domain !== 'object' || Array.isArray(domain)) {
-    throw new DeployError(409, 'session_conflict');
-  }
-  const record = domain as Record<string, unknown>;
-  if (record.hostname !== management.hostname || record.service !== input.workerName ||
-      (record.environment !== undefined && record.environment !== 'production')) {
+  const domains = parseGatewayWorkerDomains(value);
+  if (!domains || domains.length !== 1) throw new DeployError(409, 'session_conflict');
+  const domain = domains[0];
+  if (!domain) throw new DeployError(409, 'session_conflict');
+  if (domain.hostname !== management.hostname || domain.service !== input.workerName ||
+      (domain.environment !== undefined && domain.environment !== 'production')) {
     throw new DeployError(409, 'session_conflict');
   }
 }
@@ -201,42 +191,16 @@ interface ActiveRuntime {
   readonly versionId: string;
 }
 
-function activeRuntime(value: unknown): ActiveRuntime {
-  if (!isRecord(value) || !exactKeys(value, ['deployments']) || !Array.isArray(value.deployments) ||
-      value.deployments.length < 1 || value.deployments.length > 1_000) conflict();
-  const active = value.deployments[0];
-  if (!isRecord(active) || !UUID.test(String(active.id)) || !Array.isArray(active.versions) ||
-      active.versions.length !== 1 || !isRecord(active.versions[0]) ||
-      active.versions[0].percentage !== 100 || !UUID.test(String(active.versions[0].version_id))) {
-    conflict();
-  }
-  return Object.freeze({
-    deploymentId: String(active.id),
-    versionId: String(active.versions[0].version_id),
-  });
+function activeRuntime(value: BoundaryValue): ActiveRuntime {
+  const active = parseActiveGatewayRuntime(value);
+  if (!active) conflict();
+  return active;
 }
 
-function currentBindings(value: unknown): Readonly<Record<(typeof BINDING_NAMES)[number], string>> {
-  if (!isRecord(value) || !Array.isArray(value.bindings) || value.bindings.length !== BINDING_NAMES.length + 2 ||
-      value.main_module !== 'index.js' || value.compatibility_date !== '2026-08-08' ||
-      Object.hasOwn(value, 'migrations') || Object.hasOwn(value, 'migration_tag')) conflict();
-  const bindings = new Map<string, Record<string, unknown>>();
-  for (const binding of value.bindings) {
-    if (!isRecord(binding) || typeof binding.name !== 'string' || bindings.has(binding.name)) conflict();
-    bindings.set(binding.name, binding);
-  }
-  const admin = bindings.get('ADMIN_STATE');
-  const assets = bindings.get('ASSETS');
-  if (!admin || admin.type !== 'durable_object_namespace' || admin.class_name !== 'AdminState' ||
-      !assets || !exactKeys(assets, ['name', 'type']) || assets.type !== 'assets') conflict();
-  const output = {} as Record<(typeof BINDING_NAMES)[number], string>;
-  for (const name of BINDING_NAMES) {
-    const binding = bindings.get(name);
-    if (!binding || !exactKeys(binding, ['name', 'text', 'type']) || binding.type !== 'plain_text' ||
-        typeof binding.text !== 'string' || binding.text.length < 1 || binding.text.length > 4_096) conflict();
-    output[name] = binding.text;
-  }
-  return Object.freeze(output);
+function currentBindings(value: BoundaryValue): GatewayWorkerPlainTextBindings {
+  const bindings = parseGatewayRuntimeBindings(value);
+  if (!bindings) conflict();
+  return bindings;
 }
 
 interface CurrentRuntimeSeed {
@@ -284,8 +248,9 @@ async function readCurrentRuntimeSeed(
     `/workers/workers/${encodeURIComponent(input.workerName)}`,
     { method: 'GET' },
   );
-  if (!isRecord(worker) || worker.name !== input.workerName || !WORKER_ID.test(String(worker.id)) ||
-      !Array.isArray(worker.tags) || !worker.tags.includes('ankka-mcp-gateway')) conflict();
+  const currentWorker = parseCurrentGatewayWorker(worker);
+  if (!currentWorker || currentWorker.name !== input.workerName ||
+      !currentWorker.tags.includes('ankka-mcp-gateway')) conflict();
   const active = activeRuntime(await providerResult(
     input,
     `/workers/scripts/${encodeURIComponent(input.workerName)}/deployments`,
@@ -293,10 +258,11 @@ async function readCurrentRuntimeSeed(
   ));
   const version = await providerResult(
     input,
-    `/workers/workers/${String(worker.id)}/versions/${active.versionId}`,
+    `/workers/workers/${currentWorker.id}/versions/${active.versionId}`,
     { method: 'GET' },
   );
-  if (!isRecord(version) || version.id !== active.versionId) conflict();
+  const currentVersion = parseCurrentGatewayVersion(version);
+  if (!currentVersion || currentVersion.id !== active.versionId) conflict();
   const bindings = currentBindings(version);
   validateRuntimeBindings(input, management, bindings, identity);
   return Object.freeze({
@@ -306,7 +272,7 @@ async function readCurrentRuntimeSeed(
       kind: 'worker' as const,
       accountId: input.accountId,
       workerName: input.workerName,
-      workerId: String(worker.id),
+      workerId: currentWorker.id,
     }),
   });
 }
@@ -340,18 +306,6 @@ async function proveCurrentRuntime(
   if (proof.version.versionId !== seed.active.versionId ||
       proof.deployment.deploymentId !== seed.active.deploymentId) conflict();
   return proof;
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => (
-      `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`
-    )).join(',')}}`;
-  }
-  invalid();
 }
 
 async function signature(actionKey: string, body: string): Promise<string> {
@@ -418,13 +372,19 @@ async function submitCustomerAction(
     throw new DeployError(409, 'session_conflict');
   }
   const serialized = await readBoundedText(response, 'session_conflict', MAX_CUSTOMER_RESPONSE_BYTES);
-  let result: unknown;
-  try { result = JSON.parse(serialized); } catch { throw new DeployError(409, 'session_conflict'); }
-  if (!result || typeof result !== 'object' || Array.isArray(result)) throw new DeployError(409, 'session_conflict');
-  const record = result as Record<string, unknown>;
-  if (record.schemaVersion !== 1 || record.actionId !== input.actionId || record.status !== 'succeeded') {
+  let result: v.SafeParseResult<typeof customerActionResultSchema>;
+  try {
+    result = v.safeParse(customerActionResultSchema, JSON.parse(serialized));
+  } catch {
     throw new DeployError(409, 'session_conflict');
   }
+  if (!result.success || result.output.actionId !== input.actionId) {
+    throw new DeployError(409, 'session_conflict');
+  }
+}
+
+function operationFailure<Value>(error: Value): Error {
+  return error instanceof Error ? error : new DeployError(409, 'session_conflict');
 }
 
 export async function relaySourceAction(input: SourceActionRelayInput): Promise<SourceActionRelayResult> {
@@ -443,7 +403,7 @@ export async function relaySourceAction(input: SourceActionRelayInput): Promise<
     conflict();
   }
   let enabled = false;
-  let operationError: unknown = null;
+  let operationError: Error | null = null;
   try {
     await verifyAccountSubdomain(input);
     await verifyManagementDomain(input, management);
@@ -462,7 +422,7 @@ export async function relaySourceAction(input: SourceActionRelayInput): Promise<
         after.deployment.deploymentId !== before.deployment.deploymentId) conflict();
     await submitCustomerAction(input, now);
   } catch (error) {
-    operationError = error;
+    operationError = operationFailure(error);
   } finally {
     if (enabled) {
       try { await setSubdomainState(input, false); } catch {

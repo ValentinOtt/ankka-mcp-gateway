@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   CanaryPreflightInputError,
   executeCanaryPreflightCommand,
-} from '../src/canary-command.mjs';
+} from '../src/canary-command.ts';
 
 const ACCOUNT_ID = 'a'.repeat(32);
 const ZONE_ID = 'b'.repeat(32);

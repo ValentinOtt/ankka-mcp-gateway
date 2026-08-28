@@ -1,23 +1,23 @@
+import * as v from 'valibot';
+
 import { DeployError } from './errors';
 import {
-  RELEASE_ENVELOPE_SCHEMA_VERSION,
-  RELEASE_SIGNATURE_CONTEXT,
   verifyReleaseManifestDigests,
-  type VerifiedReleaseBundle,
 } from './release';
 import {
   MAX_RELEASE_FILE_BYTES,
   MAX_RELEASE_PAYLOAD_BYTES,
-  canonicalJson,
-  parseReleaseManifest,
   type ReleaseComponentName,
   type ReleaseFileRecord,
   type ReleaseManifest,
 } from './release-manifest';
+import {
+  parseVerifiedReleaseBundle,
+  type ParsedVerifiedPayloadBlob,
+} from './verified-release-bundle';
 
 const INSTALLER_PREFIX = 'payload/installer/';
 const INSTALLER_INDEX = `${INSTALLER_PREFIX}index.html`;
-const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const PUBLIC_ASSET_PATH = /^[A-Za-z0-9._/-]+$/u;
 const HASHED_ASSET_BASENAME = /-[A-Za-z0-9_][A-Za-z0-9_-]{7,}\.[a-z0-9]+$/u;
 const SOURCE_MAP_NAME = /\.map(?:[-.]|$)/iu;
@@ -25,6 +25,7 @@ const SOURCE_MAP_DIRECTIVE = /sourceMappingURL\s*=/iu;
 const RELEASE_INTERNAL_NAME = /(?:^|[-_.])(?:manifest|release[-_.]?envelope)(?:[-_.]|$)/iu;
 const SENSITIVE_NAME = /(?:^|[-_.])(?:api[-_.]?key|credential|password|private[-_.]?key|provider[-_.]?data|r2[-_.]?key|secret|token)(?:[-_.]|$)/iu;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const indexHandleSchema = v.object({});
 
 /**
  * The public installer router has the wizard locations plus two OAuth-only
@@ -112,20 +113,10 @@ interface InternalIndex {
   readonly assets: ReadonlyMap<string, InternalAsset>;
 }
 
-const INDEX_STATE = new WeakMap<SignedInstallerAssetIndex, InternalIndex>();
+const INDEX_STATE = new WeakMap<object, InternalIndex>();
 
 function invalid(): never {
   throw new DeployError(503, 'release_invalid');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
 function lexicalCompare(left: string, right: string): number {
@@ -150,7 +141,7 @@ function expectedPayload(manifest: ReleaseManifest): readonly ExpectedPayloadRec
 }
 
 function snapshotPayload(
-  input: readonly unknown[],
+  input: readonly ParsedVerifiedPayloadBlob[],
   expected: readonly ExpectedPayloadRecord[],
   manifest: ReleaseManifest,
 ): ReadonlyMap<string, PayloadSnapshot> {
@@ -160,23 +151,16 @@ function snapshotPayload(
   let declaredBytes = 0;
 
   for (const entry of input) {
-    if (!isRecord(entry) || !exactKeys(entry, ['byteSize', 'bytes', 'contentType', 'path', 'sha256'])) invalid();
-    if (typeof entry.path !== 'string' || snapshots.has(entry.path)) invalid();
+    if (snapshots.has(entry.path)) invalid();
     const expectedEntry = expectedByPath.get(entry.path);
     if (!expectedEntry) invalid();
     const { record } = expectedEntry;
     if (
-      typeof entry.byteSize !== 'number' ||
-      !Number.isSafeInteger(entry.byteSize) ||
-      entry.byteSize < 0 ||
       entry.byteSize > MAX_RELEASE_FILE_BYTES ||
       entry.byteSize !== record.byteSize ||
-      typeof entry.contentType !== 'string' ||
       entry.contentType !== record.contentType ||
-      typeof entry.sha256 !== 'string' ||
       !SHA256_PATTERN.test(entry.sha256) ||
       entry.sha256 !== record.sha256 ||
-      !(entry.bytes instanceof Blob) ||
       entry.bytes.size !== record.byteSize ||
       entry.bytes.type !== record.contentType
     ) invalid();
@@ -212,7 +196,7 @@ async function readVerifiedInstallerBlob(snapshot: PayloadSnapshot): Promise<Blo
   if (snapshot.component !== 'installer') invalid();
   let buffer: ArrayBuffer;
   try {
-    buffer = await Blob.prototype.arrayBuffer.call(snapshot.blob) as ArrayBuffer;
+    buffer = await snapshot.blob.arrayBuffer();
   } catch {
     invalid();
   }
@@ -304,37 +288,12 @@ function emptyResponse(status: 404 | 405): Response {
  * This function has no R2 or environment input and is intentionally not
  * imported by the default Worker entrypoint.
  */
-export async function createSignedInstallerAssetIndex(
-  bundle: VerifiedReleaseBundle,
+export async function createSignedInstallerAssetIndex<Input>(
+  bundle: Input,
 ): Promise<SignedInstallerAssetIndex> {
   try {
-    const input: unknown = bundle;
-    if (!isRecord(input) || !exactKeys(input, [
-      'channel', 'envelope', 'keyId', 'manifest', 'payload', 'publicKey', 'verification',
-    ])) invalid();
-    if (
-      input.verification !== 'ed25519' ||
-      typeof input.channel !== 'string' || !/^(?:canary|stable)$/u.test(input.channel) ||
-      typeof input.keyId !== 'string' ||
-      !KEY_ID_PATTERN.test(input.keyId) ||
-      !isRecord(input.envelope) ||
-      !exactKeys(input.envelope, [
-        'channel', 'keyId', 'manifest', 'schemaVersion', 'signature', 'signatureContext',
-      ]) ||
-      input.envelope.schemaVersion !== RELEASE_ENVELOPE_SCHEMA_VERSION ||
-      input.envelope.channel !== input.channel ||
-      input.envelope.keyId !== input.keyId ||
-      input.envelope.manifest !== canonicalJson(input.manifest) ||
-      typeof input.envelope.signature !== 'string' ||
-      !/^[A-Za-z0-9_-]{86}$/u.test(input.envelope.signature) ||
-      input.envelope.signatureContext !== RELEASE_SIGNATURE_CONTEXT ||
-      typeof input.publicKey !== 'string' ||
-      !/^[A-Za-z0-9_-]{43}$/u.test(input.publicKey) ||
-      !isRecord(input.manifest) ||
-      !Array.isArray(input.payload)
-    ) invalid();
-
-    const manifest = parseReleaseManifest(input.manifest);
+    const input = parseVerifiedReleaseBundle(bundle);
+    const { manifest } = input;
     await verifyReleaseManifestDigests(manifest);
     const expected = expectedPayload(manifest);
     const snapshots = snapshotPayload(input.payload, expected, manifest);
@@ -390,10 +349,11 @@ export async function createSignedInstallerAssetIndex(
  * path aliases, fragments, credentials, non-GET methods, and unknown paths are
  * rejected before a body is selected.
  */
-export function buildSignedInstallerAssetResponse(
-  index: SignedInstallerAssetIndex,
+export function buildSignedInstallerAssetResponse<Index>(
+  index: Index,
   request: Request,
 ): Response {
+  if (!v.is(indexHandleSchema, index)) invalid();
   const internal = INDEX_STATE.get(index);
   if (!internal) invalid();
   if (request.method !== 'GET' && request.method !== 'HEAD') return emptyResponse(405);

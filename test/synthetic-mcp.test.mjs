@@ -95,17 +95,20 @@ test('supports current stateless discovery and tools with mirrored headers', asy
       'io.modelcontextprotocol/clientCapabilities': {},
     },
   };
-  const modernRpc = (method, params, name) => handleSyntheticMcpRequest(new Request(ENDPOINT, {
-    method: 'POST',
-    headers: {
+  const modernRpc = (method, params, name) => {
+    const headers = {
       accept: 'application/json, text/event-stream',
       'content-type': 'application/json',
       'mcp-protocol-version': '2026-07-28',
       'mcp-method': method,
-      ...(name ? { 'mcp-name': name } : {}),
-    },
+    };
+    if (name) headers['mcp-name'] = name;
+    return handleSyntheticMcpRequest(new Request(ENDPOINT, {
+    method: 'POST',
+    headers,
     body: JSON.stringify({ jsonrpc: '2.0', id: 'modern-1', method, params }),
-  }));
+    }));
+  };
 
   const discovery = await (await modernRpc('server/discover', modernParams)).json();
   assert.deepEqual(discovery.result, {

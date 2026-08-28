@@ -1,34 +1,52 @@
+import * as v from 'valibot';
+
+import { boundaryValueSchema, type BoundaryValue } from '../src/boundary';
 import { DeployError } from '../src/errors';
-
-const journalParser = vi.hoisted(() => vi.fn());
-
-vi.mock('../src/uninstall-journal', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../src/uninstall-journal')>();
-  return { ...original, requireUninstallJournal: journalParser };
-});
-
 import {
-  createUninstallJournalPort,
+  createUninstallJournalPortWithDependencies,
   type InitializeUninstallJournalPortInput,
   type UninstallJournalFetcher,
+  type UninstallJournalPort,
 } from '../src/uninstall-journal-port';
-import type { UninstallJournal } from '../src/uninstall-journal';
 
 const ATTEMPT = `att_${'a'.repeat(32)}`;
 const NOW = Date.UTC(2026, 7, 23, 12, 0, 0);
-const VALID_WIRE_JOURNAL = Object.freeze({ schemaVersion: 1, fixture: 'valid-uninstall-journal' });
+const validWireJournalSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  fixture: v.literal('valid-uninstall-journal'),
+});
+type ValidWireJournal = v.InferOutput<typeof validWireJournalSchema>;
+const VALID_WIRE_JOURNAL = Object.freeze({
+  schemaVersion: 1,
+  fixture: 'valid-uninstall-journal',
+} satisfies ValidWireJournal);
+const journalParser = vi.fn(async (value: BoundaryValue): Promise<ValidWireJournal> => {
+  const result = v.safeParse(validWireJournalSchema, value);
+  if (!result.success) throw new DeployError(500, 'session_invalid');
+  return Object.freeze(result.output);
+});
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+interface CapturedCall {
+  readonly origin: string;
+  readonly method: string;
+  readonly path: string;
+  readonly headers: Record<string, string>;
+  readonly body: BoundaryValue | null;
 }
 
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+interface ExpectedCall<Body> {
+  readonly origin: string;
+  readonly method: string;
+  readonly path: string;
+  readonly headers: Record<string, string>;
+  readonly body: Body;
 }
 
-function json(value: unknown, status = 200, headers: HeadersInit = {}): Response {
+interface CyclicFixture {
+  self?: CyclicFixture;
+}
+
+function json<Value>(value: Value, status = 200, headers: HeadersInit = {}): Response {
   return new Response(JSON.stringify(value), {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8', ...headers },
@@ -39,26 +57,29 @@ function successJournal(): Response {
   return json({ journal: VALID_WIRE_JOURNAL });
 }
 
+function createTestPort(fetcher: UninstallJournalFetcher): UninstallJournalPort<ValidWireJournal> {
+  return createUninstallJournalPortWithDependencies(fetcher, { parseJournal: journalParser });
+}
+
+async function capturedBody(request: Request): Promise<BoundaryValue | null> {
+  if (request.method === 'GET') return null;
+  const result = v.safeParse(boundaryValueSchema, await request.json());
+  if (!result.success) throw new Error('test captured a non-boundary request body');
+  return result.output;
+}
+
 beforeEach(() => {
   journalParser.mockReset();
-  journalParser.mockImplementation(async (value: unknown) => {
-    if (!isRecord(value) || !exactKeys(value, ['schemaVersion', 'fixture']) ||
-      value.schemaVersion !== 1 || value.fixture !== 'valid-uninstall-journal') {
-      throw new DeployError(500, 'session_invalid');
-    }
-    return Object.freeze({ ...value }) as unknown as UninstallJournal;
+  journalParser.mockImplementation(async (value: BoundaryValue): Promise<ValidWireJournal> => {
+    const result = v.safeParse(validWireJournalSchema, value);
+    if (!result.success) throw new DeployError(500, 'session_invalid');
+    return Object.freeze(result.output);
   });
 });
 
 describe('typed uninstall journal port', () => {
   it('uses only the fixed same-DO origin and exact route, method, and body contract', async () => {
-    const calls: Array<{
-      readonly origin: string;
-      readonly method: string;
-      readonly path: string;
-      readonly headers: Record<string, string>;
-      readonly body: unknown;
-    }> = [];
+    const calls: CapturedCall[] = [];
     const fetcher: UninstallJournalFetcher = {
       fetch: async (request) => {
         calls.push({
@@ -66,14 +87,14 @@ describe('typed uninstall journal port', () => {
           method: request.method,
           path: new URL(request.url).pathname,
           headers: Object.fromEntries(request.headers.entries()),
-          body: request.method === 'GET' ? null : await request.json(),
+          body: await capturedBody(request),
         });
         return new URL(request.url).pathname === '/uninstall-journal/preflight/discard'
           ? json({ discarded: true })
           : successJournal();
       },
     };
-    const port = createUninstallJournalPort(fetcher);
+    const port = createTestPort(fetcher);
     const cas = { expectedRevision: 7, attemptId: ATTEMPT, now: NOW };
     const initialization: InitializeUninstallJournalPortInput = {
       initialization: {
@@ -203,7 +224,7 @@ describe('typed uninstall journal port', () => {
 
   it('rejects credential-shaped and unserializable request bodies before transport', async () => {
     let calls = 0;
-    const port = createUninstallJournalPort({
+    const port = createTestPort({
       fetch: async () => {
         calls += 1;
         return successJournal();
@@ -250,7 +271,7 @@ describe('typed uninstall journal port', () => {
       locator: { enabled: false, previewsEnabled: false, cloudflareAccessToken: 'must-not-cross-recovery' },
     })).rejects.toMatchObject({ status: 400, code: 'bad_request', message: 'bad_request' });
 
-    const cyclic: Record<string, unknown> = {};
+    const cyclic: CyclicFixture = {};
     cyclic.self = cyclic;
     await expect(port.refreshPreflight({
       expectedRevision: 0,
@@ -309,7 +330,7 @@ describe('typed uninstall journal port', () => {
     ];
 
     for (const response of cases) {
-      const port = createUninstallJournalPort({ fetch: async () => response.clone() });
+      const port = createTestPort({ fetch: async () => response.clone() });
       await expect(port.read()).rejects.toMatchObject({
         status: 500,
         code: 'session_invalid',
@@ -346,11 +367,11 @@ describe('typed uninstall journal port', () => {
     ];
 
     for (const testCase of cases) {
-      const port = createUninstallJournalPort({ fetch: async () => testCase.response.clone() });
+      const port = createTestPort({ fetch: async () => testCase.response.clone() });
       await expect(port.read()).rejects.toMatchObject(testCase.expected);
     }
 
-    const port = createUninstallJournalPort({
+    const port = createTestPort({
       fetch: async () => { throw new Error('provider response contained bearer value'); },
     });
     await expect(port.read()).rejects.toMatchObject({
@@ -369,14 +390,14 @@ describe('typed uninstall journal port', () => {
       { journal: VALID_WIRE_JOURNAL },
     ];
     for (const invalidBody of invalidBodies) {
-      const port = createUninstallJournalPort({ fetch: async () => json(invalidBody, 201) });
+      const port = createTestPort({ fetch: async () => json(invalidBody, 201) });
       await expect(port.discardPreflight(cas)).rejects.toMatchObject({
         status: 500,
         code: 'session_invalid',
       });
     }
 
-    const statusError = createUninstallJournalPort({
+    const statusError = createTestPort({
       fetch: async () => json({ error: { code: 'session_conflict' } }, 409),
     });
     await expect(statusError.discardPreflight(cas)).rejects.toMatchObject({
@@ -386,13 +407,7 @@ describe('typed uninstall journal port', () => {
   });
 });
 
-function call(method: 'GET' | 'POST', path: string, body: unknown): {
-  readonly origin: string;
-  readonly method: string;
-  readonly path: string;
-  readonly headers: Record<string, string>;
-  readonly body: unknown;
-} {
+function call<Body>(method: 'GET' | 'POST', path: string, body: Body): ExpectedCall<Body> {
   return {
     origin: 'https://gateway-deploy-session.internal',
     method,

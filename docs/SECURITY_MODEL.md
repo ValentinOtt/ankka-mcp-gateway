@@ -93,10 +93,9 @@ every payload digest before use.
 See [Release integrity](RELEASING.md) for publication and signing-key lifecycle
 requirements.
 
-Normal updates are limited to Worker code, management assets, and two
-non-secret release-identity text bindings. Changes to permissions, resource or
-secret bindings, migrations, compatibility settings, signing keys, or provider
-resources require a separately designed and approved release path.
+Normal updates are limited to Worker code and management assets. Changes to
+permissions, bindings, migrations, compatibility settings, signing keys, or
+provider resources require a separately designed and approved release path.
 
 ## Logs and telemetry
 

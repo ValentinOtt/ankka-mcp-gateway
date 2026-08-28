@@ -37,19 +37,30 @@
     "build:admin": "npm run build --workspace @ankka/gateway-admin",
     "canary:fixture:serve": "node fixtures/synthetic-mcp/server.mjs --host 127.0.0.1 --port 9610",
     "canary:fixture:test": "node --test test/synthetic-mcp.test.mjs",
-    "check": "npm run check:toolchain && npm run test && npm run build && npm run check:boundary && npm run check:history",
+    "check": "npm run check:toolchain && npm run lint && npm run typecheck && npm run test && npm run build && npm run check:boundary && npm run check:history",
     "check:boundary": "node scripts/check-public-boundary.mjs",
-    "check:history": "node scripts/check-public-history.mjs",
+    "check:history": "node scripts/check-public-history.mjs --allow-retired-product-name-through 4ba4c065aa67a761287bd74fc56f4911f7e558b3",
     "check:toolchain": "node scripts/check-toolchain.mjs",
-    "canary:preflight": "node src/cli.mjs canary preflight",
+    "canary:preflight": "node src/cli.ts canary preflight",
     "dev:admin": "npm run dev --workspace @ankka/gateway-admin",
     "dev:ui": "node scripts/dev-ui.mjs",
-    "plan": "node src/cli.mjs plan",
-    "plan:example": "node src/cli.mjs plan examples/gateway.config.json --observed examples/observed.empty.json --access examples/access-input.json",
+    "lint": "oxlint . --deny-warnings --report-unused-disable-directives",
+    "plan": "node src/cli.ts plan",
+    "plan:example": "node src/cli.ts plan examples/gateway.config.json --observed examples/observed.empty.json --access examples/access-input.json",
     "test": "npm run build:admin && npm run test:core && npm run test:apps",
     "test:apps": "npm run test --workspaces --if-present",
     "test:core": "node --test test/*.test.mjs",
     "test:payload": "npm run build:admin && node --test test/release-payload-layout.test.mjs test/worker-primary-payload.test.mjs test/worker-uninstall-payload.test.mjs",
-    "validate": "node src/cli.mjs"
+    "typecheck": "tsc --noEmit",
+    "validate": "node src/cli.ts"
+  },
+  "devDependencies": {
+    "@oxlint/plugins": "1.80.0",
+    "@types/node": "22.20.1",
+    "oxlint": "1.80.0",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "valibot": "^1.4.2"
   }
 }

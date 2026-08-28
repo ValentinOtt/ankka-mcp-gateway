@@ -3,6 +3,7 @@ import {
   type R2PublicationFunction,
   type R2PublicationIdentity,
 } from '../src/r2-publication-operator';
+import type { R2ReleaseBucket } from '../src/r2-release-publisher';
 
 const PLAN_SHA = 'a'.repeat(64);
 const ARTIFACT_SHA = 'b'.repeat(64);
@@ -28,12 +29,14 @@ const identity: R2PublicationIdentity = Object.freeze({
   schemaVersion: 1,
 });
 
-function bucket(): R2Bucket {
+function bucket(): R2ReleaseBucket {
   return {
     get: async () => null,
-    list: async () => ({ objects: [], truncated: false, delimitedPrefixes: [] }) as R2Objects,
-    put: async () => null,
-  } as unknown as R2Bucket;
+    list: async () => ({ objects: [], truncated: false, delimitedPrefixes: [] }),
+    put: async () => {
+      throw new Error('publisher fixture must not write through the bucket');
+    },
+  };
 }
 
 function successfulPublisher(calls: { count: number }): R2PublicationFunction {
@@ -123,10 +126,11 @@ describe('ephemeral R2 publication operator', () => {
   it('requires the exact single R2 binding before burning the one-shot invocation', async () => {
     const current = operator();
     const request = () => new Request(`http://127.0.0.1:5732${PATH}`, { method: 'POST' });
-    const extraBinding = await current.worker.fetch(request(), {
+    const extraEnvironment = {
       RELEASE_BUCKET: bucket(),
       EXTRA: 'forbidden',
-    } as unknown as { RELEASE_BUCKET: R2Bucket });
+    };
+    const extraBinding = await current.worker.fetch(request(), extraEnvironment);
     expect(extraBinding.status).toBe(503);
     expect(current.calls.count).toBe(0);
 

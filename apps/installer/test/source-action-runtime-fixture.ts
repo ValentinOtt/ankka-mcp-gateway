@@ -1,3 +1,6 @@
+import * as v from 'valibot';
+
+import type { JsonObject } from '../src/boundary';
 import {
   prepareVerifiedWorkerRelease,
   prepareWorkerDeploymentMutation,
@@ -22,7 +25,7 @@ interface FileInput {
 }
 
 async function sha256(value: Uint8Array | string): Promise<string> {
-  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+  const bytes = v.is(v.string(), value) ? new TextEncoder().encode(value) : value;
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes)));
   return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
@@ -37,11 +40,11 @@ export interface SourceActionRuntimeFixture {
   readonly bundle: VerifiedReleaseBundle;
   readonly identity: ExactReleaseBundleIdentity;
   readonly bindings: GatewayWorkerPlainTextBindings;
-  readonly versionResult: (versionId: string, moduleBytes?: Uint8Array) => Readonly<Record<string, unknown>>;
+  readonly versionResult: (versionId: string, moduleBytes?: Uint8Array) => JsonObject;
   readonly deploymentResult: (
     deploymentId: string,
     versionId: string,
-  ) => Promise<Readonly<Record<string, unknown>>>;
+  ) => Promise<JsonObject>;
 }
 
 export async function sourceActionRuntimeFixture(input: Readonly<{
@@ -105,13 +108,14 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
     ...file.record,
     bytes: new Blob([new Uint8Array(file.bytes)], { type: file.contentType }),
   })));
+  const channel = 'canary';
   const bundle: VerifiedReleaseBundle = Object.freeze({
     verification: 'ed25519',
-    channel: 'canary',
+    channel,
     keyId: 'source-action-test-key',
     envelope: Object.freeze({
       schemaVersion: 2,
-      channel: 'canary',
+      channel,
       keyId: 'source-action-test-key',
       manifest: canonicalJson(manifest),
       signature: 'A'.repeat(86),
@@ -123,7 +127,7 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
   });
   const identity: ExactReleaseBundleIdentity = Object.freeze({
     schemaVersion: 1,
-    channel: bundle.channel as 'canary',
+    channel,
     release: manifest.release,
     keyId: bundle.keyId,
     publicKey: bundle.publicKey,

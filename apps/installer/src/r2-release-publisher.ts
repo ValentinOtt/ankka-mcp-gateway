@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 import {
   MAX_CANONICAL_MANIFEST_BYTES,
   MAX_RELEASE_FILE_BYTES,
@@ -26,11 +28,67 @@ const CHANNEL_PATTERN = /^(?:canary|stable)$/u;
 const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const SIGNATURE_PATTERN = /^[A-Za-z0-9_-]{86}$/u;
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/u;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 const CREDENTIAL_NAME = /(?:^|[-_.])(?:api[-_.]?key|client[-_.]?secret|credential|credentials|password|passwd|private[-_.]?key|secret|secrets|token|tokens)(?:[-_.]|$)/iu;
 const MUTABLE_CHANNELS = new Set(['current', 'latest', 'mutable']);
 const RELEASE_ENVELOPE_SCHEMA_VERSION = 2;
 const RELEASE_SIGNATURE_CONTEXT = 'ankka-mcp-gateway-release-envelope-v2';
+const safeNonnegativeIntegerSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
+const planEntrySchema = v.strictObject({
+  byteSize: safeNonnegativeIntegerSchema,
+  contentType: v.string(),
+  key: v.string(),
+  sha256: v.string(),
+  sourcePath: v.string(),
+});
+const objectPlanSchema = v.strictObject({
+  artifactSha256: v.string(),
+  channel: v.string(),
+  immutability: v.strictObject({
+    externalAtomicCreateOnlyRequired: v.literal(true),
+    overwriteAllowed: v.literal(false),
+  }),
+  keyId: v.string(),
+  objectCount: safeNonnegativeIntegerSchema,
+  objects: v.array(planEntrySchema),
+  prefix: v.string(),
+  release: v.string(),
+  schemaVersion: v.literal(1),
+  totalByteSize: safeNonnegativeIntegerSchema,
+});
+const publicationBlobSchema = v.strictObject({
+  bytes: v.instance(Blob),
+  key: v.string(),
+});
+const releaseEnvelopeSchema = v.strictObject({
+  channel: v.string(),
+  keyId: v.string(),
+  manifest: v.string(),
+  schemaVersion: v.literal(RELEASE_ENVELOPE_SCHEMA_VERSION),
+  signature: v.string(),
+  signatureContext: v.literal(RELEASE_SIGNATURE_CONTEXT),
+});
+const publicationIntentSchema = v.strictObject({
+  artifactSha256: v.string(),
+  channel: v.string(),
+  createdAt: safeNonnegativeIntegerSchema,
+  keyId: v.string(),
+  objectCount: safeNonnegativeIntegerSchema,
+  objectPlanSha256: v.string(),
+  prefix: v.string(),
+  release: v.string(),
+  schemaVersion: v.literal(1),
+  totalByteSize: safeNonnegativeIntegerSchema,
+});
+const publicationInputSchema = v.strictObject({
+  blobs: v.array(publicationBlobSchema),
+  bucket: v.object({
+    get: v.function(),
+    list: v.function(),
+    put: v.function(),
+  }),
+  clock: v.object({ now: v.function() }),
+  objectPlan: v.unknown(),
+});
 
 export type R2ReleasePublicationErrorCode =
   | 'release_publication_conflict'
@@ -82,10 +140,56 @@ export interface R2ReleasePublicationClock {
 
 export interface PublishR2ReleaseInput {
   readonly blobs: readonly R2ReleasePublicationBlob[];
-  readonly bucket: R2Bucket;
+  readonly bucket: R2ReleaseBucket;
   readonly clock: R2ReleasePublicationClock;
   /** The exact JSON-parsed `r2-object-plan.json` emitted by the offline signer. */
   readonly objectPlan: unknown;
+}
+
+export interface R2ReleaseStoredObject {
+  readonly key: string;
+  readonly size: number;
+  readonly httpMetadata?: { readonly contentType?: string };
+  readonly customMetadata?: Readonly<Record<string, string>>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+
+export interface R2ReleaseListedObject {
+  readonly key: string;
+  readonly size: number;
+}
+
+export type R2ReleaseObjectPage =
+  | {
+      readonly objects: readonly R2ReleaseListedObject[];
+      readonly truncated: false;
+    }
+  | {
+      readonly objects: readonly R2ReleaseListedObject[];
+      readonly truncated: true;
+      readonly cursor: string;
+    };
+
+export interface R2ReleasePutOptions {
+  readonly onlyIf: Headers;
+  readonly sha256: string;
+  readonly httpMetadata: { readonly contentType: string };
+  readonly customMetadata: Readonly<Record<string, string>>;
+}
+
+/** Exact customer-owned R2 capability required by the release publisher. */
+export interface R2ReleaseBucket {
+  get(key: string): Promise<R2ReleaseStoredObject | null>;
+  put(
+    key: string,
+    value: Uint8Array<ArrayBuffer>,
+    options: R2ReleasePutOptions,
+  ): Promise<{ readonly key: string } | null>;
+  list(options: {
+    readonly prefix: string;
+    readonly limit: number;
+    readonly cursor?: string;
+  }): Promise<R2ReleaseObjectPage>;
 }
 
 export interface R2ReleasePublicationResult {
@@ -151,23 +255,6 @@ function unavailable(): never {
   throw new R2ReleasePublicationError('release_publication_unavailable');
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null &&
-    typeof value === 'object' &&
-    !Array.isArray(value) &&
-    Object.getPrototypeOf(value) === Object.prototype;
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
-function safeInteger(value: unknown, maximum = Number.MAX_SAFE_INTEGER): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= maximum;
-}
-
 function lexicalCompare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -177,7 +264,10 @@ function safePath(value: string): boolean {
     value.length === 0 ||
     value.includes('\\') ||
     value.includes('%') ||
-    CONTROL_CHARACTER.test(value)
+    Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    })
   ) return false;
   return value.split('/').every((segment) =>
     SAFE_SEGMENT.test(segment) &&
@@ -186,21 +276,16 @@ function safePath(value: string): boolean {
     !CREDENTIAL_NAME.test(segment));
 }
 
-function immutablePlanEntry(input: unknown): R2ReleaseObjectPlanEntry {
-  if (!isPlainRecord(input) || !exactKeys(input, [
-    'byteSize',
-    'contentType',
-    'key',
-    'sha256',
-    'sourcePath',
-  ])) invalid();
+function immutablePlanEntry(
+  input: v.InferOutput<typeof planEntrySchema>,
+): R2ReleaseObjectPlanEntry {
   if (
-    !safeInteger(input.byteSize, MAX_TOTAL_OBJECT_BYTES) ||
-    typeof input.contentType !== 'string' || input.contentType.length === 0 ||
-    typeof input.key !== 'string' || !safePath(input.key) ||
+    input.byteSize > MAX_TOTAL_OBJECT_BYTES ||
+    input.contentType.length === 0 ||
+    !safePath(input.key) ||
     new TextEncoder().encode(input.key).byteLength > MAX_R2_KEY_BYTES ||
-    typeof input.sha256 !== 'string' || !SHA256_PATTERN.test(input.sha256) ||
-    typeof input.sourcePath !== 'string' || !safePath(input.sourcePath)
+    !SHA256_PATTERN.test(input.sha256) ||
+    !safePath(input.sourcePath)
   ) invalid();
   return Object.freeze({
     byteSize: input.byteSize,
@@ -211,87 +296,74 @@ function immutablePlanEntry(input: unknown): R2ReleaseObjectPlanEntry {
   });
 }
 
-function parseObjectPlan(input: unknown): R2ReleaseObjectPlan {
-  if (!isPlainRecord(input) || !exactKeys(input, [
-    'artifactSha256',
-    'channel',
-    'immutability',
-    'keyId',
-    'objectCount',
-    'objects',
-    'prefix',
-    'release',
-    'schemaVersion',
-    'totalByteSize',
-  ])) invalid();
+function parseObjectPlan<Input>(input: Input): R2ReleaseObjectPlan {
+  const result = v.safeParse(objectPlanSchema, input);
+  if (!result.success) invalid();
+  const value = result.output;
   if (
-    input.schemaVersion !== 1 ||
-    typeof input.artifactSha256 !== 'string' || !SHA256_PATTERN.test(input.artifactSha256) ||
-    typeof input.channel !== 'string' || !CHANNEL_PATTERN.test(input.channel) ||
-    MUTABLE_CHANNELS.has(input.channel) ||
-    typeof input.keyId !== 'string' || !KEY_ID_PATTERN.test(input.keyId) ||
-    typeof input.release !== 'string' || !RELEASE_PATTERN.test(input.release) ||
-    !safeInteger(input.objectCount, MAX_RELEASE_OBJECT_COUNT) || input.objectCount < 2 ||
-    !safeInteger(input.totalByteSize, MAX_TOTAL_OBJECT_BYTES) ||
-    !Array.isArray(input.objects) ||
-    !isPlainRecord(input.immutability) ||
-    !exactKeys(input.immutability, ['externalAtomicCreateOnlyRequired', 'overwriteAllowed']) ||
-    input.immutability.externalAtomicCreateOnlyRequired !== true ||
-    input.immutability.overwriteAllowed !== false
+    !SHA256_PATTERN.test(value.artifactSha256) ||
+    !CHANNEL_PATTERN.test(value.channel) ||
+    MUTABLE_CHANNELS.has(value.channel) ||
+    !KEY_ID_PATTERN.test(value.keyId) ||
+    !RELEASE_PATTERN.test(value.release) ||
+    value.objectCount > MAX_RELEASE_OBJECT_COUNT || value.objectCount < 2 ||
+    value.totalByteSize > MAX_TOTAL_OBJECT_BYTES
   ) invalid();
 
-  const expectedPrefix = `${RELEASE_BUCKET_ROOT}/${input.channel}/${input.release}/`;
-  if (input.prefix !== expectedPrefix || !safePath(expectedPrefix.slice(0, -1))) invalid();
-  const objects = input.objects.map(immutablePlanEntry);
-  if (objects.length !== input.objectCount) invalid();
+  const expectedPrefix = `${RELEASE_BUCKET_ROOT}/${value.channel}/${value.release}/`;
+  if (value.prefix !== expectedPrefix || !safePath(expectedPrefix.slice(0, -1))) invalid();
+  const objects = value.objects.map(immutablePlanEntry);
+  if (objects.length !== value.objectCount) invalid();
   const keys = new Set<string>();
   let totalByteSize = 0;
   for (let index = 0; index < objects.length; index += 1) {
-    const object = objects[index];
+    const object = objects.at(index);
+    const previous = objects.at(index - 1);
     if (
+      object === undefined ||
       !object.key.startsWith(expectedPrefix) ||
       object.key === expectedPrefix ||
       object.sourcePath !== `objects/${object.key}` ||
       keys.has(object.key) ||
-      (index > 0 && objects[index - 1].key >= object.key)
+      (index > 0 && (previous === undefined || previous.key >= object.key))
     ) invalid();
     keys.add(object.key);
     totalByteSize += object.byteSize;
     if (!Number.isSafeInteger(totalByteSize) || totalByteSize > MAX_TOTAL_OBJECT_BYTES) invalid();
   }
-  if (totalByteSize !== input.totalByteSize) invalid();
+  if (totalByteSize !== value.totalByteSize) invalid();
   return Object.freeze({
-    artifactSha256: input.artifactSha256,
-    channel: input.channel,
+    artifactSha256: value.artifactSha256,
+    channel: value.channel,
     immutability: Object.freeze({
       externalAtomicCreateOnlyRequired: true,
       overwriteAllowed: false,
     }),
-    keyId: input.keyId,
-    objectCount: input.objectCount,
+    keyId: value.keyId,
+    objectCount: value.objectCount,
     objects: Object.freeze(objects),
     prefix: expectedPrefix,
-    release: input.release,
+    release: value.release,
     schemaVersion: 1,
-    totalByteSize: input.totalByteSize,
+    totalByteSize: value.totalByteSize,
   });
 }
 
-function parseBlobInputs(
-  input: unknown,
+function parseBlobInputs<Input>(
+  input: Input,
   plan: R2ReleaseObjectPlan,
 ): readonly R2ReleasePublicationBlob[] {
-  if (!Array.isArray(input) || input.length !== plan.objects.length) invalid();
+  const result = v.safeParse(v.array(publicationBlobSchema), input);
+  if (!result.success || result.output.length !== plan.objects.length) invalid();
   const blobs: R2ReleasePublicationBlob[] = [];
-  for (let index = 0; index < input.length; index += 1) {
-    const entry = input[index];
-    if (!isPlainRecord(entry) || !exactKeys(entry, ['bytes', 'key'])) invalid();
+  for (let index = 0; index < result.output.length; index += 1) {
+    const entry = result.output.at(index);
+    const object = plan.objects.at(index);
     if (
-      typeof entry.key !== 'string' ||
-      entry.key !== plan.objects[index].key ||
-      !(entry.bytes instanceof Blob) ||
-      entry.bytes.size !== plan.objects[index].byteSize ||
-      entry.bytes.type !== plan.objects[index].contentType
+      entry === undefined || object === undefined ||
+      entry.key !== object.key ||
+      entry.bytes.size !== object.byteSize ||
+      entry.bytes.type !== object.contentType
     ) invalid();
     blobs.push(Object.freeze({ key: entry.key, bytes: entry.bytes }));
   }
@@ -342,24 +414,20 @@ function decodeUtf8(bytes: Uint8Array<ArrayBuffer>): string {
 }
 
 function parseEnvelope(serialized: string, plan: R2ReleaseObjectPlan): ReleaseManifest {
-  let parsed: unknown;
+  let parsed: v.InferOutput<typeof releaseEnvelopeSchema>;
   try {
-    parsed = JSON.parse(serialized);
+    const result = v.safeParse(releaseEnvelopeSchema, JSON.parse(serialized));
+    if (!result.success) invalid();
+    parsed = result.output;
     if (canonicalJson(parsed) !== serialized) invalid();
   } catch (error) {
     if (error instanceof R2ReleasePublicationError) throw error;
     invalid();
   }
-  if (!isPlainRecord(parsed) || !exactKeys(parsed, [
-    'channel', 'keyId', 'manifest', 'schemaVersion', 'signature', 'signatureContext',
-  ])) invalid();
   if (
-    parsed.schemaVersion !== RELEASE_ENVELOPE_SCHEMA_VERSION ||
     parsed.channel !== plan.channel ||
     parsed.keyId !== plan.keyId ||
-    typeof parsed.manifest !== 'string' ||
-    typeof parsed.signature !== 'string' || !SIGNATURE_PATTERN.test(parsed.signature) ||
-    parsed.signatureContext !== RELEASE_SIGNATURE_CONTEXT
+    !SIGNATURE_PATTERN.test(parsed.signature)
   ) invalid();
   let manifest: ReleaseManifest;
   try {
@@ -404,20 +472,22 @@ function releaseObjectMetadata(
   });
 }
 
-async function preparePublication(
-  objectPlan: unknown,
-  blobInput: unknown,
+async function preparePublication<ObjectPlan, BlobInput>(
+  objectPlan: ObjectPlan,
+  blobInput: BlobInput,
 ): Promise<PreparedPublication> {
   const plan = parseObjectPlan(objectPlan);
   const blobs = parseBlobInputs(blobInput, plan);
   const planSha256 = await sha256Hex(new TextEncoder().encode(canonicalJson(plan)));
   const desired: DesiredObject[] = [];
   for (let index = 0; index < plan.objects.length; index += 1) {
-    const object = plan.objects[index];
+    const object = plan.objects.at(index);
+    const blob = blobs.at(index);
+    if (object === undefined || blob === undefined) invalid();
     const maximum = object.key === `${plan.prefix}${ENVELOPE_FILENAME}`
       ? MAX_ENVELOPE_BYTES
       : MAX_RELEASE_FILE_BYTES;
-    const bytes = await blobBytes(blobs[index].bytes, maximum);
+    const bytes = await blobBytes(blob.bytes, maximum);
     if (await sha256Hex(bytes) !== object.sha256) invalid();
     desired.push(Object.freeze({
       key: object.key,
@@ -476,7 +546,12 @@ async function preparePublication(
 function bytesEqual(left: Uint8Array<ArrayBuffer>, right: Uint8Array<ArrayBuffer>): boolean {
   if (left.byteLength !== right.byteLength) return false;
   let mismatch = 0;
-  for (let index = 0; index < left.byteLength; index += 1) mismatch |= left[index] ^ right[index];
+  for (let index = 0; index < left.byteLength; index += 1) {
+    const leftByte = left.at(index);
+    const rightByte = right.at(index);
+    if (leftByte === undefined || rightByte === undefined) return false;
+    mismatch |= leftByte ^ rightByte;
+  }
   return mismatch === 0;
 }
 
@@ -492,11 +567,11 @@ function metadataEqual(
 }
 
 async function readObject(
-  bucket: R2Bucket,
+  bucket: R2ReleaseBucket,
   key: string,
   maximumBytes: number,
 ): Promise<ReadObject | null> {
-  let object: R2ObjectBody | null;
+  let object: R2ReleaseStoredObject | null;
   try {
     object = await bucket.get(key);
   } catch {
@@ -505,7 +580,9 @@ async function readObject(
   if (object === null) return null;
   if (
     object.key !== key ||
-    !safeInteger(object.size, maximumBytes)
+    !Number.isSafeInteger(object.size) ||
+    object.size < 0 ||
+    object.size > maximumBytes
   ) conflict();
   let raw: ArrayBuffer;
   try {
@@ -536,7 +613,7 @@ function assertExactRead(actual: ReadObject, expected: DesiredObject): void {
   ) conflict();
 }
 
-async function putCreateOnly(bucket: R2Bucket, desired: DesiredObject): Promise<void> {
+async function putCreateOnly(bucket: R2ReleaseBucket, desired: DesiredObject): Promise<void> {
   try {
     await bucket.put(desired.key, desired.bytes, {
       onlyIf: new Headers({ 'If-None-Match': '*' }),
@@ -562,32 +639,21 @@ function parsePublicationIntent(
   prepared: PreparedPublication,
   now: number,
 ): PublicationIntent {
-  let parsed: unknown;
+  let parsed: v.InferOutput<typeof publicationIntentSchema>;
   try {
-    parsed = JSON.parse(serialized);
+    const result = v.safeParse(publicationIntentSchema, JSON.parse(serialized));
+    if (!result.success) conflict();
+    parsed = result.output;
     if (canonicalJson(parsed) !== serialized) conflict();
   } catch (error) {
     if (error instanceof R2ReleasePublicationError) throw error;
     conflict();
   }
-  if (!isPlainRecord(parsed) || !exactKeys(parsed, [
-    'artifactSha256',
-    'channel',
-    'createdAt',
-    'keyId',
-    'objectCount',
-    'objectPlanSha256',
-    'prefix',
-    'release',
-    'schemaVersion',
-    'totalByteSize',
-  ])) conflict();
   const plan = prepared.plan;
   if (
-    parsed.schemaVersion !== 1 ||
     parsed.artifactSha256 !== plan.artifactSha256 ||
     parsed.channel !== plan.channel ||
-    !safeInteger(parsed.createdAt) || parsed.createdAt > now ||
+    parsed.createdAt > now ||
     parsed.keyId !== plan.keyId ||
     parsed.objectCount !== plan.objectCount ||
     parsed.objectPlanSha256 !== prepared.planSha256 ||
@@ -595,7 +661,7 @@ function parsePublicationIntent(
     parsed.release !== plan.release ||
     parsed.totalByteSize !== plan.totalByteSize
   ) conflict();
-  return Object.freeze(parsed as unknown as PublicationIntent);
+  return Object.freeze({ ...parsed });
 }
 
 function intentMetadata(
@@ -612,7 +678,7 @@ function intentMetadata(
 
 async function desiredIntent(
   prepared: PreparedPublication,
-  bucket: R2Bucket,
+  bucket: R2ReleaseBucket,
   now: number,
 ): Promise<{ desired: DesiredObject; existed: boolean; intent: PublicationIntent }> {
   const key = intentKey(prepared.plan);
@@ -653,7 +719,7 @@ async function desiredIntent(
 }
 
 async function listedPrefixObjects(
-  bucket: R2Bucket,
+  bucket: R2ReleaseBucket,
   prefix: string,
 ): Promise<ReadonlyMap<string, number>> {
   const objects = new Map<string, number>();
@@ -663,34 +729,37 @@ async function listedPrefixObjects(
   while (true) {
     pages += 1;
     if (pages > MAX_LIST_PAGES) conflict();
-    let page: R2Objects;
+    let page: R2ReleaseObjectPage;
     try {
-      page = await bucket.list({ prefix, limit: LIST_PAGE_SIZE, ...(cursor ? { cursor } : {}) });
+      const options = cursor === undefined
+        ? { prefix, limit: LIST_PAGE_SIZE }
+        : { prefix, limit: LIST_PAGE_SIZE, cursor };
+      page = await bucket.list(options);
     } catch {
       unavailable();
     }
-    if (!page || !Array.isArray(page.objects) || typeof page.truncated !== 'boolean') conflict();
     for (const object of page.objects) {
       if (
-        !object ||
-        typeof object.key !== 'string' ||
         !object.key.startsWith(prefix) ||
-        !safeInteger(object.size, MAX_TOTAL_OBJECT_BYTES) ||
+        !Number.isSafeInteger(object.size) ||
+        object.size < 0 ||
+        object.size > MAX_TOTAL_OBJECT_BYTES ||
         objects.has(object.key)
       ) conflict();
       objects.set(object.key, object.size);
       if (objects.size > MAX_RELEASE_OBJECT_COUNT) conflict();
     }
     if (!page.truncated) break;
+    const nextCursor = page.cursor;
     if (
-      typeof page.cursor !== 'string' ||
-      page.cursor.length === 0 ||
-      page.cursor.length > 4_096 ||
-      cursors.has(page.cursor) ||
+      nextCursor === undefined ||
+      nextCursor.length === 0 ||
+      nextCursor.length > 4_096 ||
+      cursors.has(nextCursor) ||
       page.objects.length === 0
     ) conflict();
-    cursors.add(page.cursor);
-    cursor = page.cursor;
+    cursors.add(nextCursor);
+    cursor = nextCursor;
   }
   return objects;
 }
@@ -726,14 +795,7 @@ function assertExactSet(
 export async function publishCreateOnlyR2Release(
   input: PublishR2ReleaseInput,
 ): Promise<R2ReleasePublicationResult> {
-  if (!isPlainRecord(input) || !exactKeys(input, ['blobs', 'bucket', 'clock', 'objectPlan'])) invalid();
-  if (
-    !input.bucket ||
-    typeof input.bucket.get !== 'function' ||
-    typeof input.bucket.put !== 'function' ||
-    typeof input.bucket.list !== 'function' ||
-    !input.clock || typeof input.clock.now !== 'function'
-  ) invalid();
+  if (!v.safeParse(publicationInputSchema, input).success) invalid();
   const prepared = await preparePublication(input.objectPlan, input.blobs);
   let now: number;
   try {
@@ -741,7 +803,7 @@ export async function publishCreateOnlyR2Release(
   } catch {
     invalid();
   }
-  if (!safeInteger(now)) invalid();
+  if (!Number.isSafeInteger(now) || now < 0) invalid();
 
   const intent = await desiredIntent(prepared, input.bucket, now);
   await putCreateOnly(input.bucket, intent.desired);

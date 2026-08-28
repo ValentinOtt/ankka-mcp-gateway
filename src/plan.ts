@@ -1,4 +1,13 @@
-import { validateGatewayConfig } from './config.mjs';
+import * as v from 'valibot';
+
+import { validateGatewayConfig, type GatewayConfig } from './config.ts';
+import {
+  boundaryObjectSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+  type JsonObject,
+  type JsonValue,
+} from './json.ts';
 
 const MANAGER = 'ankka-mcp-gateway';
 const HASH_PREFIX = 'sha256:';
@@ -22,7 +31,7 @@ export const GATEWAY_REQUIRED_CAPABILITIES = Object.freeze([
   'dns.record.write',
 ]);
 
-const RESOURCE_ORDER = new Map([
+const RESOURCE_ORDER = new Map<ResourceKind, number>([
   ['mcp_server', 0],
   ['source_access_application', 1],
   ['source_access_policy', 2],
@@ -32,7 +41,6 @@ const RESOURCE_ORDER = new Map([
   ['dns_record', 6],
 ]);
 
-const RESOURCE_KINDS = new Set(RESOURCE_ORDER.keys());
 const RESOURCE_KEY = /^[a-z][a-z0-9-]{0,31}$/;
 const SAFE_OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const DESIRED_HASH = /^sha256:[0-9a-f]{64}$/;
@@ -40,13 +48,126 @@ const RELEASE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,79}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
+const resourceKindSchema = v.picklist([
+  'mcp_server',
+  'source_access_application',
+  'source_access_policy',
+  'portal',
+  'portal_access_application',
+  'portal_access_policy',
+  'dns_record',
+]);
+const stringSchema = v.string();
+const booleanSchema = v.boolean();
+const numberSchema = v.number();
+
+export type ResourceKind = v.InferOutput<typeof resourceKindSchema>;
+type ChangeAction = 'conflict' | 'create' | 'delete' | 'noop' | 'update';
+
+export interface GatewayPlanOptions {
+  readonly access?: BoundaryValue;
+  readonly release?: BoundaryValue;
+}
+
+export interface GatewayDesiredStateInput {
+  readonly access?: BoundaryValue;
+  readonly target?: BoundaryValue;
+}
+
+interface DeploymentTarget {
+  readonly accountId: string | null;
+  readonly zoneId: string | null;
+  readonly zoneName: string;
+  readonly zoneStatus: string;
+  readonly zeroTrustReady: boolean;
+}
+
+interface NormalizedAccess {
+  readonly allowedEmails: readonly string[];
+  readonly allowedEmailsProvided: boolean;
+  readonly identitiesHash: string;
+  readonly invalidEmailCount: number;
+}
+
+export type PlanBlocker = {
+  readonly code: string;
+  readonly message: string;
+};
+
+export type ProviderLocator = {
+  readonly id: string;
+  readonly parentId?: string;
+};
+
+export type DesiredResource = {
+  readonly desired: JsonObject;
+  readonly desiredHash: string;
+  readonly key: string;
+  readonly kind: ResourceKind;
+};
+
+type ResourceSpec = Omit<DesiredResource, 'desiredHash'>;
+
+interface ObservedResource {
+  readonly desiredHash: string;
+  readonly key: string;
+  readonly kind: ResourceKind;
+  readonly ownerInstallationId: string;
+  readonly ownerMatchesManager: boolean;
+  readonly provider?: ProviderLocator;
+}
+
+export type PlanChange = {
+  action: ChangeAction;
+  desired?: JsonObject;
+  desiredHash?: string;
+  key: string;
+  kind: ResourceKind;
+  provider?: ProviderLocator;
+  reason?: string;
+};
+
+interface Reconciliation {
+  readonly changes: PlanChange[];
+  readonly uninstall: PlanChange[];
+}
+
+export interface GatewayPlan {
+  readonly blockers: readonly PlanBlocker[];
+  readonly changes: readonly PlanChange[];
+  readonly desiredHash: string;
+  readonly installationId: string;
+  readonly planId: string;
+  readonly release: string;
+  readonly requiredCapabilities: readonly string[];
+  readonly schemaVersion: 1;
+  readonly uninstall: readonly PlanChange[];
+}
+
+export interface GatewayDesiredState {
+  readonly accessPolicy: {
+    readonly identitiesHash: string;
+    readonly identityCount: number;
+    readonly identityType: 'email';
+  };
+  readonly blockers: readonly PlanBlocker[];
+  readonly desiredHash: string;
+  readonly installationId: string;
+  readonly resources: readonly DesiredResource[];
+  readonly schemaVersion: 1;
+}
+
 /**
  * Calculate desired-versus-observed Cloudflare state without performing I/O.
  * Observed input is reduced to explicit, validated identifiers and is never
  * spread into plan output. The result omits raw member emails, but its stable
  * identity digest and other deployment metadata still belong to the customer.
  */
-export async function buildGatewayPlan(config, observed, options = {}) {
+export async function buildGatewayPlan(
+  config: JsonValue,
+  observed: BoundaryValue,
+  options: GatewayPlanOptions = {},
+): Promise<GatewayPlan> {
   const release = normalizeRelease(options.release);
   const desiredState = await buildGatewayDesiredState(config, {
     target: isObject(observed) ? observed.target : undefined,
@@ -93,8 +214,11 @@ export async function buildGatewayPlan(config, observed, options = {}) {
  * Raw access identities are consumed only to derive policy count/digests and
  * are never returned.
  */
-export async function buildGatewayDesiredState(config, input = {}) {
-  validateGatewayConfig(config);
+export async function buildGatewayDesiredState(
+  configInput: JsonValue,
+  input: GatewayDesiredStateInput = {},
+): Promise<GatewayDesiredState> {
+  const config = validateGatewayConfig(configInput);
 
   const target = normalizeTarget(input.target);
   const access = await normalizeAccess(input.access);
@@ -121,27 +245,27 @@ export async function buildGatewayDesiredState(config, input = {}) {
   };
 }
 
-function normalizeRelease(value) {
+function normalizeRelease(value: BoundaryValue): string {
   if (value === undefined) return DEFAULT_RELEASE;
-  if (typeof value !== 'string' || !RELEASE.test(value)) {
+  if (!isString(value) || !RELEASE.test(value)) {
     throw new TypeError('options.release must be a safe, non-empty release identifier');
   }
   return value;
 }
 
-function normalizeTarget(value) {
+function normalizeTarget(value: BoundaryValue): DeploymentTarget {
   const rawTarget = isObject(value) ? value : {};
 
   return {
     accountId: safeOpaqueId(rawTarget.accountId),
     zoneId: safeOpaqueId(rawTarget.zoneId),
     zoneName: normalizeHostname(rawTarget.zoneName),
-    zoneStatus: typeof rawTarget.zoneStatus === 'string' ? rawTarget.zoneStatus : '',
+    zoneStatus: isString(rawTarget.zoneStatus) ? rawTarget.zoneStatus : '',
     zeroTrustReady: rawTarget.zeroTrustReady === true,
   };
 }
 
-async function normalizeAccess(value) {
+async function normalizeAccess(value: BoundaryValue): Promise<NormalizedAccess> {
   const rawAccess = isObject(value) ? value : {};
   const unsupportedKeys = Object.keys(rawAccess).filter((key) => key !== 'allowedEmails');
   if (unsupportedKeys.length > 0) {
@@ -149,15 +273,15 @@ async function normalizeAccess(value) {
   }
 
   const rawEmails = Array.isArray(rawAccess.allowedEmails) ? rawAccess.allowedEmails : [];
-  const validEmails = [];
+  const validEmails: string[] = [];
   let invalidEmailCount = 0;
 
-  for (const value of rawEmails) {
-    if (typeof value !== 'string') {
+  for (const rawEmail of rawEmails) {
+    if (!isString(rawEmail)) {
       invalidEmailCount += 1;
       continue;
     }
-    const email = value.trim().toLowerCase();
+    const email = rawEmail.trim().toLowerCase();
     if (email.length === 0 || email.length > 254 || !EMAIL.test(email)) {
       invalidEmailCount += 1;
       continue;
@@ -174,8 +298,12 @@ async function normalizeAccess(value) {
   };
 }
 
-function buildBlockers(config, target, access) {
-  const blockers = [];
+function buildBlockers(
+  config: GatewayConfig,
+  target: DeploymentTarget,
+  access: NormalizedAccess,
+): PlanBlocker[] {
+  const blockers: PlanBlocker[] = [];
 
   if (!target.accountId) {
     blockers.push({
@@ -222,7 +350,10 @@ function buildBlockers(config, target, access) {
   return blockers;
 }
 
-async function stableInstallationId(hostname, target) {
+async function stableInstallationId(
+  hostname: string,
+  target: DeploymentTarget,
+): Promise<string> {
   const digest = await hashHex({
     hostname,
     accountId: target.accountId ?? '',
@@ -231,12 +362,16 @@ async function stableInstallationId(hostname, target) {
   return `acg-${digest.slice(0, 24)}`;
 }
 
-async function stablePlanId(value) {
+async function stablePlanId(value: JsonValue): Promise<string> {
   const digest = await hashHex(value);
   return `plan-${digest.slice(0, 24)}`;
 }
 
-async function buildDesiredResources(config, access, installationId) {
+async function buildDesiredResources(
+  config: GatewayConfig,
+  access: NormalizedAccess,
+  installationId: string,
+): Promise<DesiredResource[]> {
   const sources = [...config.sources]
     .map((source) => ({ ...source, enabledTools: [...source.enabledTools].sort(compareText) }))
     .sort((left, right) => compareText(left.id, right.id));
@@ -247,8 +382,8 @@ async function buildDesiredResources(config, access, installationId) {
     identityCount: access.allowedEmails.length,
     identitiesHash: access.identitiesHash,
   };
-  const resourceSpecs = [];
-  const sourceMappings = [];
+  const resourceSpecs: ResourceSpec[] = [];
+  const sourceMappings: JsonObject[] = [];
 
   for (const source of sources) {
     const mcpKey = await stableResourceKey('mcp', installationId, source.id);
@@ -392,7 +527,11 @@ async function buildDesiredResources(config, access, installationId) {
   );
 }
 
-async function stableResourceKey(prefix, installationId, logicalId) {
+async function stableResourceKey(
+  prefix: string,
+  installationId: string,
+  logicalId: string,
+): Promise<string> {
   const digest = await hashHex({ installationId, prefix, logicalId });
   const hint = logicalId
     .toLowerCase()
@@ -405,42 +544,46 @@ async function stableResourceKey(prefix, installationId, logicalId) {
   return `${prefix}-${digest.slice(0, 32 - prefix.length - 1)}`;
 }
 
-function normalizeObservedResources(observed) {
+function normalizeObservedResources(observed: BoundaryValue): ObservedResource[] {
   const rawResources = isObject(observed) && Array.isArray(observed.resources)
     ? observed.resources
     : [];
-  const resources = [];
+  const resources: ObservedResource[] = [];
 
   for (const raw of rawResources) {
-    if (!isObject(raw) || !RESOURCE_KINDS.has(raw.kind) || !RESOURCE_KEY.test(raw.key)) {
+    if (!isObject(raw) || !isResourceKind(raw.kind) || !isResourceKey(raw.key)) {
       continue;
     }
     const owner = isObject(raw.owner) ? raw.owner : {};
     const provider = normalizeProviderLocator(raw.kind, raw.provider);
-    resources.push({
+    const resource: ObservedResource = {
       kind: raw.kind,
       key: raw.key,
-      ...(provider ? { provider } : {}),
       ownerMatchesManager: owner.manager === MANAGER,
       ownerInstallationId:
-        typeof owner.installationId === 'string' && RESOURCE_KEY.test(owner.installationId)
+        isResourceKey(owner.installationId)
           ? owner.installationId
           : '',
       desiredHash:
-        typeof raw.desiredHash === 'string' && DESIRED_HASH.test(raw.desiredHash)
+        isString(raw.desiredHash) && DESIRED_HASH.test(raw.desiredHash)
           ? raw.desiredHash
           : '',
-    });
+    };
+    resources.push(provider ? { ...resource, provider } : resource);
   }
 
   return resources.sort(compareObservedResources);
 }
 
-function reconcile(desiredResources, observedResources, installationId) {
+function reconcile(
+  desiredResources: readonly DesiredResource[],
+  observedResources: readonly ObservedResource[],
+  installationId: string,
+): Reconciliation {
   const desiredIdentities = new Set(
     desiredResources.map((resource) => resourceIdentity(resource.kind, resource.key)),
   );
-  const observedByIdentity = new Map();
+  const observedByIdentity = new Map<string, ObservedResource[]>();
 
   for (const resource of observedResources) {
     const identity = resourceIdentity(resource.kind, resource.key);
@@ -456,7 +599,8 @@ function reconcile(desiredResources, observedResources, installationId) {
       return desiredChange('conflict', desired, undefined, 'ambiguous_observed_resource');
     }
 
-    const observed = candidates[0];
+    const observed = candidates.at(0);
+    if (!observed) throw new Error('Observed resource reconciliation invariant failed');
     if (!isOwned(observed, installationId)) {
       return desiredChange(
         'conflict',
@@ -481,7 +625,7 @@ function reconcile(desiredResources, observedResources, installationId) {
     );
   });
 
-  const staleByIdentity = new Map();
+  const staleByIdentity = new Map<string, ObservedResource[]>();
   for (const observed of observedResources) {
     const identity = resourceIdentity(observed.kind, observed.key);
     if (desiredIdentities.has(identity) || !isOwned(observed, installationId)) continue;
@@ -490,9 +634,10 @@ function reconcile(desiredResources, observedResources, installationId) {
     staleByIdentity.set(identity, matches);
   }
 
-  const staleChanges = [];
+  const staleChanges: PlanChange[] = [];
   for (const matches of staleByIdentity.values()) {
-    const observed = matches[0];
+    const observed = matches.at(0);
+    if (!observed) throw new Error('Stale resource reconciliation invariant failed');
     if (matches.length > 1) {
       staleChanges.push({
         action: 'conflict',
@@ -501,13 +646,14 @@ function reconcile(desiredResources, observedResources, installationId) {
         reason: 'ambiguous_observed_resource',
       });
     } else {
-      staleChanges.push({
+      const change: PlanChange = {
         action: 'delete',
         kind: observed.kind,
         key: observed.key,
-        ...(observed.provider ? { provider: observed.provider } : {}),
         reason: 'stale_owned_resource',
-      });
+      };
+      if (observed.provider) change.provider = observed.provider;
+      staleChanges.push(change);
     }
   }
   staleChanges.sort(compareReverseResourceOrder);
@@ -515,39 +661,48 @@ function reconcile(desiredResources, observedResources, installationId) {
 
   const uninstall = observedResources
     .filter((resource) => isOwned(resource, installationId))
-    .map((resource) => ({
-      action: 'delete',
-      kind: resource.kind,
-      key: resource.key,
-      ...(resource.provider ? { provider: resource.provider } : {}),
-    }))
+    .map((resource) => {
+      const change: PlanChange = {
+        action: 'delete',
+        kind: resource.kind,
+        key: resource.key,
+      };
+      if (resource.provider) change.provider = resource.provider;
+      return change;
+    })
     .sort(compareReverseResourceOrder);
 
   return { changes, uninstall };
 }
 
-function desiredChange(action, resource, provider, reason) {
-  return {
+function desiredChange(
+  action: ChangeAction,
+  resource: DesiredResource,
+  provider?: ProviderLocator,
+  reason?: string,
+): PlanChange {
+  const change: PlanChange = {
     action,
     kind: resource.kind,
     key: resource.key,
     desiredHash: resource.desiredHash,
     desired: resource.desired,
-    ...(provider ? { provider } : {}),
-    ...(reason ? { reason } : {}),
   };
+  if (provider) change.provider = provider;
+  if (reason) change.reason = reason;
+  return change;
 }
 
-function isOwned(resource, installationId) {
+function isOwned(resource: ObservedResource, installationId: string): boolean {
   return resource.ownerMatchesManager
     && resource.ownerInstallationId === installationId;
 }
 
-function resourceIdentity(kind, key) {
+function resourceIdentity(kind: ResourceKind, key: string): string {
   return `${kind}\u0000${key}`;
 }
 
-function compareObservedResources(left, right) {
+function compareObservedResources(left: ObservedResource, right: ObservedResource): number {
   return (
     resourceRank(left.kind) - resourceRank(right.kind) ||
     compareText(left.key, right.key) ||
@@ -555,7 +710,7 @@ function compareObservedResources(left, right) {
   );
 }
 
-function compareReverseResourceOrder(left, right) {
+function compareReverseResourceOrder(left: PlanChange, right: PlanChange): number {
   return (
     resourceRank(right.kind) - resourceRank(left.kind) ||
     compareText(left.key, right.key) ||
@@ -563,16 +718,16 @@ function compareReverseResourceOrder(left, right) {
   );
 }
 
-function resourceRank(kind) {
+function resourceRank(kind: ResourceKind): number {
   return RESOURCE_ORDER.get(kind) ?? -1;
 }
 
-function hostnameBelongsToZone(hostname, zoneName) {
+function hostnameBelongsToZone(hostname: string, zoneName: string): boolean {
   return hostname === zoneName || hostname.endsWith(`.${zoneName}`);
 }
 
-function normalizeHostname(value) {
-  if (typeof value !== 'string' || value.length > 253 || value !== value.toLowerCase()) {
+function normalizeHostname(value: BoundaryValue): string {
+  if (!isString(value) || value.length > 253 || value !== value.toLowerCase()) {
     return '';
   }
   const labels = value.split('.');
@@ -580,11 +735,14 @@ function normalizeHostname(value) {
   return value;
 }
 
-function safeOpaqueId(value) {
-  return typeof value === 'string' && SAFE_OPAQUE_ID.test(value) ? value : null;
+function safeOpaqueId(value: BoundaryValue): string | null {
+  return isString(value) && SAFE_OPAQUE_ID.test(value) ? value : null;
 }
 
-function normalizeProviderLocator(kind, value) {
+function normalizeProviderLocator(
+  kind: ResourceKind,
+  value: BoundaryValue,
+): ProviderLocator | null {
   if (!isObject(value)) return null;
   const policy = kind === 'source_access_policy' || kind === 'portal_access_policy';
   const expectedKeys = policy ? ['id', 'parentId'] : ['id'];
@@ -598,19 +756,20 @@ function normalizeProviderLocator(kind, value) {
   const id = safeOpaqueId(value.id);
   const parentId = policy ? safeOpaqueId(value.parentId) : null;
   if (!id || (policy && !parentId)) return null;
-  return policy ? { id, parentId } : { id };
+  if (parentId) return { id, parentId };
+  return { id };
 }
 
-function providerLocatorText(value) {
-  if (!isObject(value)) return '';
+function providerLocatorText(value: ProviderLocator | undefined): string {
+  if (!value) return '';
   return `${value.parentId ?? ''}\u0000${value.id ?? ''}`;
 }
 
-async function hashCanonical(value) {
+async function hashCanonical(value: JsonValue): Promise<string> {
   return `${HASH_PREFIX}${await hashHex(value)}`;
 }
 
-async function hashHex(value) {
+async function hashHex(value: JsonValue): Promise<string> {
   if (!globalThis.crypto?.subtle) {
     throw new Error('Web Crypto is required to build a gateway plan');
   }
@@ -621,30 +780,48 @@ async function hashHex(value) {
     .join('');
 }
 
-function canonicalJson(value) {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
-    return JSON.stringify(value);
+function canonicalJson(value: JsonValue): string {
+  if (value === null || v.is(booleanSchema, value) || isString(value)) {
+    return serializeJsonPrimitive(value);
   }
-  if (typeof value === 'number') {
+  if (v.is(numberSchema, value)) {
     if (!Number.isFinite(value)) throw new TypeError('Cannot hash a non-finite number');
-    return JSON.stringify(value);
+    return serializeJsonPrimitive(value);
   }
   if (Array.isArray(value)) {
     return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
   }
   if (isObject(value)) {
-    return `{${Object.keys(value)
-      .sort(compareText)
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => compareText(left, right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
       .join(',')}}`;
   }
-  throw new TypeError(`Cannot hash unsupported value type: ${typeof value}`);
+  throw new TypeError('Cannot hash unsupported JSON value');
 }
 
-function compareText(left, right) {
+function serializeJsonPrimitive(value: boolean | null | number | string): string {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) throw new TypeError('Cannot serialize JSON primitive');
+  return serialized;
+}
+
+function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function isObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+function isObject(value: BoundaryValue): value is BoundaryObject {
+  return v.is(boundaryObjectSchema, value);
+}
+
+function isString(value: BoundaryValue): value is string {
+  return v.is(stringSchema, value);
+}
+
+function isResourceKind(value: BoundaryValue): value is ResourceKind {
+  return v.is(resourceKindSchema, value);
+}
+
+function isResourceKey(value: BoundaryValue): value is string {
+  return isString(value) && RESOURCE_KEY.test(value);
 }

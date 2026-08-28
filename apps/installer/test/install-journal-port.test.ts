@@ -1,3 +1,6 @@
+import * as v from 'valibot';
+
+import { boundaryValueSchema, type BoundaryValue } from '../src/boundary';
 import type { AuthorizedTarget } from '../src/cloudflare-target';
 import { deriveCustomerGatewayExpectedProjection } from '../src/customer-bootstrap-request';
 import { sha256Hex } from '../src/crypto';
@@ -12,6 +15,7 @@ import {
   type InstallJournalFetcher,
 } from '../src/install-journal-port';
 import { buildStaticDeployPlan, parseDeploySelection } from '../src/schema';
+import { canonicalJson } from '../src/release-manifest';
 import { manifest, NOW, selectionInput } from './fixtures';
 
 const ATTEMPT = `att_${'a'.repeat(32)}`;
@@ -20,19 +24,6 @@ const TARGET: AuthorizedTarget = Object.freeze({
   account: Object.freeze({ id: '1'.repeat(32), name: 'Example account' }),
   zone: Object.freeze({ id: '2'.repeat(32), name: 'example.com', status: 'active' }),
 });
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (!isRecord(value)) throw new TypeError('canonical');
-  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-}
 
 async function journalFixture(): Promise<{
   initialization: CreateInstallJournalInput;
@@ -100,7 +91,7 @@ async function journalFixture(): Promise<{
   };
 }
 
-function json(value: unknown, status = 200, headers: HeadersInit = {}): Response {
+function json<Value>(value: Value, status = 200, headers: HeadersInit = {}): Response {
   return new Response(JSON.stringify(value), {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8', ...headers },
@@ -110,13 +101,13 @@ function json(value: unknown, status = 200, headers: HeadersInit = {}): Response
 describe('typed install journal port', () => {
   it('uses only the exact internal routes, methods, and bodies and reparses every returned journal', async () => {
     const fixture = await journalFixture();
-    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const calls: Array<{ method: string; path: string; body: BoundaryValue }> = [];
     const fetcher: InstallJournalFetcher = {
       fetch: async (request) => {
         calls.push({
           method: request.method,
           path: new URL(request.url).pathname,
-          body: request.method === 'GET' ? null : await request.json(),
+          body: request.method === 'GET' ? null : v.parse(boundaryValueSchema, await request.json()),
         });
         return json({ journal: fixture.journal });
       },

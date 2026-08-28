@@ -160,12 +160,13 @@ async function installedWithAdditionalSource(options = {}) {
 
 async function runCleanupCore(request, env, storage, providerFetch) {
   const rawBody = request.method === 'POST' ? await request.clone().text() : undefined;
-  const internal = new Request('https://admin-state.invalid/uninstall', {
+  const requestInit = {
     method: request.method,
     headers: request.headers,
-    ...(rawBody === undefined ? {} : { body: rawBody }),
     redirect: 'manual',
-  });
+  };
+  if (rawBody !== undefined) requestInit.body = rawBody;
+  const internal = new Request('https://admin-state.invalid/uninstall', requestInit);
   return withProviderFetch(providerFetch, () => new AdminState({ storage }, env).fetch(internal));
 }
 

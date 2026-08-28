@@ -1,3 +1,12 @@
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  boundaryValueSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+} from './boundary';
+import { canonicalJson } from './canonical-json';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 import type {
   AdminStateDurableObjectNamespaceLocator,
@@ -16,10 +25,9 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const RELEASE = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const UNINSTALL_CYCLE_ID = /^uninstall-[a-f0-9]{24}$/u;
 const SAFE_TOKEN = /^[A-Za-z0-9._~-]+$/u;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 const HOSTNAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 
-const EXACT_COMPATIBILITY_DATE: '2026-08-08' = '2026-08-08';
+const EXACT_COMPATIBILITY_DATE = '2026-08-08' as const;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_RELEASE_BYTES = 32 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
@@ -27,6 +35,14 @@ const MAX_VERSION_RESPONSE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const VERSION_PAGE_SIZE = 100;
 const MAX_VERSION_PAGES = 100;
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return true;
+  }
+  return false;
+}
 const NAMESPACE_PAGE_SIZE = 1_000;
 const MAX_NAMESPACE_PAGES = 100;
 const MAX_NAMESPACE_COUNT = NAMESPACE_PAGE_SIZE * MAX_NAMESPACE_PAGES;
@@ -36,12 +52,6 @@ const MAX_SCRIPTS = 10_000;
 const SCRIPT_PAGE_SIZE = 100;
 const MAX_SCRIPT_PAGES = MAX_SCRIPTS / SCRIPT_PAGE_SIZE;
 
-const MODULE_CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
-  '.js': 'application/javascript+module',
-  '.mjs': 'application/javascript+module',
-  '.wasm': 'application/wasm',
-});
-
 export const UNINSTALL_CLEANUP_VARIABLE_NAMES = Object.freeze([
   'ANKKA_GATEWAY_RELEASE',
   'ANKKA_GATEWAY_RELEASE_SHA256',
@@ -50,6 +60,537 @@ export const UNINSTALL_CLEANUP_VARIABLE_NAMES = Object.freeze([
   'CLOUDFLARE_ZONE_NAME',
   'ZERO_TRUST_READY',
 ] as const);
+
+const accountIdSchema = v.pipe(v.string(), v.regex(ACCOUNT_ID));
+const workerIdSchema = v.pipe(v.string(), v.regex(WORKER_ID));
+const workerNameSchema = v.pipe(v.string(), v.regex(WORKER_NAME));
+const uuidSchema = v.pipe(v.string(), v.regex(UUID));
+const sha256Schema = v.pipe(v.string(), v.regex(SHA256));
+const uninstallCycleIdSchema = v.pipe(v.string(), v.regex(UNINSTALL_CYCLE_ID));
+const versionSubmissionSchema = v.strictObject({
+  kind: v.literal('uninstall_worker_version'),
+  stage: v.picklist(['cleanup', 'retirement']),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  versionId: uuidSchema,
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+});
+const deploymentSubmissionSchema = v.strictObject({
+  kind: v.literal('uninstall_worker_deployment'),
+  stage: v.picklist(['cleanup', 'retirement', 'restore_clean']),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  versionId: uuidSchema,
+  deploymentId: uuidSchema,
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+});
+const workerDeleteSubmissionSchema = v.strictObject({
+  kind: v.literal('uninstall_worker_delete'),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  namespaceId: accountIdSchema,
+  retirementVersionId: uuidSchema,
+  retirementProofCommitment: sha256Schema,
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+});
+const directUploadTransportSchema = v.custom<CloudflareDirectUploadCall['transport']>(
+  (value) => v.is(v.function(), value),
+);
+const directUploadCallSchema = v.object({
+  accessToken: v.pipe(v.string(), v.minLength(20), v.maxLength(8_192), v.regex(SAFE_TOKEN)),
+  transport: directUploadTransportSchema,
+  timeoutMs: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(100), v.maxValue(60_000))),
+});
+const providerEnvelopeSchema = v.strictObject({
+  errors: v.nullable(v.array(boundaryValueSchema)),
+  messages: v.nullable(v.array(boundaryValueSchema)),
+  result: boundaryValueSchema,
+  success: v.boolean(),
+});
+const providerErrorListSchema = v.pipe(v.array(v.looseObject({
+  code: v.pipe(v.number(), v.safeInteger()),
+  message: v.pipe(v.string(), v.minLength(1), v.maxLength(2_048)),
+})), v.minLength(1), v.maxLength(16));
+const emptyProviderListSchema = v.union([
+  v.null(),
+  v.pipe(v.array(boundaryValueSchema), v.length(0)),
+]);
+const rawResultSchema = v.object({ result: v.object({ id: v.string() }) });
+const moduleCommitmentSchema = v.strictObject({
+  name: v.string(),
+  contentType: v.string(),
+  contentSha256: sha256Schema,
+  byteLength: v.pipe(v.number(), v.safeInteger(), v.minValue(1), v.maxValue(MAX_FILE_BYTES)),
+});
+const cleanupVariableHashSchema = v.strictObject({
+  name: v.picklist(UNINSTALL_CLEANUP_VARIABLE_NAMES),
+  valueSha256: sha256Schema,
+});
+const cleanupContractSchema = v.strictObject({
+  assets: v.literal('absent'),
+  defaultApplication: v.literal('absent'),
+  durableObject: v.strictObject({
+    binding: v.literal('ADMIN_STATE'),
+    className: v.literal('AdminState'),
+    namespaceId: accountIdSchema,
+    storage: v.literal('sqlite'),
+  }),
+  exports: v.strictObject({
+    AdminState: v.strictObject({ type: v.literal('durable-object'), storage: v.literal('sqlite') }),
+  }),
+  uninstallNonceBinding: v.literal('present'),
+  variableValueHashes: v.pipe(
+    v.array(cleanupVariableHashSchema),
+    v.length(UNINSTALL_CLEANUP_VARIABLE_NAMES.length),
+  ),
+});
+const retirementContractSchema = v.strictObject({
+  assets: v.literal('absent'),
+  bindings: v.tuple([]),
+  defaultApplication: v.literal('absent'),
+  exports: v.strictObject({
+    AdminState: v.strictObject({ type: v.literal('durable-object'), state: v.literal('deleted') }),
+  }),
+});
+const recoveryBaseSchemas = {
+  kind: v.literal('uninstall_version_recovery'),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  release: v.pipe(v.string(), v.regex(RELEASE)),
+  artifactSha256: sha256Schema,
+  componentSha256: sha256Schema,
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+  compatibilityDate: v.literal(EXACT_COMPATIBILITY_DATE),
+  compatibilityFlags: v.tuple([]),
+  mainModule: v.literal('index.js'),
+  modules: v.pipe(v.array(moduleCommitmentSchema), v.minLength(1), v.maxLength(1_000)),
+};
+const cleanupRecoverySchema = v.strictObject({
+  ...recoveryBaseSchemas,
+  stage: v.literal('cleanup'),
+  namespaceId: accountIdSchema,
+  contract: cleanupContractSchema,
+});
+const retirementRecoverySchema = v.strictObject({
+  ...recoveryBaseSchemas,
+  stage: v.literal('retirement'),
+  contract: retirementContractSchema,
+});
+const versionRecoverySchema = v.union([cleanupRecoverySchema, retirementRecoverySchema]);
+const deploymentBodySchema = v.strictObject({
+  annotations: v.strictObject({ 'workers/message': v.string() }),
+  strategy: v.literal('percentage'),
+  versions: v.tuple([v.strictObject({ percentage: v.literal(100), version_id: uuidSchema })]),
+});
+const deploymentIntentSchema = v.strictObject({
+  kind: v.literal('uninstall_deployment'),
+  stage: v.picklist(['cleanup', 'retirement', 'restore_clean']),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  versionId: uuidSchema,
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+  body: deploymentBodySchema,
+});
+const prepareDeploymentInputSchema = v.strictObject({
+  stage: v.picklist(['cleanup', 'retirement', 'restore_clean']),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  versionId: uuidSchema,
+});
+const deploymentAnnotationsSchema = v.strictObject({
+  'workers/message': v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(256))),
+  'workers/triggered_by': v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(256))),
+});
+const deploymentObservationSchema = v.strictObject({
+  annotations: v.optional(deploymentAnnotationsSchema),
+  author_email: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(320))),
+  created_on: v.string(),
+  id: uuidSchema,
+  source: v.literal('api'),
+  strategy: v.literal('percentage'),
+  versions: v.pipe(v.array(v.strictObject({
+    percentage: v.pipe(v.number(), v.minValue(0), v.maxValue(100)),
+    version_id: uuidSchema,
+  })), v.minLength(1), v.maxLength(100)),
+});
+const deploymentListResultSchema = v.strictObject({
+  deployments: v.pipe(v.array(deploymentObservationSchema), v.maxLength(MAX_DEPLOYMENTS)),
+});
+const boundedNamespaceTextSchema = (maximum: number) => v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(maximum),
+  v.check((value) => !hasControlCharacter(value)),
+);
+const namespaceLocatorSchema = v.strictObject({
+  accountId: accountIdSchema,
+  namespaceId: accountIdSchema,
+  namespaceName: boundedNamespaceTextSchema(256),
+  workerName: workerNameSchema,
+  className: v.literal('AdminState'),
+  storage: v.literal('sqlite'),
+});
+const namespacePresenceProofSchema = v.strictObject({
+  kind: v.literal('admin_state_namespace_presence'),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  namespaceId: accountIdSchema,
+  namespaceName: boundedNamespaceTextSchema(256),
+  className: v.literal('AdminState'),
+  storage: v.literal('sqlite'),
+  accountNamespaceCount: v.pipe(v.number(), v.safeInteger(), v.minValue(1), v.maxValue(MAX_NAMESPACE_COUNT)),
+  snapshotSha256: sha256Schema,
+});
+const namespaceRetirementProofSchema = v.strictObject({
+  kind: v.literal('admin_state_namespace_retirement'),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  namespaceId: accountIdSchema,
+  retirementVersionId: uuidSchema,
+  accountNamespaceCount: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(MAX_NAMESPACE_COUNT)),
+  firstSnapshotSha256: sha256Schema,
+  secondSnapshotSha256: sha256Schema,
+});
+const namespaceRetiredInputSchema = v.strictObject({
+  namespace: namespaceLocatorSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  retirementRecovery: retirementRecoverySchema,
+  retirementSubmission: versionSubmissionSchema,
+  retirementDeploymentIntent: deploymentIntentSchema,
+  retirementDeploymentSubmission: deploymentSubmissionSchema,
+});
+const namespacePresentInputSchema = v.strictObject({
+  namespace: namespaceLocatorSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+});
+const namespaceListItemSchema = v.strictObject({
+  id: accountIdSchema,
+  class: boundedNamespaceTextSchema(128),
+  name: boundedNamespaceTextSchema(256),
+  script: boundedNamespaceTextSchema(128),
+  use_sqlite: v.boolean(),
+});
+const namespaceListPageSchema = v.strictObject({
+  errors: v.nullable(v.array(boundaryValueSchema)),
+  messages: v.nullable(v.array(boundaryValueSchema)),
+  result: v.pipe(v.array(namespaceListItemSchema), v.maxLength(NAMESPACE_PAGE_SIZE)),
+  result_info: v.strictObject({
+    count: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(NAMESPACE_PAGE_SIZE)),
+    page: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+    per_page: v.literal(NAMESPACE_PAGE_SIZE),
+    total_count: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(MAX_NAMESPACE_COUNT)),
+    total_pages: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(MAX_NAMESPACE_PAGES))),
+  }),
+  success: v.literal(true),
+});
+const verifiedReleaseModuleSchema = v.strictObject({
+  bytes: v.custom<Uint8Array>((value) => value instanceof Uint8Array),
+  contentType: v.string(),
+  name: v.string(),
+  sha256: sha256Schema,
+});
+const releaseSetIdentitySchema = v.strictObject({
+  primary: v.object({
+    verification: v.literal('ed25519'),
+    release: v.pipe(v.string(), v.regex(RELEASE)),
+    artifactSha256: sha256Schema,
+  }),
+  cleanup: v.object({
+    verification: v.literal('ed25519'),
+    release: v.pipe(v.string(), v.regex(RELEASE)),
+    artifactSha256: sha256Schema,
+    componentSha256: sha256Schema,
+    variant: v.literal('cleanup'),
+    worker: v.object({
+      contract: boundaryObjectSchema,
+      modules: v.pipe(v.array(verifiedReleaseModuleSchema), v.minLength(1), v.maxLength(1_000)),
+    }),
+  }),
+  retirement: v.object({
+    verification: v.literal('ed25519'),
+    release: v.pipe(v.string(), v.regex(RELEASE)),
+    artifactSha256: sha256Schema,
+    componentSha256: sha256Schema,
+    variant: v.literal('retirement'),
+    worker: v.object({
+      contract: boundaryObjectSchema,
+      modules: v.pipe(v.array(verifiedReleaseModuleSchema), v.minLength(1), v.maxLength(1_000)),
+    }),
+  }),
+});
+const verifiedReleaseSetSchema = v.custom<VerifiedGatewayWorkerReleaseSet>(
+  (value) => v.is(releaseSetIdentitySchema, value),
+);
+const cleanupVariablesSchema = v.strictObject({
+  ANKKA_GATEWAY_RELEASE: boundedNamespaceTextSchema(4_096),
+  ANKKA_GATEWAY_RELEASE_SHA256: boundedNamespaceTextSchema(4_096),
+  CLOUDFLARE_ACCOUNT_ID: accountIdSchema,
+  CLOUDFLARE_ZONE_ID: accountIdSchema,
+  CLOUDFLARE_ZONE_NAME: v.pipe(boundedNamespaceTextSchema(4_096), v.regex(HOSTNAME)),
+  ZERO_TRUST_READY: v.literal('true'),
+});
+const prepareCleanupVersionInputSchema = v.strictObject({
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  namespaceId: accountIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  releaseSet: verifiedReleaseSetSchema,
+  variables: cleanupVariablesSchema,
+  uninstallNonce: v.pipe(v.string(), v.minLength(32), v.maxLength(8_192), v.regex(SAFE_TOKEN)),
+});
+const prepareRetirementVersionInputSchema = v.strictObject({
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  releaseSet: verifiedReleaseSetSchema,
+});
+const isoDateSchema = v.pipe(
+  v.string(),
+  v.minLength(20),
+  v.maxLength(40),
+  v.check((date) => Number.isFinite(Date.parse(date))),
+);
+const versionAnnotationsSchema = v.strictObject({
+  'workers/message': v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(256))),
+  'workers/tag': v.string(),
+  'workers/triggered_by': v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(256))),
+});
+const versionSubmitBindingSchema = v.union([
+  v.strictObject({
+    name: v.literal('ADMIN_STATE'),
+    type: v.literal('durable_object_namespace'),
+    class_name: v.literal('AdminState'),
+    namespace_id: accountIdSchema,
+  }),
+  v.strictObject({
+    name: v.picklist(UNINSTALL_CLEANUP_VARIABLE_NAMES),
+    type: v.literal('plain_text'),
+    text: v.string(),
+  }),
+  v.strictObject({
+    name: v.literal('ANKKA_UNINSTALL_NONCE'),
+    type: v.literal('secret_text'),
+    text: v.pipe(v.string(), v.minLength(32), v.maxLength(8_192), v.regex(SAFE_TOKEN)),
+  }),
+]);
+const versionSubmitIntentSchema = v.strictObject({
+  kind: v.literal('uninstall_version_submit'),
+  stage: v.picklist(['cleanup', 'retirement']),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+  semanticCommitment: boundaryObjectSchema,
+  body: v.strictObject({
+    annotations: v.strictObject({ 'workers/tag': v.string() }),
+    bindings: v.array(versionSubmitBindingSchema),
+    compatibility_date: v.literal(EXACT_COMPATIBILITY_DATE),
+    compatibility_flags: v.tuple([]),
+    exports: boundaryObjectSchema,
+    main_module: v.literal('index.js'),
+    modules: v.array(v.strictObject({
+      name: v.string(),
+      content_type: v.string(),
+      content_base64: v.string(),
+    })),
+  }),
+});
+const defaultWorkerExportSchema = v.strictObject({
+  type: v.literal('worker'),
+  state: v.optional(v.literal('created')),
+  cache: v.optional(v.strictObject({ enabled: v.literal(false) })),
+});
+const activeExportsSchema = v.strictObject({
+  AdminState: v.strictObject({
+    type: v.literal('durable-object'),
+    storage: v.literal('sqlite'),
+    state: v.optional(v.literal('created')),
+  }),
+  default: v.optional(defaultWorkerExportSchema),
+});
+const retiredExportsSchema = v.strictObject({
+  AdminState: v.optional(v.strictObject({
+    type: v.literal('durable-object'),
+    state: v.literal('deleted'),
+  })),
+  default: v.optional(defaultWorkerExportSchema),
+});
+const exportReconciliationSchema = v.strictObject({
+  created: v.array(boundaryValueSchema),
+  deleted: v.array(boundaryValueSchema),
+  info: v.array(boundaryValueSchema),
+  removable_entries: v.array(boundaryValueSchema),
+  renamed: v.array(boundaryValueSchema),
+  transfer_pending: v.array(boundaryValueSchema),
+  transferred: v.array(boundaryValueSchema),
+  updated: v.array(boundaryValueSchema),
+  warnings: v.array(boundaryValueSchema),
+});
+const providerVersionBindingSchema = v.union([
+  v.strictObject({
+    name: v.literal('ADMIN_STATE'),
+    type: v.literal('durable_object_namespace'),
+    class_name: v.literal('AdminState'),
+    namespace_id: v.optional(accountIdSchema),
+  }),
+  v.strictObject({
+    name: v.picklist(UNINSTALL_CLEANUP_VARIABLE_NAMES),
+    type: v.literal('plain_text'),
+    text: v.string(),
+  }),
+  v.strictObject({ name: v.literal('ANKKA_UNINSTALL_NONCE'), type: v.literal('secret_text') }),
+]);
+const providerVersionModuleSchema = v.strictObject({
+  name: v.string(),
+  content_type: v.string(),
+  content_base64: v.optional(v.string()),
+});
+const versionResultSchema = v.strictObject({
+  annotations: versionAnnotationsSchema,
+  bindings: v.optional(v.array(providerVersionBindingSchema)),
+  compatibility_date: v.literal(EXACT_COMPATIBILITY_DATE),
+  compatibility_flags: v.optional(v.tuple([])),
+  created_on: isoDateSchema,
+  env: v.optional(boundaryObjectSchema),
+  exports: boundaryObjectSchema,
+  exports_reconciliation: v.optional(exportReconciliationSchema),
+  id: uuidSchema,
+  limits: v.optional(v.strictObject({
+    cpu_ms: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0))),
+  })),
+  main_module: v.literal('index.js'),
+  modules: v.array(providerVersionModuleSchema),
+  number: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+  placement: v.optional(v.strictObject({
+    hint: v.optional(v.string()),
+    mode: v.optional(v.string()),
+  })),
+  source: v.optional(v.literal('api')),
+  startup_time_ms: v.optional(v.pipe(v.number(), v.finite(), v.minValue(0))),
+  urls: v.optional(v.array(boundaryValueSchema)),
+  usage_model: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(128))),
+});
+const versionListItemSchema = v.strictObject({
+  annotations: v.optional(v.strictObject({
+    'workers/message': v.optional(v.string()),
+    'workers/tag': v.optional(v.string()),
+    'workers/triggered_by': v.optional(v.string()),
+  })),
+  assets: v.optional(boundaryValueSchema),
+  bindings: v.optional(boundaryValueSchema),
+  compatibility_date: v.optional(boundaryValueSchema),
+  compatibility_flags: v.optional(boundaryValueSchema),
+  created_on: v.optional(boundaryValueSchema),
+  exports: v.optional(boundaryValueSchema),
+  exports_reconciliation: v.optional(boundaryValueSchema),
+  id: uuidSchema,
+  limits: v.optional(boundaryValueSchema),
+  main_module: v.optional(boundaryValueSchema),
+  modules: v.optional(boundaryValueSchema),
+  number: v.optional(boundaryValueSchema),
+  placement: v.optional(boundaryValueSchema),
+  startup_time_ms: v.optional(boundaryValueSchema),
+  usage_model: v.optional(boundaryValueSchema),
+});
+const versionListPageSchema = v.strictObject({
+  errors: v.nullable(v.array(boundaryValueSchema)),
+  messages: v.nullable(v.array(boundaryValueSchema)),
+  result: v.pipe(v.array(versionListItemSchema), v.maxLength(VERSION_PAGE_SIZE)),
+  result_info: v.strictObject({
+    count: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(VERSION_PAGE_SIZE)),
+    page: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+    per_page: v.literal(VERSION_PAGE_SIZE),
+    total_count: v.pipe(
+      v.number(),
+      v.safeInteger(),
+      v.minValue(0),
+      v.maxValue(VERSION_PAGE_SIZE * MAX_VERSION_PAGES),
+    ),
+    total_pages: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(MAX_VERSION_PAGES))),
+  }),
+  success: v.literal(true),
+});
+const workerDeleteIntentSchema = v.strictObject({
+  kind: v.literal('uninstall_worker_delete_intent'),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  namespaceId: accountIdSchema,
+  retirementVersionId: uuidSchema,
+  retirementProofCommitment: sha256Schema,
+  retirementProof: namespaceRetirementProofSchema,
+  requestHash: sha256Schema,
+  correlationTag: v.string(),
+  method: v.literal('DELETE'),
+  force: v.literal('omitted'),
+});
+const workerDeletionRecoveryProofSchema = v.strictObject({
+  kind: v.literal('uninstall_worker_deletion_proof'),
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workerId: workerIdSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  namespaceId: accountIdSchema,
+  retirementVersionId: uuidSchema,
+  retirementProofCommitment: sha256Schema,
+  requestHash: sha256Schema,
+  firstScriptListSha256: sha256Schema,
+  secondScriptListSha256: sha256Schema,
+  scriptCount: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(MAX_SCRIPTS)),
+});
+const workerDeleteResultSchema = v.union([
+  v.null(),
+  v.strictObject({}),
+  v.strictObject({ id: workerIdSchema }),
+]);
+const scriptListInfoSchema = v.strictObject({
+  count: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(SCRIPT_PAGE_SIZE)),
+  page: v.pipe(v.number(), v.safeInteger(), v.minValue(1), v.maxValue(MAX_SCRIPT_PAGES)),
+  per_page: v.literal(SCRIPT_PAGE_SIZE),
+  total_count: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(MAX_SCRIPTS)),
+  total_pages: v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(MAX_SCRIPT_PAGES)),
+});
+const scriptListPageSchema = v.strictObject({
+  errors: v.nullable(v.array(boundaryValueSchema)),
+  messages: v.nullable(v.array(boundaryValueSchema)),
+  result: v.pipe(v.array(v.looseObject({ id: workerNameSchema })), v.maxLength(SCRIPT_PAGE_SIZE)),
+  result_info: v.optional(v.nullable(scriptListInfoSchema)),
+  success: v.literal(true),
+});
+
+const MODULE_CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
+  '.js': 'application/javascript+module',
+  '.mjs': 'application/javascript+module',
+  '.wasm': 'application/wasm',
+});
 
 export type UninstallCleanupVariableName = (typeof UNINSTALL_CLEANUP_VARIABLE_NAMES)[number];
 export type UninstallCleanupVariables = Readonly<Record<UninstallCleanupVariableName, string>>;
@@ -262,8 +803,8 @@ export interface UninstallWorkerVersionSubmitIntent {
   readonly uninstallCycleId: string;
   readonly requestHash: string;
   readonly correlationTag: string;
-  readonly semanticCommitment: Readonly<Record<string, unknown>>;
-  readonly body: Readonly<Record<string, unknown>>;
+  readonly semanticCommitment: BoundaryObject;
+  readonly body: BoundaryObject;
 }
 
 export interface UninstallWorkerVersionMutationPlan {
@@ -418,9 +959,9 @@ interface PreparedCall {
 }
 
 interface CloudflareEnvelope {
-  readonly errors: null | readonly unknown[];
-  readonly messages: null | readonly unknown[];
-  readonly result: unknown;
+  readonly errors: null | readonly BoundaryValue[];
+  readonly messages: null | readonly BoundaryValue[];
+  readonly result: BoundaryValue;
   readonly success: boolean;
 }
 
@@ -450,32 +991,20 @@ function fail(
   throw new CloudflareUninstallWorkerLifecycleError(code, stage, outcome, submissions);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+function isRecord<Value>(value: Value): value is Value & BoundaryObject {
+  return v.is(boundaryObjectSchema, value);
 }
 
-function isJournalObject(value: unknown): value is Record<string, unknown> {
+function isJournalObject<Value>(value: Value): value is Value & BoundaryObject {
   if (!isRecord(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
 
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+function exactKeys<Value extends object>(value: Value, expected: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   const sortedExpected = [...expected].sort();
   return actual.length === sortedExpected.length && actual.every((key, index) => key === sortedExpected[index]);
-}
-
-function exactSubmissionIdentity(value: Record<string, unknown>): value is Record<string, unknown> & {
-  readonly accountId: string;
-  readonly workerName: string;
-  readonly workerId: string;
-  readonly uninstallCycleId: string;
-} {
-  return typeof value.accountId === 'string' && ACCOUNT_ID.test(value.accountId) &&
-    typeof value.workerName === 'string' && WORKER_NAME.test(value.workerName) &&
-    typeof value.workerId === 'string' && WORKER_ID.test(value.workerId) &&
-    typeof value.uninstallCycleId === 'string' && UNINSTALL_CYCLE_ID.test(value.uninstallCycleId);
 }
 
 /**
@@ -483,79 +1012,58 @@ function exactSubmissionIdentity(value: Record<string, unknown>): value is Recor
  * returns a fresh allowlisted locator; extra provider or credential fields
  * reject the whole value instead of being copied into an error.
  */
-export function parseCloudflareUninstallWorkerLifecycleSubmission(
-  value: unknown,
+export function parseCloudflareUninstallWorkerLifecycleSubmission<Input>(
+  value: Input,
 ): CloudflareUninstallWorkerLifecycleSubmission | null {
   try {
-    if (!isJournalObject(value) || !exactSubmissionIdentity(value)) return null;
-    if (
-      value.kind === 'uninstall_worker_version' &&
-      exactKeys(value, [
-        'accountId', 'correlationTag', 'kind', 'requestHash', 'stage', 'uninstallCycleId', 'versionId',
-        'workerId', 'workerName',
-      ]) && (value.stage === 'cleanup' || value.stage === 'retirement') &&
-      typeof value.versionId === 'string' && UUID.test(value.versionId) &&
-      typeof value.requestHash === 'string' && SHA256.test(value.requestHash) &&
-      value.correlationTag === versionCorrelationTag(value.stage, value.requestHash)
-    ) {
+    const versionCandidate = v.safeParse(versionSubmissionSchema, value);
+    if (versionCandidate.success && versionCandidate.output.correlationTag ===
+      versionCorrelationTag(versionCandidate.output.stage, versionCandidate.output.requestHash)) {
+      const submission = versionCandidate.output;
       return Object.freeze({
         kind: 'uninstall_worker_version',
-        stage: value.stage,
-        accountId: value.accountId,
-        workerName: value.workerName,
-        workerId: value.workerId,
-        uninstallCycleId: value.uninstallCycleId,
-        versionId: value.versionId,
-        requestHash: value.requestHash,
-        correlationTag: value.correlationTag,
+        stage: submission.stage,
+        accountId: submission.accountId,
+        workerName: submission.workerName,
+        workerId: submission.workerId,
+        uninstallCycleId: submission.uninstallCycleId,
+        versionId: submission.versionId,
+        requestHash: submission.requestHash,
+        correlationTag: submission.correlationTag,
       });
     }
-    if (
-      value.kind === 'uninstall_worker_deployment' &&
-      exactKeys(value, [
-        'accountId', 'correlationTag', 'deploymentId', 'kind', 'requestHash', 'stage',
-        'uninstallCycleId', 'versionId', 'workerId', 'workerName',
-      ]) && (value.stage === 'cleanup' || value.stage === 'retirement' || value.stage === 'restore_clean') &&
-      typeof value.versionId === 'string' && UUID.test(value.versionId) &&
-      typeof value.deploymentId === 'string' && UUID.test(value.deploymentId) &&
-      typeof value.requestHash === 'string' && SHA256.test(value.requestHash) &&
-      value.correlationTag === deploymentCorrelationTag(value.stage, value.requestHash)
-    ) {
+    const deploymentCandidate = v.safeParse(deploymentSubmissionSchema, value);
+    if (deploymentCandidate.success && deploymentCandidate.output.correlationTag ===
+      deploymentCorrelationTag(deploymentCandidate.output.stage, deploymentCandidate.output.requestHash)) {
+      const submission = deploymentCandidate.output;
       return Object.freeze({
         kind: 'uninstall_worker_deployment',
-        stage: value.stage,
-        accountId: value.accountId,
-        workerName: value.workerName,
-        workerId: value.workerId,
-        uninstallCycleId: value.uninstallCycleId,
-        versionId: value.versionId,
-        deploymentId: value.deploymentId,
-        requestHash: value.requestHash,
-        correlationTag: value.correlationTag,
+        stage: submission.stage,
+        accountId: submission.accountId,
+        workerName: submission.workerName,
+        workerId: submission.workerId,
+        uninstallCycleId: submission.uninstallCycleId,
+        versionId: submission.versionId,
+        deploymentId: submission.deploymentId,
+        requestHash: submission.requestHash,
+        correlationTag: submission.correlationTag,
       });
     }
-    if (
-      value.kind === 'uninstall_worker_delete' &&
-      exactKeys(value, [
-        'accountId', 'correlationTag', 'kind', 'namespaceId', 'requestHash',
-        'retirementProofCommitment', 'retirementVersionId', 'uninstallCycleId', 'workerId', 'workerName',
-      ]) && typeof value.namespaceId === 'string' && ACCOUNT_ID.test(value.namespaceId) &&
-      typeof value.retirementVersionId === 'string' && UUID.test(value.retirementVersionId) &&
-      typeof value.retirementProofCommitment === 'string' && SHA256.test(value.retirementProofCommitment) &&
-      typeof value.requestHash === 'string' && SHA256.test(value.requestHash) &&
-      value.correlationTag === `ankka-un-w-delete-sha256:${value.requestHash}`
-    ) {
+    const deleteCandidate = v.safeParse(workerDeleteSubmissionSchema, value);
+    if (deleteCandidate.success && deleteCandidate.output.correlationTag ===
+      `ankka-un-w-delete-sha256:${deleteCandidate.output.requestHash}`) {
+      const submission = deleteCandidate.output;
       return Object.freeze({
         kind: 'uninstall_worker_delete',
-        accountId: value.accountId,
-        workerName: value.workerName,
-        workerId: value.workerId,
-        uninstallCycleId: value.uninstallCycleId,
-        namespaceId: value.namespaceId,
-        retirementVersionId: value.retirementVersionId,
-        retirementProofCommitment: value.retirementProofCommitment,
-        requestHash: value.requestHash,
-        correlationTag: value.correlationTag,
+        accountId: submission.accountId,
+        workerName: submission.workerName,
+        workerId: submission.workerId,
+        uninstallCycleId: submission.uninstallCycleId,
+        namespaceId: submission.namespaceId,
+        retirementVersionId: submission.retirementVersionId,
+        retirementProofCommitment: submission.retirementProofCommitment,
+        requestHash: submission.requestHash,
+        correlationTag: submission.correlationTag,
       });
     }
     return null;
@@ -564,17 +1072,7 @@ export function parseCloudflareUninstallWorkerLifecycleSubmission(
   }
 }
 
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('canonical');
-}
-
-function canonicalEqual(left: unknown, right: unknown): boolean {
+function canonicalEqual<Left, Right>(left: Left, right: Right): boolean {
   try {
     return canonicalJson(left) === canonicalJson(right);
   } catch {
@@ -591,7 +1089,7 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 async function sha256(value: Uint8Array | string): Promise<string> {
-  const source = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+  const source = value instanceof Uint8Array ? value : new TextEncoder().encode(value);
   const owned = new Uint8Array(source.byteLength);
   owned.set(source);
   return bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', owned)));
@@ -605,9 +1103,9 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function strictBase64Bytes(value: unknown, byteLength: number): Uint8Array | null {
+function strictBase64Bytes<Input>(value: Input, byteLength: number): Uint8Array | null {
   if (
-    typeof value !== 'string' ||
+    !v.is(v.string(), value) ||
     value.length !== 4 * Math.ceil(byteLength / 3) ||
     !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)
   ) return null;
@@ -627,60 +1125,40 @@ function extension(path: string): string {
   return dot > slash ? path.slice(dot).toLowerCase() : '';
 }
 
-function safeModuleName(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 256 &&
-    !value.startsWith('/') && !value.includes('\\') && !CONTROL_CHARACTER.test(value) &&
+function safeModuleName<Input>(value: Input): value is Input & string {
+  return v.is(v.string(), value) && value.length > 0 && value.length <= 256 &&
+    !value.startsWith('/') && !value.includes('\\') && !hasControlCharacter(value) &&
     value.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
 }
 
-function safeToken(value: unknown, minimum = 20): value is string {
-  return typeof value === 'string' && value.length >= minimum && value.length <= 8192 && SAFE_TOKEN.test(value);
-}
-
-function validIdentity(input: Record<string, unknown>): boolean {
-  return ACCOUNT_ID.test(String(input.accountId)) &&
-    WORKER_NAME.test(String(input.workerName)) &&
-    WORKER_ID.test(String(input.workerId)) &&
-    UNINSTALL_CYCLE_ID.test(String(input.uninstallCycleId));
-}
-
 function validCleanupVariables(
-  value: unknown,
+  value: v.InferOutput<typeof cleanupVariablesSchema>,
   accountId: string,
   release: string,
   artifactSha256: string,
-): value is UninstallCleanupVariables {
-  if (!isRecord(value) || !exactKeys(value, UNINSTALL_CLEANUP_VARIABLE_NAMES)) return false;
-  for (const name of UNINSTALL_CLEANUP_VARIABLE_NAMES) {
-    const entry = value[name];
-    if (typeof entry !== 'string' || entry.length === 0 || entry.length > 4096 || CONTROL_CHARACTER.test(entry)) {
-      return false;
-    }
-  }
+): boolean {
   return value.ANKKA_GATEWAY_RELEASE === release &&
     value.ANKKA_GATEWAY_RELEASE_SHA256 === `sha256:${artifactSha256}` &&
     value.CLOUDFLARE_ACCOUNT_ID === accountId &&
-    typeof value.CLOUDFLARE_ZONE_ID === 'string' && ACCOUNT_ID.test(value.CLOUDFLARE_ZONE_ID) &&
-    typeof value.CLOUDFLARE_ZONE_NAME === 'string' && HOSTNAME.test(value.CLOUDFLARE_ZONE_NAME) &&
     value.ZERO_TRUST_READY === 'true';
 }
 
 async function verifiedModules(
   modules: VerifiedGatewayWorkerReleaseSet['cleanup']['worker']['modules'],
 ): Promise<readonly VersionModuleBytes[]> {
-  if (!Array.isArray(modules) || modules.length === 0 || modules.length > 1_000) {
-    fail('invalid_input', 'validate', 'not_sent');
-  }
+  const candidate = v.safeParse(
+    v.pipe(v.array(verifiedReleaseModuleSchema), v.minLength(1), v.maxLength(1_000)),
+    modules,
+  );
+  if (!candidate.success) fail('invalid_input', 'validate', 'not_sent');
   const result: VersionModuleBytes[] = [];
   const names = new Set<string>();
   let totalBytes = 0;
-  for (const module of modules) {
+  for (const module of candidate.output) {
     if (
-      !isRecord(module) || !exactKeys(module, ['bytes', 'contentType', 'name', 'sha256']) ||
       !safeModuleName(module.name) || names.has(module.name) ||
       module.contentType !== MODULE_CONTENT_TYPES[extension(module.name)] ||
-      typeof module.sha256 !== 'string' || !SHA256.test(module.sha256) ||
-      !(module.bytes instanceof Uint8Array) || module.bytes.byteLength === 0 ||
+      module.bytes.byteLength === 0 ||
       module.bytes.byteLength > MAX_FILE_BYTES
     ) fail('invalid_input', 'validate', 'not_sent');
     const bytes = new Uint8Array(module.bytes);
@@ -704,17 +1182,13 @@ async function verifiedModules(
 }
 
 function releaseSetIdentityValid(releaseSet: VerifiedGatewayWorkerReleaseSet): boolean {
-  if (!isRecord(releaseSet) || !exactKeys(releaseSet, ['cleanup', 'primary', 'retirement'])) return false;
+  if (!v.is(releaseSetIdentitySchema, releaseSet)) return false;
   const { primary, cleanup, retirement } = releaseSet;
-  if (!isRecord(primary) || !isRecord(cleanup) || !isRecord(retirement)) return false;
   if (
-    primary.verification !== 'ed25519' || cleanup.verification !== 'ed25519' || retirement.verification !== 'ed25519' ||
-    !RELEASE.test(primary.release) || cleanup.release !== primary.release || retirement.release !== primary.release ||
-    !SHA256.test(primary.artifactSha256) || cleanup.artifactSha256 !== primary.artifactSha256 ||
+    cleanup.release !== primary.release || retirement.release !== primary.release ||
+    cleanup.artifactSha256 !== primary.artifactSha256 ||
     retirement.artifactSha256 !== primary.artifactSha256 ||
-    !SHA256.test(cleanup.componentSha256) || !SHA256.test(retirement.componentSha256) ||
-    cleanup.variant !== 'cleanup' || retirement.variant !== 'retirement' ||
-    !isRecord(cleanup.worker) || !isRecord(retirement.worker)
+    cleanup.variant !== 'cleanup' || retirement.variant !== 'retirement'
   ) return false;
   return canonicalEqual(
     cleanup.worker.contract,
@@ -734,7 +1208,7 @@ function moduleCommitments(modules: readonly VersionModuleBytes[]): readonly Uni
   })));
 }
 
-function versionSemanticCommitment(recovery: UninstallWorkerVersionRecoveryRecord): Record<string, unknown> {
+function versionSemanticCommitment(recovery: UninstallWorkerVersionRecoveryRecord): BoundaryObject {
   return {
     accountId: recovery.accountId,
     artifactSha256: recovery.artifactSha256,
@@ -769,9 +1243,10 @@ async function createCleanupRecovery(
     name,
     valueSha256: await sha256(input.variables[name]),
   })));
-  const base = {
-    kind: 'uninstall_version_recovery' as const,
-    stage: 'cleanup' as const,
+  const emptyTuple: readonly [] = Object.freeze([]);
+  const base: Omit<CleanupWorkerVersionRecoveryRecord, 'correlationTag' | 'requestHash'> = {
+    kind: 'uninstall_version_recovery',
+    stage: 'cleanup',
     accountId: input.accountId,
     workerName: input.workerName,
     workerId: input.workerId,
@@ -781,21 +1256,21 @@ async function createCleanupRecovery(
     artifactSha256: input.releaseSet.cleanup.artifactSha256,
     componentSha256: input.releaseSet.cleanup.componentSha256,
     compatibilityDate: EXACT_COMPATIBILITY_DATE,
-    compatibilityFlags: Object.freeze([]) as readonly [],
-    mainModule: 'index.js' as const,
+    compatibilityFlags: emptyTuple,
+    mainModule: 'index.js',
     contract: Object.freeze({
-      assets: 'absent' as const,
-      defaultApplication: 'absent' as const,
+      assets: 'absent',
+      defaultApplication: 'absent',
       durableObject: Object.freeze({
-        binding: 'ADMIN_STATE' as const,
-        className: 'AdminState' as const,
+        binding: 'ADMIN_STATE',
+        className: 'AdminState',
         namespaceId: input.namespaceId,
-        storage: 'sqlite' as const,
+        storage: 'sqlite',
       }),
       exports: Object.freeze({
-        AdminState: Object.freeze({ type: 'durable-object' as const, storage: 'sqlite' as const }),
+        AdminState: Object.freeze({ type: 'durable-object', storage: 'sqlite' }),
       }),
-      uninstallNonceBinding: 'present' as const,
+      uninstallNonceBinding: 'present',
       variableValueHashes: Object.freeze(hashes),
     }),
     modules: moduleCommitments(modules),
@@ -816,9 +1291,10 @@ async function createRetirementRecovery(
   input: PrepareRetirementWorkerVersionInput,
   modules: readonly VersionModuleBytes[],
 ): Promise<RetirementWorkerVersionRecoveryRecord> {
-  const base = {
-    kind: 'uninstall_version_recovery' as const,
-    stage: 'retirement' as const,
+  const emptyTuple: readonly [] = Object.freeze([]);
+  const base: Omit<RetirementWorkerVersionRecoveryRecord, 'correlationTag' | 'requestHash'> = {
+    kind: 'uninstall_version_recovery',
+    stage: 'retirement',
     accountId: input.accountId,
     workerName: input.workerName,
     workerId: input.workerId,
@@ -827,14 +1303,14 @@ async function createRetirementRecovery(
     artifactSha256: input.releaseSet.retirement.artifactSha256,
     componentSha256: input.releaseSet.retirement.componentSha256,
     compatibilityDate: EXACT_COMPATIBILITY_DATE,
-    compatibilityFlags: Object.freeze([]) as readonly [],
-    mainModule: 'index.js' as const,
+    compatibilityFlags: emptyTuple,
+    mainModule: 'index.js',
     contract: Object.freeze({
-      assets: 'absent' as const,
-      bindings: Object.freeze([]) as readonly [],
-      defaultApplication: 'absent' as const,
+      assets: 'absent',
+      bindings: emptyTuple,
+      defaultApplication: 'absent',
       exports: Object.freeze({
-        AdminState: Object.freeze({ type: 'durable-object' as const, state: 'deleted' as const }),
+        AdminState: Object.freeze({ type: 'durable-object', state: 'deleted' }),
       }),
     }),
     modules: moduleCommitments(modules),
@@ -856,8 +1332,8 @@ function versionBody(
   modules: readonly VersionModuleBytes[],
   variables?: UninstallCleanupVariables,
   uninstallNonce?: string,
-): Readonly<Record<string, unknown>> {
-  const bindings: Record<string, unknown>[] = [];
+): BoundaryObject {
+  const bindings: BoundaryObject[] = [];
   if (recovery.stage === 'cleanup') {
     if (!variables || !uninstallNonce) fail('invalid_input', 'validate', 'not_sent');
     bindings.push({
@@ -890,31 +1366,28 @@ function versionBody(
 export async function prepareCleanupWorkerVersionMutation(
   input: PrepareCleanupWorkerVersionInput,
 ): Promise<UninstallWorkerVersionMutationPlan> {
-  if (
-    !isRecord(input) || !exactKeys(input, [
-      'accountId', 'namespaceId', 'releaseSet', 'uninstallCycleId', 'uninstallNonce', 'variables',
-      'workerId', 'workerName',
-    ]) || !validIdentity(input) || !ACCOUNT_ID.test(input.namespaceId) ||
-    !safeToken(input.uninstallNonce, 32) || !releaseSetIdentityValid(input.releaseSet) ||
+  const candidate = v.safeParse(prepareCleanupVersionInputSchema, input);
+  if (!candidate.success || !releaseSetIdentityValid(candidate.output.releaseSet) ||
     !validCleanupVariables(
-      input.variables,
-      input.accountId,
-      input.releaseSet.cleanup.release,
-      input.releaseSet.cleanup.artifactSha256,
+      candidate.output.variables,
+      candidate.output.accountId,
+      candidate.output.releaseSet.cleanup.release,
+      candidate.output.releaseSet.cleanup.artifactSha256,
     )
   ) fail('invalid_input', 'validate', 'not_sent');
-  const modules = await verifiedModules(input.releaseSet.cleanup.worker.modules);
-  const recovery = await createCleanupRecovery(input, modules);
-  const body = versionBody(recovery, modules, input.variables, input.uninstallNonce);
+  const parsedInput: PrepareCleanupWorkerVersionInput = candidate.output;
+  const modules = await verifiedModules(parsedInput.releaseSet.cleanup.worker.modules);
+  const recovery = await createCleanupRecovery(parsedInput, modules);
+  const body = versionBody(recovery, modules, parsedInput.variables, parsedInput.uninstallNonce);
   return Object.freeze({
     recovery,
     ephemeral: Object.freeze({
       kind: 'uninstall_version_submit',
       stage: 'cleanup',
-      accountId: input.accountId,
-      workerName: input.workerName,
-      workerId: input.workerId,
-      uninstallCycleId: input.uninstallCycleId,
+      accountId: parsedInput.accountId,
+      workerName: parsedInput.workerName,
+      workerId: parsedInput.workerId,
+      uninstallCycleId: parsedInput.uninstallCycleId,
       requestHash: recovery.requestHash,
       correlationTag: recovery.correlationTag,
       semanticCommitment: Object.freeze(versionSemanticCommitment(recovery)),
@@ -926,23 +1399,23 @@ export async function prepareCleanupWorkerVersionMutation(
 export async function prepareRetirementWorkerVersionMutation(
   input: PrepareRetirementWorkerVersionInput,
 ): Promise<UninstallWorkerVersionMutationPlan> {
-  if (
-    !isRecord(input) || !exactKeys(input, [
-      'accountId', 'releaseSet', 'uninstallCycleId', 'workerId', 'workerName',
-    ]) || !validIdentity(input) || !releaseSetIdentityValid(input.releaseSet)
-  ) fail('invalid_input', 'validate', 'not_sent');
-  const modules = await verifiedModules(input.releaseSet.retirement.worker.modules);
-  const recovery = await createRetirementRecovery(input, modules);
+  const candidate = v.safeParse(prepareRetirementVersionInputSchema, input);
+  if (!candidate.success || !releaseSetIdentityValid(candidate.output.releaseSet)) {
+    fail('invalid_input', 'validate', 'not_sent');
+  }
+  const parsedInput: PrepareRetirementWorkerVersionInput = candidate.output;
+  const modules = await verifiedModules(parsedInput.releaseSet.retirement.worker.modules);
+  const recovery = await createRetirementRecovery(parsedInput, modules);
   const body = versionBody(recovery, modules);
   return Object.freeze({
     recovery,
     ephemeral: Object.freeze({
       kind: 'uninstall_version_submit',
       stage: 'retirement',
-      accountId: input.accountId,
-      workerName: input.workerName,
-      workerId: input.workerId,
-      uninstallCycleId: input.uninstallCycleId,
+      accountId: parsedInput.accountId,
+      workerName: parsedInput.workerName,
+      workerId: parsedInput.workerId,
+      uninstallCycleId: parsedInput.uninstallCycleId,
       requestHash: recovery.requestHash,
       correlationTag: recovery.correlationTag,
       semanticCommitment: Object.freeze(versionSemanticCommitment(recovery)),
@@ -951,18 +1424,14 @@ export async function prepareRetirementWorkerVersionMutation(
   });
 }
 
-function validModuleCommitments(value: unknown): value is readonly UninstallWorkerModuleCommitment[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 1_000) return false;
+function validModuleCommitments(value: readonly UninstallWorkerModuleCommitment[]): boolean {
   const names = new Set<string>();
   let previous = '';
   let total = 0;
   for (const module of value) {
     if (
-      !isRecord(module) || !exactKeys(module, ['byteLength', 'contentSha256', 'contentType', 'name']) ||
       !safeModuleName(module.name) || names.has(module.name) || (previous !== '' && previous >= module.name) ||
       module.contentType !== MODULE_CONTENT_TYPES[extension(module.name)] ||
-      typeof module.contentSha256 !== 'string' || !SHA256.test(module.contentSha256) ||
-      typeof module.byteLength !== 'number' || !Number.isSafeInteger(module.byteLength) ||
       module.byteLength <= 0 || module.byteLength > MAX_FILE_BYTES
     ) return false;
     names.add(module.name);
@@ -973,73 +1442,18 @@ function validModuleCommitments(value: unknown): value is readonly UninstallWork
   return names.has('index.js');
 }
 
-function exactCleanupContract(value: unknown, namespaceId: string): value is CleanupWorkerVersionRecoveryRecord['contract'] {
-  if (!isRecord(value) || !exactKeys(value, [
-    'assets', 'defaultApplication', 'durableObject', 'exports', 'uninstallNonceBinding',
-    'variableValueHashes',
-  ])) return false;
-  if (
-    value.assets !== 'absent' || value.defaultApplication !== 'absent' ||
-    value.uninstallNonceBinding !== 'present' ||
-    !canonicalEqual(value.durableObject, {
-      binding: 'ADMIN_STATE', className: 'AdminState', namespaceId, storage: 'sqlite',
-    }) ||
-    !canonicalEqual(value.exports, {
-      AdminState: { storage: 'sqlite', type: 'durable-object' },
-    }) ||
-    !Array.isArray(value.variableValueHashes) ||
-    value.variableValueHashes.length !== UNINSTALL_CLEANUP_VARIABLE_NAMES.length
-  ) return false;
-  return value.variableValueHashes.every((binding, index) => (
-    isRecord(binding) && exactKeys(binding, ['name', 'valueSha256']) &&
-    binding.name === UNINSTALL_CLEANUP_VARIABLE_NAMES[index] &&
-    typeof binding.valueSha256 === 'string' && SHA256.test(binding.valueSha256)
-  ));
-}
-
-function exactRetirementContract(value: unknown): value is RetirementWorkerVersionRecoveryRecord['contract'] {
-  return isRecord(value) && exactKeys(value, ['assets', 'bindings', 'defaultApplication', 'exports']) &&
-    value.assets === 'absent' && value.defaultApplication === 'absent' &&
-    Array.isArray(value.bindings) && value.bindings.length === 0 &&
-    canonicalEqual(value.exports, {
-      AdminState: { state: 'deleted', type: 'durable-object' },
-    });
-}
-
-async function validVersionRecoveryRecord(value: unknown): Promise<boolean> {
-  if (!isRecord(value)) return false;
-  const cleanup = value.stage === 'cleanup';
-  const expected = cleanup
-    ? [
-        'accountId', 'artifactSha256', 'compatibilityDate', 'compatibilityFlags', 'componentSha256',
-        'contract', 'correlationTag', 'kind', 'mainModule', 'modules', 'namespaceId', 'release',
-        'requestHash', 'stage', 'uninstallCycleId', 'workerId', 'workerName',
-      ]
-    : [
-        'accountId', 'artifactSha256', 'compatibilityDate', 'compatibilityFlags', 'componentSha256',
-        'contract', 'correlationTag', 'kind', 'mainModule', 'modules', 'release', 'requestHash',
-        'stage', 'uninstallCycleId', 'workerId', 'workerName',
-      ];
-  if (
-    !exactKeys(value, expected) || value.kind !== 'uninstall_version_recovery' ||
-    (value.stage !== 'cleanup' && value.stage !== 'retirement') || !validIdentity(value) ||
-    typeof value.release !== 'string' || !RELEASE.test(value.release) ||
-    typeof value.artifactSha256 !== 'string' || !SHA256.test(value.artifactSha256) ||
-    typeof value.componentSha256 !== 'string' || !SHA256.test(value.componentSha256) ||
-    typeof value.requestHash !== 'string' || !SHA256.test(value.requestHash) ||
-    value.correlationTag !== versionCorrelationTag(value.stage, value.requestHash) ||
-    value.compatibilityDate !== EXACT_COMPATIBILITY_DATE ||
-    !Array.isArray(value.compatibilityFlags) || value.compatibilityFlags.length !== 0 ||
-    value.mainModule !== 'index.js' || !validModuleCommitments(value.modules)
-  ) return false;
-  if (cleanup) {
-    if (typeof value.namespaceId !== 'string' || !ACCOUNT_ID.test(value.namespaceId) ||
-      !exactCleanupContract(value.contract, value.namespaceId)) return false;
-  } else if (!exactRetirementContract(value.contract)) return false;
+async function validVersionRecoveryRecord(value: UninstallWorkerVersionRecoveryRecord): Promise<boolean> {
+  const candidate = v.safeParse(versionRecoverySchema, value);
+  if (!candidate.success || value.correlationTag !== versionCorrelationTag(value.stage, value.requestHash) ||
+    !validModuleCommitments(value.modules)) return false;
+  if (value.stage === 'cleanup' && (
+    value.contract.durableObject.namespaceId !== value.namespaceId ||
+    value.contract.variableValueHashes.some(
+      (binding, index) => binding.name !== UNINSTALL_CLEANUP_VARIABLE_NAMES[index],
+    )
+  )) return false;
   try {
-    const expectedHash = await sha256(canonicalJson(versionSemanticCommitment(
-      value as unknown as UninstallWorkerVersionRecoveryRecord,
-    )));
+    const expectedHash = await sha256(canonicalJson(versionSemanticCommitment(value)));
     return expectedHash === value.requestHash;
   } catch {
     return false;
@@ -1047,24 +1461,24 @@ async function validVersionRecoveryRecord(value: unknown): Promise<boolean> {
 }
 
 /** Parse an exact, credential-free record at the uninstall journal boundary. */
-export async function parseUninstallWorkerVersionRecoveryRecord(
-  value: unknown,
+export async function parseUninstallWorkerVersionRecoveryRecord<Input>(
+  value: Input,
 ): Promise<UninstallWorkerVersionRecoveryRecord | null> {
   try {
-    if (!isJournalObject(value) || !await validVersionRecoveryRecord(value)) return null;
-    const input = value as unknown as UninstallWorkerVersionRecoveryRecord;
-    const modules: UninstallWorkerModuleCommitment[] = [];
-    for (let index = 0; index < input.modules.length; index += 1) {
-      const module = input.modules[index];
-      modules.push(Object.freeze({
+    const candidate = v.safeParse(versionRecoverySchema, value);
+    if (!candidate.success) return null;
+    const input = candidate.output;
+    const modules = Object.freeze(input.modules.map((module) => Object.freeze({
         name: module.name,
         contentType: module.contentType,
         contentSha256: module.contentSha256,
         byteLength: module.byteLength,
-      }));
-    }
+      })));
+    const emptyTuple: readonly [] = Object.freeze([]);
+    const recoveryKind = 'uninstall_version_recovery' as const;
+    const mainModule = 'index.js' as const;
     const common = {
-      kind: 'uninstall_version_recovery' as const,
+      kind: recoveryKind,
       accountId: input.accountId,
       workerName: input.workerName,
       workerId: input.workerId,
@@ -1075,23 +1489,16 @@ export async function parseUninstallWorkerVersionRecoveryRecord(
       requestHash: input.requestHash,
       correlationTag: input.correlationTag,
       compatibilityDate: EXACT_COMPATIBILITY_DATE,
-      compatibilityFlags: Object.freeze([]) as readonly [],
-      mainModule: 'index.js' as const,
-      modules: Object.freeze(modules),
+      compatibilityFlags: emptyTuple,
+      mainModule,
+      modules,
     };
     if (input.stage === 'cleanup') {
-      const variableValueHashes: Array<{
-        readonly name: UninstallCleanupVariableName;
-        readonly valueSha256: string;
-      }> = [];
-      for (let index = 0; index < input.contract.variableValueHashes.length; index += 1) {
-        const binding = input.contract.variableValueHashes[index];
-        variableValueHashes.push(Object.freeze({
+      const variableValueHashes = Object.freeze(input.contract.variableValueHashes.map((binding) => Object.freeze({
           name: binding.name,
           valueSha256: binding.valueSha256,
-        }));
-      }
-      const parsed = Object.freeze({
+        })));
+      const parsed: CleanupWorkerVersionRecoveryRecord = Object.freeze({
         ...common,
         stage: 'cleanup',
         namespaceId: input.namespaceId,
@@ -1108,17 +1515,17 @@ export async function parseUninstallWorkerVersionRecoveryRecord(
             AdminState: Object.freeze({ type: 'durable-object', storage: 'sqlite' }),
           }),
           uninstallNonceBinding: 'present',
-          variableValueHashes: Object.freeze(variableValueHashes),
+          variableValueHashes,
         }),
       });
       return await validVersionRecoveryRecord(parsed) ? parsed : null;
     }
-    const parsed = Object.freeze({
+    const parsed: RetirementWorkerVersionRecoveryRecord = Object.freeze({
       ...common,
       stage: 'retirement',
       contract: Object.freeze({
         assets: 'absent',
-        bindings: Object.freeze([]) as readonly [],
+        bindings: emptyTuple,
         defaultApplication: 'absent',
         exports: Object.freeze({
           AdminState: Object.freeze({ type: 'durable-object', state: 'deleted' }),
@@ -1135,32 +1542,25 @@ async function validVersionSubmitIntent(
   intent: UninstallWorkerVersionSubmitIntent,
   recovery: UninstallWorkerVersionRecoveryRecord,
 ): Promise<boolean> {
+  const candidate = v.safeParse(versionSubmitIntentSchema, intent);
   if (
-    !await validVersionRecoveryRecord(recovery) || !isRecord(intent) || !exactKeys(intent, [
-      'accountId', 'body', 'correlationTag', 'kind', 'requestHash', 'semanticCommitment', 'stage',
-      'uninstallCycleId', 'workerId', 'workerName',
-    ]) || intent.kind !== 'uninstall_version_submit' || intent.stage !== recovery.stage ||
-    intent.accountId !== recovery.accountId || intent.workerName !== recovery.workerName ||
-    intent.workerId !== recovery.workerId || intent.uninstallCycleId !== recovery.uninstallCycleId ||
-    intent.requestHash !== recovery.requestHash || intent.correlationTag !== recovery.correlationTag ||
-    !canonicalEqual(intent.semanticCommitment, versionSemanticCommitment(recovery)) ||
-    !isRecord(intent.body) || !exactKeys(intent.body, [
-      'annotations', 'bindings', 'compatibility_date', 'compatibility_flags', 'exports',
-      'main_module', 'modules',
-    ]) || Object.hasOwn(intent.body, 'assets') || Object.hasOwn(intent.body, 'migrations') ||
-    Object.hasOwn(intent.body, 'migration_tag') ||
-    !canonicalEqual(intent.body.annotations, { 'workers/tag': recovery.correlationTag }) ||
-    intent.body.compatibility_date !== EXACT_COMPATIBILITY_DATE ||
-    !Array.isArray(intent.body.compatibility_flags) || intent.body.compatibility_flags.length !== 0 ||
-    intent.body.main_module !== 'index.js' ||
-    !canonicalEqual(intent.body.exports, recovery.contract.exports) ||
-    !Array.isArray(intent.body.bindings) || !Array.isArray(intent.body.modules) ||
-    intent.body.modules.length !== recovery.modules.length
+    !candidate.success || !await validVersionRecoveryRecord(recovery) ||
+    candidate.output.stage !== recovery.stage ||
+    candidate.output.accountId !== recovery.accountId || candidate.output.workerName !== recovery.workerName ||
+    candidate.output.workerId !== recovery.workerId ||
+    candidate.output.uninstallCycleId !== recovery.uninstallCycleId ||
+    candidate.output.requestHash !== recovery.requestHash ||
+    candidate.output.correlationTag !== recovery.correlationTag ||
+    !canonicalEqual(candidate.output.semanticCommitment, versionSemanticCommitment(recovery)) ||
+    candidate.output.body.annotations['workers/tag'] !== recovery.correlationTag ||
+    !canonicalEqual(candidate.output.body.exports, recovery.contract.exports) ||
+    candidate.output.body.modules.length !== recovery.modules.length
   ) return false;
+  const parsedIntent = candidate.output;
 
-  const bindingMap = new Map<string, Record<string, unknown>>();
-  for (const binding of intent.body.bindings) {
-    if (!isRecord(binding) || typeof binding.name !== 'string' || bindingMap.has(binding.name)) return false;
+  const bindingMap = new Map<string, v.InferOutput<typeof versionSubmitBindingSchema>>();
+  for (const binding of parsedIntent.body.bindings) {
+    if (bindingMap.has(binding.name)) return false;
     bindingMap.set(binding.name, binding);
   }
   if (recovery.stage === 'cleanup') {
@@ -1172,38 +1572,37 @@ async function validVersionSubmitIntent(
     for (const expected of recovery.contract.variableValueHashes) {
       const binding = bindingMap.get(expected.name);
       if (
-        !binding || !exactKeys(binding, ['name', 'text', 'type']) || binding.type !== 'plain_text' ||
-        typeof binding.text !== 'string' || await sha256(binding.text) !== expected.valueSha256
+        binding?.name !== expected.name || binding.type !== 'plain_text' ||
+        await sha256(binding.text) !== expected.valueSha256
       ) return false;
     }
     const nonce = bindingMap.get('ANKKA_UNINSTALL_NONCE');
     if (
-      !nonce || !exactKeys(nonce, ['name', 'text', 'type']) || nonce.type !== 'secret_text' ||
-      !safeToken(nonce.text, 32)
+      nonce?.name !== 'ANKKA_UNINSTALL_NONCE' || nonce.type !== 'secret_text'
     ) return false;
   } else if (bindingMap.size !== 0) return false;
 
   for (let index = 0; index < recovery.modules.length; index += 1) {
-    const expected = recovery.modules[index];
-    const module = intent.body.modules[index];
+    const expected = recovery.modules.at(index);
+    const module = parsedIntent.body.modules.at(index);
+    if (expected === undefined || module === undefined) return false;
     if (
-      !isRecord(module) || !exactKeys(module, ['content_base64', 'content_type', 'name']) ||
       module.name !== expected.name || module.content_type !== expected.contentType
     ) return false;
     const bytes = strictBase64Bytes(module.content_base64, expected.byteLength);
     if (!bytes || await sha256(bytes) !== expected.contentSha256) return false;
   }
-  return await sha256(canonicalJson(intent.semanticCommitment)) === recovery.requestHash;
+  return await sha256(canonicalJson(parsedIntent.semanticCommitment)) === recovery.requestHash;
 }
 
 function prepareCall(value: CloudflareDirectUploadCall): PreparedCall {
-  if (!isRecord(value)) fail('invalid_input', 'validate', 'not_sent');
-  const timeoutMs = value.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  if (
-    !safeToken(value.accessToken) || typeof value.transport !== 'function' ||
-    !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000
-  ) fail('invalid_input', 'validate', 'not_sent');
-  return { accessToken: value.accessToken, transport: value.transport, timeoutMs };
+  const candidate = v.safeParse(directUploadCallSchema, value);
+  if (!candidate.success) fail('invalid_input', 'validate', 'not_sent');
+  return {
+    accessToken: candidate.output.accessToken,
+    transport: candidate.output.transport,
+    timeoutMs: candidate.output.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  };
 }
 
 function authHeaders(accessToken: string): Headers {
@@ -1219,7 +1618,7 @@ function jsonHeaders(accessToken: string): Headers {
   return headers;
 }
 
-async function readBoundedJson(response: Response, maximum = MAX_RESPONSE_BYTES): Promise<unknown> {
+async function readBoundedJson(response: Response, maximum = MAX_RESPONSE_BYTES): Promise<BoundaryValue> {
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
   if (!contentType.startsWith('application/json') || !response.body) throw new TypeError('response');
   const declared = response.headers.get('content-length');
@@ -1247,7 +1646,9 @@ async function readBoundedJson(response: Response, maximum = MAX_RESPONSE_BYTES)
     offset += chunk.byteLength;
   }
   try {
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
+    const parsed: BoundaryValue = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    if (!v.is(boundaryValueSchema, parsed)) throw new TypeError('response');
+    return parsed;
   } catch {
     throw new TypeError('response');
   }
@@ -1260,7 +1661,7 @@ async function requestJson(
   init: RequestInit,
   maximum = MAX_RESPONSE_BYTES,
   submissions: readonly CloudflareUninstallWorkerLifecycleSubmission[] = [],
-): Promise<{ readonly status: number; readonly value: unknown }> {
+): Promise<{ readonly status: number; readonly value: BoundaryValue }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), call.timeoutMs);
   const mutation = init.method === 'POST' || init.method === 'DELETE';
@@ -1275,45 +1676,40 @@ async function requestJson(
   }
 }
 
-function isEmptyProviderList(value: unknown): value is null | readonly [] {
-  return value === null || (Array.isArray(value) && value.length === 0);
+function isEmptyProviderList<Value>(value: Value): boolean {
+  return v.is(emptyProviderListSchema, value);
 }
 
-function providerErrors(value: unknown): boolean {
-  return Array.isArray(value) && value.length > 0 && value.length <= 16 && value.every((error) => (
-    isRecord(error) && typeof error.code === 'number' && Number.isSafeInteger(error.code) &&
-    typeof error.message === 'string' && error.message.length > 0 && error.message.length <= 2_048 &&
-    Object.keys(error).every((key) => ['code', 'documentation_url', 'message', 'source'].includes(key))
-  ));
+function providerErrors<Value>(value: Value): boolean {
+  return v.is(providerErrorListSchema, value);
 }
 
-function parseEnvelope(value: unknown): CloudflareEnvelope | null {
-  if (!isRecord(value) || !exactKeys(value, ['errors', 'messages', 'result', 'success']) ||
-    typeof value.success !== 'boolean' || !(value.errors === null || Array.isArray(value.errors)) ||
-    !(value.messages === null || Array.isArray(value.messages))) return null;
+function parseEnvelope<Value>(value: Value): CloudflareEnvelope | null {
+  const candidate = v.safeParse(providerEnvelopeSchema, value);
+  if (!candidate.success) return null;
   return {
-    errors: value.errors,
-    messages: value.messages,
-    result: value.result,
-    success: value.success,
+    errors: candidate.output.errors,
+    messages: candidate.output.messages,
+    result: candidate.output.result,
+    success: candidate.output.success,
   };
 }
 
-function successResult(value: unknown): unknown | null {
+function successResult<Value>(value: Value): BoundaryValue | null {
   const envelope = parseEnvelope(value);
   return envelope && envelope.success && isEmptyProviderList(envelope.errors) &&
     isEmptyProviderList(envelope.messages) ? envelope.result : null;
 }
 
-function absentEnvelope(value: unknown): boolean {
+function absentEnvelope<Value>(value: Value): boolean {
   const envelope = parseEnvelope(value);
   return Boolean(envelope && !envelope.success && providerErrors(envelope.errors) &&
     isEmptyProviderList(envelope.messages) && envelope.result === null);
 }
 
-function rejectStatus(
+function rejectStatus<Value>(
   status: number,
-  value: unknown,
+  value: Value,
   stage: CloudflareUninstallWorkerLifecycleStage,
   submissions: readonly CloudflareUninstallWorkerLifecycleSubmission[] = [],
 ): never {
@@ -1324,9 +1720,9 @@ function rejectStatus(
   fail('provider_unknown', stage, 'unknown', submissions);
 }
 
-function rawResultId(value: unknown, pattern: RegExp): string | null {
-  if (!isRecord(value) || !isRecord(value.result) || typeof value.result.id !== 'string') return null;
-  return pattern.test(value.result.id) ? value.result.id : null;
+function rawResultId<Value>(value: Value, pattern: RegExp): string | null {
+  const candidate = v.safeParse(rawResultSchema, value);
+  return candidate.success && pattern.test(candidate.output.result.id) ? candidate.output.result.id : null;
 }
 
 function versionResponseMaximum(recovery: UninstallWorkerVersionRecoveryRecord): number {
@@ -1390,7 +1786,7 @@ export async function submitUninstallWorkerVersionMutation(
   const surfaced = versionId === null ? [] : [versionSubmission(recovery, versionId)];
   if (![200, 201].includes(response.status)) rejectStatus(response.status, response.value, 'version_submit', surfaced);
   if (versionId === null) fail('provider_mismatch', 'version_submit', 'unknown');
-  const submission = surfaced[0];
+  const submission = versionSubmission(recovery, versionId);
   const result = successResult(response.value);
   if (!isRecord(result) || result.id !== versionId) {
     fail('provider_mismatch', 'version_submit', 'submitted', [submission]);
@@ -1398,48 +1794,17 @@ export async function submitUninstallWorkerVersionMutation(
   return submission;
 }
 
-function safeIsoDate(value: unknown): value is string {
-  return typeof value === 'string' && value.length >= 20 && value.length <= 40 && Number.isFinite(Date.parse(value));
+function safeIsoDate<Value>(value: Value): value is Value & string {
+  return v.is(isoDateSchema, value);
 }
 
-function exactVersionAnnotations(value: unknown, correlationTag: string): boolean {
-  if (!isRecord(value)) return false;
-  if (Object.keys(value).some((key) => !['workers/message', 'workers/tag', 'workers/triggered_by'].includes(key))) {
-    return false;
-  }
-  return value['workers/tag'] === correlationTag && ['workers/message', 'workers/triggered_by'].every((key) => (
-    value[key] === undefined || (
-      typeof value[key] === 'string' && value[key].length > 0 && value[key].length <= 256
-    )
-  ));
+function exactVersionAnnotations<Value>(value: Value, correlationTag: string): boolean {
+  const candidate = v.safeParse(versionAnnotationsSchema, value);
+  return candidate.success && candidate.output['workers/tag'] === correlationTag;
 }
 
-function exactDefaultWorkerExport(value: unknown): boolean {
-  if (!isRecord(value) || value.type !== 'worker') return false;
-  if (Object.keys(value).some((key) => !['cache', 'state', 'type'].includes(key))) return false;
-  if (!(value.state === undefined || value.state === 'created')) return false;
-  return value.cache === undefined || (
-    isRecord(value.cache) && exactKeys(value.cache, ['enabled']) && value.cache.enabled === false
-  );
-}
-
-function exactActiveExports(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const keys = Object.keys(value).sort();
-  if (!(keys.length === 1 || (keys.length === 2 && keys[0] === 'AdminState' && keys[1] === 'default'))) {
-    return false;
-  }
-  const adminState = value.AdminState;
-  if (
-    !isRecord(adminState) ||
-    !(
-      exactKeys(adminState, ['storage', 'type']) ||
-      exactKeys(adminState, ['state', 'storage', 'type'])
-    ) ||
-    adminState.type !== 'durable-object' || adminState.storage !== 'sqlite' ||
-    !(adminState.state === undefined || adminState.state === 'created')
-  ) return false;
-  return value.default === undefined || exactDefaultWorkerExport(value.default);
+function exactActiveExports<Value>(value: Value): boolean {
+  return v.is(activeExportsSchema, value);
 }
 
 /**
@@ -1448,15 +1813,8 @@ function exactActiveExports(value: unknown): boolean {
  * stronger retirement proof than absence. Either shape is accepted; a live
  * `AdminState` export is not.
  */
-function exactRetiredExports(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  if (Object.keys(value).some((key) => !['AdminState', 'default'].includes(key))) return false;
-  if (Object.hasOwn(value, 'AdminState')) {
-    const adminState = value.AdminState;
-    if (!isRecord(adminState) || !exactKeys(adminState, ['state', 'type']) ||
-      adminState.type !== 'durable-object' || adminState.state !== 'deleted') return false;
-  }
-  return !Object.hasOwn(value, 'default') || exactDefaultWorkerExport(value.default);
+function exactRetiredExports<Value>(value: Value): boolean {
+  return v.is(retiredExportsSchema, value);
 }
 
 const EXPORT_RECONCILIATION_KEYS = Object.freeze([
@@ -1471,28 +1829,28 @@ const EXPORT_RECONCILIATION_KEYS = Object.freeze([
   'warnings',
 ] as const);
 
-function validExportReconciliation(value: unknown, stage: UninstallWorkerVersionStage): boolean {
-  if (!isRecord(value) || !exactKeys(value, EXPORT_RECONCILIATION_KEYS)) return false;
-  for (const key of EXPORT_RECONCILIATION_KEYS) {
-    if (!Array.isArray(value[key])) return false;
-  }
+function validExportReconciliation(
+  value: v.InferOutput<typeof exportReconciliationSchema>,
+  stage: UninstallWorkerVersionStage,
+): boolean {
   if (stage === 'retirement') {
     return canonicalEqual(value.deleted, ['AdminState']) &&
       EXPORT_RECONCILIATION_KEYS.filter((key) => key !== 'deleted').every(
-        (key) => (value[key] as unknown[]).length === 0,
+        (key) => value[key].length === 0,
       );
   }
-  if ((value.deleted as unknown[]).length !== 0) return false;
-  const allowedAdminState = (entry: unknown): boolean => entry === 'AdminState';
+  if (value.deleted.length !== 0) return false;
+  const allowedAdminState = (entry: BoundaryValue): boolean => entry === 'AdminState';
   return ['created', 'updated'].every((key) => (
-    (value[key] as unknown[]).length <= 1 && (value[key] as unknown[]).every(allowedAdminState)
+    value[key === 'created' ? 'created' : 'updated'].length <= 1 &&
+    value[key === 'created' ? 'created' : 'updated'].every(allowedAdminState)
   )) && EXPORT_RECONCILIATION_KEYS.filter(
     (key) => !['created', 'deleted', 'updated'].includes(key),
-  ).every((key) => (value[key] as unknown[]).length === 0);
+  ).every((key) => value[key].length === 0);
 }
 
-async function exactVersionResult(
-  result: unknown,
+async function exactVersionResult<Input>(
+  result: Input,
   recovery: UninstallWorkerVersionRecoveryRecord,
   versionId: string,
   requireModuleContent = false,
@@ -1500,58 +1858,29 @@ async function exactVersionResult(
   // Live version read-back (2026-08-23) also carries env, source, and urls, and
   // omits compatibility_flags and exports_reconciliation when they are empty or
   // not yet reconciled. The uninstall Workers carry no assets at any stage.
-  if (!isRecord(result) || Object.keys(result).some((key) => ![
-    'annotations', 'bindings', 'compatibility_date', 'compatibility_flags', 'created_on', 'env', 'exports',
-    'exports_reconciliation', 'id', 'limits', 'main_module', 'modules', 'number', 'placement', 'source',
-    'startup_time_ms', 'urls', 'usage_model',
-  ].includes(key))) return false;
+  const candidate = v.safeParse(versionResultSchema, result);
+  if (!candidate.success) return false;
+  const parsedResult = candidate.output;
   if (
-    Object.hasOwn(result, 'assets') || Object.hasOwn(result, 'migrations') ||
-    Object.hasOwn(result, 'migration_tag') || result.id !== versionId || !safeIsoDate(result.created_on) ||
-    typeof result.number !== 'number' || !Number.isSafeInteger(result.number) || result.number < 1 ||
-    result.compatibility_date !== recovery.compatibilityDate ||
-    !(result.compatibility_flags === undefined ||
-      (Array.isArray(result.compatibility_flags) && result.compatibility_flags.length === 0)) ||
-    result.main_module !== recovery.mainModule ||
-    !exactVersionAnnotations(result.annotations, recovery.correlationTag) ||
+    parsedResult.id !== versionId || parsedResult.compatibility_date !== recovery.compatibilityDate ||
+    parsedResult.main_module !== recovery.mainModule ||
+    !exactVersionAnnotations(parsedResult.annotations, recovery.correlationTag) ||
     // Declarative exports are reconciled by the deployment, so the field is
     // absent on a version that has not been deployed yet. The exact `exports`
     // assertion below carries the same evidence and is always present.
-    !(result.exports_reconciliation === undefined ||
-      validExportReconciliation(result.exports_reconciliation, recovery.stage)) ||
-    // A version with no bindings omits the field entirely (live 2026-08-23).
-    !(result.bindings === undefined || Array.isArray(result.bindings)) ||
-    !Array.isArray(result.modules) || result.modules.length !== recovery.modules.length
+    !(parsedResult.exports_reconciliation === undefined ||
+      validExportReconciliation(parsedResult.exports_reconciliation, recovery.stage)) ||
+    parsedResult.modules.length !== recovery.modules.length
   ) return false;
-  if (result.source !== undefined && result.source !== 'api') return false;
-  if (result.urls !== undefined && !Array.isArray(result.urls)) return false;
-  if (result.env !== undefined && !isRecord(result.env)) return false;
-  if (recovery.stage === 'cleanup' ? !exactActiveExports(result.exports) : !exactRetiredExports(result.exports)) {
+  if (recovery.stage === 'cleanup'
+    ? !exactActiveExports(parsedResult.exports)
+    : !exactRetiredExports(parsedResult.exports)) {
     return false;
   }
-  if (result.usage_model !== undefined && !(
-    typeof result.usage_model === 'string' && result.usage_model.length > 0 && result.usage_model.length <= 128
-  )) return false;
-  if (result.startup_time_ms !== undefined && !(
-    typeof result.startup_time_ms === 'number' && Number.isFinite(result.startup_time_ms) &&
-    result.startup_time_ms >= 0
-  )) return false;
-  if (result.limits !== undefined && !(
-    isRecord(result.limits) && Object.keys(result.limits).every((key) => key === 'cpu_ms') &&
-    (result.limits.cpu_ms === undefined || (
-      typeof result.limits.cpu_ms === 'number' && Number.isSafeInteger(result.limits.cpu_ms) &&
-      result.limits.cpu_ms >= 0
-    ))
-  )) return false;
-  if (result.placement !== undefined && !(
-    isRecord(result.placement) && Object.keys(result.placement).every((key) => ['hint', 'mode'].includes(key)) &&
-    (result.placement.mode === undefined || typeof result.placement.mode === 'string') &&
-    (result.placement.hint === undefined || typeof result.placement.hint === 'string')
-  )) return false;
 
-  const bindings = new Map<string, Record<string, unknown>>();
-  for (const binding of (result.bindings ?? []) as readonly unknown[]) {
-    if (!isRecord(binding) || typeof binding.name !== 'string' || bindings.has(binding.name)) return false;
+  const bindings = new Map<string, v.InferOutput<typeof providerVersionBindingSchema>>();
+  for (const binding of parsedResult.bindings ?? []) {
+    if (bindings.has(binding.name)) return false;
     bindings.set(binding.name, binding);
   }
   if (recovery.stage === 'retirement') {
@@ -1565,28 +1894,27 @@ async function exactVersionResult(
       (adminState.namespace_id !== undefined && adminState.namespace_id !== recovery.namespaceId)
     ) return false;
     const nonce = bindings.get('ANKKA_UNINSTALL_NONCE');
-    if (!nonce || !exactKeys(nonce, ['name', 'type']) || nonce.type !== 'secret_text') return false;
+    if (nonce?.name !== 'ANKKA_UNINSTALL_NONCE' || nonce.type !== 'secret_text') return false;
     for (const expected of recovery.contract.variableValueHashes) {
       const binding = bindings.get(expected.name);
       if (
-        !binding || !exactKeys(binding, ['name', 'text', 'type']) || binding.type !== 'plain_text' ||
-        typeof binding.text !== 'string' || await sha256(binding.text) !== expected.valueSha256
+        binding?.name !== expected.name || binding.type !== 'plain_text' ||
+        await sha256(binding.text) !== expected.valueSha256
       ) return false;
     }
   }
 
-  const returnedModules = new Map<string, Record<string, unknown>>();
-  for (const module of result.modules) {
-    if (!isRecord(module) || typeof module.name !== 'string' || returnedModules.has(module.name)) return false;
+  const returnedModules = new Map<string, v.InferOutput<typeof providerVersionModuleSchema>>();
+  for (const module of parsedResult.modules) {
+    if (returnedModules.has(module.name)) return false;
     returnedModules.set(module.name, module);
   }
   if (returnedModules.size !== recovery.modules.length) return false;
   for (const expected of recovery.modules) {
     const module = returnedModules.get(expected.name);
     if (
-      !module || Object.keys(module).some((key) => !['content_base64', 'content_type', 'name'].includes(key)) ||
-      !Object.hasOwn(module, 'content_type') || module.content_type !== expected.contentType ||
-      (requireModuleContent && typeof module.content_base64 !== 'string')
+      !module || module.content_type !== expected.contentType ||
+      (requireModuleContent && module.content_base64 === undefined)
     ) return false;
     if (module.content_base64 !== undefined) {
       const bytes = strictBase64Bytes(module.content_base64, expected.byteLength);
@@ -1624,58 +1952,45 @@ async function verifyUninstallWorkerVersionSubmissionWithMode(
 }
 
 /** Validate the exact provider version. Returned module bytes are optional, but exact when present. */
-export async function verifyUninstallWorkerVersionSubmission(
-  recovery: UninstallWorkerVersionRecoveryRecord,
-  submission: UninstallWorkerVersionSubmission,
+export async function verifyUninstallWorkerVersionSubmission<RecoveryInput, SubmissionInput>(
+  recoveryInput: RecoveryInput,
+  submissionInput: SubmissionInput,
   callInput: CloudflareDirectUploadCall,
 ): Promise<UninstallWorkerVersionSubmission> {
+  const recovery = await parseUninstallWorkerVersionRecoveryRecord(recoveryInput);
+  const submission = parseCloudflareUninstallWorkerLifecycleSubmission(submissionInput);
+  if (!recovery || !submission || submission.kind !== 'uninstall_worker_version') {
+    fail('invalid_input', 'validate', 'not_sent');
+  }
   return verifyUninstallWorkerVersionSubmissionWithMode(recovery, submission, callInput, false);
 }
 
-function parseVersionListPage(
-  value: unknown,
+type VersionListItem = v.InferOutput<typeof versionListItemSchema>;
+
+function parseVersionListPage<Value>(
+  value: Value,
   expectedPage: number,
-): { readonly items: readonly unknown[]; readonly totalCount: number; readonly totalPages: number } | null {
-  if (!isRecord(value) || !exactKeys(value, ['errors', 'messages', 'result', 'result_info', 'success']) ||
-    value.success !== true || !isEmptyProviderList(value.errors) || !isEmptyProviderList(value.messages) ||
-    !Array.isArray(value.result) || !isRecord(value.result_info) ||
-    // Live (2026-08-23): the version list omits total_pages entirely. When it
-    // is absent the page count is derived from the totals actually reported.
-    !exactKeys(value.result_info, Object.hasOwn(value.result_info, 'total_pages')
-      ? ['count', 'page', 'per_page', 'total_count', 'total_pages']
-      : ['count', 'page', 'per_page', 'total_count'])) return null;
-  const info = value.result_info;
+): { readonly items: readonly VersionListItem[]; readonly totalCount: number; readonly totalPages: number } | null {
+  const candidate = v.safeParse(versionListPageSchema, value);
+  if (!candidate.success || !isEmptyProviderList(candidate.output.errors) ||
+    !isEmptyProviderList(candidate.output.messages)) return null;
+  const info = candidate.output.result_info;
   if (
-    info.page !== expectedPage || info.per_page !== VERSION_PAGE_SIZE || info.count !== value.result.length ||
-    typeof info.count !== 'number' || !Number.isSafeInteger(info.count) || info.count < 0 ||
-    info.count > VERSION_PAGE_SIZE || typeof info.total_count !== 'number' ||
-    !Number.isSafeInteger(info.total_count) || info.total_count < 0 ||
-    info.total_count > VERSION_PAGE_SIZE * MAX_VERSION_PAGES ||
-    (info.total_pages !== undefined && (typeof info.total_pages !== 'number' ||
-      !Number.isSafeInteger(info.total_pages) || info.total_pages < 0 || info.total_pages > MAX_VERSION_PAGES))
+    info.page !== expectedPage || info.count !== candidate.output.result.length
   ) return null;
   const calculated = info.total_count === 0 ? 0 : Math.ceil(info.total_count / VERSION_PAGE_SIZE);
-  const totalPages = info.total_pages === undefined ? calculated : info.total_pages as number;
+  const totalPages = info.total_pages ?? calculated;
   if (!(
     (info.total_count === 0 && (totalPages === 0 || totalPages === 1) && expectedPage === 1) ||
     (info.total_count > 0 && totalPages === calculated)
   )) return null;
-  return { items: value.result, totalCount: info.total_count, totalPages };
+  return { items: candidate.output.result, totalCount: info.total_count, totalPages };
 }
 
-function versionListItem(value: unknown): { readonly id: string; readonly tag: string | null } | null {
-  if (!isRecord(value) || typeof value.id !== 'string' || !UUID.test(value.id)) return null;
-  if (Object.keys(value).some((key) => ![
-    'annotations', 'assets', 'bindings', 'compatibility_date', 'compatibility_flags', 'created_on',
-    'exports', 'exports_reconciliation', 'id', 'limits', 'main_module', 'modules', 'number',
-    'placement', 'startup_time_ms', 'usage_model',
-  ].includes(key))) return null;
+function versionListItem(value: VersionListItem) {
   if (value.annotations === undefined) return { id: value.id, tag: null };
-  if (!isRecord(value.annotations) || Object.keys(value.annotations).some(
-    (key) => !['workers/message', 'workers/tag', 'workers/triggered_by'].includes(key),
-  )) return null;
   const tag = value.annotations['workers/tag'];
-  return tag === undefined || typeof tag === 'string' ? { id: value.id, tag: tag ?? null } : null;
+  return { id: value.id, tag: tag ?? null };
 }
 
 /** Fully paginate versions and recover only one exact correlation match. */
@@ -1709,23 +2024,24 @@ export async function inspectUninstallWorkerVersionRecovery(
     }
     for (const raw of parsed.items) {
       const item = versionListItem(raw);
-      if (!item) fail('provider_mismatch', 'version_recovery', 'unknown');
       if (seenIds.has(item.id)) fail('recovery_ambiguous', 'version_recovery', 'unknown');
       seenIds.add(item.id);
       if (item.tag === recovery.correlationTag) matches.push(item.id);
     }
     observed += parsed.items.length;
-    const last = (totalPages ?? 0) === 0 ? 1 : totalPages as number;
+    const last = (totalPages ?? 0) === 0 ? 1 : totalPages ?? 1;
     if (page === last) break;
   }
   if (totalCount === null || observed !== totalCount) fail('provider_mismatch', 'version_recovery', 'unknown');
   if (matches.length === 0) return null;
   if (matches.length !== 1) fail('recovery_ambiguous', 'version_recovery', 'unknown');
-  const submission = versionSubmission(recovery, matches[0]);
+  const versionId = matches.at(0);
+  if (versionId === undefined) fail('provider_mismatch', 'version_recovery', 'unknown');
+  const submission = versionSubmission(recovery, versionId);
   return await verifyUninstallWorkerVersionSubmission(recovery, submission, callInput);
 }
 
-function deploymentSemanticCommitment(input: PrepareUninstallWorkerDeploymentInput): Record<string, unknown> {
+function deploymentSemanticCommitment(input: PrepareUninstallWorkerDeploymentInput): BoundaryObject {
   return {
     accountId: input.accountId,
     stage: input.stage,
@@ -1740,6 +2056,22 @@ function deploymentCorrelationTag(stage: UninstallWorkerDeploymentStage, request
   return `ankka-un-d-${stage}-sha256:${requestHash}`;
 }
 
+function deploymentBody(
+  correlationTag: string,
+  versionId: string,
+): UninstallWorkerDeploymentMutationIntent['body'] {
+  const version: { readonly percentage: 100; readonly version_id: string } = Object.freeze({
+    percentage: 100,
+    version_id: versionId,
+  });
+  const versions: readonly [{ readonly percentage: 100; readonly version_id: string }] = Object.freeze([version]);
+  return Object.freeze({
+    annotations: Object.freeze({ 'workers/message': correlationTag }),
+    strategy: 'percentage',
+    versions,
+  });
+}
+
 /**
  * Prepare a journal-safe deployment intent. `restore_clean` uses the persisted
  * pre-uninstall clean version ID, but its correlation is unique to this exact
@@ -1748,93 +2080,55 @@ function deploymentCorrelationTag(stage: UninstallWorkerDeploymentStage, request
 export async function prepareUninstallWorkerDeploymentMutation(
   input: PrepareUninstallWorkerDeploymentInput,
 ): Promise<UninstallWorkerDeploymentMutationIntent> {
-  if (
-    !isRecord(input) || !exactKeys(input, [
-      'accountId', 'stage', 'uninstallCycleId', 'versionId', 'workerId', 'workerName',
-    ]) || !validIdentity(input) ||
-    !['cleanup', 'retirement', 'restore_clean'].includes(input.stage) || !UUID.test(input.versionId)
-  ) fail('invalid_input', 'validate', 'not_sent');
-  const requestHash = await sha256(canonicalJson(deploymentSemanticCommitment(input)));
-  const correlationTag = deploymentCorrelationTag(input.stage, requestHash);
+  const candidate = v.safeParse(prepareDeploymentInputSchema, input);
+  if (!candidate.success) fail('invalid_input', 'validate', 'not_sent');
+  const parsedInput = candidate.output;
+  const requestHash = await sha256(canonicalJson(deploymentSemanticCommitment(parsedInput)));
+  const correlationTag = deploymentCorrelationTag(parsedInput.stage, requestHash);
+  const body = deploymentBody(correlationTag, parsedInput.versionId);
   return Object.freeze({
     kind: 'uninstall_deployment',
-    stage: input.stage,
-    accountId: input.accountId,
-    workerName: input.workerName,
-    workerId: input.workerId,
-    uninstallCycleId: input.uninstallCycleId,
-    versionId: input.versionId,
+    stage: parsedInput.stage,
+    accountId: parsedInput.accountId,
+    workerName: parsedInput.workerName,
+    workerId: parsedInput.workerId,
+    uninstallCycleId: parsedInput.uninstallCycleId,
+    versionId: parsedInput.versionId,
     requestHash,
     correlationTag,
-    body: Object.freeze({
-      annotations: Object.freeze({ 'workers/message': correlationTag }),
-      strategy: 'percentage',
-      versions: Object.freeze([
-        Object.freeze({ percentage: 100 as const, version_id: input.versionId }),
-      ]) as readonly [{ readonly percentage: 100; readonly version_id: string }],
-    }),
+    body,
   });
 }
 
 async function validDeploymentIntent(intent: UninstallWorkerDeploymentMutationIntent): Promise<boolean> {
-  if (
-    !isRecord(intent) || !exactKeys(intent, [
-      'accountId', 'body', 'correlationTag', 'kind', 'requestHash', 'stage', 'uninstallCycleId',
-      'versionId', 'workerId', 'workerName',
-    ]) || intent.kind !== 'uninstall_deployment' || !validIdentity(intent) ||
-    !['cleanup', 'retirement', 'restore_clean'].includes(intent.stage) || !UUID.test(intent.versionId) ||
-    !SHA256.test(intent.requestHash) ||
+  if (!v.is(deploymentIntentSchema, intent) ||
     intent.correlationTag !== deploymentCorrelationTag(intent.stage, intent.requestHash) ||
-    !canonicalEqual(intent.body, {
-      annotations: { 'workers/message': intent.correlationTag },
-      strategy: 'percentage',
-      versions: [{ percentage: 100, version_id: intent.versionId }],
-    })
+    intent.body.annotations['workers/message'] !== intent.correlationTag ||
+    intent.body.versions[0].version_id !== intent.versionId
   ) return false;
   return await sha256(canonicalJson(deploymentSemanticCommitment(intent))) === intent.requestHash;
 }
 
 /** Pure, exact journal parser for a semantic deployment mutation intent. */
-export async function parseUninstallWorkerDeploymentMutationIntent(
-  value: unknown,
+export async function parseUninstallWorkerDeploymentMutationIntent<Input>(
+  value: Input,
 ): Promise<UninstallWorkerDeploymentMutationIntent | null> {
   try {
-    if (!isJournalObject(value) || !exactKeys(value, [
-      'accountId', 'body', 'correlationTag', 'kind', 'requestHash', 'stage', 'uninstallCycleId',
-      'versionId', 'workerId', 'workerName',
-    ]) || value.kind !== 'uninstall_deployment' || !exactSubmissionIdentity(value) ||
-      (value.stage !== 'cleanup' && value.stage !== 'retirement' && value.stage !== 'restore_clean') ||
-      typeof value.versionId !== 'string' || !UUID.test(value.versionId) ||
-      typeof value.requestHash !== 'string' || !SHA256.test(value.requestHash) ||
-      value.correlationTag !== deploymentCorrelationTag(value.stage, value.requestHash) ||
-      !isJournalObject(value.body) || !exactKeys(value.body, ['annotations', 'strategy', 'versions']) ||
-      !isJournalObject(value.body.annotations) ||
-      !exactKeys(value.body.annotations, ['workers/message']) ||
-      value.body.annotations['workers/message'] !== value.correlationTag ||
-      value.body.strategy !== 'percentage' || !Array.isArray(value.body.versions) ||
-      value.body.versions.length !== 1 || !isJournalObject(value.body.versions[0]) ||
-      !exactKeys(value.body.versions[0], ['percentage', 'version_id']) ||
-      value.body.versions[0].percentage !== 100 || value.body.versions[0].version_id !== value.versionId ||
-      !await validDeploymentIntent(value as unknown as UninstallWorkerDeploymentMutationIntent)
-    ) return null;
-    const parsed = Object.freeze({
+    const candidate = v.safeParse(deploymentIntentSchema, value);
+    if (!candidate.success) return null;
+    const input = candidate.output;
+    const body = deploymentBody(input.correlationTag, input.versionId);
+    const parsed: UninstallWorkerDeploymentMutationIntent = Object.freeze({
       kind: 'uninstall_deployment',
-      stage: value.stage,
-      accountId: value.accountId,
-      workerName: value.workerName,
-      workerId: value.workerId,
-      uninstallCycleId: value.uninstallCycleId,
-      versionId: value.versionId,
-      requestHash: value.requestHash,
-      correlationTag: value.correlationTag,
-      body: Object.freeze({
-        annotations: Object.freeze({ 'workers/message': value.correlationTag }),
-        strategy: 'percentage',
-        versions: Object.freeze([Object.freeze({
-          percentage: 100 as const,
-          version_id: value.versionId,
-        })]) as readonly [{ readonly percentage: 100; readonly version_id: string }],
-      }),
+      stage: input.stage,
+      accountId: input.accountId,
+      workerName: input.workerName,
+      workerId: input.workerId,
+      uninstallCycleId: input.uninstallCycleId,
+      versionId: input.versionId,
+      requestHash: input.requestHash,
+      correlationTag: input.correlationTag,
+      body,
     });
     return await validDeploymentIntent(parsed) ? parsed : null;
   } catch {
@@ -1864,10 +2158,7 @@ function validDeploymentSubmission(
   intent: UninstallWorkerDeploymentMutationIntent,
   submission: UninstallWorkerDeploymentSubmission,
 ): boolean {
-  return isRecord(submission) && exactKeys(submission, [
-    'accountId', 'correlationTag', 'deploymentId', 'kind', 'requestHash', 'stage',
-    'uninstallCycleId', 'versionId', 'workerId', 'workerName',
-  ]) && submission.kind === 'uninstall_worker_deployment' && submission.stage === intent.stage &&
+  return v.is(deploymentSubmissionSchema, submission) && submission.stage === intent.stage &&
     submission.accountId === intent.accountId && submission.workerName === intent.workerName &&
     submission.workerId === intent.workerId && submission.uninstallCycleId === intent.uninstallCycleId &&
     submission.versionId === intent.versionId && submission.requestHash === intent.requestHash &&
@@ -1892,7 +2183,7 @@ export async function submitUninstallWorkerDeploymentMutation(
     rejectStatus(response.status, response.value, 'deployment_submit', surfaced);
   }
   if (deploymentId === null) fail('provider_mismatch', 'deployment_submit', 'unknown');
-  const submission = surfaced[0];
+  const submission = deploymentSubmission(intent, deploymentId);
   const result = successResult(response.value);
   if (!isRecord(result) || result.id !== deploymentId) {
     fail('provider_mismatch', 'deployment_submit', 'submitted', [submission]);
@@ -1900,53 +2191,38 @@ export async function submitUninstallWorkerDeploymentMutation(
   return submission;
 }
 
-function deploymentAnnotations(value: unknown): Record<string, unknown> | null {
-  if (!isRecord(value) || Object.keys(value).some(
-    (key) => !['workers/message', 'workers/triggered_by'].includes(key),
-  )) return null;
-  for (const entry of Object.values(value)) {
-    if (!(typeof entry === 'string' && entry.length > 0 && entry.length <= 256)) return null;
-  }
-  return value;
+type DeploymentObservation = v.InferOutput<typeof deploymentObservationSchema>;
+
+function deploymentAnnotations<Value>(
+  value: Value,
+): v.InferOutput<typeof deploymentAnnotationsSchema> | null {
+  const candidate = v.safeParse(deploymentAnnotationsSchema, value);
+  return candidate.success ? candidate.output : null;
 }
 
-function validDeploymentShape(value: unknown): value is Record<string, unknown> {
-  if (!isRecord(value) || Object.keys(value).some((key) => ![
-    'annotations', 'author_email', 'created_on', 'id', 'source', 'strategy', 'versions',
-  ].includes(key))) return false;
-  if (
-    typeof value.id !== 'string' || !UUID.test(value.id) || !safeIsoDate(value.created_on) ||
-    value.source !== 'api' || value.strategy !== 'percentage' ||
-    (value.author_email !== undefined && !(
-      typeof value.author_email === 'string' && value.author_email.length > 0 && value.author_email.length <= 320
-    )) ||
-    (value.annotations !== undefined && deploymentAnnotations(value.annotations) === null) ||
-    !Array.isArray(value.versions) || value.versions.length === 0 || value.versions.length > 100
-  ) return false;
+function parseDeploymentObservation<Value>(value: Value): DeploymentObservation | null {
+  const candidate = v.safeParse(deploymentObservationSchema, value);
+  if (!candidate.success || !safeIsoDate(candidate.output.created_on)) return null;
   let percentage = 0;
   const versions = new Set<string>();
-  for (const version of value.versions) {
-    if (
-      !isRecord(version) || !exactKeys(version, ['percentage', 'version_id']) ||
-      typeof version.version_id !== 'string' || !UUID.test(version.version_id) || versions.has(version.version_id) ||
-      typeof version.percentage !== 'number' || !Number.isFinite(version.percentage) ||
-      version.percentage <= 0 || version.percentage > 100
-    ) return false;
+  for (const version of candidate.output.versions) {
+    if (versions.has(version.version_id) || version.percentage <= 0) return null;
     versions.add(version.version_id);
     percentage += version.percentage;
   }
-  return percentage === 100;
+  return percentage === 100 ? candidate.output : null;
 }
 
-function exactDeployment(
-  value: unknown,
+function exactDeployment<Value>(
+  value: Value,
   intent: UninstallWorkerDeploymentMutationIntent,
   deploymentId: string,
 ): boolean {
-  if (!validDeploymentShape(value) || value.id !== deploymentId) return false;
-  const annotations = deploymentAnnotations(value.annotations);
+  const deployment = parseDeploymentObservation(value);
+  if (!deployment || deployment.id !== deploymentId) return false;
+  const annotations = deploymentAnnotations(deployment.annotations);
   if (!annotations || annotations['workers/message'] !== intent.correlationTag) return false;
-  return canonicalEqual(value.versions, [{ percentage: 100, version_id: intent.versionId }]);
+  return canonicalEqual(deployment.versions, [{ percentage: 100, version_id: intent.versionId }]);
 }
 
 export async function verifyUninstallWorkerDeploymentSubmission(
@@ -1973,10 +2249,17 @@ export async function verifyUninstallWorkerDeploymentSubmission(
   return submission;
 }
 
-function deploymentList(value: unknown): readonly unknown[] | null {
+function deploymentList<Value>(value: Value): readonly DeploymentObservation[] | null {
   const result = successResult(value);
-  return isRecord(result) && exactKeys(result, ['deployments']) && Array.isArray(result.deployments) &&
-    result.deployments.length <= MAX_DEPLOYMENTS ? result.deployments : null;
+  const candidate = v.safeParse(deploymentListResultSchema, result);
+  if (!candidate.success) return null;
+  const deployments: DeploymentObservation[] = [];
+  for (const raw of candidate.output.deployments) {
+    const parsed = parseDeploymentObservation(raw);
+    if (!parsed) return null;
+    deployments.push(parsed);
+  }
+  return Object.freeze(deployments);
 }
 
 async function readDeploymentList(
@@ -1984,7 +2267,7 @@ async function readDeploymentList(
   call: PreparedCall,
   stage: 'deployment_recovery' | 'deployment_active_verify',
   submissions: readonly CloudflareUninstallWorkerLifecycleSubmission[] = [],
-): Promise<readonly unknown[]> {
+): Promise<readonly DeploymentObservation[]> {
   const response = await requestJson(
     call,
     stage,
@@ -1998,8 +2281,7 @@ async function readDeploymentList(
   if (!deployments) fail('provider_mismatch', stage, 'unknown', submissions);
   const seen = new Set<string>();
   for (const deployment of deployments) {
-    if (!validDeploymentShape(deployment)) fail('provider_mismatch', stage, 'unknown', submissions);
-    const id = String(deployment.id);
+    const id = deployment.id;
     if (seen.has(id)) fail('recovery_ambiguous', stage, 'unknown', submissions);
     seen.add(id);
   }
@@ -2014,12 +2296,14 @@ export async function inspectUninstallWorkerDeploymentRecovery(
   const call = prepareCall(callInput);
   const deployments = await readDeploymentList(intent, call, 'deployment_recovery');
   const matches = deployments.filter((deployment) => (
-    deploymentAnnotations((deployment as Record<string, unknown>).annotations)?.['workers/message'] ===
+    deploymentAnnotations(deployment.annotations)?.['workers/message'] ===
       intent.correlationTag
   ));
   if (matches.length === 0) return null;
   if (matches.length !== 1) fail('recovery_ambiguous', 'deployment_recovery', 'unknown');
-  const submission = deploymentSubmission(intent, String((matches[0] as Record<string, unknown>).id));
+  const match = matches[0];
+  if (!match) fail('provider_mismatch', 'deployment_recovery', 'unknown');
+  const submission = deploymentSubmission(intent, match.id);
   return await verifyUninstallWorkerDeploymentSubmission(intent, submission, callInput);
 }
 
@@ -2048,7 +2332,7 @@ export async function verifyUninstallWorkerDeploymentIsActive(
     fail('provider_mismatch', 'deployment_active_verify', 'submitted', [submission]);
   }
   const matches = deployments.filter((deployment) => (
-    deploymentAnnotations((deployment as Record<string, unknown>).annotations)?.['workers/message'] ===
+    deploymentAnnotations(deployment.annotations)?.['workers/message'] ===
       intent.correlationTag
   ));
   if (matches.length !== 1) {
@@ -2122,81 +2406,52 @@ export interface ProveAdminStateNamespaceRetiredInput {
   readonly retirementDeploymentSubmission: UninstallWorkerDeploymentSubmission;
 }
 
-function boundedNamespaceText(value: unknown, maximum: number): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= maximum && !CONTROL_CHARACTER.test(value);
-}
-
-function validNamespaceLocator(value: unknown): value is AdminStateDurableObjectNamespaceLocator {
-  return isRecord(value) && exactKeys(value, [
-    'accountId', 'className', 'namespaceId', 'namespaceName', 'storage', 'workerName',
-  ]) && typeof value.accountId === 'string' && ACCOUNT_ID.test(value.accountId) &&
-    typeof value.namespaceId === 'string' && ACCOUNT_ID.test(value.namespaceId) &&
-    boundedNamespaceText(value.namespaceName, 256) && typeof value.workerName === 'string' &&
-    WORKER_NAME.test(value.workerName) && value.className === 'AdminState' && value.storage === 'sqlite';
-}
-
 /** Pure, exact journal parser for the pre-retirement namespace presence proof. */
-export function parseAdminStateNamespacePresenceProof(
-  value: unknown,
+export function parseAdminStateNamespacePresenceProof<Input>(
+  value: Input,
 ): AdminStateNamespacePresenceProof | null {
   try {
-    if (!isJournalObject(value) || !exactKeys(value, [
-      'accountId', 'accountNamespaceCount', 'className', 'kind', 'namespaceId', 'namespaceName',
-      'snapshotSha256', 'storage', 'uninstallCycleId', 'workerId', 'workerName',
-    ]) || value.kind !== 'admin_state_namespace_presence' || !exactSubmissionIdentity(value) ||
-      typeof value.namespaceId !== 'string' || !ACCOUNT_ID.test(value.namespaceId) ||
-      !boundedNamespaceText(value.namespaceName, 256) || value.className !== 'AdminState' ||
-      value.storage !== 'sqlite' || typeof value.accountNamespaceCount !== 'number' ||
-      !Number.isSafeInteger(value.accountNamespaceCount) || value.accountNamespaceCount <= 0 ||
-      value.accountNamespaceCount > MAX_NAMESPACE_COUNT ||
-      typeof value.snapshotSha256 !== 'string' || !SHA256.test(value.snapshotSha256)
-    ) return null;
+    const candidate = v.safeParse(namespacePresenceProofSchema, value);
+    if (!candidate.success) return null;
+    const proof = candidate.output;
     return Object.freeze({
       kind: 'admin_state_namespace_presence',
-      accountId: value.accountId,
-      workerName: value.workerName,
-      workerId: value.workerId,
-      uninstallCycleId: value.uninstallCycleId,
-      namespaceId: value.namespaceId,
-      namespaceName: value.namespaceName,
+      accountId: proof.accountId,
+      workerName: proof.workerName,
+      workerId: proof.workerId,
+      uninstallCycleId: proof.uninstallCycleId,
+      namespaceId: proof.namespaceId,
+      namespaceName: proof.namespaceName,
       className: 'AdminState',
       storage: 'sqlite',
-      accountNamespaceCount: value.accountNamespaceCount,
-      snapshotSha256: value.snapshotSha256,
+      accountNamespaceCount: proof.accountNamespaceCount,
+      snapshotSha256: proof.snapshotSha256,
     });
   } catch {
     return null;
   }
 }
 
-export function parseAdminStateNamespaceRetirementProof(
-  value: unknown,
+export function parseAdminStateNamespaceRetirementProof<Input>(
+  value: Input,
 ): AdminStateNamespaceRetirementProof | null {
   try {
-    if (
-      !isJournalObject(value) || !exactKeys(value, [
-        'accountId', 'accountNamespaceCount', 'firstSnapshotSha256', 'kind', 'namespaceId',
-        'retirementVersionId', 'secondSnapshotSha256', 'uninstallCycleId', 'workerId', 'workerName',
-      ]) || value.kind !== 'admin_state_namespace_retirement' || !exactSubmissionIdentity(value) ||
-      typeof value.namespaceId !== 'string' || !ACCOUNT_ID.test(value.namespaceId) ||
-      typeof value.retirementVersionId !== 'string' || !UUID.test(value.retirementVersionId) ||
-      typeof value.accountNamespaceCount !== 'number' || !Number.isSafeInteger(value.accountNamespaceCount) ||
-      value.accountNamespaceCount < 0 || value.accountNamespaceCount > MAX_NAMESPACE_COUNT ||
-      typeof value.firstSnapshotSha256 !== 'string' || !SHA256.test(value.firstSnapshotSha256) ||
-      typeof value.secondSnapshotSha256 !== 'string' || !SHA256.test(value.secondSnapshotSha256) ||
-      value.firstSnapshotSha256 !== value.secondSnapshotSha256
-    ) return null;
+    const candidate = v.safeParse(namespaceRetirementProofSchema, value);
+    if (!candidate.success || candidate.output.firstSnapshotSha256 !== candidate.output.secondSnapshotSha256) {
+      return null;
+    }
+    const proof = candidate.output;
     return Object.freeze({
       kind: 'admin_state_namespace_retirement',
-      accountId: value.accountId,
-      workerName: value.workerName,
-      workerId: value.workerId,
-      uninstallCycleId: value.uninstallCycleId,
-      namespaceId: value.namespaceId,
-      retirementVersionId: value.retirementVersionId,
-      accountNamespaceCount: value.accountNamespaceCount,
-      firstSnapshotSha256: value.firstSnapshotSha256,
-      secondSnapshotSha256: value.secondSnapshotSha256,
+      accountId: proof.accountId,
+      workerName: proof.workerName,
+      workerId: proof.workerId,
+      uninstallCycleId: proof.uninstallCycleId,
+      namespaceId: proof.namespaceId,
+      retirementVersionId: proof.retirementVersionId,
+      accountNamespaceCount: proof.accountNamespaceCount,
+      firstSnapshotSha256: proof.firstSnapshotSha256,
+      secondSnapshotSha256: proof.secondSnapshotSha256,
     });
   } catch {
     return null;
@@ -2207,14 +2462,7 @@ async function validAdminStateNamespaceRetiredInput(
   input: ProveAdminStateNamespaceRetiredInput,
 ): Promise<boolean> {
   if (
-    !isRecord(input) || !exactKeys(input, [
-      'namespace', 'retirementDeploymentIntent', 'retirementDeploymentSubmission',
-      'retirementRecovery', 'retirementSubmission', 'uninstallCycleId', 'workerId',
-    ]) || !validNamespaceLocator(input.namespace) || typeof input.workerId !== 'string' ||
-    !WORKER_ID.test(input.workerId) || typeof input.uninstallCycleId !== 'string' ||
-    !UNINSTALL_CYCLE_ID.test(input.uninstallCycleId) ||
-    !isRecord(input.retirementRecovery) || !isRecord(input.retirementSubmission) ||
-    !isRecord(input.retirementDeploymentIntent) || !isRecord(input.retirementDeploymentSubmission) ||
+    !v.is(namespaceRetiredInputSchema, input) ||
     input.retirementRecovery.stage !== 'retirement' ||
     input.retirementRecovery.accountId !== input.namespace.accountId ||
     input.retirementRecovery.workerName !== input.namespace.workerName ||
@@ -2233,14 +2481,13 @@ async function validAdminStateNamespaceRetiredInput(
     validDeploymentSubmission(input.retirementDeploymentIntent, input.retirementDeploymentSubmission);
 }
 
-async function parseAdminStateNamespaceRetiredInput(
-  value: unknown,
+async function parseAdminStateNamespaceRetiredInput<Input>(
+  value: Input,
 ): Promise<ProveAdminStateNamespaceRetiredInput | null> {
   try {
-    if (!isRecord(value) || !await validAdminStateNamespaceRetiredInput(
-      value as unknown as ProveAdminStateNamespaceRetiredInput,
-    )) return null;
-    const input = value as unknown as ProveAdminStateNamespaceRetiredInput;
+    const candidate = v.safeParse(namespaceRetiredInputSchema, value);
+    if (!candidate.success) return null;
+    const input = candidate.output;
     const retirementRecovery = await parseUninstallWorkerVersionRecoveryRecord(input.retirementRecovery);
     const retirementSubmission = parseCloudflareUninstallWorkerLifecycleSubmission(input.retirementSubmission);
     const retirementDeploymentIntent = await parseUninstallWorkerDeploymentMutationIntent(
@@ -2254,14 +2501,14 @@ async function parseAdminStateNamespaceRetiredInput(
       retirementDeploymentIntent?.stage !== 'retirement' ||
       retirementDeploymentSubmission?.kind !== 'uninstall_worker_deployment' ||
       retirementDeploymentSubmission.stage !== 'retirement') return null;
-    const parsed = Object.freeze({
+    const parsed: ProveAdminStateNamespaceRetiredInput = Object.freeze({
       namespace: Object.freeze({
         accountId: input.namespace.accountId,
         namespaceId: input.namespace.namespaceId,
         namespaceName: input.namespace.namespaceName,
         workerName: input.namespace.workerName,
-        className: 'AdminState' as const,
-        storage: 'sqlite' as const,
+        className: 'AdminState',
+        storage: 'sqlite',
       }),
       workerId: input.workerId,
       uninstallCycleId: input.uninstallCycleId,
@@ -2292,44 +2539,29 @@ function retirementProofMatchesInput(
     proof.retirementVersionId === input.retirementSubmission.versionId;
 }
 
-function parseNamespacePage(
-  value: unknown,
+function parseNamespacePage<Input>(
+  value: Input,
   expectedPage: number,
 ): {
   readonly items: readonly DurableObjectNamespaceItem[];
   readonly totalCount: number;
   readonly totalPages: number;
 } | null {
-  if (!isRecord(value) || !exactKeys(value, ['errors', 'messages', 'result', 'result_info', 'success']) ||
-    value.success !== true || !isEmptyProviderList(value.errors) || !isEmptyProviderList(value.messages) ||
-    !Array.isArray(value.result) || !isRecord(value.result_info) ||
-    // Live (2026-08-23): the namespace list omits total_pages entirely. When it
-    // is absent the page count is derived from the totals actually reported.
-    !exactKeys(value.result_info, Object.hasOwn(value.result_info, 'total_pages')
-      ? ['count', 'page', 'per_page', 'total_count', 'total_pages']
-      : ['count', 'page', 'per_page', 'total_count'])) return null;
-  const info = value.result_info;
+  const candidate = v.safeParse(namespaceListPageSchema, value);
+  if (!candidate.success || !isEmptyProviderList(candidate.output.errors) ||
+    !isEmptyProviderList(candidate.output.messages)) return null;
+  const info = candidate.output.result_info;
   if (
-    info.page !== expectedPage || info.per_page !== NAMESPACE_PAGE_SIZE || info.count !== value.result.length ||
-    typeof info.count !== 'number' || !Number.isSafeInteger(info.count) || info.count < 0 ||
-    info.count > NAMESPACE_PAGE_SIZE || typeof info.total_count !== 'number' ||
-    !Number.isSafeInteger(info.total_count) || info.total_count < 0 || info.total_count > MAX_NAMESPACE_COUNT ||
-    (info.total_pages !== undefined && (typeof info.total_pages !== 'number' ||
-      !Number.isSafeInteger(info.total_pages) ||
-      info.total_pages < 0 || info.total_pages > MAX_NAMESPACE_PAGES))
+    info.page !== expectedPage || info.count !== candidate.output.result.length
   ) return null;
   const calculated = info.total_count === 0 ? 0 : Math.ceil(info.total_count / NAMESPACE_PAGE_SIZE);
-  const totalPages = info.total_pages === undefined ? calculated : info.total_pages as number;
+  const totalPages = info.total_pages ?? calculated;
   if (!(
     (info.total_count === 0 && (totalPages === 0 || totalPages === 1) && expectedPage === 1) ||
     (info.total_count > 0 && totalPages === calculated)
   )) return null;
   const items: DurableObjectNamespaceItem[] = [];
-  for (const item of value.result) {
-    if (!isRecord(item) || !exactKeys(item, ['class', 'id', 'name', 'script', 'use_sqlite']) ||
-      typeof item.id !== 'string' || !ACCOUNT_ID.test(item.id) || !boundedNamespaceText(item.class, 128) ||
-      !boundedNamespaceText(item.name, 256) || !boundedNamespaceText(item.script, 128) ||
-      typeof item.use_sqlite !== 'boolean') return null;
+  for (const item of candidate.output.result) {
     items.push(Object.freeze({
       id: item.id,
       className: item.class,
@@ -2372,7 +2604,7 @@ async function readNamespaceSnapshot(
       seenIds.add(item.id);
       items.push(item);
     }
-    const lastPage = (totalPages ?? 0) === 0 ? 1 : totalPages as number;
+    const lastPage = totalPages === null || totalPages === 0 ? 1 : totalPages;
     if (page === lastPage) break;
   }
   if (totalCount === null || items.length !== totalCount) fail('provider_mismatch', stage, 'unknown');
@@ -2386,11 +2618,7 @@ export async function provePersistedAdminStateNamespacePresent(
   input: ProveAdminStateNamespacePresentInput,
   callInput: CloudflareDirectUploadCall,
 ): Promise<AdminStateNamespacePresenceProof> {
-  if (
-    !isRecord(input) || !exactKeys(input, ['namespace', 'uninstallCycleId', 'workerId']) ||
-    !validNamespaceLocator(input.namespace) || !WORKER_ID.test(input.workerId) ||
-    !UNINSTALL_CYCLE_ID.test(input.uninstallCycleId)
-  ) fail('invalid_input', 'validate', 'not_sent');
+  if (!v.is(namespacePresentInputSchema, input)) fail('invalid_input', 'validate', 'not_sent');
   const call = prepareCall(callInput);
   const snapshot = await readNamespaceSnapshot(input.namespace.accountId, call, 'namespace_present');
   const identityMatches = snapshot.items.filter((item) => (
@@ -2399,7 +2627,8 @@ export async function provePersistedAdminStateNamespacePresent(
   if (identityMatches.length !== 1) {
     fail(identityMatches.length > 1 ? 'recovery_ambiguous' : 'provider_mismatch', 'namespace_present', 'unknown');
   }
-  const match = identityMatches[0];
+  const match = identityMatches.at(0);
+  if (match === undefined) fail('provider_mismatch', 'namespace_present', 'unknown');
   if (
     match.id !== input.namespace.namespaceId || match.name !== input.namespace.namespaceName || !match.useSqlite
   ) fail('provider_mismatch', 'namespace_present', 'unknown');
@@ -2465,13 +2694,13 @@ export async function proveAdminStateNamespaceRetired(
   });
 }
 
-function workerDeleteSemanticCommitment(input: WorkerDeleteMutationIntent): Record<string, unknown> {
+function workerDeleteSemanticCommitment(input: WorkerDeleteMutationIntent): BoundaryObject {
   return {
     accountId: input.accountId,
     force: 'omitted',
     method: 'DELETE',
     namespaceId: input.namespaceId,
-    retirementProof: input.retirementProof,
+    retirementProof: { ...input.retirementProof },
     retirementProofCommitment: input.retirementProofCommitment,
     retirementVersionId: input.retirementVersionId,
     uninstallCycleId: input.uninstallCycleId,
@@ -2494,7 +2723,7 @@ export async function prepareWorkerDeleteMutation(
     fail('provider_mismatch', 'namespace_absent', 'unknown', [input.retirementSubmission]);
   }
   const retirementProofCommitment = await adminStateNamespaceRetirementProofCommitment(input);
-  const base = {
+  const base: WorkerDeleteMutationIntent = {
     kind: 'uninstall_worker_delete_intent',
     accountId: input.namespace.accountId,
     workerName: input.namespace.workerName,
@@ -2508,7 +2737,7 @@ export async function prepareWorkerDeleteMutation(
     correlationTag: '',
     method: 'DELETE',
     force: 'omitted',
-  } as const;
+  };
   const requestHash = await sha256(canonicalJson(workerDeleteSemanticCommitment(base)));
   return Object.freeze({
     ...base,
@@ -2517,41 +2746,34 @@ export async function prepareWorkerDeleteMutation(
   });
 }
 
-export async function parseWorkerDeleteMutationIntent(
-  value: unknown,
+export async function parseWorkerDeleteMutationIntent<Input>(
+  value: Input,
 ): Promise<WorkerDeleteMutationIntent | null> {
   try {
-    if (!isJournalObject(value) || !exactKeys(value, [
-      'accountId', 'correlationTag', 'force', 'kind', 'method', 'namespaceId', 'requestHash',
-      'retirementProof', 'retirementProofCommitment', 'retirementVersionId', 'uninstallCycleId',
-      'workerId', 'workerName',
-    ]) || value.kind !== 'uninstall_worker_delete_intent' || !exactSubmissionIdentity(value) ||
-      typeof value.namespaceId !== 'string' || !ACCOUNT_ID.test(value.namespaceId) ||
-      typeof value.retirementVersionId !== 'string' || !UUID.test(value.retirementVersionId) ||
-      typeof value.retirementProofCommitment !== 'string' || !SHA256.test(value.retirementProofCommitment) ||
-      typeof value.requestHash !== 'string' || !SHA256.test(value.requestHash) ||
-      value.correlationTag !== `ankka-un-w-delete-sha256:${value.requestHash}` ||
-      value.method !== 'DELETE' || value.force !== 'omitted') return null;
-    const retirementProof = parseAdminStateNamespaceRetirementProof(value.retirementProof);
-    if (!retirementProof || retirementProof.accountId !== value.accountId ||
-      retirementProof.workerName !== value.workerName || retirementProof.workerId !== value.workerId ||
-      retirementProof.uninstallCycleId !== value.uninstallCycleId ||
-      retirementProof.namespaceId !== value.namespaceId ||
-      retirementProof.retirementVersionId !== value.retirementVersionId) return null;
-    const parsed = Object.freeze({
-      kind: 'uninstall_worker_delete_intent' as const,
-      accountId: value.accountId,
-      workerName: value.workerName,
-      workerId: value.workerId,
-      uninstallCycleId: value.uninstallCycleId,
-      namespaceId: value.namespaceId,
-      retirementVersionId: value.retirementVersionId,
-      retirementProofCommitment: value.retirementProofCommitment,
+    const candidate = v.safeParse(workerDeleteIntentSchema, value);
+    if (!candidate.success || candidate.output.correlationTag !==
+      `ankka-un-w-delete-sha256:${candidate.output.requestHash}`) return null;
+    const input = candidate.output;
+    const retirementProof = parseAdminStateNamespaceRetirementProof(input.retirementProof);
+    if (!retirementProof || retirementProof.accountId !== input.accountId ||
+      retirementProof.workerName !== input.workerName || retirementProof.workerId !== input.workerId ||
+      retirementProof.uninstallCycleId !== input.uninstallCycleId ||
+      retirementProof.namespaceId !== input.namespaceId ||
+      retirementProof.retirementVersionId !== input.retirementVersionId) return null;
+    const parsed: WorkerDeleteMutationIntent = Object.freeze({
+      kind: 'uninstall_worker_delete_intent',
+      accountId: input.accountId,
+      workerName: input.workerName,
+      workerId: input.workerId,
+      uninstallCycleId: input.uninstallCycleId,
+      namespaceId: input.namespaceId,
+      retirementVersionId: input.retirementVersionId,
+      retirementProofCommitment: input.retirementProofCommitment,
       retirementProof,
-      requestHash: value.requestHash,
-      correlationTag: value.correlationTag,
-      method: 'DELETE' as const,
-      force: 'omitted' as const,
+      requestHash: input.requestHash,
+      correlationTag: input.correlationTag,
+      method: 'DELETE',
+      force: 'omitted',
     });
     return await sha256(canonicalJson(workerDeleteSemanticCommitment(parsed))) === parsed.requestHash
       ? parsed
@@ -2579,7 +2801,7 @@ function workerDeleteSubmission(intent: WorkerDeleteMutationIntent): WorkerDelet
 async function requestDelete(
   call: PreparedCall,
   intent: WorkerDeleteMutationIntent,
-): Promise<{ readonly status: number; readonly value: unknown | undefined }> {
+): Promise<{ readonly status: number; readonly value: BoundaryValue | undefined }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), call.timeoutMs);
   try {
@@ -2612,17 +2834,17 @@ async function requestDelete(
  * This module has no process-local replay lock. After an unknown outcome,
  * recoverWorkerDeletionOutcome is read-only and must replace any replay.
  */
-export async function submitWorkerDeleteMutation(
-  intent: WorkerDeleteMutationIntent,
-  retirementProofInput: ProveAdminStateNamespaceRetiredInput,
+export async function submitWorkerDeleteMutation<IntentInput, ProofInput>(
+  intentInput: IntentInput,
+  proofInput: ProofInput,
   callInput: CloudflareDirectUploadCall,
 ): Promise<WorkerDeleteSubmission> {
-  const parsedIntent = await parseWorkerDeleteMutationIntent(intent);
-  const parsedProofInput = await parseAdminStateNamespaceRetiredInput(retirementProofInput);
+  const parsedIntent = await parseWorkerDeleteMutationIntent(intentInput);
+  const parsedProofInput = await parseAdminStateNamespaceRetiredInput(proofInput);
   if (!parsedIntent || !parsedProofInput) {
     fail('invalid_input', 'validate', 'not_sent');
   }
-  retirementProofInput = parsedProofInput;
+  const retirementProofInput = parsedProofInput;
   const commitment = await adminStateNamespaceRetirementProofCommitment(retirementProofInput);
   if (commitment !== parsedIntent.retirementProofCommitment ||
     !retirementProofMatchesInput(parsedIntent.retirementProof, retirementProofInput)) {
@@ -2648,9 +2870,11 @@ export async function submitWorkerDeleteMutation(
       fail('provider_mismatch', 'worker_delete', 'submitted', [submission]);
     }
     const result = envelope.result;
-    if (!(result === null || (isRecord(result) && (
-      exactKeys(result, []) || (exactKeys(result, ['id']) && result.id === parsedIntent.workerId)
-    )))) {
+    const parsedResult = v.safeParse(workerDeleteResultSchema, result);
+    if (!parsedResult.success || (
+      parsedResult.output !== null && 'id' in parsedResult.output &&
+      parsedResult.output.id !== parsedIntent.workerId
+    )) {
       fail('provider_mismatch', 'worker_delete', 'submitted', [submission]);
     }
   }
@@ -2660,7 +2884,7 @@ export async function submitWorkerDeleteMutation(
 async function requestAbsenceStatus(
   call: PreparedCall,
   url: string,
-): Promise<{ readonly status: number; readonly value?: unknown }> {
+): Promise<{ readonly status: number; readonly value?: BoundaryValue }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), call.timeoutMs);
   try {
@@ -2689,37 +2913,25 @@ interface ScriptListPage {
   };
 }
 
-function parseScriptListPage(value: unknown, expectedPage: number): ScriptListPage | null {
-  if (!isRecord(value)) return null;
-  const allowedEnvelopeKeys = new Set(['errors', 'messages', 'result', 'result_info', 'success']);
-  if (Object.keys(value).some((key) => !allowedEnvelopeKeys.has(key)) ||
-    value.success !== true || !isEmptyProviderList(value.errors) || !isEmptyProviderList(value.messages) ||
-    !Array.isArray(value.result) || value.result.length > MAX_SCRIPTS) return null;
+function parseScriptListPage<Value>(value: Value, expectedPage: number): ScriptListPage | null {
+  const candidate = v.safeParse(scriptListPageSchema, value);
+  if (!candidate.success || !isEmptyProviderList(candidate.output.errors) ||
+    !isEmptyProviderList(candidate.output.messages)) return null;
+  const parsedPage = candidate.output;
   const ids: string[] = [];
   const seen = new Set<string>();
-  for (const script of value.result) {
-    if (!isRecord(script) || typeof script.id !== 'string' || !WORKER_NAME.test(script.id) || seen.has(script.id)) {
-      return null;
-    }
+  for (const script of parsedPage.result) {
+    if (seen.has(script.id)) return null;
     seen.add(script.id);
     ids.push(script.id);
   }
   ids.sort(lexicalCompare);
-  if (value.result_info === undefined || value.result_info === null) {
+  if (parsedPage.result_info === undefined || parsedPage.result_info === null) {
     return expectedPage === 1 ? Object.freeze({ ids: Object.freeze(ids), pagination: null }) : null;
   }
-  if (!isRecord(value.result_info) || !exactKeys(value.result_info, [
-    'count', 'page', 'per_page', 'total_count', 'total_pages',
-  ])) return null;
-  const info = value.result_info;
+  const info = parsedPage.result_info;
   if (
-    ids.length > SCRIPT_PAGE_SIZE ||
-    info.page !== expectedPage || info.per_page !== SCRIPT_PAGE_SIZE || info.count !== ids.length ||
-    typeof info.count !== 'number' || !Number.isSafeInteger(info.count) || info.count < 0 ||
-    typeof info.total_count !== 'number' || !Number.isSafeInteger(info.total_count) ||
-    info.total_count < 0 || info.total_count > MAX_SCRIPTS ||
-    typeof info.total_pages !== 'number' || !Number.isSafeInteger(info.total_pages) ||
-    info.total_pages < 0 || info.total_pages > MAX_SCRIPT_PAGES
+    info.page !== expectedPage || info.count !== ids.length
   ) return null;
   const calculated = info.total_count === 0 ? 0 : Math.ceil(info.total_count / SCRIPT_PAGE_SIZE);
   if (!(
@@ -2768,7 +2980,7 @@ async function readFullScriptList(
     } else if (
       parsed.pagination.totalCount !== totalCount || parsed.pagination.totalPages !== totalPages
     ) fail('provider_mismatch', 'worker_delete_recovery', 'unknown');
-    const remaining = (totalCount as number) - ids.length;
+    const remaining = (totalCount ?? 0) - ids.length;
     const expectedCount = Math.max(0, Math.min(SCRIPT_PAGE_SIZE, remaining));
     if (parsed.ids.length !== expectedCount) fail('provider_mismatch', 'worker_delete_recovery', 'unknown');
     for (const id of parsed.ids) {
@@ -2776,7 +2988,7 @@ async function readFullScriptList(
       seen.add(id);
       ids.push(id);
     }
-    const lastPage = (totalPages ?? 0) === 0 ? 1 : totalPages as number;
+    const lastPage = (totalPages ?? 0) === 0 ? 1 : totalPages ?? 1;
     if (page === lastPage) break;
   }
   if (totalCount === null || totalPages === null || ids.length !== totalCount) {
@@ -2820,38 +3032,27 @@ async function proveOneWorkerAbsenceObservation(
 }
 
 /** Pure, exact journal parser for the namespace-bound Worker absence proof. */
-export function parseWorkerDeletionRecoveryProof(
-  value: unknown,
+export function parseWorkerDeletionRecoveryProof<Input>(
+  value: Input,
 ): WorkerDeletionRecoveryProof | null {
   try {
-    if (!isJournalObject(value) || !exactKeys(value, [
-      'accountId', 'firstScriptListSha256', 'kind', 'namespaceId', 'requestHash',
-      'retirementProofCommitment', 'retirementVersionId', 'scriptCount', 'secondScriptListSha256',
-      'uninstallCycleId', 'workerId', 'workerName',
-    ]) || value.kind !== 'uninstall_worker_deletion_proof' || !exactSubmissionIdentity(value) ||
-      typeof value.namespaceId !== 'string' || !ACCOUNT_ID.test(value.namespaceId) ||
-      typeof value.retirementVersionId !== 'string' || !UUID.test(value.retirementVersionId) ||
-      typeof value.retirementProofCommitment !== 'string' || !SHA256.test(value.retirementProofCommitment) ||
-      typeof value.requestHash !== 'string' || !SHA256.test(value.requestHash) ||
-      typeof value.firstScriptListSha256 !== 'string' || !SHA256.test(value.firstScriptListSha256) ||
-      typeof value.secondScriptListSha256 !== 'string' || !SHA256.test(value.secondScriptListSha256) ||
-      value.firstScriptListSha256 !== value.secondScriptListSha256 ||
-      typeof value.scriptCount !== 'number' || !Number.isSafeInteger(value.scriptCount) ||
-      value.scriptCount < 0 || value.scriptCount > MAX_SCRIPTS
-    ) return null;
+    const candidate = v.safeParse(workerDeletionRecoveryProofSchema, value);
+    if (!candidate.success || candidate.output.firstScriptListSha256 !==
+      candidate.output.secondScriptListSha256) return null;
+    const input = candidate.output;
     return Object.freeze({
       kind: 'uninstall_worker_deletion_proof',
-      accountId: value.accountId,
-      workerName: value.workerName,
-      workerId: value.workerId,
-      uninstallCycleId: value.uninstallCycleId,
-      namespaceId: value.namespaceId,
-      retirementVersionId: value.retirementVersionId,
-      retirementProofCommitment: value.retirementProofCommitment,
-      requestHash: value.requestHash,
-      firstScriptListSha256: value.firstScriptListSha256,
-      secondScriptListSha256: value.secondScriptListSha256,
-      scriptCount: value.scriptCount,
+      accountId: input.accountId,
+      workerName: input.workerName,
+      workerId: input.workerId,
+      uninstallCycleId: input.uninstallCycleId,
+      namespaceId: input.namespaceId,
+      retirementVersionId: input.retirementVersionId,
+      retirementProofCommitment: input.retirementProofCommitment,
+      requestHash: input.requestHash,
+      firstScriptListSha256: input.firstScriptListSha256,
+      secondScriptListSha256: input.secondScriptListSha256,
+      scriptCount: input.scriptCount,
     });
   } catch {
     return null;
@@ -2859,28 +3060,31 @@ export function parseWorkerDeletionRecoveryProof(
 }
 
 /** Pure aggregate parser for every credential-free lifecycle journal kind. */
-export async function parseCloudflareUninstallWorkerLifecycleJournalRecord(
-  value: unknown,
+export async function parseCloudflareUninstallWorkerLifecycleJournalRecord<Input>(
+  value: Input,
 ): Promise<CloudflareUninstallWorkerLifecycleJournalRecord | null> {
   try {
-    if (!isJournalObject(value) || typeof value.kind !== 'string') return null;
-    switch (value.kind) {
+    if (!isJournalObject(value)) return null;
+    const candidate = v.safeParse(boundaryObjectSchema, value);
+    if (!candidate.success || !v.is(v.string(), candidate.output.kind)) return null;
+    const input = candidate.output;
+    switch (input.kind) {
       case 'uninstall_version_recovery':
-        return await parseUninstallWorkerVersionRecoveryRecord(value);
+        return await parseUninstallWorkerVersionRecoveryRecord(input);
       case 'uninstall_worker_version':
       case 'uninstall_worker_deployment':
       case 'uninstall_worker_delete':
-        return parseCloudflareUninstallWorkerLifecycleSubmission(value);
+        return parseCloudflareUninstallWorkerLifecycleSubmission(input);
       case 'uninstall_deployment':
-        return await parseUninstallWorkerDeploymentMutationIntent(value);
+        return await parseUninstallWorkerDeploymentMutationIntent(input);
       case 'admin_state_namespace_presence':
-        return parseAdminStateNamespacePresenceProof(value);
+        return parseAdminStateNamespacePresenceProof(input);
       case 'admin_state_namespace_retirement':
-        return parseAdminStateNamespaceRetirementProof(value);
+        return parseAdminStateNamespaceRetirementProof(input);
       case 'uninstall_worker_delete_intent':
-        return await parseWorkerDeleteMutationIntent(value);
+        return await parseWorkerDeleteMutationIntent(input);
       case 'uninstall_worker_deletion_proof':
-        return parseWorkerDeletionRecoveryProof(value);
+        return parseWorkerDeletionRecoveryProof(input);
       default:
         return null;
     }

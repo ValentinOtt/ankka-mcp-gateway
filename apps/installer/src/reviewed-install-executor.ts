@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 import { deriveBootstrapNonce } from './bootstrap-nonce';
 import type {
   CustomerGatewayFreshPreflightAttestation,
@@ -89,7 +91,9 @@ import {
   submitCustomerBootstrap,
   type CustomerBootstrapResult,
   type CustomerGatewayDesiredProjection,
+  type PrepareCustomerBootstrapClaimInput,
   type PreparedCustomerBootstrapClaim,
+  type SubmitCustomerBootstrapInput,
 } from './customer-bootstrap-request';
 import { base64UrlDecode, sha256Hex } from './crypto';
 import { DeployError } from './errors';
@@ -119,6 +123,7 @@ import {
 } from './install-journal';
 import { adaptVerifiedReleaseBundleForWorkerDirectUpload } from './release-direct-upload-adapter';
 import type { VerifiedRelease, VerifiedReleaseBundle } from './release';
+import { canonicalJson } from './release-manifest';
 import {
   parseDeploySelection,
   parseStaticDeployPlan,
@@ -140,6 +145,11 @@ const BOOTSTRAP_SUBMIT_TIMEOUT_MS = 90_000;
 const BOOTSTRAP_READY_ATTEMPTS = 40;
 const BOOTSTRAP_READY_INTERVAL_MS = 1_500;
 const MAX_IDENTITY_PROVIDERS = 64;
+const executionCapabilitiesSchema = v.object({
+  journal: v.object({ read: v.function() }),
+  provider: v.object({ inspectWorker: v.function() }),
+  transport: v.function(),
+});
 
 export type ReviewedInstallFailureCode =
   | 'bootstrap_recovery_required'
@@ -491,7 +501,7 @@ export function createCloudflareReviewedInstallProviderAdapter(): ReviewedInstal
     submitCustomerBootstrap: async (input) => {
       const requestIdBytes = base64UrlDecode(input.claim.requestId);
       try {
-        return await submitCustomerBootstrap({
+        const submitInput: Omit<SubmitCustomerBootstrapInput, 'timeoutMs'> = {
           selection: input.selection,
           target: input.target,
           release: input.release,
@@ -505,8 +515,10 @@ export function createCloudflareReviewedInstallProviderAdapter(): ReviewedInstal
           accountWorkersSubdomain: input.accountWorkersSubdomain,
           bootstrapNonce: input.bootstrapNonce,
           transport: input.transport,
-          timeoutMs: input.timeoutMs,
-        });
+        };
+        return await submitCustomerBootstrap(input.timeoutMs === undefined
+          ? submitInput
+          : { ...submitInput, timeoutMs: input.timeoutMs });
       } finally {
         requestIdBytes.fill(0);
       }
@@ -558,25 +570,19 @@ interface ExecutionContext {
   journal: InstallJournal;
 }
 
+interface InitializedExecutionContext {
+  readonly base: Omit<ExecutionContext, 'journal'>;
+  readonly identityProviders: readonly string[];
+  readonly organization: ZeroTrustOrganization;
+  readonly workersSubdomain: AccountWorkersSubdomain;
+  readonly journal: InstallJournal;
+}
+
 function fail(code: ReviewedInstallFailureCode): never {
   throw new ReviewedInstallExecutionError(code);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('canonical_json_invalid');
-}
-
-function exact(left: unknown, right: unknown): boolean {
+function exact<Left, Right>(left: Left, right: Right): boolean {
   try {
     return canonicalJson(left) === canonicalJson(right);
   } catch {
@@ -600,8 +606,9 @@ function requireAction(journal: InstallJournal, name: InstallActionName): Instal
 
 function requireWorkerName(plan: StaticDeployPlan): string {
   const matches = plan.managementResources.filter((resource) => resource.kind === 'management_worker');
-  if (matches.length !== 1) fail('journal_recovery_mismatch');
-  return matches[0].name;
+  const match = matches.length === 1 ? matches.at(0) : undefined;
+  if (match === undefined) fail('journal_recovery_mismatch');
+  return match.name;
 }
 
 function requireIdentityProviderIds(providers: readonly AccessIdentityProvider[]): readonly string[] {
@@ -644,7 +651,7 @@ function workerRecord(intent: WorkerMutationIntent): WorkerCreateRecord {
   });
 }
 
-async function intentHash(intent: unknown): Promise<string> {
+async function intentHash<Intent>(intent: Intent): Promise<string> {
   return sha256Hex(canonicalJson(intent));
 }
 
@@ -767,14 +774,17 @@ function namespaceProof(
   input: InspectAdminStateDurableObjectNamespaceInput,
 ): AdminStateDurableObjectNamespaceLocator {
   if (
-    !isRecord(value) || !exact(Object.keys(value).sort(), [
+    !exact(Object.keys(value).sort(), [
       'accountId', 'className', 'namespaceId', 'namespaceName', 'storage', 'workerName',
     ]) || value.accountId !== input.accountId || value.workerName !== input.workerName ||
     value.className !== 'AdminState' || value.storage !== 'sqlite' ||
     !NAMESPACE_ID.test(value.namespaceId) ||
     (input.expectedNamespaceId !== undefined && value.namespaceId !== input.expectedNamespaceId) ||
-    typeof value.namespaceName !== 'string' || value.namespaceName.length < 1 ||
-    value.namespaceName.length > 256 || /[\u0000-\u001f\u007f]/u.test(value.namespaceName)
+    value.namespaceName.length < 1 || value.namespaceName.length > 256 ||
+    Array.from(value.namespaceName).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    })
   ) fail('reviewed_adapter_invalid');
   return value;
 }
@@ -789,13 +799,14 @@ function namespaceInspectionInput(
     ? bootstrap.locator.namespaceId
     : undefined;
   const expected = expectedNamespaceId ?? (phase === 'clean' ? bootstrapNamespaceId : undefined);
-  return Object.freeze({
+  const base = {
     accountId: context.target.account.id,
     workerName: context.workerName,
-    className: 'AdminState' as const,
-    storage: 'sqlite' as const,
-    ...(expected === undefined ? {} : { expectedNamespaceId: expected }),
-  });
+    className: 'AdminState',
+    storage: 'sqlite',
+  } satisfies InspectAdminStateDurableObjectNamespaceInput;
+  if (expected === undefined) return Object.freeze(base);
+  return Object.freeze({ ...base, expectedNamespaceId: expected });
 }
 
 function persistedVersionLocator(
@@ -825,20 +836,49 @@ function domainLocator(value: InstallActionLocator | null): ManagementCustomDoma
   return value;
 }
 
-function knownSubmission<T extends WorkerSubmission | VersionSubmission | DeploymentSubmission>(
-  error: unknown,
-  kind: T['kind'],
-  predicate: (value: T) => boolean,
-): T | null {
-  if (!(error instanceof CloudflareDirectUploadError)) return null;
-  const candidates = error.submissions.filter((submission) => submission.kind === kind) as T[];
-  return candidates.length === 1 && predicate(candidates[0]) ? candidates[0] : null;
+function uploadSubmissions<ErrorValue>(
+  error: ErrorValue,
+): readonly (DeploymentSubmission | VersionSubmission | WorkerSubmission)[] {
+  return error instanceof CloudflareDirectUploadError ? error.submissions : Object.freeze([]);
 }
 
-async function prepareAction(
+function knownWorkerSubmission<ErrorValue>(
+  error: ErrorValue,
+  predicate: (value: WorkerSubmission) => boolean,
+): WorkerSubmission | null {
+  const candidates = uploadSubmissions(error).filter(
+    (submission): submission is WorkerSubmission => submission.kind === 'worker',
+  );
+  const candidate = candidates.length === 1 ? candidates.at(0) : undefined;
+  return candidate !== undefined && predicate(candidate) ? candidate : null;
+}
+
+function knownVersionSubmission<ErrorValue>(
+  error: ErrorValue,
+  predicate: (value: VersionSubmission) => boolean,
+): VersionSubmission | null {
+  const candidates = uploadSubmissions(error).filter(
+    (submission): submission is VersionSubmission => submission.kind === 'version',
+  );
+  const candidate = candidates.length === 1 ? candidates.at(0) : undefined;
+  return candidate !== undefined && predicate(candidate) ? candidate : null;
+}
+
+function knownDeploymentSubmission<ErrorValue>(
+  error: ErrorValue,
+  predicate: (value: DeploymentSubmission) => boolean,
+): DeploymentSubmission | null {
+  const candidates = uploadSubmissions(error).filter(
+    (submission): submission is DeploymentSubmission => submission.kind === 'deployment',
+  );
+  const candidate = candidates.length === 1 ? candidates.at(0) : undefined;
+  return candidate !== undefined && predicate(candidate) ? candidate : null;
+}
+
+async function prepareAction<RecordValue>(
   context: ExecutionContext,
   name: InstallActionName,
-  record: unknown,
+  record: RecordValue,
   preparedAt = executionNow(context),
 ): Promise<void> {
   context.journal = await context.input.journal.prepareAction({
@@ -859,10 +899,10 @@ async function armAction(context: ExecutionContext, name: InstallActionName): Pr
   });
 }
 
-async function submittedAction(
+async function submittedAction<Locator>(
   context: ExecutionContext,
   name: InstallActionName,
-  locator: unknown,
+  locator: Locator,
 ): Promise<void> {
   context.journal = await context.input.journal.recordSubmitted({
     expectedRevision: context.journal.revision,
@@ -905,9 +945,8 @@ async function convergeWorker(context: ExecutionContext, intent: WorkerMutationI
       try {
         locator = await context.input.provider.submitWorker(intent, context.call);
       } catch (error) {
-        const known = knownSubmission<WorkerSubmission>(
+        const known = knownWorkerSubmission(
           error,
-          'worker',
           (candidate) => candidate.accountId === intent.accountId && candidate.workerName === intent.workerName,
         );
         if (!known) throw error;
@@ -1123,9 +1162,8 @@ async function convergeWorkerVersion(
       try {
         locator = await context.input.provider.submitWorkerVersion(stagedPlan, context.call);
       } catch (error) {
-        const known = knownSubmission<VersionSubmission>(
+        const known = knownVersionSubmission(
           error,
-          'version',
           (candidate) => candidate.phase === phase && candidate.requestHash === recovery.requestHash,
         );
         if (!known) throw error;
@@ -1205,9 +1243,8 @@ async function convergeWorkerDeployment(
       try {
         locator = await context.input.provider.submitWorkerDeployment(intent, context.call);
       } catch (error) {
-        const known = knownSubmission<DeploymentSubmission>(
+        const known = knownDeploymentSubmission(
           error,
-          'deployment',
           (candidate) => candidate.phase === version.phase && candidate.requestHash === intent.requestHash,
         );
         if (!known) throw error;
@@ -1378,14 +1415,16 @@ async function freshClaim(
   context: ExecutionContext,
   workersSubdomain: AccountWorkersSubdomain,
 ): Promise<{ readonly claim: PreparedCustomerBootstrapClaim; readonly semantic: Omit<CustomerBootstrapSubmitRecord, 'attempts'> }> {
-  const claim = await prepareCustomerBootstrapClaim({
+  const claimInput: Omit<PrepareCustomerBootstrapClaimInput, 'randomBytes'> = {
     selection: context.selection,
     target: context.target,
     release: context.release,
     plan: context.plan,
     nowMs: executionNow(context),
-    randomBytes: context.input.randomBytes,
-  });
+  };
+  const claim = await prepareCustomerBootstrapClaim(context.input.randomBytes === undefined
+    ? claimInput
+    : { ...claimInput, randomBytes: context.input.randomBytes });
   const semantic = Object.freeze({
     schemaVersion: 1 as const,
     kind: 'customer_bootstrap_submit' as const,
@@ -1743,14 +1782,13 @@ function validateExecutionInput(input: ReviewedInstallExecutionInput): void {
     !ATTEMPT_ID.test(input.attemptId) || !ACCESS_TOKEN.test(input.accessToken) ||
     !SESSION_ID.test(input.sessionId) || !BASE64_KEY.test(input.bootstrapNonceDerivationKey) ||
     !Number.isSafeInteger(input.recoverUntil) || input.recoverUntil <= 0 ||
-    typeof input.journal?.read !== 'function' || typeof input.provider?.inspectWorker !== 'function' ||
-    typeof input.transport !== 'function'
+    !v.safeParse(executionCapabilitiesSchema, input).success
   ) fail('reviewed_adapter_invalid');
 }
 
 async function initializeOrRecoverContext(
   input: ReviewedInstallExecutionInput,
-): Promise<{ readonly base: Omit<ExecutionContext, 'journal'>; readonly identityProviders: readonly string[]; readonly organization: ZeroTrustOrganization; readonly workersSubdomain: AccountWorkersSubdomain; readonly journal: InstallJournal }> {
+): Promise<InitializedExecutionContext> {
   validateExecutionInput(input);
   const selection = parseDeploySelection(input.selection);
   const plan = parseStaticDeployPlan(input.plan);
@@ -1766,11 +1804,13 @@ async function initializeOrRecoverContext(
     nowMs: validationNow,
   });
   const workerName = requireWorkerName(plan);
-  const call = Object.freeze({
+  const callBase: ReviewedInstallProviderCall = {
     accessToken: input.accessToken,
     transport: input.transport,
-    ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
-  });
+  };
+  const call = input.timeoutMs === undefined
+    ? Object.freeze(callBase)
+    : Object.freeze({ ...callBase, timeoutMs: input.timeoutMs });
   const base = { input, selection, plan, target, release, directRelease, projection, workerName, call };
   let journal = await readJournalOrNull(input.journal);
   let organization: ZeroTrustOrganization;
@@ -1904,6 +1944,8 @@ export async function executeReviewedInstall(
 
   // Terminal provider re-proofs. No hash-only convergence is accepted.
   const attachedDomain = domainLocator(requireAction(context.journal, 'management_custom_domain_attach').locator);
+  const cleanNamespaceId = cleanVersion.namespaceId;
+  if (cleanNamespaceId === undefined) fail('journal_recovery_mismatch');
   await context.input.provider.verifyWorker(workerIntent, worker, context.call, {
     domain: {
       id: attachedDomain.domainId,
@@ -1911,7 +1953,7 @@ export async function executeReviewedInstall(
       zoneId: context.target.zone.id,
       zoneName: context.target.zone.name,
     },
-    namespaceId: cleanVersion.namespaceId as string,
+    namespaceId: cleanNamespaceId,
   });
   const cleanAction = requireAction(context.journal, 'clean_worker_version_create');
   if (cleanAction.record.kind !== 'worker_version_create') fail('journal_recovery_mismatch');
@@ -1921,9 +1963,9 @@ export async function executeReviewedInstall(
     cleanRecovery,
     cleanVersion,
     context.call,
-    cleanVersion.namespaceId,
+    cleanNamespaceId,
   );
-  const terminalNamespaceInput = namespaceInspectionInput(context, 'clean', cleanVersion.namespaceId);
+  const terminalNamespaceInput = namespaceInspectionInput(context, 'clean', cleanNamespaceId);
   namespaceProof(
     await context.input.provider.inspectAdminStateNamespace(terminalNamespaceInput, context.call),
     terminalNamespaceInput,

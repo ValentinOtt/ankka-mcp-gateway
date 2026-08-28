@@ -2,7 +2,7 @@ import { render, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GatewayAdminApi, GatewayStatus, ManagedSources, RuntimeUpdate } from './api'
 import { GatewayProvider } from './GatewayContext'
-import { WebMcpTools } from './WebMcpTools'
+import { WebMcpTools, type WebMcpTool } from './WebMcpTools'
 
 const status: GatewayStatus = {
   schemaVersion: 1,
@@ -60,11 +60,7 @@ describe('WebMcpTools', () => {
       prepareTeardownAction,
       getTeardownAction: vi.fn(),
     }
-    const tools: Array<{
-      name: string
-      annotations: Record<string, boolean>
-      execute(input: Record<string, unknown>): Promise<string>
-    }> = []
+    const tools: WebMcpTool[] = []
     document.modelContext = {
       registerTool: vi.fn(async (tool) => { tools.push(tool) }),
     }
@@ -73,13 +69,14 @@ describe('WebMcpTools', () => {
     await waitFor(() => expect(tools.some((tool) => tool.name === 'review_gateway_teardown')).toBe(true))
 
     const tool = tools.find((candidate) => candidate.name === 'review_gateway_teardown')
-    expect(tool?.annotations).toMatchObject({
+    if (tool === undefined) throw new TypeError('teardown tool fixture missing')
+    expect(tool.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     })
-    const result = JSON.parse(await tool!.execute({}))
+    const result = JSON.parse(await tool.execute({}))
     expect(result).toEqual({
       ok: true,
       result: {

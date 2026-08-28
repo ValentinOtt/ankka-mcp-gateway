@@ -31,12 +31,10 @@ The customer deployment contains:
   runtime state; and
 - Cloudflare-managed upstream credentials and per-user OAuth grants.
 
-The current hosted browser flow creates an empty Portal. The signed installation
-contract can also carry one explicitly planned initial source with an exact tool
-allowlist, but the browser flow does not expose that option. Administrators
-using ordinary self-service add sources later from the customer dashboard. A
-source may add an MCP server plus its Access resources before updating the
-Portal mapping.
+The initial installation creates an empty Portal. Administrators add sources
+later from the customer dashboard. Each added source has an exact tool
+allowlist and may add an MCP server plus its Access resources before updating
+the Portal mapping.
 
 ### Hosted installer
 
@@ -128,12 +126,16 @@ Customer releases are built from one clean public source commit and signed with
 Ed25519 outside the repository. The signed manifest covers the release channel,
 source commit, deployment contract, and every payload file.
 
-An ordinary update persists changes only to customer Worker code, management
-assets, and two non-secret release-identity text bindings. It does not persist
-changes to Access, DNS, Portal configuration, sources, credentials, resource or
-secret bindings, compatibility settings, or Durable Object data. Rollback
-restores a previous Worker version and its release identity but does not roll
-back customer data. See
+The customer Worker payloads remain hand-authored JavaScript by design. Each is
+a dependency-free, single-module deployment unit, and the reviewed file bytes
+are the bytes covered by the release manifest. The control plane, dashboard,
+and reusable libraries use TypeScript; release tooling does not transpile a
+second Worker artifact that would need a separate provenance boundary.
+
+An ordinary update persists changes only to customer Worker code and management
+assets. It does not persist changes to Access, DNS, Portal configuration,
+sources, credentials, or Durable Object data. Rollback restores a previous
+Worker version but does not roll back customer data. See
 [Gateway updates and rollback](UPDATES.md).
 
 ## Telemetry boundary

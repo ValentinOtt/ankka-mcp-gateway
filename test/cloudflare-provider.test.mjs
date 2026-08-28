@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import {
   CloudflareGatewayProviderError,
   createCloudflareGatewayProvider,
-} from '../src/cloudflare-provider.mjs';
-import { buildGatewayDesiredState } from '../src/plan.mjs';
+} from '../src/cloudflare-provider.ts';
+import { buildGatewayDesiredState } from '../src/plan.ts';
 import {
   beginReceiptAction,
   createInstallationReceipt,
   ownershipMarker,
   receiptChecksum,
-} from '../src/receipt.mjs';
+} from '../src/receipt.ts';
 
 const TOKEN = 'test-only-provider-token';
 const ACCOUNT_ID = 'account_123';
@@ -378,9 +378,12 @@ async function mutationFixture(kind, action, {
     action,
     kind,
     key: resource.key,
-    ...(action !== 'delete' ? { desiredHash: resource.desiredHash, desired: resource.desired } : {}),
-    ...(locator ? { provider: locator } : {}),
   };
+  if (action !== 'delete') {
+    change.desiredHash = resource.desiredHash;
+    change.desired = resource.desired;
+  }
+  if (locator) change.provider = locator;
   return {
     input: { change, receipt, config: gatewayConfig, target: TARGET, access: ACCESS },
     desired,
@@ -1374,7 +1377,7 @@ test('source policy update accepts its exact inline reflection and rechecks it b
 });
 
 test('source policy update rejects foreign, duplicate, and malformed inline policies', async () => {
-  for (const inlineShape of ['foreign', 'duplicate', 'malformed']) {
+  for (const inlinePolicyState of ['foreign', 'duplicate', 'malformed']) {
     const fixture = await mutationFixture('source_access_policy', 'update', {
       locator: { id: 'policy_source_123', parentId: 'app_source_123' },
     });
@@ -1385,9 +1388,9 @@ test('source policy update rejects foreign, duplicate, and malformed inline poli
       id: 'app_source_123',
       serverId: parent.serverId,
       marker: parent.marker,
-      policies: inlineShape === 'foreign'
+      policies: inlinePolicyState === 'foreign'
         ? [exact, { id: 'policy_foreign_inline', name: 'foreign' }]
-        : inlineShape === 'duplicate'
+        : inlinePolicyState === 'duplicate'
           ? [exact, { ...exact }]
           : [{ name: policy.name }],
     });
@@ -1403,7 +1406,7 @@ test('source policy update rejects foreign, duplicate, and malformed inline poli
     await assert.rejects(provider(mock.fetchImpl).applyChange(fixture.input), (error) =>
       error.code === 'ownership_conflict'
         && error.mutationOutcome === 'not_submitted');
-    assert.equal(mock.calls.some((call) => call.init.method === 'PUT'), false, inlineShape);
+    assert.equal(mock.calls.some((call) => call.init.method === 'PUT'), false, inlinePolicyState);
   }
 });
 
@@ -1576,13 +1579,14 @@ for (const policyKind of ['source_access_policy', 'portal_access_policy']) {
         marker: sourceParent.marker,
       })
       : exactPortalApp();
+    const parent = {
+      id: parentId,
+      description: 'foreign-marker',
+    };
+    if (policyKind === 'portal_access_policy') parent.hostname = 'mcp.example.com';
     const mock = scriptedFetch([
       { response: success(app) },
-      { response: success({
-        id: parentId,
-        ...(policyKind === 'portal_access_policy' ? { hostname: 'mcp.example.com' } : {}),
-        description: 'foreign-marker',
-      }) },
+      { response: success(parent) },
     ]);
     await assert.rejects(
       provider(mock.fetchImpl).applyChange(fixture.input),
@@ -1596,11 +1600,9 @@ for (const action of ['create', 'update', 'delete']) {
   test(`source policy ${action} revalidates its exact bound parent immediately before mutation`, async () => {
     const policyId = 'policy_source_123';
     const appId = 'app_source_123';
-    const fixture = await mutationFixture('source_access_policy', action, {
-      ...(action === 'create'
-        ? {}
-        : { locator: { id: policyId, parentId: appId } }),
-    });
+    const fixtureOptions = {};
+    if (action !== 'create') fixtureOptions.locator = { id: policyId, parentId: appId };
+    const fixture = await mutationFixture('source_access_policy', action, fixtureOptions);
     const sourceParent = sourcePolicyParent(fixture);
     const serverId = sourceParent.serverId;
     const app = exactSourceApp({ id: appId, serverId, marker: sourceParent.marker });
@@ -1835,14 +1837,14 @@ test('DNS update blocks dependency drift or disappearance after its first proof'
 });
 
 test('DNS mutations reject foreign or duplicate Portal policies reflected inline', async () => {
-  for (const inlineShape of ['foreign', 'duplicate']) {
+  for (const inlinePolicyState of ['foreign', 'duplicate']) {
     const fixture = await mutationFixture('dns_record', 'update', {
       locator: { id: 'dns_123' },
     });
     const policy = exactPortalPolicy(fixture);
     const exact = { id: policy.id, name: policy.name };
     const app = exactPortalApp({
-      policies: inlineShape === 'foreign'
+      policies: inlinePolicyState === 'foreign'
         ? [exact, { id: 'policy_foreign_inline', name: 'foreign' }]
         : [exact, { ...exact }],
     });
@@ -1856,7 +1858,7 @@ test('DNS mutations reject foreign or duplicate Portal policies reflected inline
     await assert.rejects(provider(mock.fetchImpl).applyChange(fixture.input), (error) =>
       error.code === 'ownership_conflict'
         && error.mutationOutcome === 'not_submitted');
-    assert.equal(mock.calls.some((call) => call.init.method === 'PUT'), false, inlineShape);
+    assert.equal(mock.calls.some((call) => call.init.method === 'PUT'), false, inlinePolicyState);
   }
 });
 
@@ -2040,9 +2042,9 @@ for (const { kind, inlinePolicies } of [
     const app = exactPortalApp();
     const parent = {
       id: resource.key,
-      ...(kind === 'portal' ? { hostname: 'mcp.example.com' } : {}),
       description: fixture.marker,
     };
+    if (kind === 'portal') parent.hostname = 'mcp.example.com';
     const mock = scriptedFetch([
       { response: success(parent) },
       { response: success([app]) },

@@ -8,14 +8,14 @@ import {
   lifecycleResultExitCode,
   renderLifecyclePreview,
   renderLifecycleResult,
-} from '../src/canary-lifecycle-command.mjs';
-import { STALE_LOCK_RECOVERY_CONFIRMATION } from '../src/receipt-store.mjs';
-import { ownershipMarker } from '../src/receipt.mjs';
+} from '../src/canary-lifecycle-command.ts';
+import { STALE_LOCK_RECOVERY_CONFIRMATION } from '../src/receipt-store.ts';
+import { ownershipMarker } from '../src/receipt.ts';
 import {
   CANARY_FIXTURE_ID,
   CANARY_TOOL_NAME,
   CanaryLifecycleError,
-} from '../src/canary-runner.mjs';
+} from '../src/canary-runner.ts';
 
 const ACCOUNT_ID = 'a'.repeat(32);
 const ZONE_ID = 'b'.repeat(32);
@@ -260,11 +260,6 @@ function runtime(overrides = {}) {
     providerFactory(options) {
       assert.equal(options.token, TOKEN);
       return provider;
-    },
-    receiptStoreFactory(path) {
-      if (path === RECEIPT_PATH) return store;
-      assert.equal(path, `${RECEIPT_PATH}.cleanup-recovery`);
-      return cleanupStore;
     },
     inspectSyntheticUpstream: async () => ({
       fixture: CANARY_FIXTURE_ID,

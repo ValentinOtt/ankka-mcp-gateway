@@ -32,8 +32,14 @@ const files = gitPaths([
   '-z',
 ]);
 const failures = [];
+let checkedFiles = 0;
 
 for (const relative of files) {
+  const file = path.join(root, ...relative.split('/'));
+  const metadata = await lstat(file).catch(() => null);
+  if (metadata === null) continue;
+  checkedFiles += 1;
+
   const displayPath = safeDisplayLocation(relative, 'path');
   if (forbiddenGeneratedPath.test(relative)) {
     failures.push(`${displayPath} is forbidden generated output`);
@@ -52,9 +58,6 @@ for (const relative of files) {
     continue;
   }
 
-  const file = path.join(root, ...relative.split('/'));
-  const metadata = await lstat(file).catch(() => null);
-  if (metadata === null) continue;
   if (metadata.isSymbolicLink()) {
     failures.push(`${displayPath} is a symbolic link`);
     continue;
@@ -107,7 +110,7 @@ if (failures.length > 0) {
   console.error(`Public-boundary check failed:\n- ${failures.join('\n- ')}`);
   process.exitCode = 1;
 } else {
-  console.log(`Public-boundary check passed for ${files.length} publishable files.`);
+  console.log(`Public-boundary check passed for ${checkedFiles} publishable files.`);
 }
 
 function gitPaths(commandArgs) {

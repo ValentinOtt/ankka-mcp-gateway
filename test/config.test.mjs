@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { GatewayConfigError, validateGatewayConfig } from '../src/config.mjs';
+import { GatewayConfigError, validateGatewayConfig } from '../src/config.ts';
 
 async function example() {
   return JSON.parse(
@@ -11,7 +11,7 @@ async function example() {
 
 test('accepts the checked-in secret-free example', async () => {
   const config = await example();
-  assert.equal(validateGatewayConfig(config), config);
+  assert.deepEqual(validateGatewayConfig(config), config);
 });
 
 test('rejects secret-bearing configuration fields', async () => {

@@ -8,6 +8,15 @@ Future entries must identify the source, copyright owner, license, publication
 approval, review date, and material modifications. Do not include private
 repository revisions or internal paths.
 
+## Anti-slop Oxlint plugin
+
+The source under `tools/oxlint/anti-slop/` was copied on 2026-08-28 from the
+public `dmmulroy/anti-slop` repository at revision
+`6d538555cb151d4121ed51a27db81890eacf8ae9`. It is licensed under the MIT
+License, Copyright (c) 2026 Dillon Mulroy. The upstream rule tests were not
+copied. The required license is retained at
+`tools/oxlint/anti-slop/LICENSE`.
+
 ## Hosted installer
 
 The implementation under `apps/installer/` was transferred from Ankka's

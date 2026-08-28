@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 import {
   OAUTH_ATTEMPT_TTL_MS,
   OAUTH_CALLBACK_URL,
@@ -33,15 +35,19 @@ import {
   type SealedOauthCookie,
 } from './crypto';
 import { GatewayDeploySession } from './durable/gateway-deploy-session';
-import type { GatewayDeployEnv } from './env';
-import { DeployError, stableError, type DeployErrorCode } from './errors';
+import type {
+  GatewayDeployEnv,
+  GatewayDeploySessionStub,
+} from './env';
+import { DeployError, isDeployErrorCode, stableError, type DeployErrorCode } from './errors';
 import {
   assertExactReleaseBundleIdentity,
   DisabledExactReleaseBundleProvider,
-  parseExactReleaseBundleIdentity,
+  exactReleaseBundleIdentitySchema,
   type ExactReleaseBundleIdentity,
   type ExactReleaseBundleProvider,
 } from './exact-release-bundle';
+import { deepFreezePlainData, isPlainDataTree } from './plain-data';
 import {
   recordHostedInstallerAnalytics,
   type HostedInstallerAnalyticsOutcome,
@@ -80,12 +86,17 @@ import {
   type DeploySelection,
   type StaticDeployPlan,
 } from './schema';
-import { resolveAuthorizedAccount, resolveAuthorizedTarget } from './cloudflare-target';
+import {
+  resolveAuthorizedAccount,
+  resolveAuthorizedTarget,
+  type AuthorizedTargetResolutionInput,
+} from './cloudflare-target';
 import { relaySourceAction } from './source-action-relay';
 import { buildPublicUpdateChannel } from './update-channel';
 import { relayRuntimeUpdate } from './runtime-update-relay';
 import {
   discoverCloudflareTargets,
+  type CloudflareDiscoveryResult,
   type DiscoveredCloudflareTarget,
   type PublicCloudflareDiscovery,
 } from './cloudflare-discovery';
@@ -126,10 +137,14 @@ import { createReturningUninstallJournalPort } from './returning-uninstall-journ
 
 export { GatewayDeploySession };
 
+export interface GatewayDeployExecutionContext {
+  waitUntil(task: Promise<unknown>): void;
+}
+
 export interface InstallCallbackResponseInput {
   readonly request: Request;
   readonly env: GatewayDeployEnv;
-  readonly context?: ExecutionContext;
+  readonly context?: GatewayDeployExecutionContext;
   readonly execute: () => Promise<void>;
 }
 
@@ -157,7 +172,7 @@ interface SessionContext {
   created: boolean;
   sessionId: string;
   csrfToken: string;
-  stub: DurableObjectStub;
+  stub: GatewayDeploySessionStub;
   publicSession: PublicDeploySession;
   installProgress: PublicInstallProgress | null;
   discovery: PublicCloudflareDiscovery;
@@ -166,10 +181,6 @@ interface SessionContext {
   uninstallRecovery: PublicUninstallRecovery | null;
   returningUninstall: PublicReturningUninstall | null;
   sessionCookieMaxAgeSeconds: number | null;
-}
-
-interface InternalErrorBody {
-  error?: { code?: DeployErrorCode };
 }
 
 const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
@@ -186,14 +197,14 @@ function responseHeaders(contentType: string): Headers {
   return headers;
 }
 
-function json(value: unknown, status = 200, cookies: readonly string[] = []): Response {
+function json<Value>(value: Value, status = 200, cookies: readonly string[] = []): Response {
   const headers = responseHeaders('application/json; charset=utf-8');
   for (const cookie of cookies) headers.append('set-cookie', cookie);
   return new Response(JSON.stringify(value), { status, headers });
 }
 
-function errorResponse(error: unknown, clearOauth = false): Response {
-  const stable = stableError(error);
+function errorResponse<ErrorInput>(error: ErrorInput, clearOauth = false): Response {
+  const stable = stableError(error instanceof Error ? error : undefined);
   const response = json(
     stable.reason ? { code: stable.code, reason: stable.reason } : { code: stable.code },
     stable.status,
@@ -214,14 +225,20 @@ function completionAnalyticsOutcome(
 }
 
 function hostedInstallerAnalyticsSink(env: GatewayDeployEnv): HostedInstallerAnalyticsSink {
-  return {
-    dataset: env.HOSTED_INSTALLER_ANALYTICS,
-    channel: env.HOSTED_INSTALLER_ANALYTICS_CHANNEL,
-    release: env.HOSTED_INSTALLER_ANALYTICS_RELEASE,
-  };
+  const sink: HostedInstallerAnalyticsSink = {};
+  if (env.HOSTED_INSTALLER_ANALYTICS !== undefined) {
+    sink.dataset = env.HOSTED_INSTALLER_ANALYTICS;
+  }
+  if (env.HOSTED_INSTALLER_ANALYTICS_CHANNEL !== undefined) {
+    sink.channel = env.HOSTED_INSTALLER_ANALYTICS_CHANNEL;
+  }
+  if (env.HOSTED_INSTALLER_ANALYTICS_RELEASE !== undefined) {
+    sink.release = env.HOSTED_INSTALLER_ANALYTICS_RELEASE;
+  }
+  return sink;
 }
 
-async function internalCall<T>(stub: DurableObjectStub, path: string, init?: RequestInit): Promise<T> {
+async function internalCall<T>(stub: GatewayDeploySessionStub, path: string, init?: RequestInit): Promise<T> {
   const request = new Request(`https://gateway-deploy-session.invalid${path}`, init);
   const response = await stub.fetch(request);
   let body: unknown;
@@ -231,13 +248,24 @@ async function internalCall<T>(stub: DurableObjectStub, path: string, init?: Req
     throw new DeployError(500, 'session_invalid');
   }
   if (!response.ok) {
-    const code = (body as InternalErrorBody)?.error?.code;
+    const code = internalErrorCode(body);
     throw new DeployError(response.status, code ?? 'session_invalid');
   }
+  // SAFETY: This is a same-release private Durable Object RPC. Every caller
+  // names the exact endpoint response contract, and public/untrusted nested
+  // values are parsed by their domain parser immediately after this boundary.
   return body as T;
 }
 
-function sessionStub(env: GatewayDeployEnv, sessionId: string): DurableObjectStub {
+function internalErrorCode<Input>(input: Input): DeployErrorCode | null {
+  const result = v.safeParse(v.object({
+    error: v.optional(v.object({ code: v.optional(v.string()) })),
+  }), input);
+  const code = result.success ? result.output.error?.code : undefined;
+  return isDeployErrorCode(code) ? code : null;
+}
+
+function sessionStub(env: GatewayDeployEnv, sessionId: string): GatewayDeploySessionStub {
   return env.GATEWAY_DEPLOY_SESSION.get(env.GATEWAY_DEPLOY_SESSION.idFromName(sessionId));
 }
 
@@ -256,7 +284,7 @@ function randomUninstallCycleId(): string {
 }
 
 async function readPublicSession(
-  stub: DurableObjectStub,
+  stub: GatewayDeploySessionStub,
   now: number,
 ): Promise<{
   session: PublicDeploySession;
@@ -331,7 +359,7 @@ async function initializeSession(
   env: GatewayDeployEnv,
   sessionId: string,
   now: number,
-): Promise<{ stub: DurableObjectStub; csrfToken: string; session: PublicDeploySession }> {
+): Promise<{ stub: GatewayDeploySessionStub; csrfToken: string; session: PublicDeploySession }> {
   const csrfToken = await deriveCsrfToken(env.DEPLOY_SESSION_ENCRYPTION_KEY, sessionId);
   const stub = sessionStub(env, sessionId);
   const initialized = await internalCall<{ session: PublicDeploySession }>(stub, '/initialize', {
@@ -346,7 +374,7 @@ async function initializeSession(
   return { stub, csrfToken, session: initialized.session };
 }
 
-async function synchronizeSessionCsrf(stub: DurableObjectStub, csrfToken: string): Promise<void> {
+async function synchronizeSessionCsrf(stub: GatewayDeploySessionStub, csrfToken: string): Promise<void> {
   const synchronized = await internalCall<{ synchronized: true }>(stub, '/csrf/synchronize', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -461,6 +489,8 @@ async function existingSession(
   const body = await readPublicSession(stub, now);
   const returningRecovery = body.returningUninstall &&
     body.returningUninstall.status !== 'removed' && now < body.returningUninstall.recoverUntil;
+  const recoveryDeadline = body.recovery?.recoverUntil ??
+    (returningRecovery ? body.returningUninstall?.recoverUntil : undefined);
   if (body.session.expiresAt <= now && (!allowRecovery || (!body.recovery && !returningRecovery))) {
     throw new DeployError(410, 'session_expired');
   }
@@ -476,8 +506,8 @@ async function existingSession(
     uninstall: body.uninstall,
     uninstallRecovery: body.uninstallRecovery,
     returningUninstall: body.returningUninstall,
-    sessionCookieMaxAgeSeconds: body.recovery || returningRecovery
-      ? recoveryCookieSeconds(now, body.recovery?.recoverUntil ?? body.returningUninstall!.recoverUntil)
+    sessionCookieMaxAgeSeconds: recoveryDeadline !== undefined
+      ? recoveryCookieSeconds(now, recoveryDeadline)
       : null,
   };
 }
@@ -693,20 +723,19 @@ async function readPlanApproval(
     if (error instanceof DeployError) throw error;
     throw new DeployError(400, 'bad_request');
   }
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw new DeployError(400, 'bad_request');
-  }
-  const value = input as Record<string, unknown>;
-  if (
-    Object.keys(value).sort().join(',') !== ['planHash', 'planId'].sort().join(',') ||
-    typeof value.planId !== 'string' || !(purpose === 'install'
+  if (!isPlainDataTree(input)) throw new DeployError(400, 'bad_request');
+  const result = v.safeParse(v.strictObject({
+    planId: v.string(),
+    planHash: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+  }), input);
+  if (!result.success || !(purpose === 'install'
       ? /^plan-[a-f0-9]{24}$/u
       : purpose === 'uninstall'
         ? /^uninstall-plan-[a-f0-9]{24}$/u
-        : /^returning-uninstall-plan-[a-f0-9]{24}$/u).test(value.planId) ||
-    typeof value.planHash !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(value.planHash)
-  ) throw new DeployError(400, 'bad_request');
-  return { planId: value.planId, planHash: value.planHash };
+        : /^returning-uninstall-plan-[a-f0-9]{24}$/u).test(result.output.planId)) {
+    throw new DeployError(400, 'bad_request');
+  }
+  return result.output;
 }
 
 async function readUninstallPlanApproval(request: Request): Promise<{ planId: string; planHash: string }> {
@@ -731,16 +760,10 @@ async function readOauthHandoff(request: Request): Promise<string> {
     if (error instanceof DeployError) throw error;
     throw new DeployError(400, 'bad_request');
   }
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw new DeployError(400, 'bad_request');
-  }
-  const value = input as Record<string, unknown>;
-  if (
-    Object.keys(value).join(',') !== 'handoff' ||
-    typeof value.handoff !== 'string' ||
-    !/^[A-Za-z0-9_-]{40,4096}$/u.test(value.handoff)
-  ) throw new DeployError(400, 'bad_request');
-  return value.handoff;
+  if (!isPlainDataTree(input)) throw new DeployError(400, 'bad_request');
+  const result = v.safeParse(handoffEnvelopeSchema, input);
+  if (!result.success) throw new DeployError(400, 'bad_request');
+  return result.output.handoff;
 }
 
 function oauthHandoffUrl(sealed: string): string {
@@ -835,137 +858,110 @@ interface GatewayTeardownManagementActionHandoff {
 type ManagementActionHandoff = SourceManagementActionHandoff | RuntimeManagementActionHandoff |
   GatewayTeardownManagementActionHandoff;
 
-function parseManagementOrigin(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
+function parseManagementOrigin(value: string): string | null {
   let url: URL;
   try { url = new URL(value); } catch { return null; }
   return url.protocol === 'https:' && url.username === '' && url.password === '' && url.port === '' &&
     url.pathname === '/' && url.search === '' && url.hash === '' ? url.origin : null;
 }
 
+function validGatewayName(value: string): boolean {
+  return ![...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 31 || codePoint === 127 || '<>{}\\'.includes(character);
+  });
+}
+
+const handoffEnvelopeSchema = v.strictObject({
+  handoff: v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{40,4096}$/u)),
+});
+const managementOriginSchema = v.pipe(v.string(), v.check((origin) => parseManagementOrigin(origin) !== null));
+const managementActionSharedEntries = {
+  actionId: v.pipe(v.string(), v.regex(/^action_[A-Za-z0-9_-]{32}$/u)),
+  actionKey: v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{43}$/u)),
+  actorEmail: v.pipe(
+    v.string(),
+    v.regex(/^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u),
+    v.check((email) => email === email.toLowerCase()),
+  ),
+  accountId: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
+  workerName: v.pipe(v.string(), v.regex(/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)),
+  workersSubdomain: v.pipe(v.string(), v.regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)),
+  managementOrigin: managementOriginSchema,
+  expiresAt: v.pipe(v.number(), v.safeInteger()),
+};
+const runtimeVersionHandoffSchema = v.strictObject({
+  release: v.pipe(v.string(), v.regex(/^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)),
+  artifactSha256: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+  versionId: v.union([
+    v.pipe(v.string(), v.regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u)),
+    v.null(),
+  ]),
+});
+const sourceManagementActionHandoffSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  ...managementActionSharedEntries,
+  releaseIdentity: exactReleaseBundleIdentitySchema,
+});
+const runtimeManagementActionHandoffSchema = v.strictObject({
+  schemaVersion: v.literal(2),
+  actionType: v.literal('runtime_update'),
+  ...managementActionSharedEntries,
+  operation: v.picklist(['update', 'rollback']),
+  from: runtimeVersionHandoffSchema,
+  to: runtimeVersionHandoffSchema,
+});
+const teardownManagementActionHandoffSchema = v.strictObject({
+  schemaVersion: v.literal(3),
+  actionType: v.literal('gateway_teardown'),
+  ...managementActionSharedEntries,
+  installationId: v.pipe(v.string(), v.regex(/^acg-[a-f0-9]{24}$/u)),
+  gatewayName: v.pipe(v.string(), v.minLength(1), v.maxLength(128), v.check(validGatewayName)),
+  portalHostname: v.pipe(v.string(), v.regex(
+    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u,
+  )),
+});
+const managementActionHandoffSchema = v.variant('schemaVersion', [
+  sourceManagementActionHandoffSchema,
+  runtimeManagementActionHandoffSchema,
+  teardownManagementActionHandoffSchema,
+]);
+
 async function readManagementActionHandoff(request: Request, now: number): Promise<ManagementActionHandoff> {
   requireMutationBoundary(request);
   const declared = Number(request.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > 8192) throw new DeployError(413, 'bad_request');
-  let envelope: unknown;
+  let envelopeInput: unknown;
   try {
     const serialized = await request.text();
     if (serialized.length > 8192) throw new DeployError(413, 'bad_request');
-    envelope = JSON.parse(serialized);
+    envelopeInput = JSON.parse(serialized);
   } catch (error) {
     if (error instanceof DeployError) throw error;
     throw new DeployError(400, 'bad_request');
   }
-  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
-      Object.keys(envelope as Record<string, unknown>).join(',') !== 'handoff' ||
-      typeof (envelope as Record<string, unknown>).handoff !== 'string' ||
-      !/^[A-Za-z0-9_-]{40,4096}$/u.test((envelope as Record<string, unknown>).handoff as string)) {
+  if (!isPlainDataTree(envelopeInput)) throw new DeployError(400, 'bad_request');
+  const envelopeResult = v.safeParse(handoffEnvelopeSchema, envelopeInput);
+  if (!envelopeResult.success) {
     throw new DeployError(400, 'bad_request');
   }
-  let value: unknown;
+  let claimInput: unknown;
   try {
-    const bytes = base64UrlDecode((envelope as Record<string, unknown>).handoff as string);
-    try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } finally { bytes.fill(0); }
+    const bytes = base64UrlDecode(envelopeResult.output.handoff);
+    try { claimInput = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+    finally { bytes.fill(0); }
   } catch {
     throw new DeployError(400, 'bad_request');
   }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new DeployError(400, 'bad_request');
-  const claim = value as Record<string, unknown>;
+  if (!isPlainDataTree(claimInput)) throw new DeployError(400, 'bad_request');
+  const claimResult = v.safeParse(managementActionHandoffSchema, claimInput);
+  if (!claimResult.success) throw new DeployError(400, 'bad_request');
+  const claim = claimResult.output;
   const managementOrigin = parseManagementOrigin(claim.managementOrigin);
-  let sourceReleaseIdentity: ExactReleaseBundleIdentity | null = null;
-  if (claim.schemaVersion === 1) {
-    try { sourceReleaseIdentity = parseExactReleaseBundleIdentity(claim.releaseIdentity); } catch { /* rejected below */ }
-  }
-  const runtimeVersion = (input: unknown): input is RuntimeManagementActionHandoff['from'] => {
-    if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
-    const record = input as Record<string, unknown>;
-    return Object.keys(record).sort().join(',') === 'artifactSha256,release,versionId' &&
-      typeof record.release === 'string' &&
-      /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(record.release) &&
-      typeof record.artifactSha256 === 'string' && /^sha256:[a-f0-9]{64}$/u.test(record.artifactSha256) &&
-      (record.versionId === null || (typeof record.versionId === 'string' &&
-        /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(record.versionId)));
-  };
-  const shared = typeof claim.actionId === 'string' && /^action_[A-Za-z0-9_-]{32}$/u.test(claim.actionId) &&
-    typeof claim.actionKey === 'string' && /^[A-Za-z0-9_-]{43}$/u.test(claim.actionKey) &&
-    typeof claim.actorEmail === 'string' && claim.actorEmail === claim.actorEmail.toLowerCase() &&
-    /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u.test(claim.actorEmail) &&
-    typeof claim.accountId === 'string' && /^[a-f0-9]{32}$/u.test(claim.accountId) &&
-    typeof claim.workerName === 'string' && /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(claim.workerName) &&
-    typeof claim.workersSubdomain === 'string' &&
-    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(claim.workersSubdomain) &&
-    Boolean(managementOrigin) && typeof claim.expiresAt === 'number' && Number.isSafeInteger(claim.expiresAt) &&
-    claim.expiresAt > now && claim.expiresAt <= now + OAUTH_ATTEMPT_TTL_MS;
-  if (claim.schemaVersion === 2) {
-    if (Object.keys(claim).sort().join(',') !== [
-      'accountId', 'actionId', 'actionKey', 'actionType', 'actorEmail', 'expiresAt', 'from',
-      'managementOrigin', 'operation', 'schemaVersion', 'to', 'workerName', 'workersSubdomain',
-    ].sort().join(',') || claim.actionType !== 'runtime_update' || !shared ||
-        (claim.operation !== 'update' && claim.operation !== 'rollback') ||
-        !runtimeVersion(claim.from) || !runtimeVersion(claim.to)) throw new DeployError(400, 'bad_request');
-    return Object.freeze({
-      schemaVersion: 2, actionType: 'runtime_update', actionId: claim.actionId as string,
-      actionKey: claim.actionKey as string, actorEmail: claim.actorEmail as string,
-      accountId: claim.accountId as string, workerName: claim.workerName as string,
-      workersSubdomain: claim.workersSubdomain as string, managementOrigin: managementOrigin as string,
-      operation: claim.operation, from: Object.freeze({ ...claim.from }), to: Object.freeze({ ...claim.to }),
-      expiresAt: claim.expiresAt as number,
-    });
-  }
-  if (claim.schemaVersion === 3) {
-    if (Object.keys(claim).sort().join(',') !== [
-      'accountId', 'actionId', 'actionKey', 'actionType', 'actorEmail', 'expiresAt', 'gatewayName',
-      'installationId', 'managementOrigin', 'portalHostname', 'schemaVersion', 'workerName',
-      'workersSubdomain',
-    ].sort().join(',') || claim.actionType !== 'gateway_teardown' || !shared ||
-      typeof claim.installationId !== 'string' || !/^acg-[a-f0-9]{24}$/u.test(claim.installationId) ||
-      typeof claim.gatewayName !== 'string' || claim.gatewayName.length < 1 || claim.gatewayName.length > 128 ||
-      /[\u0000-\u001f\u007f<>{}\\]/u.test(claim.gatewayName) || typeof claim.portalHostname !== 'string' ||
-      !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u
-        .test(claim.portalHostname)) throw new DeployError(400, 'bad_request');
-    return Object.freeze({
-      schemaVersion: 3,
-      actionType: 'gateway_teardown',
-      actionId: claim.actionId as string,
-      actionKey: claim.actionKey as string,
-      actorEmail: claim.actorEmail as string,
-      accountId: claim.accountId as string,
-      installationId: claim.installationId,
-      gatewayName: claim.gatewayName,
-      portalHostname: claim.portalHostname,
-      workerName: claim.workerName as string,
-      workersSubdomain: claim.workersSubdomain as string,
-      managementOrigin: managementOrigin as string,
-      expiresAt: claim.expiresAt as number,
-    });
-  }
-  if (Object.keys(claim).sort().join(',') !== [
-    'accountId', 'actionId', 'actionKey', 'actorEmail', 'expiresAt', 'managementOrigin',
-    'releaseIdentity', 'schemaVersion', 'workerName', 'workersSubdomain',
-  ].sort().join(',') || claim.schemaVersion !== 1 ||
-      typeof claim.actionId !== 'string' || !/^action_[A-Za-z0-9_-]{32}$/u.test(claim.actionId) ||
-      typeof claim.actionKey !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(claim.actionKey) ||
-      typeof claim.actorEmail !== 'string' || claim.actorEmail !== claim.actorEmail.toLowerCase() ||
-      !/^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u.test(claim.actorEmail) ||
-      typeof claim.accountId !== 'string' || !/^[a-f0-9]{32}$/u.test(claim.accountId) ||
-      typeof claim.workerName !== 'string' || !/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(claim.workerName) ||
-      typeof claim.workersSubdomain !== 'string' ||
-      !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(claim.workersSubdomain) ||
-      !managementOrigin || !sourceReleaseIdentity || !shared) {
+  if (!managementOrigin || claim.expiresAt <= now || claim.expiresAt > now + OAUTH_ATTEMPT_TTL_MS) {
     throw new DeployError(400, 'bad_request');
   }
-  return Object.freeze({
-    schemaVersion: 1 as const,
-    actionId: claim.actionId as string,
-    actionKey: claim.actionKey as string,
-    actorEmail: claim.actorEmail as string,
-    accountId: claim.accountId as string,
-    workerName: claim.workerName as string,
-    workersSubdomain: claim.workersSubdomain as string,
-    managementOrigin,
-    releaseIdentity: sourceReleaseIdentity,
-    expiresAt: claim.expiresAt as number,
-  });
+  return deepFreezePlainData({ ...claim, managementOrigin });
 }
 
 async function authorizeManagementAction(
@@ -1518,13 +1514,13 @@ async function deleteSession(request: Request, env: GatewayDeployEnv): Promise<R
     body: JSON.stringify({ csrfHash }),
   }));
   if (!response.ok) {
-    let body: InternalErrorBody = {};
+    let code: DeployErrorCode | null = null;
     try {
-      body = await response.json() as InternalErrorBody;
+      code = internalErrorCode(await response.json());
     } catch {
       // Stable fallback only.
     }
-    throw new DeployError(response.status, body.error?.code ?? 'session_invalid');
+    throw new DeployError(response.status, code ?? 'session_invalid');
   }
   return clearedSessionResponse();
 }
@@ -1535,10 +1531,14 @@ function uniqueQuery(url: URL, name: string): string | null {
   return values[0] ?? null;
 }
 
+type ValidatedCallbackQuery =
+  | { readonly state: string; readonly code: string; readonly denied: false }
+  | { readonly state: string; readonly code: null; readonly denied: true };
+
 function validateCallbackQuery(
   url: URL,
   expectedScopes: readonly string[],
-): { state: string; code: string | null; denied: boolean } {
+): ValidatedCallbackQuery {
   const keys = [...url.searchParams.keys()];
   const state = uniqueQuery(url, 'state');
   const code = uniqueQuery(url, 'code');
@@ -1560,7 +1560,9 @@ function validateCallbackQuery(
   ) {
     throw new DeployError(400, 'callback_invalid');
   }
-  return { state, code, denied: oauthError !== null };
+  if (oauthError !== null) return { state, code: null, denied: true };
+  if (code === null) throw new DeployError(400, 'callback_invalid');
+  return { state, code, denied: false };
 }
 
 function echoedScopeIsExact(value: string, expectedScopes: readonly string[]): boolean {
@@ -1580,11 +1582,15 @@ function sanitizeReason(value: string): string {
  * thrown error's name) plus the last journaled install action and phase, so an
  * operator can see where a live run died without any provider body or token.
  */
-async function installFailureReason(stub: DurableObjectStub, error: unknown): Promise<string | null> {
-  const stable = stableError(error);
+async function installFailureReason<ErrorInput>(stub: GatewayDeploySessionStub, error: ErrorInput): Promise<string | null> {
+  const stable = stableError(error instanceof Error ? error : undefined);
+  const errorDetails = v.safeParse(v.object({
+    code: v.optional(v.string()),
+    stage: v.optional(v.string()),
+  }), error);
   const detail = (field: 'code' | 'stage'): string => {
-    const value = error && typeof error === 'object' ? (error as Record<string, unknown>)[field] : undefined;
-    return typeof value === 'string' && /^[a-z][a-z0-9_]{0,40}$/u.test(value) ? `_${value}` : '';
+    const value = errorDetails.success ? errorDetails.output[field] : undefined;
+    return value !== undefined && /^[a-z][a-z0-9_]{0,40}$/u.test(value) ? `_${value}` : '';
   };
   // Most specific first so a long reason never loses its useful part.
   const errorClass = error instanceof DeployError
@@ -1596,11 +1602,11 @@ async function installFailureReason(stub: DurableObjectStub, error: unknown): Pr
     // instead of the journal silently yielded `before_journal` for every
     // failure that had a journal, which hid the real stage on live runs.
     const response = await internalCall<{
-      journal?: { actions?: Array<{ name?: unknown; phase?: unknown }> };
+      journal?: { actions?: Array<{ name?: string; phase?: string }> };
     }>(stub, '/install-journal', { method: 'GET' });
     const actions = response?.journal?.actions;
     const last = Array.isArray(actions) ? actions.at(-1) : undefined;
-    if (last && typeof last.name === 'string' && typeof last.phase === 'string') {
+    if (last?.name !== undefined && last.phase !== undefined) {
       stage = `${last.name}_${last.phase}`;
     } else if (Array.isArray(actions)) {
       stage = 'journal_empty';
@@ -1617,7 +1623,7 @@ async function installFailureReason(stub: DurableObjectStub, error: unknown): Pr
 }
 
 async function completeAttempt(
-  stub: DurableObjectStub,
+  stub: GatewayDeploySessionStub,
   attemptId: string,
   code: 'install_complete' | DeployErrorCode,
   installationId: string | null,
@@ -1626,18 +1632,18 @@ async function completeAttempt(
   reason: string | null = null,
   existingGateway: ExistingAnkkaGatewaySummary | null = null,
 ): Promise<void> {
+  const body = existingGateway === null
+    ? { attemptId, code, installationId, grantRevocation, completedAt, reason }
+    : { attemptId, code, installationId, grantRevocation, completedAt, reason, existingGateway };
   await internalCall(stub, '/complete', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      attemptId, code, installationId, grantRevocation, completedAt, reason,
-      ...(existingGateway ? { existingGateway } : {}),
-    }),
+    body: JSON.stringify(body),
   });
 }
 
 async function completeUninstallAttempt(
-  stub: DurableObjectStub,
+  stub: GatewayDeploySessionStub,
   attemptId: string,
   code: 'uninstall_complete' | DeployErrorCode,
   installationId: string | null,
@@ -1758,10 +1764,10 @@ async function sourceActionOauthCallback(
   transport: FetchTransport,
   exactReleaseProvider: ExactReleaseBundleProvider,
   now: number,
-  callback: { state: string; code: string | null; denied: boolean },
+  callback: ValidatedCallbackQuery,
   sealed: Extract<SealedOauthCookie, { schemaVersion: 4 }>,
   managementCallbackResponse?: ManagementCallbackResponse,
-  context?: ExecutionContext,
+  context?: GatewayDeployExecutionContext,
 ): Promise<Response> {
   if (sealed.purpose !== 'source_apply' || sealed.expiresAt <= now) {
     throw new DeployError(400, 'session_invalid');
@@ -1780,7 +1786,7 @@ async function sourceActionOauthCallback(
         );
         assertExactReleaseBundleIdentity(releaseBundle, sealed.releaseIdentity);
         grant = await exchangeAuthorizationCode({
-          code: callback.code as string,
+          code: callback.code,
           verifier: sealed.verifier,
           config: oauthConfig(env),
           transport,
@@ -1825,12 +1831,12 @@ async function sourceActionOauthCallback(
   }
   if (managementCallbackResponse) {
     try {
-      return await withVerifiedManagementContext(await managementCallbackResponse({
-        request,
-        env,
-        ...(context === undefined ? {} : { context }),
-        execute: executeOnce,
-      }), env, sealed, now);
+      const callbackInput: InstallCallbackResponseInput = context === undefined
+        ? { request, env, execute: executeOnce }
+        : { request, env, context, execute: executeOnce };
+      return await withVerifiedManagementContext(
+        await managementCallbackResponse(callbackInput), env, sealed, now,
+      );
     } catch {
       return installerRedirect();
     }
@@ -1844,10 +1850,10 @@ async function runtimeUpdateOauthCallback(
   transport: FetchTransport,
   releaseProvider: ReleaseBundleProvider,
   now: number,
-  callback: { state: string; code: string | null; denied: boolean },
+  callback: ValidatedCallbackQuery,
   sealed: Extract<SealedOauthCookie, { schemaVersion: 5 }>,
   managementCallbackResponse?: ManagementCallbackResponse,
-  context?: ExecutionContext,
+  context?: GatewayDeployExecutionContext,
 ): Promise<Response> {
   if (sealed.purpose !== 'runtime_update' || sealed.expiresAt <= now) {
     throw new DeployError(400, 'session_invalid');
@@ -1864,7 +1870,7 @@ async function runtimeUpdateOauthCallback(
           `sha256:${releaseBundle.manifest.artifact.treeSha256}` !== sealed.to.artifactSha256
         )) throw new DeployError(409, 'session_conflict');
         grant = await exchangeAuthorizationCode({
-          code: callback.code as string,
+          code: callback.code,
           verifier: sealed.verifier,
           config: oauthConfig(env),
           transport,
@@ -1910,12 +1916,12 @@ async function runtimeUpdateOauthCallback(
   }
   if (managementCallbackResponse) {
     try {
-      return await withVerifiedManagementContext(await managementCallbackResponse({
-        request,
-        env,
-        ...(context === undefined ? {} : { context }),
-        execute: executeOnce,
-      }), env, sealed, now);
+      const callbackInput: InstallCallbackResponseInput = context === undefined
+        ? { request, env, execute: executeOnce }
+        : { request, env, context, execute: executeOnce };
+      return await withVerifiedManagementContext(
+        await managementCallbackResponse(callbackInput), env, sealed, now,
+      );
     } catch {
       return installerRedirect();
     }
@@ -1924,10 +1930,10 @@ async function runtimeUpdateOauthCallback(
 }
 
 async function completeDiscoveryAttempt(
-  stub: DurableObjectStub,
+  stub: GatewayDeploySessionStub,
   attemptId: string,
   code: 'discovery_complete' | DeployErrorCode,
-  result: unknown,
+  result: CloudflareDiscoveryResult | null,
   grantRevocation: 'confirmed' | 'unconfirmed' | null,
   completedAt: number,
 ): Promise<void> {
@@ -1950,7 +1956,7 @@ async function oauthCallback(
   now: number,
   installCallbackResponse?: InstallCallbackResponse,
   managementCallbackResponse?: ManagementCallbackResponse,
-  context?: ExecutionContext,
+  context?: GatewayDeployExecutionContext,
 ): Promise<Response> {
   const sealedValue = readOauthCookie(request);
   if (!sealedValue) throw new DeployError(400, 'session_invalid');
@@ -2084,21 +2090,24 @@ async function oauthCallback(
         throw new DeployError(409, 'session_conflict');
       }
       grant = await exchangeAuthorizationCode({
-        code: callback.code as string,
+        code: callback.code,
         verifier: sealed.verifier,
         config: oauthConfig(env),
         transport,
       });
       grant.assertUsable();
       const installed = await grant.withAccessToken(async (accessToken) => {
-        const target = await resolveAuthorizedTarget({
+        const targetInput: AuthorizedTargetResolutionInput = {
           accessToken,
           typedZoneName: selection.basics.zoneName,
           expectedAdminEmail: selection.basics.adminEmail,
-          expectedAccountId: consumed.discoveredTarget?.account.id,
-          expectedZoneId: consumed.discoveredTarget?.zone.id,
           transport,
-        });
+        };
+        if (consumed.discoveredTarget !== null) {
+          targetInput.expectedAccountId = consumed.discoveredTarget.account.id;
+          targetInput.expectedZoneId = consumed.discoveredTarget.zone.id;
+        }
+        const target = await resolveAuthorizedTarget(targetInput);
         return executor.execute({
           selection,
           plan,
@@ -2125,7 +2134,7 @@ async function oauthCallback(
         resultCode = 'existing_gateway_detected';
         existingGateway = error.existingGateway;
       } else {
-        resultCode = stableError(error).code;
+        resultCode = stableError(error instanceof Error ? error : undefined).code;
       }
       resultReason = await installFailureReason(session.stub, error);
       installationId = null;
@@ -2173,12 +2182,10 @@ async function oauthCallback(
   };
   if (installCallbackResponse) {
     try {
-      return withClearedOauthCookie(await installCallbackResponse({
-        request,
-        env,
-        ...(context === undefined ? {} : { context }),
-        execute: executeOnce,
-      }));
+      const callbackInput: InstallCallbackResponseInput = context === undefined
+        ? { request, env, execute: executeOnce }
+        : { request, env, context, execute: executeOnce };
+      return withClearedOauthCookie(await installCallbackResponse(callbackInput));
     } catch {
       // A signed shell or stream construction failure must not strand the
       // consumed grant. Fall back to the original connected callback path.
@@ -2195,7 +2202,7 @@ async function discoveryOauthCallback(
   env: GatewayDeployEnv,
   transport: FetchTransport,
   now: number,
-  callback: { state: string; code: string | null; denied: boolean },
+  callback: ValidatedCallbackQuery,
   sealed: SealedOauthCookie,
 ): Promise<Response> {
   const session = await existingSession(request, env, now, true);
@@ -2230,7 +2237,7 @@ async function discoveryOauthCallback(
   let grantRevocation: 'confirmed' | 'unconfirmed' | null = null;
   try {
     grant = await exchangeAuthorizationCode({
-      code: callback.code as string,
+      code: callback.code,
       verifier: sealed.verifier,
       config: oauthConfig(env),
       transport,
@@ -2242,7 +2249,7 @@ async function discoveryOauthCallback(
     }));
     resultCode = 'discovery_complete';
   } catch (error) {
-    resultCode = stableError(error).code;
+    resultCode = stableError(error instanceof Error ? error : undefined).code;
     result = null;
   } finally {
     if (grant) {
@@ -2285,7 +2292,7 @@ async function uninstallOauthCallback(
   releaseProvider: ReleaseBundleProvider,
   executor: UninstallExecutor,
   now: number,
-  callback: { state: string; code: string | null; denied: boolean },
+  callback: ValidatedCallbackQuery,
   sealed: SealedOauthCookie,
 ): Promise<Response> {
   const session = await retainedInstallationSession(request, env, now);
@@ -2345,7 +2352,7 @@ async function uninstallOauthCallback(
       throw new DeployError(409, 'session_conflict');
     }
     grant = await exchangeAuthorizationCode({
-      code: callback.code as string,
+      code: callback.code,
       verifier: sealed.verifier,
       config: oauthConfig(env),
       transport,
@@ -2399,7 +2406,7 @@ async function uninstallOauthCallback(
     resultCode = 'uninstall_complete';
     installationId = removed.installationId;
   } catch (error) {
-    const stable = stableError(error);
+    const stable = stableError(error instanceof Error ? error : undefined);
     resultCode = stable.code;
     resultReason = stable.reason;
     installationId = null;
@@ -2439,7 +2446,7 @@ async function uninstallOauthCallback(
 }
 
 async function completeReturningUninstallAttempt(
-  stub: DurableObjectStub,
+  stub: GatewayDeploySessionStub,
   attemptId: string,
   code: 'returning_uninstall_complete' | DeployErrorCode,
   installationId: string | null,
@@ -2447,17 +2454,13 @@ async function completeReturningUninstallAttempt(
   completedAt: number,
   reason: string | null = null,
 ): Promise<void> {
+  const body = reason === null
+    ? { attemptId, code, completedAt, installationId, grantRevocation }
+    : { attemptId, code, completedAt, installationId, grantRevocation, reason };
   await internalCall(stub, '/returning-uninstall/complete', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      attemptId,
-      code,
-      completedAt,
-      installationId,
-      grantRevocation,
-      ...(reason === null ? {} : { reason }),
-    }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -2468,7 +2471,7 @@ async function returningUninstallRecoveryOauthCallback(
   exactReleaseProvider: ExactReleaseBundleProvider,
   executor: ReturningUninstallExecutor,
   now: number,
-  callback: { state: string; code: string | null; denied: boolean },
+  callback: ValidatedCallbackQuery,
   sealed: Extract<SealedOauthCookie, { readonly schemaVersion: 8 }>,
 ): Promise<Response> {
   const session = await existingSession(request, env, now, true);
@@ -2524,7 +2527,7 @@ async function returningUninstallRecoveryOauthCallback(
   let grantRevocation: 'confirmed' | 'unconfirmed' | null = null;
   try {
     grant = await exchangeAuthorizationCode({
-      code: callback.code as string,
+      code: callback.code,
       verifier: sealed.verifier,
       config: oauthConfig(env),
       transport,
@@ -2566,7 +2569,7 @@ async function returningUninstallRecoveryOauthCallback(
     resultCode = 'returning_uninstall_complete';
     installationId = removed.installationId;
   } catch (error) {
-    const stable = stableError(error);
+    const stable = stableError(error instanceof Error ? error : undefined);
     resultCode = stable.code;
     resultReason = stable.reason;
   } finally {
@@ -2605,7 +2608,7 @@ async function returningUninstallOauthCallback(
   exactReleaseProvider: ExactReleaseBundleProvider,
   executor: ReturningUninstallExecutor,
   now: number,
-  callback: { state: string; code: string | null; denied: boolean },
+  callback: ValidatedCallbackQuery,
   sealed: Extract<SealedOauthCookie, { readonly schemaVersion: 7 }>,
 ): Promise<Response> {
   const session = await existingSession(request, env, now, true);
@@ -2674,7 +2677,7 @@ async function returningUninstallOauthCallback(
   let grantRevocation: 'confirmed' | 'unconfirmed' | null = null;
   try {
     grant = await exchangeAuthorizationCode({
-      code: callback.code as string,
+      code: callback.code,
       verifier: sealed.verifier,
       config: oauthConfig(env),
       transport,
@@ -2728,7 +2731,7 @@ async function returningUninstallOauthCallback(
     resultCode = 'returning_uninstall_complete';
     installationId = removed.installationId;
   } catch (error) {
-    const stable = stableError(error);
+    const stable = stableError(error instanceof Error ? error : undefined);
     resultCode = stable.code;
     resultReason = stable.reason;
   } finally {
@@ -2770,22 +2773,24 @@ const HOME_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><m
 const RESULT_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ankka MCP Gateway deployment result</title></head><body><main><h1>Deployment attempt finished</h1><p>Return to the installer to review the code-only result.</p></main></body></html>`;
 
 export interface GatewayDeployWorker {
-  fetch(request: Request, env: GatewayDeployEnv, context?: ExecutionContext): Promise<Response>;
+  fetch(
+    request: Request,
+    env: GatewayDeployEnv,
+    context?: GatewayDeployExecutionContext,
+  ): Promise<Response>;
 }
 
 function validatedCapabilityPolicy(
   input: InstallerCapabilityPolicy | undefined,
 ): Readonly<InstallerCapabilityPolicy> {
   if (input === undefined) return DISABLED_INSTALLER_CAPABILITY_POLICY;
-  if (
-    !input ||
-    typeof input !== 'object' ||
-    Object.keys(input).sort().join(',') !== 'deploy,events,uninstall' ||
-    typeof input.deploy !== 'boolean' ||
-    typeof input.uninstall !== 'boolean' ||
-    typeof input.events !== 'boolean'
-  ) throw new DeployError(500, 'internal_error');
-  return Object.freeze({ deploy: input.deploy, uninstall: input.uninstall, events: input.events });
+  const result = v.safeParse(v.strictObject({
+    deploy: v.boolean(),
+    events: v.boolean(),
+    uninstall: v.boolean(),
+  }), input);
+  if (!result.success) throw new DeployError(500, 'internal_error');
+  return Object.freeze(result.output);
 }
 
 function validatedAbuseControlPolicy(

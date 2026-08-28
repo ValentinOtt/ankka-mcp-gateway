@@ -7,7 +7,7 @@ interface StatusPillProps {
   children: string
 }
 
-const toneClass: Record<StatusTone, string> = {
+const toneClass = {
   ready: 'bg-success-soft text-success-strong',
   waiting: 'bg-kumo-tint text-kumo-subtle',
   attention: 'bg-brand-soft text-brand-strong',

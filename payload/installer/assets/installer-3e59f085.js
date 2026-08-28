@@ -21,9 +21,24 @@ const state = {
 
 const byId = (id) => document.getElementById(id);
 const notice = byId('live-notice');
+const OBJECT_TAG = Object.prototype.toString;
+const FUNCTION_SOURCE = Function.prototype.toString;
+
+function isText(value) {
+  return Object(value) !== value && OBJECT_TAG.call(value) === '[object String]';
+}
+
+function isCallable(value) {
+  try {
+    FUNCTION_SOURCE.call(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const SELECTION_ERROR_MESSAGES = Object.freeze({
-  selection_shape_invalid: 'The configuration shape is incomplete. Review every gateway field.',
+  selection_contract_invalid: 'The configuration is incomplete. Review every gateway field.',
   gateway_name_invalid: 'Enter a gateway name between 2 and 80 letters, numbers, spaces, or hyphens.',
   admin_email_invalid: 'Enter a valid primary administrator email.',
   additional_admin_emails_invalid: 'Enter at most 19 valid additional administrator emails.',
@@ -71,17 +86,17 @@ class ApiError extends Error {
     super('request_failed');
     this.name = 'ApiError';
     this.status = status;
-    this.code = typeof payload?.code === 'string' ? payload.code : 'internal_error';
-    this.reason = typeof payload?.reason === 'string' ? payload.reason : null;
+    this.code = isText(payload?.code) ? payload.code : 'internal_error';
+    this.reason = isText(payload?.reason) ? payload.reason : null;
   }
 }
 
 function text(value) {
-  return typeof value === 'string' ? value : '';
+  return isText(value) ? value : '';
 }
 
 function list(value, lowercase = false) {
-  if (typeof value !== 'string') return [];
+  if (!isText(value)) return [];
   const entries = value.split(/[\n,]/u)
     .map((entry) => entry.trim())
     .filter(Boolean)
@@ -109,23 +124,24 @@ async function api(path, { method = 'GET', body, extraHeaders = {} } = {}) {
   }
   if (body !== undefined) headers['content-type'] = 'application/json';
   Object.assign(headers, extraHeaders);
-  const response = await fetch(path, {
+  const request = {
     method,
     headers,
     credentials: 'same-origin',
     redirect: 'error',
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
+  };
+  if (body !== undefined) request.body = JSON.stringify(body);
+  const response = await fetch(path, request);
   let payload = null;
   try { payload = await response.json(); } catch { /* The fixed UI error is enough. */ }
   if (!response.ok) throw new ApiError(response.status, payload);
   if (!payload || payload.schemaVersion !== 1) throw new ApiError(502, null);
-  if (typeof payload.csrf === 'string') state.csrf = payload.csrf;
+  if (isText(payload.csrf)) state.csrf = payload.csrf;
   if (payload.capabilities && payload.authorization) {
     state.session = payload;
     if (payload.selection) state.draft = structuredClone(payload.selection);
   }
-  if (Array.isArray(payload.targets) && typeof payload.status === 'string') {
+  if (Array.isArray(payload.targets) && isText(payload.status)) {
     state.discovery = payload;
     if (payload.selectedTargetIdHash) state.selectedTargetIdHash = payload.selectedTargetIdHash;
   }
@@ -899,7 +915,7 @@ const STRING_ARRAY_SCHEMA = Object.freeze({
 
 async function registerAgentTools() {
   const modelContext = document.modelContext;
-  if (state.agentToolsRegistered || !modelContext || typeof modelContext.registerTool !== 'function') return;
+  if (state.agentToolsRegistered || !modelContext || !isCallable(modelContext.registerTool)) return;
   const tools = [
     {
       name: 'begin_cloudflare_discovery',

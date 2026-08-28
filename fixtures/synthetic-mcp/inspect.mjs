@@ -1,3 +1,4 @@
+import * as v from 'valibot';
 import {
   SYNTHETIC_FIXTURE_ID,
   SYNTHETIC_TOOL_NAME,
@@ -16,7 +17,7 @@ export class SyntheticMcpInspectionError extends Error {
 
 export async function inspectSyntheticEndpoint(endpoint, { fetchImpl = globalThis.fetch } = {}) {
   const url = parseEndpoint(endpoint);
-  if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function');
+  if (!v.is(v.function(), fetchImpl)) throw new TypeError('fetchImpl must be a function');
 
   const initialize = await rpc(fetchImpl, url, 'initialize', {
     protocolVersion: PROTOCOL_VERSION,
@@ -109,17 +110,18 @@ async function notification(fetchImpl, endpoint, method) {
 }
 
 async function post(fetchImpl, endpoint, body) {
+  const headers = {
+    Accept: 'application/json, text/event-stream',
+    'Content-Type': 'application/json',
+    'MCP-Protocol-Version': PROTOCOL_VERSION,
+    'Mcp-Method': body.method,
+  };
+  if (body.method === 'tools/call') headers['Mcp-Name'] = body.params.name;
   try {
     return await fetchImpl(endpoint, {
       method: 'POST',
       redirect: 'error',
-      headers: {
-        Accept: 'application/json, text/event-stream',
-        'Content-Type': 'application/json',
-        'MCP-Protocol-Version': PROTOCOL_VERSION,
-        'Mcp-Method': body.method,
-        ...(body.method === 'tools/call' ? { 'Mcp-Name': body.params.name } : {}),
-      },
+      headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });

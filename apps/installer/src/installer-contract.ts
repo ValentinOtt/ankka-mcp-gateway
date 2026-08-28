@@ -2,7 +2,11 @@ import { isFailureReason } from './errors';
 import type { DeploySelection, StaticDeployPlan } from './schema';
 import type { DeployErrorCode } from './errors';
 import type { PublicDeployRecovery, PublicDeploySession } from './session';
-import type { PublicUninstallRecovery, PublicUninstallSession } from './uninstall-session';
+import type {
+  PublicUninstallPlan,
+  PublicUninstallRecovery,
+  PublicUninstallSession,
+} from './uninstall-session';
 import type { ExistingAnkkaGatewaySummary } from './cloudflare-gateway-fresh-preflight';
 import type { PublicReturningUninstall } from './returning-uninstall-session';
 import {
@@ -136,8 +140,13 @@ export interface InstallerRemoval {
 }
 
 /** Appends the stored secret-free diagnostic reason, when one was recorded. */
-function withDiagnostic(detail: string, result: object | null | undefined): string {
-  const candidate = result && 'reason' in result ? (result as { reason?: unknown }).reason : null;
+interface DiagnosticResult {
+  readonly code: string;
+  readonly reason?: string;
+}
+
+function withDiagnostic(detail: string, result: DiagnosticResult | null | undefined): string {
+  const candidate = result?.reason ?? null;
   const reason = isFailureReason(candidate) ? candidate : null;
   return reason ? `${detail} Diagnostic: ${reason}.` : detail;
 }
@@ -411,7 +420,7 @@ function deployment(
 }
 
 function removal(
-  uninstall: PublicUninstallSession | null,
+  uninstall: InstallerUninstallSession | null,
   recovery: PublicUninstallRecovery | null,
 ): InstallerRemoval | null {
   if (!uninstall) return null;
@@ -458,6 +467,10 @@ function removal(
       : null,
   };
 }
+
+type InstallerUninstallSession = Omit<PublicUninstallSession, 'plan'> & {
+  readonly plan: PublicUninstallPlan;
+};
 
 const RETURNING_REMOVAL_NOTICE =
   'Removal is authorized by the checksum-verified receipt held in the customer-owned Worker. Cloudflare retains any Advanced Certificate for manual review.';
@@ -507,7 +520,7 @@ export function installerSession(
   session: PublicDeploySession,
   recovery: PublicDeployRecovery | null = null,
   capabilityPolicy: InstallerCapabilityPolicy = DISABLED_INSTALLER_CAPABILITY_POLICY,
-  uninstall: PublicUninstallSession | null = null,
+  uninstall: InstallerUninstallSession | null = null,
   uninstallRecovery: PublicUninstallRecovery | null = null,
   installProgress: PublicInstallProgress | null = null,
   returningUninstall: PublicReturningUninstall | null = null,

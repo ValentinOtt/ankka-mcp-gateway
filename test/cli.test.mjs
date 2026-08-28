@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const execFileAsync = promisify(execFile);
-const cli = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
+const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 const config = fileURLToPath(new URL('../examples/gateway.config.json', import.meta.url));
 const observed = fileURLToPath(new URL('../examples/observed.empty.json', import.meta.url));
 const access = fileURLToPath(new URL('../examples/access-input.json', import.meta.url));

@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 export type DeployErrorCode =
   | 'abuse_controls_unavailable'
   | 'bad_request'
@@ -46,16 +48,17 @@ export const DEPLOY_ERROR_CODES: ReadonlySet<string> = new Set<DeployErrorCode>(
   'target_account_ambiguous',
   'target_zone_invalid',
 ]);
+const stringSchema = v.string();
 
-export function isDeployErrorCode(value: unknown): value is DeployErrorCode {
-  return typeof value === 'string' && DEPLOY_ERROR_CODES.has(value);
+export function isDeployErrorCode<Value>(value: Value): value is Value & DeployErrorCode {
+  return v.is(stringSchema, value) && DEPLOY_ERROR_CODES.has(value);
 }
 
 /** Safe diagnostic vocabulary: fixed words, HTTP status classes, and RFC 6749 error codes only. */
 export const FAILURE_REASON_PATTERN = /^[a-z][a-z0-9_]{0,159}$/u;
 
-export function isFailureReason(value: unknown): value is string {
-  return typeof value === 'string' && FAILURE_REASON_PATTERN.test(value);
+export function isFailureReason<Value>(value: Value): value is Value & string {
+  return v.is(stringSchema, value) && FAILURE_REASON_PATTERN.test(value);
 }
 
 export class DeployError extends Error {
@@ -73,6 +76,6 @@ export class DeployError extends Error {
   }
 }
 
-export function stableError(error: unknown): DeployError {
+export function stableError<Thrown>(error: Thrown): DeployError {
   return error instanceof DeployError ? error : new DeployError(500, 'internal_error');
 }

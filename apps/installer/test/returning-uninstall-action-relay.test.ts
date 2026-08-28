@@ -1,10 +1,14 @@
+import * as v from 'valibot';
 import { describe, expect, it } from 'vitest';
 
+import { boundaryObjectSchema } from '../src/boundary';
 import {
   applyReturningUninstallAction,
   relayReturningUninstallAction,
 } from '../src/returning-uninstall-action-relay';
-import type { ReturningUninstallImportedAuthority } from '../src/returning-uninstall-authority';
+import { parseReturningUninstallImportedAuthority } from '../src/returning-uninstall-authority';
+import { requestJson } from './boundary';
+import { readyInstallationReceiptFixture } from './provider-neutral-installation-receipt-fixture';
 
 const ACCOUNT_ID = 'a'.repeat(32);
 const ACTION_ID = `action_${'A'.repeat(32)}`;
@@ -16,16 +20,17 @@ const REQUEST_ID = 'R'.repeat(22);
 const WORKER_ID = 'b'.repeat(32);
 const VERSION_ID = '11111111-1111-4111-8111-111111111111';
 const DEPLOYMENT_ID = '22222222-2222-4222-8222-222222222222';
+const subdomainMutationSchema = v.object({ enabled: v.boolean(), previews_enabled: v.boolean() });
 
-function envelope(result: unknown, status = 200): Response {
+function envelope<Result>(result: Result, status = 200): Response {
   return new Response(JSON.stringify({ success: status >= 200 && status < 300, result }), {
     status,
     headers: { 'content-type': 'application/json' },
   });
 }
 
-function runtimeBindings(overrides: Readonly<Record<string, string>> = {}): readonly unknown[] {
-  const values: Record<string, string> = {
+function runtimeBindings(overrides: Readonly<Record<string, string>> = {}) {
+  const values = {
     ADMIN_EMAILS: 'admin@example.com',
     ANKKA_GATEWAY_RELEASE: 'gateway-v1.0.0',
     ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${'1'.repeat(64)}`,
@@ -106,39 +111,90 @@ function input(transport: (input: RequestInfo | URL, init?: RequestInit) => Prom
   } as const;
 }
 
-function authority(
-  runtimeOverrides: Partial<ReturningUninstallImportedAuthority['runtime']> = {},
-): ReturningUninstallImportedAuthority {
-  return {
-    actionId: ACTION_ID,
-    actorEmail: 'admin@example.com',
+async function authority(
+  runtimeOverrides: Readonly<Record<string, string>> = {},
+) {
+  const resourceKinds = [
+    'portal', 'portal_access_application', 'portal_access_policy', 'dns_record',
+  ] as const;
+  const receipt = await readyInstallationReceiptFixture({
     installationId: INSTALLATION_ID,
-    // The immutable installation receipt can predate the currently active,
-    // independently signed runtime after an update.
-    receipt: {
-      installationId: INSTALLATION_ID,
-      release: 'gateway-v0.9.0',
-      target: { accountId: ACCOUNT_ID, hostname: 'mcp.example.com' },
-    },
-    control: {
-      audienceEmails: ['admin@example.com'],
-      portal: { hostname: 'mcp.example.com', name: 'Example Gateway' },
-    },
-    runtime: {
-      release: 'gateway-v1.0.0',
-      artifactSha256: `sha256:${'1'.repeat(64)}`,
-      updateChannel: 'canary',
-      updateKeyId: 'release-test-v1',
-      updatePublicKey: 'A'.repeat(43),
+    release: 'gateway-v0.9.0',
+    desiredHash: `sha256:${'2'.repeat(64)}`,
+    target: {
       accountId: ACCOUNT_ID,
       zoneId: 'c'.repeat(32),
       zoneName: 'example.com',
-      workerName: 'ankka-gateway-example',
-      workersSubdomain: 'customer-workers',
-      managementHostname: 'manage.example.com',
-      ...runtimeOverrides,
+      hostname: 'mcp.example.com',
     },
-  } as unknown as ReturningUninstallImportedAuthority;
+    accessPolicy: {
+      identityType: 'email',
+      identityCount: 1,
+      identitiesHash: `sha256:${'3'.repeat(64)}`,
+    },
+    resources: resourceKinds.map((kind, index) => {
+      const key = `resource-${index}`;
+      const base = {
+        kind,
+        key,
+        desiredHash: `sha256:${String(index + 4).repeat(64)}`,
+        marker: `acg:v1:${INSTALLATION_ID}:${key}`,
+      };
+      return kind === 'portal_access_policy'
+        ? { ...base, identityHash: `sha256:${'8'.repeat(64)}` }
+        : base;
+    }),
+  });
+  const portal = receipt.resources[0];
+  if (!portal || portal.kind !== 'portal') throw new TypeError('portal authority fixture');
+  return await parseReturningUninstallImportedAuthority({
+    schemaVersion: 1,
+    status: 'authorized',
+    authority: {
+      schemaVersion: 1,
+      installationId: INSTALLATION_ID,
+      root: { receipt },
+      control: {
+        schemaVersion: 1,
+        installationId: INSTALLATION_ID,
+        accountId: ACCOUNT_ID,
+        audienceEmails: ['admin@example.com'],
+        portal: {
+          id: portal.provider.id,
+          hostname: 'mcp.example.com',
+          name: 'Example Gateway',
+          marker: portal.marker,
+        },
+        sourceOwnership: [],
+      },
+      sources: { schemaVersion: 1, revision: 1, applyMode: 'oauth_per_action', sources: [] },
+      runtime: {
+        release: 'gateway-v1.0.0',
+        artifactSha256: `sha256:${'1'.repeat(64)}`,
+        updateChannel: 'canary',
+        updateKeyId: 'release-test-v1',
+        updatePublicKey: 'A'.repeat(43),
+        accountId: ACCOUNT_ID,
+        zoneId: 'c'.repeat(32),
+        zoneName: 'example.com',
+        workerName: 'ankka-gateway-example',
+        workersSubdomain: 'customer-workers',
+        managementHostname: 'manage.example.com',
+        ...runtimeOverrides,
+      },
+    },
+    actionId: ACTION_ID,
+  }, {
+    actionId: ACTION_ID,
+    actorEmail: 'admin@example.com',
+    installationId: INSTALLATION_ID,
+    accountId: ACCOUNT_ID,
+    workerName: 'ankka-gateway-example',
+    workersSubdomain: 'customer-workers',
+    managementOrigin: 'https://manage.example.com',
+    portalHostname: 'mcp.example.com',
+    gatewayName: 'Example Gateway',
+  });
 }
 
 describe('returning uninstall customer-action relay', () => {
@@ -186,7 +242,7 @@ describe('returning uninstall customer-action relay', () => {
       throw new Error('provider write must not be reached');
     };
 
-    await expect(applyReturningUninstallAction(input(transport), REQUEST_ID, authority(), async () => {
+    await expect(applyReturningUninstallAction(input(transport), REQUEST_ID, await authority(), async () => {
       throw new Error('post-ready proof must not be reached');
     }))
       .rejects.toMatchObject({ code: 'session_conflict' });
@@ -211,7 +267,7 @@ describe('returning uninstall customer-action relay', () => {
       throw new Error('provider write must not be reached');
     };
 
-    await expect(applyReturningUninstallAction(input(transport), REQUEST_ID, authority({
+    await expect(applyReturningUninstallAction(input(transport), REQUEST_ID, await authority({
       artifactSha256: `sha256:${'2'.repeat(64)}`,
     }), async () => {
       throw new Error('post-ready proof must not be reached');
@@ -233,7 +289,7 @@ describe('returning uninstall customer-action relay', () => {
         const preflight = runtimePreflightResponse(url);
         if (preflight) return preflight;
         if (request.method === 'GET') return envelope({ enabled, previews_enabled: false });
-        const body = await request.json() as { enabled: boolean; previews_enabled: boolean };
+        const body = await requestJson(request, subdomainMutationSchema);
         expect(body.previews_enabled).toBe(false);
         enabled = body.enabled;
         providerWrites.push(enabled);
@@ -252,7 +308,7 @@ describe('returning uninstall customer-action relay', () => {
       expect(request.headers.get('authorization')).toBeNull();
       expect(request.headers.get('cookie')).toBeNull();
       expect(request.headers.get('x-ankka-teardown-action-signature')).toMatch(/^sha256=[a-f0-9]{64}$/u);
-      const body = await request.json() as Record<string, unknown>;
+      const body = await requestJson(request, boundaryObjectSchema);
       expect(body).toMatchObject({
         schemaVersion: 1,
         command: 'apply',
@@ -270,7 +326,7 @@ describe('returning uninstall customer-action relay', () => {
     };
 
     let postReadyProofs = 0;
-    await expect(applyReturningUninstallAction(input(transport), REQUEST_ID, authority(), async () => {
+    await expect(applyReturningUninstallAction(input(transport), REQUEST_ID, await authority(), async () => {
       expect(enabled).toBe(true);
       expect(customerPosts).toBe(0);
       postReadyProofs += 1;
@@ -299,7 +355,7 @@ describe('returning uninstall customer-action relay', () => {
         const preflight = runtimePreflightResponse(url);
         if (preflight) return preflight;
         if (request.method === 'GET') return envelope({ enabled, previews_enabled: false });
-        const body = await request.json() as { enabled: boolean; previews_enabled: boolean };
+        const body = await requestJson(request, subdomainMutationSchema);
         enabled = body.enabled;
         providerWrites.push(enabled);
         return envelope({ enabled, previews_enabled: false });
@@ -315,7 +371,7 @@ describe('returning uninstall customer-action relay', () => {
     await expect(applyReturningUninstallAction(
       input(transport),
       REQUEST_ID,
-      authority(),
+      await authority(),
       async () => { throw new Error('active release changed'); },
     )).rejects.toThrow('active release changed');
     expect(customerPosts).toBe(0);

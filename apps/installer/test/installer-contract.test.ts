@@ -4,7 +4,11 @@ import {
 } from '../src/installer-contract';
 import { buildStaticDeployPlan, parseDeploySelection } from '../src/schema';
 import type { PublicDeploySession } from '../src/session';
-import type { StaticUninstallPlan } from '../src/uninstall-plan';
+import type { PublicUninstallPlan } from '../src/uninstall-session';
+import {
+  STATIC_UNINSTALL_PROVIDER_NOTICE,
+  STATIC_UNINSTALL_STEP_SUMMARIES,
+} from '../src/uninstall-plan';
 import type { PublicInstallProgress } from '../src/install-journal';
 import { buildReturningUninstallPlan, RETURNING_UNINSTALL_STEPS } from '../src/returning-uninstall-plan';
 import { manifest, NOW, selectionInput } from './fixtures';
@@ -264,18 +268,23 @@ describe('installer UI/server cross-contract', () => {
     const selection = parseDeploySelection(selectionInput);
     const plan = await buildStaticDeployPlan(selection, manifest, NOW + 600_000);
     const installationId = `acg-${'f'.repeat(24)}`;
-    const providerNotice = 'Review or remove the retained Advanced Certificate manually in Cloudflare.';
-    const uninstallPlan = {
+    const providerNotice = STATIC_UNINSTALL_PROVIDER_NOTICE;
+    const uninstallPlan: PublicUninstallPlan = {
       schemaVersion: 1,
       writesPerformed: false,
       installationId,
       release: { id: manifest.release, aggregateSha256: manifest.artifact.treeSha256 },
-      steps: [{ kind: 'gateway_resources_remove', summary: 'Remove the exact gateway resources.' }],
+      steps: [{
+        order: 2,
+        kind: 'gateway_resources_remove',
+        summary: STATIC_UNINSTALL_STEP_SUMMARIES.gateway_resources_remove,
+        resources: [],
+      }],
       providerNotice,
       planId: `uninstall-plan-${'a'.repeat(24)}`,
       planHash: `sha256:${'b'.repeat(64)}`,
       expiresAt: NOW + 300_000,
-    } as unknown as StaticUninstallPlan;
+    };
     const response = installerSession({
       schemaVersion: 1,
       status: 'succeeded',
@@ -311,7 +320,10 @@ describe('installer UI/server cross-contract', () => {
         planHash: uninstallPlan.planHash,
         writesPerformed: false,
         providerNotice,
-        operations: [{ id: 'gateway_resources_remove', label: 'Remove the exact gateway resources.' }],
+        operations: [{
+          id: 'gateway_resources_remove',
+          label: STATIC_UNINSTALL_STEP_SUMMARIES.gateway_resources_remove,
+        }],
       },
       failure: { code: 'internal_error' },
       receipt: null,
@@ -325,8 +337,8 @@ describe('installer UI/server cross-contract', () => {
     const selection = parseDeploySelection(selectionInput);
     const plan = await buildStaticDeployPlan(selection, manifest, NOW + 600_000);
     const installationId = `acg-${'1'.repeat(24)}`;
-    const providerNotice = 'Review the retained Advanced Certificate manually in Cloudflare.';
-    const uninstallPlan = {
+    const providerNotice = STATIC_UNINSTALL_PROVIDER_NOTICE;
+    const uninstallPlan: PublicUninstallPlan = {
       schemaVersion: 1,
       writesPerformed: false,
       installationId,
@@ -336,7 +348,7 @@ describe('installer UI/server cross-contract', () => {
       planId: `uninstall-plan-${'2'.repeat(24)}`,
       planHash: `sha256:${'3'.repeat(64)}`,
       expiresAt: NOW + 300_000,
-    } as unknown as StaticUninstallPlan;
+    };
     const response = installerSession({
       schemaVersion: 1,
       status: 'succeeded',

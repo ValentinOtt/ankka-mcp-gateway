@@ -1,9 +1,12 @@
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as v from 'valibot';
 
 const repositoryRoot = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.dirname(repositoryRoot);
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
 
 function lexicalCompare(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -34,7 +37,7 @@ try {
 } catch {
   throw new Error('license_bundle_lock_invalid');
 }
-if (lock.lockfileVersion !== 3 || !lock.packages || typeof lock.packages !== 'object') {
+if (lock.lockfileVersion !== 3 || !v.is(OBJECT_SCHEMA, lock.packages)) {
   throw new Error('license_bundle_lock_invalid');
 }
 
@@ -56,9 +59,9 @@ for (const [relative, locked] of external) {
   } catch {
     throw new Error('license_bundle_package_invalid');
   }
-  if (typeof manifest.name !== 'string' || typeof manifest.version !== 'string' ||
-      manifest.version !== locked.version || typeof locked.resolved !== 'string' ||
-      !locked.resolved.startsWith('https://registry.npmjs.org/') || typeof locked.integrity !== 'string') {
+  if (!v.is(STRING_SCHEMA, manifest.name) || !v.is(STRING_SCHEMA, manifest.version) ||
+      manifest.version !== locked.version || !v.is(STRING_SCHEMA, locked.resolved) ||
+      !locked.resolved.startsWith('https://registry.npmjs.org/') || !v.is(STRING_SCHEMA, locked.integrity)) {
     throw new Error('license_bundle_package_invalid');
   }
   const filenames = (await readdir(directory, { withFileTypes: true }))

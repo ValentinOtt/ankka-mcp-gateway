@@ -13,6 +13,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import * as v from 'valibot';
 
 import {
   ReleaseCandidateError,
@@ -35,6 +36,8 @@ const INJECTED_PROBE =
   `      ${REVIEWED_FAULT_INJECTION_MARKER}\n` +
   `      return fixedJson(503, { schemaVersion: 1, error: '${REVIEWED_FAULT_INJECTION_SENTINEL}' });\n` +
   "    }\n";
+const plainRecordSchema = v.record(v.string(), v.unknown());
+const stringSchema = v.string();
 
 export class ReviewedFaultCandidateError extends Error {
   constructor(code) {
@@ -50,7 +53,7 @@ function fail(code) {
 
 function exactKeys(value, keys) {
   if (
-    value === null || typeof value !== 'object' || Array.isArray(value) ||
+    !v.is(plainRecordSchema, value) ||
     Object.getPrototypeOf(value) !== Object.prototype
   ) return false;
   const actual = Object.keys(value).sort();
@@ -74,7 +77,7 @@ function occurrences(value, needle) {
 }
 
 function releaseParts(release) {
-  if (typeof release !== 'string' || !RELEASE_PATTERN.test(release)) fail('invalid_release');
+  if (!v.is(stringSchema, release) || !RELEASE_PATTERN.test(release)) fail('invalid_release');
   return release.slice('gateway-v'.length).split('.').map((part) => BigInt(part));
 }
 
@@ -243,7 +246,7 @@ function parseCliArguments(argv) {
     }
     values[flag] = argv[index + 1];
   }
-  if ([...flags].some((flag) => typeof values[flag] !== 'string')) fail('invalid_arguments');
+  if ([...flags].some((flag) => !v.is(stringSchema, values[flag]))) fail('invalid_arguments');
   return Object.freeze({
     help: false,
     sourceDirectory: values['--source'],

@@ -5,6 +5,7 @@
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+import * as v from 'valibot';
 
 import {
   classifyAccessApplicationForHostname,
@@ -24,6 +25,9 @@ const MAX_PAGES = 10;
 const PAGE_SIZE = 100;
 const TIMEOUT_MS = 10_000;
 const RUNTIME_MODES = Object.freeze(['active', 'disabled']);
+const FUNCTION_SCHEMA = v.function();
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
 
 export class IsolatedAccessVerificationError extends Error {
   constructor(code = 'isolated_access_verification_failed') {
@@ -38,7 +42,7 @@ function fail(code = 'isolated_access_verification_failed') {
 }
 
 function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return v.is(OBJECT_SCHEMA, value) && !Array.isArray(value);
 }
 
 function exactKeys(value, keys) {
@@ -124,7 +128,7 @@ async function readAllApplications(fetchImpl, token, accountId) {
     for (const application of body.result) {
       if (
         !isRecord(application) ||
-        typeof application.id !== 'string' || application.id.length < 1 || application.id.length > 256 ||
+        !v.is(STRING_SCHEMA, application.id) || application.id.length < 1 || application.id.length > 256 ||
         ids.has(application.id)
       ) fail('provider_response_invalid');
       ids.add(application.id);
@@ -266,7 +270,7 @@ export async function verifyIsolatedAccess(input) {
     fail('target_invalid');
   }
   if (
-    typeof input.fetchImpl !== 'function' || typeof input.readToken !== 'function' ||
+    !v.is(FUNCTION_SCHEMA, input.fetchImpl) || !v.is(FUNCTION_SCHEMA, input.readToken) ||
     !RUNTIME_MODES.includes(input.runtimeMode)
   ) {
     fail('input_invalid');
@@ -275,7 +279,7 @@ export async function verifyIsolatedAccess(input) {
   let token;
   try {
     token = await input.readToken();
-    if (typeof token !== 'string' || !TOKEN_PATTERN.test(token)) fail('token_invalid');
+    if (!v.is(STRING_SCHEMA, token) || !TOKEN_PATTERN.test(token)) fail('token_invalid');
     const applications = await readAllApplications(input.fetchImpl, token, target.accountId);
     const configuration = verifyConfiguration(applications, contract);
     const behaviorChecks = await verifyBehavior(input.fetchImpl, contract, input.runtimeMode);

@@ -21,6 +21,7 @@ import {
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+import * as v from 'valibot';
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES = 32 * 1024 * 1024;
@@ -40,7 +41,6 @@ const PUBLIC_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/u;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 const CREDENTIAL_NAME = /(?:^|[-_.])(?:api[-_.]?key|client[-_.]?secret|credential|credentials|password|passwd|private[-_.]?key|secret|secrets|token|tokens)(?:[-_.]|$)/iu;
 const DISALLOWED_CREDENTIAL_SEGMENT = new Set([
   'APIKEY',
@@ -53,8 +53,20 @@ const DISALLOWED_CREDENTIAL_SEGMENT = new Set([
   'SECRET',
   'TOKEN',
 ]);
+
+function hasControlCharacter(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return true;
+  }
+  return false;
+}
 const PKCS8_SEED_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const SPKI_PUBLIC_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+const BOOLEAN_SCHEMA = v.boolean();
+const NUMBER_SCHEMA = v.number();
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
 
 export const REVIEWED_FAULT_INJECTION = 'exact-version-health-probe-v1';
 export const REVIEWED_FAULT_INJECTION_MARKER =
@@ -219,7 +231,7 @@ function fail() {
 }
 
 function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return v.is(OBJECT_SCHEMA, value) && !Array.isArray(value);
 }
 
 function exactKeys(value, keys) {
@@ -243,9 +255,9 @@ export function canonicalJson(value) {
 
 export function releaseSignatureCanonicalJson(channel, keyId, manifest) {
   if (
-    typeof channel !== 'string' || !CHANNEL_PATTERN.test(channel) ||
-    typeof keyId !== 'string' || !KEY_ID_PATTERN.test(keyId) ||
-    typeof manifest !== 'string' || manifest.length === 0
+    !v.is(STRING_SCHEMA, channel) || !CHANNEL_PATTERN.test(channel) ||
+    !v.is(STRING_SCHEMA, keyId) || !KEY_ID_PATTERN.test(keyId) ||
+    !v.is(STRING_SCHEMA, manifest) || manifest.length === 0
   ) fail();
   return canonicalJson({
     channel,
@@ -257,10 +269,10 @@ export function releaseSignatureCanonicalJson(channel, keyId, manifest) {
 }
 
 function canonicalValue(value, seen) {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+  if (value === null || v.is(STRING_SCHEMA, value) || v.is(BOOLEAN_SCHEMA, value)) {
     return JSON.stringify(value);
   }
-  if (typeof value === 'number') {
+  if (v.is(NUMBER_SCHEMA, value)) {
     if (!Number.isFinite(value)) fail();
     return JSON.stringify(value);
   }
@@ -339,11 +351,11 @@ function componentPayloadDirectory(component) {
 function safePayloadPath(value, component) {
   const payloadDirectory = componentPayloadDirectory(component);
   if (
-    typeof value !== 'string' ||
+    !v.is(STRING_SCHEMA, value) ||
     !value.startsWith(`payload/${payloadDirectory}/`) ||
     value.includes('\\') ||
     value.includes('%') ||
-    CONTROL_CHARACTER.test(value) ||
+    hasControlCharacter(value) ||
     Buffer.byteLength(value, 'utf8') > MAX_PAYLOAD_PATH_BYTES
   ) return false;
   const segments = value.split('/');
@@ -356,7 +368,7 @@ function safePayloadPath(value, component) {
 }
 
 function identifierSegments(identifier) {
-  if (typeof identifier !== 'string' || identifier === '') return [];
+  if (!v.is(STRING_SCHEMA, identifier) || identifier === '') return [];
   return identifier
     .replace(/([a-z0-9])([A-Z])/gu, '$1_$2')
     .replace(/[^A-Za-z0-9]+/gu, '_')
@@ -444,9 +456,9 @@ function parseFileRecord(input, component) {
   if (
     !safeInteger(input.byteSize, MAX_FILE_BYTES) ||
     !safePayloadPath(input.path, component) ||
-    typeof input.contentType !== 'string' ||
+    !v.is(STRING_SCHEMA, input.contentType) ||
     input.contentType !== expectedContentType(component, input.path) ||
-    typeof input.sha256 !== 'string' ||
+    !v.is(STRING_SCHEMA, input.sha256) ||
     !SHA256_PATTERN.test(input.sha256)
   ) fail();
   return Object.freeze({
@@ -463,7 +475,7 @@ function parseComponent(input, component) {
     !safeInteger(input.byteSize, MAX_PAYLOAD_BYTES) ||
     !safeInteger(input.fileCount, MAX_FILES) ||
     !Array.isArray(input.files) ||
-    typeof input.treeSha256 !== 'string' ||
+    !v.is(STRING_SCHEMA, input.treeSha256) ||
     !SHA256_PATTERN.test(input.treeSha256)
   ) fail();
   const files = input.files.map((record) => parseFileRecord(record, component));
@@ -507,10 +519,10 @@ function parseCanonicalManifest(bytes, expectedRelease) {
   ])) fail();
   if (
     raw.schemaVersion !== 1 ||
-    typeof raw.release !== 'string' ||
+    !v.is(STRING_SCHEMA, raw.release) ||
     !RELEASE_PATTERN.test(raw.release) ||
     raw.release !== expectedRelease ||
-    typeof raw.sourceCommit !== 'string' ||
+    !v.is(STRING_SCHEMA, raw.sourceCommit) ||
     !COMMIT_PATTERN.test(raw.sourceCommit) ||
     canonicalJson(raw.cloudflare) !== canonicalJson(APPROVED_CLOUDFLARE_CONTRACT) ||
     !Array.isArray(raw.oauthScopeIds) ||
@@ -519,7 +531,7 @@ function parseCanonicalManifest(bytes, expectedRelease) {
     !exactKeys(raw.artifact, ['byteSize', 'fileCount', 'treeSha256']) ||
     !safeInteger(raw.artifact.byteSize, MAX_PAYLOAD_BYTES) ||
     !safeInteger(raw.artifact.fileCount, MAX_FILES) ||
-    typeof raw.artifact.treeSha256 !== 'string' ||
+    !v.is(STRING_SCHEMA, raw.artifact.treeSha256) ||
     !SHA256_PATTERN.test(raw.artifact.treeSha256) ||
     !exactKeys(raw.components, [
       'admin',
@@ -686,7 +698,7 @@ function setsEqual(left, right) {
 }
 
 export async function loadVerifiedPublicRelease(releaseDirectory, expectedRelease) {
-  if (typeof releaseDirectory !== 'string' || releaseDirectory.length === 0 || releaseDirectory.includes('\0')) fail();
+  if (!v.is(STRING_SCHEMA, releaseDirectory) || releaseDirectory.length === 0 || releaseDirectory.includes('\0')) fail();
   let root;
   try {
     const requestedRoot = path.resolve(releaseDirectory);
@@ -751,7 +763,7 @@ export async function loadVerifiedPublicRelease(releaseDirectory, expectedReleas
 }
 
 function decodePublicKey(encoded) {
-  if (typeof encoded !== 'string' || !PUBLIC_KEY_PATTERN.test(encoded)) fail();
+  if (!v.is(STRING_SCHEMA, encoded) || !PUBLIC_KEY_PATTERN.test(encoded)) fail();
   let bytes;
   try {
     bytes = Buffer.from(encoded, 'base64url');
@@ -834,10 +846,10 @@ export async function prepareSignedReleasePublishPlan(input) {
       !exactKeys(input, [...ordinaryKeys, 'reviewedFaultInjection'])
     ) fail();
     if (
-      typeof input.channel !== 'string' || !CHANNEL_PATTERN.test(input.channel) ||
-      typeof input.release !== 'string' || !RELEASE_PATTERN.test(input.release) ||
-      typeof input.keyId !== 'string' || !KEY_ID_PATTERN.test(input.keyId) ||
-      typeof input.publicKey !== 'string' || !PUBLIC_KEY_PATTERN.test(input.publicKey) ||
+      !v.is(STRING_SCHEMA, input.channel) || !CHANNEL_PATTERN.test(input.channel) ||
+      !v.is(STRING_SCHEMA, input.release) || !RELEASE_PATTERN.test(input.release) ||
+      !v.is(STRING_SCHEMA, input.keyId) || !KEY_ID_PATTERN.test(input.keyId) ||
+      !v.is(STRING_SCHEMA, input.publicKey) || !PUBLIC_KEY_PATTERN.test(input.publicKey) ||
       !(seed instanceof Uint8Array) || seed.byteLength !== 32
     ) fail();
 
@@ -951,7 +963,7 @@ export async function prepareSignedReleasePublishPlan(input) {
 function outputRelativeForObject(object, release) {
   const expectedPrefix = `${OBJECTS_DIRECTORY}/${R2_ROOT}/`;
   if (
-    typeof object.sourcePath !== 'string' ||
+    !v.is(STRING_SCHEMA, object.sourcePath) ||
     !object.sourcePath.startsWith(expectedPrefix) ||
     object.sourcePath.includes('\\') ||
     object.sourcePath.includes('%') ||
@@ -1012,7 +1024,7 @@ async function writeExclusiveAndVerify(root, relativePath, bytes, expectedSha256
  */
 export async function writeSignedReleasePublishDirectory(prepared, outputDirectory) {
   const state = PREPARED_STATE.get(prepared);
-  if (!state || typeof outputDirectory !== 'string' || outputDirectory.length === 0 || outputDirectory.includes('\0')) fail();
+  if (!state || !v.is(STRING_SCHEMA, outputDirectory) || outputDirectory.length === 0 || outputDirectory.includes('\0')) fail();
   const resolved = path.resolve(outputDirectory);
   if (resolved === state.sourceRoot || resolved.startsWith(`${state.sourceRoot}${path.sep}`)) fail();
   const basename = path.basename(resolved);
@@ -1101,12 +1113,12 @@ function parseCliArguments(argv) {
   }
   if (
     !stdinKey ||
-    typeof values['--release-dir'] !== 'string' ||
-    typeof values['--release'] !== 'string' ||
-    typeof values['--channel'] !== 'string' ||
-    typeof values['--key-id'] !== 'string' ||
-    typeof values['--public-key'] !== 'string' ||
-    (write !== (typeof values['--out'] === 'string'))
+    !v.is(STRING_SCHEMA, values['--release-dir']) ||
+    !v.is(STRING_SCHEMA, values['--release']) ||
+    !v.is(STRING_SCHEMA, values['--channel']) ||
+    !v.is(STRING_SCHEMA, values['--key-id']) ||
+    !v.is(STRING_SCHEMA, values['--public-key']) ||
+    (write !== v.is(STRING_SCHEMA, values['--out']))
   ) fail();
   return {
     help: false,
@@ -1164,10 +1176,10 @@ export async function runReleaseSigningCli({ argv, stdin, stdout, stderr }) {
       publicKey: options.publicKey,
       release: options.release,
       releaseDirectory: options.releaseDirectory,
-      ...(options.reviewedFaultInjection === undefined ? {} : {
-        reviewedFaultInjection: options.reviewedFaultInjection,
-      }),
     };
+    if (options.reviewedFaultInjection !== undefined) {
+      signingInput.reviewedFaultInjection = options.reviewedFaultInjection;
+    }
     const prepared = await prepareSignedReleasePublishPlan(signingInput);
     if (options.write) {
       await writeSignedReleasePublishDirectory(prepared, options.outputDirectory);

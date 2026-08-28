@@ -2,6 +2,7 @@ import { constants as FS_CONSTANTS } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as v from 'valibot';
 
 export const LIVE_INSTALLER_HOSTNAME = 'deploy.ankka.ai';
 export const LIVE_INSTALLER_WORKER_NAME = 'ankka-gateway-deploy';
@@ -21,6 +22,8 @@ const RESERVED_HOST_SUFFIXES = Object.freeze([
   '.test',
   '.workers.dev',
 ]);
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
 
 export class IsolatedCanaryTargetError extends Error {
   constructor() {
@@ -35,7 +38,7 @@ function fail() {
 }
 
 function isPlainRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+  return v.is(OBJECT_SCHEMA, value) && !Array.isArray(value) &&
     Object.getPrototypeOf(value) === Object.prototype;
 }
 
@@ -58,7 +61,7 @@ function isWithinRepository(filename) {
 
 export function isIsolatedCanaryHostname(value) {
   if (
-    typeof value !== 'string' ||
+    !v.is(STRING_SCHEMA, value) ||
     value.length > 253 ||
     value !== value.toLowerCase() ||
     value === LIVE_INSTALLER_HOSTNAME ||
@@ -80,12 +83,12 @@ export function parseIsolatedCanaryTarget(input) {
   if (
     input.schemaVersion !== 1 ||
     input.kind !== 'ankka-gateway-deploy-isolated-target' ||
-    typeof input.accountId !== 'string' || !ACCOUNT_ID_PATTERN.test(input.accountId) ||
+    !v.is(STRING_SCHEMA, input.accountId) || !ACCOUNT_ID_PATTERN.test(input.accountId) ||
     !isIsolatedCanaryHostname(input.hostname) ||
-    typeof input.oauthClientId !== 'string' ||
+    !v.is(STRING_SCHEMA, input.oauthClientId) ||
     !OAUTH_CLIENT_ID_PATTERN.test(input.oauthClientId) ||
     input.oauthClientId === LIVE_INSTALLER_OAUTH_CLIENT_ID ||
-    typeof input.workerName !== 'string' || !WORKER_NAME_PATTERN.test(input.workerName) ||
+    !v.is(STRING_SCHEMA, input.workerName) || !WORKER_NAME_PATTERN.test(input.workerName) ||
     input.workerName === LIVE_INSTALLER_WORKER_NAME
   ) fail();
   return Object.freeze({
@@ -99,7 +102,7 @@ export function parseIsolatedCanaryTarget(input) {
 }
 
 export async function readIsolatedCanaryTargetFile(filename) {
-  if (typeof filename !== 'string' || filename.length === 0 || filename.includes('\0')) fail();
+  if (!v.is(STRING_SCHEMA, filename) || filename.length === 0 || filename.includes('\0')) fail();
   let resolved;
   let handle;
   let bytes;

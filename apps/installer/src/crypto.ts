@@ -1,9 +1,195 @@
+import * as v from 'valibot';
+
 import { DeployError } from './errors';
-import type { ExactReleaseBundleIdentity } from './exact-release-bundle';
+import {
+  exactReleaseBundleIdentitySchema,
+  type ExactReleaseBundleIdentity,
+} from './exact-release-bundle';
+import { isPlainDataTree } from './plain-data';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const OAUTH_COOKIE_AAD = encoder.encode('ankka-gateway-deploy-oauth-cookie-v2');
+const BASE64_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
+const ATTEMPT_ID = /^att_[A-Za-z0-9_-]{32}$/u;
+const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u;
+const EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u;
+const ACCOUNT_ID = /^[a-f0-9]{32}$/u;
+const INSTALLATION_ID = /^acg-[a-f0-9]{24}$/u;
+const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+const RELEASE = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
+const HASH = /^sha256:[a-f0-9]{64}$/u;
+const VERSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
+const RETURNING_UNINSTALL_PLAN_ID = /^returning-uninstall-plan-[a-f0-9]{24}$/u;
+
+function validManagementOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port &&
+      url.pathname === '/' && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+function validHostname(value: string): boolean {
+  const labels = value.split('.');
+  return value.length <= 253 && value === value.toLowerCase() && labels.length >= 2 &&
+    labels.every((label) => DNS_LABEL.test(label));
+}
+
+function validSafeName(value: string): boolean {
+  return ![...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 31 || codePoint === 127 || '<>{}\\'.includes(character);
+  });
+}
+
+const base64TokenSchema = v.pipe(v.string(), v.regex(BASE64_TOKEN));
+const attemptIdSchema = v.pipe(v.string(), v.regex(ATTEMPT_ID));
+const actionIdSchema = v.pipe(v.string(), v.regex(ACTION_ID));
+const emailSchema = v.pipe(
+  v.string(),
+  v.regex(EMAIL),
+  v.check((email) => email === email.toLowerCase()),
+);
+const accountIdSchema = v.pipe(v.string(), v.regex(ACCOUNT_ID));
+const installationIdSchema = v.pipe(v.string(), v.regex(INSTALLATION_ID));
+const workerNameSchema = v.pipe(v.string(), v.regex(WORKER_NAME));
+const workersSubdomainSchema = v.pipe(v.string(), v.regex(DNS_LABEL));
+const managementOriginSchema = v.pipe(v.string(), v.check(validManagementOrigin));
+const hostnameSchema = v.pipe(v.string(), v.check(validHostname));
+const safeNameSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(128),
+  v.check(validSafeName),
+);
+const expiresAtSchema = v.pipe(v.number(), v.safeInteger());
+const runtimeVersionSchema = v.strictObject({
+  release: v.pipe(v.string(), v.regex(RELEASE)),
+  artifactSha256: v.pipe(v.string(), v.regex(HASH)),
+  versionId: v.union([v.pipe(v.string(), v.regex(VERSION_ID)), v.null()]),
+});
+
+const sealedOauthCookieV2Schema = v.strictObject({
+  schemaVersion: v.literal(2),
+  purpose: v.picklist(['install', 'uninstall']),
+  sessionId: base64TokenSchema,
+  attemptId: attemptIdSchema,
+  verifier: base64TokenSchema,
+  expiresAt: expiresAtSchema,
+});
+const sealedOauthCookieV3Schema = v.strictObject({
+  schemaVersion: v.literal(3),
+  purpose: v.picklist(['discover', 'install', 'uninstall']),
+  sessionId: base64TokenSchema,
+  attemptId: attemptIdSchema,
+  state: base64TokenSchema,
+  verifier: base64TokenSchema,
+  expiresAt: expiresAtSchema,
+});
+const sealedOauthCookieV4Schema = v.strictObject({
+  schemaVersion: v.literal(4),
+  purpose: v.literal('source_apply'),
+  state: base64TokenSchema,
+  verifier: base64TokenSchema,
+  expiresAt: expiresAtSchema,
+  actionId: actionIdSchema,
+  actionKey: base64TokenSchema,
+  actorEmail: emailSchema,
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workersSubdomain: workersSubdomainSchema,
+  managementOrigin: managementOriginSchema,
+  releaseIdentity: exactReleaseBundleIdentitySchema,
+});
+const sealedOauthCookieV5Schema = v.strictObject({
+  schemaVersion: v.literal(5),
+  purpose: v.literal('runtime_update'),
+  state: base64TokenSchema,
+  verifier: base64TokenSchema,
+  expiresAt: expiresAtSchema,
+  actionId: actionIdSchema,
+  actionKey: base64TokenSchema,
+  actorEmail: emailSchema,
+  accountId: accountIdSchema,
+  workerName: workerNameSchema,
+  workersSubdomain: workersSubdomainSchema,
+  managementOrigin: managementOriginSchema,
+  operation: v.picklist(['update', 'rollback']),
+  from: runtimeVersionSchema,
+  to: runtimeVersionSchema,
+});
+const sealedOauthCookieV6Schema = v.strictObject({
+  schemaVersion: v.literal(6),
+  purpose: v.literal('gateway_teardown_review'),
+  sessionId: base64TokenSchema,
+  expiresAt: expiresAtSchema,
+  actionId: actionIdSchema,
+  actionKey: base64TokenSchema,
+  actorEmail: emailSchema,
+  accountId: accountIdSchema,
+  installationId: installationIdSchema,
+  gatewayName: safeNameSchema,
+  portalHostname: hostnameSchema,
+  workerName: workerNameSchema,
+  workersSubdomain: workersSubdomainSchema,
+  managementOrigin: managementOriginSchema,
+});
+const sealedOauthCookieV7Schema = v.strictObject({
+  schemaVersion: v.literal(7),
+  purpose: v.literal('gateway_teardown'),
+  sessionId: base64TokenSchema,
+  attemptId: attemptIdSchema,
+  state: base64TokenSchema,
+  verifier: base64TokenSchema,
+  expiresAt: expiresAtSchema,
+  actionId: actionIdSchema,
+  actionKey: base64TokenSchema,
+  actorEmail: emailSchema,
+  accountId: accountIdSchema,
+  installationId: installationIdSchema,
+  gatewayName: safeNameSchema,
+  portalHostname: hostnameSchema,
+  workerName: workerNameSchema,
+  workersSubdomain: workersSubdomainSchema,
+  managementOrigin: managementOriginSchema,
+});
+const sealedOauthCookieV8Schema = v.strictObject({
+  schemaVersion: v.literal(8),
+  purpose: v.literal('gateway_teardown_recovery'),
+  sessionId: base64TokenSchema,
+  attemptId: attemptIdSchema,
+  state: base64TokenSchema,
+  verifier: base64TokenSchema,
+  expiresAt: expiresAtSchema,
+  planId: v.pipe(v.string(), v.regex(RETURNING_UNINSTALL_PLAN_ID)),
+  planHash: v.pipe(v.string(), v.regex(HASH)),
+  actorEmail: emailSchema,
+  accountId: accountIdSchema,
+  zoneId: accountIdSchema,
+  installationId: installationIdSchema,
+});
+const sealedOauthCookieV9Schema = v.strictObject({
+  schemaVersion: v.literal(9),
+  purpose: v.literal('management_action_result'),
+  actionType: v.picklist(['source_apply', 'runtime_update']),
+  actionId: actionIdSchema,
+  managementOrigin: managementOriginSchema,
+  expiresAt: expiresAtSchema,
+});
+const sealedOauthCookieSchema = v.variant('schemaVersion', [
+  sealedOauthCookieV2Schema,
+  sealedOauthCookieV3Schema,
+  sealedOauthCookieV4Schema,
+  sealedOauthCookieV5Schema,
+  sealedOauthCookieV6Schema,
+  sealedOauthCookieV7Schema,
+  sealedOauthCookieV8Schema,
+  sealedOauthCookieV9Schema,
+]);
 
 export function base64UrlEncode(bytes: Uint8Array): string {
   let binary = '';
@@ -217,211 +403,21 @@ export type SealedOauthCookie =
   | SealedOauthCookieV8
   | SealedOauthCookieV9;
 
-function parseSealedPayload(input: unknown): SealedOauthCookie {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw new DeployError(400, 'session_invalid');
-  }
-  const value = input as Record<string, unknown>;
-  const expectedKeys = value.schemaVersion === 2
-    ? ['attemptId', 'expiresAt', 'purpose', 'schemaVersion', 'sessionId', 'verifier']
-    : value.schemaVersion === 3
-      ? ['attemptId', 'expiresAt', 'purpose', 'schemaVersion', 'sessionId', 'state', 'verifier']
-      : value.schemaVersion === 4 ? [
-        'accountId', 'actionId', 'actionKey', 'actorEmail', 'expiresAt', 'managementOrigin',
-        'purpose', 'releaseIdentity', 'schemaVersion', 'state', 'verifier', 'workerName',
-        'workersSubdomain',
-      ] : value.schemaVersion === 5 ? [
-        'accountId', 'actionId', 'actionKey', 'actorEmail', 'expiresAt', 'from', 'managementOrigin',
-        'operation', 'purpose', 'schemaVersion', 'state', 'to', 'verifier', 'workerName', 'workersSubdomain',
-      ] : value.schemaVersion === 6 ? [
-        'accountId', 'actionId', 'actionKey', 'actorEmail', 'expiresAt', 'gatewayName', 'installationId',
-        'managementOrigin', 'portalHostname', 'purpose', 'schemaVersion', 'sessionId', 'workerName',
-        'workersSubdomain',
-      ] : value.schemaVersion === 7 ? [
-        'accountId', 'actionId', 'actionKey', 'actorEmail', 'attemptId', 'expiresAt', 'gatewayName',
-        'installationId', 'managementOrigin', 'portalHostname', 'purpose', 'schemaVersion', 'sessionId',
-        'state', 'verifier', 'workerName', 'workersSubdomain',
-      ] : value.schemaVersion === 8 ? [
-        'accountId', 'actorEmail', 'attemptId', 'expiresAt', 'installationId', 'planHash', 'planId',
-        'purpose', 'schemaVersion', 'sessionId', 'state', 'verifier', 'zoneId',
-      ] : value.schemaVersion === 9 ? [
-        'actionId', 'actionType', 'expiresAt', 'managementOrigin', 'purpose', 'schemaVersion',
-      ] : [
-      ];
-  if (value.schemaVersion === 4) {
-    let management: URL;
-    try { management = new URL(String(value.managementOrigin)); } catch {
-      throw new DeployError(400, 'session_invalid');
-    }
-    const releaseIdentity = value.releaseIdentity;
-    if (
-      Object.keys(value).sort().join(',') !== expectedKeys.sort().join(',') ||
-      value.purpose !== 'source_apply' ||
-      typeof value.state !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.state) ||
-      typeof value.verifier !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.verifier) ||
-      typeof value.expiresAt !== 'number' || !Number.isSafeInteger(value.expiresAt) ||
-      typeof value.actionId !== 'string' || !/^action_[A-Za-z0-9_-]{32}$/u.test(value.actionId) ||
-      typeof value.actionKey !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.actionKey) ||
-      typeof value.actorEmail !== 'string' || value.actorEmail !== value.actorEmail.toLowerCase() ||
-      !/^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u.test(value.actorEmail) ||
-      typeof value.accountId !== 'string' || !/^[a-f0-9]{32}$/u.test(value.accountId) ||
-      typeof value.workerName !== 'string' || !/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(value.workerName) ||
-      typeof value.workersSubdomain !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(value.workersSubdomain) ||
-      !releaseIdentity || typeof releaseIdentity !== 'object' || Array.isArray(releaseIdentity) ||
-      Object.keys(releaseIdentity).sort().join(',') !==
-        'artifactSha256,channel,keyId,publicKey,release,schemaVersion' ||
-      (releaseIdentity as Record<string, unknown>).schemaVersion !== 1 ||
-      ((releaseIdentity as Record<string, unknown>).channel !== 'canary' &&
-        (releaseIdentity as Record<string, unknown>).channel !== 'stable') ||
-      typeof (releaseIdentity as Record<string, unknown>).release !== 'string' ||
-      !/^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(
-        (releaseIdentity as Record<string, unknown>).release as string,
-      ) || typeof (releaseIdentity as Record<string, unknown>).keyId !== 'string' ||
-      !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test((releaseIdentity as Record<string, unknown>).keyId as string) ||
-      typeof (releaseIdentity as Record<string, unknown>).publicKey !== 'string' ||
-      !/^[A-Za-z0-9_-]{43}$/u.test((releaseIdentity as Record<string, unknown>).publicKey as string) ||
-      typeof (releaseIdentity as Record<string, unknown>).artifactSha256 !== 'string' ||
-      !/^[a-f0-9]{64}$/u.test((releaseIdentity as Record<string, unknown>).artifactSha256 as string) ||
-      management.protocol !== 'https:' || management.username !== '' || management.password !== '' ||
-      management.port !== '' || management.pathname !== '/' || management.search !== '' || management.hash !== ''
-    ) throw new DeployError(400, 'session_invalid');
-    return value as unknown as SealedOauthCookieV4;
-  }
-  if (value.schemaVersion === 5) {
-    let management: URL;
-    try { management = new URL(String(value.managementOrigin)); } catch {
-      throw new DeployError(400, 'session_invalid');
-    }
-    const runtimeVersion = (input: unknown): boolean => Boolean(input) && typeof input === 'object' &&
-      !Array.isArray(input) && Object.keys(input as Record<string, unknown>).sort().join(',') ===
-        'artifactSha256,release,versionId' &&
-      typeof (input as Record<string, unknown>).release === 'string' &&
-      /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(
-        (input as Record<string, unknown>).release as string,
-      ) && typeof (input as Record<string, unknown>).artifactSha256 === 'string' &&
-      /^sha256:[a-f0-9]{64}$/u.test((input as Record<string, unknown>).artifactSha256 as string) &&
-      ((input as Record<string, unknown>).versionId === null || (
-        typeof (input as Record<string, unknown>).versionId === 'string' &&
-        /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(
-          (input as Record<string, unknown>).versionId as string,
-        )
-      ));
-    if (
-      Object.keys(value).sort().join(',') !== expectedKeys.sort().join(',') ||
-      value.purpose !== 'runtime_update' ||
-      typeof value.state !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.state) ||
-      typeof value.verifier !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.verifier) ||
-      typeof value.expiresAt !== 'number' || !Number.isSafeInteger(value.expiresAt) ||
-      typeof value.actionId !== 'string' || !/^action_[A-Za-z0-9_-]{32}$/u.test(value.actionId) ||
-      typeof value.actionKey !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.actionKey) ||
-      typeof value.actorEmail !== 'string' || value.actorEmail !== value.actorEmail.toLowerCase() ||
-      !/^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u.test(value.actorEmail) ||
-      typeof value.accountId !== 'string' || !/^[a-f0-9]{32}$/u.test(value.accountId) ||
-      typeof value.workerName !== 'string' || !/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(value.workerName) ||
-      typeof value.workersSubdomain !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(value.workersSubdomain) ||
-      management.protocol !== 'https:' || management.username !== '' || management.password !== '' ||
-      management.port !== '' || management.pathname !== '/' || management.search !== '' || management.hash !== '' ||
-      (value.operation !== 'update' && value.operation !== 'rollback') || !runtimeVersion(value.from) ||
-      !runtimeVersion(value.to)
-    ) throw new DeployError(400, 'session_invalid');
-    return value as unknown as SealedOauthCookieV5;
-  }
-  if (value.schemaVersion === 6 || value.schemaVersion === 7) {
-    let management: URL;
-    try { management = new URL(String(value.managementOrigin)); } catch {
-      throw new DeployError(400, 'session_invalid');
-    }
-    const hostname = (input: unknown): boolean => typeof input === 'string' && input.length <= 253 &&
-      input === input.toLowerCase() && input.split('.').length >= 2 && input.split('.').every((label) =>
-        /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label));
-    const attemptValid = value.schemaVersion === 6 || (
-      typeof value.attemptId === 'string' && /^att_[A-Za-z0-9_-]{32}$/u.test(value.attemptId) &&
-      typeof value.state === 'string' && /^[A-Za-z0-9_-]{43}$/u.test(value.state) &&
-      typeof value.verifier === 'string' && /^[A-Za-z0-9_-]{43}$/u.test(value.verifier)
-    );
-    if (Object.keys(value).sort().join(',') !== expectedKeys.sort().join(',') ||
-      value.purpose !== (value.schemaVersion === 6 ? 'gateway_teardown_review' : 'gateway_teardown') ||
-      typeof value.sessionId !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.sessionId) ||
-      !attemptValid || typeof value.expiresAt !== 'number' || !Number.isSafeInteger(value.expiresAt) ||
-      typeof value.actionId !== 'string' || !/^action_[A-Za-z0-9_-]{32}$/u.test(value.actionId) ||
-      typeof value.actionKey !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.actionKey) ||
-      typeof value.actorEmail !== 'string' || value.actorEmail !== value.actorEmail.toLowerCase() ||
-      !/^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u.test(value.actorEmail) ||
-      typeof value.accountId !== 'string' || !/^[a-f0-9]{32}$/u.test(value.accountId) ||
-      typeof value.installationId !== 'string' || !/^acg-[a-f0-9]{24}$/u.test(value.installationId) ||
-      typeof value.gatewayName !== 'string' || value.gatewayName.length < 1 || value.gatewayName.length > 128 ||
-      /[\u0000-\u001f\u007f<>{}\\]/u.test(value.gatewayName) || !hostname(value.portalHostname) ||
-      typeof value.workerName !== 'string' || !/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(value.workerName) ||
-      typeof value.workersSubdomain !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(value.workersSubdomain) ||
-      management.protocol !== 'https:' || management.username !== '' || management.password !== '' ||
-      management.port !== '' || management.pathname !== '/' || management.search !== '' || management.hash !== '') {
-      throw new DeployError(400, 'session_invalid');
-    }
-    return value as unknown as SealedOauthCookieV6 | SealedOauthCookieV7;
-  }
-  if (value.schemaVersion === 8) {
-    if (Object.keys(value).sort().join(',') !== expectedKeys.sort().join(',') ||
-      value.purpose !== 'gateway_teardown_recovery' ||
-      typeof value.sessionId !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.sessionId) ||
-      typeof value.attemptId !== 'string' || !/^att_[A-Za-z0-9_-]{32}$/u.test(value.attemptId) ||
-      typeof value.state !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.state) ||
-      typeof value.verifier !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.verifier) ||
-      typeof value.expiresAt !== 'number' || !Number.isSafeInteger(value.expiresAt) ||
-      typeof value.planId !== 'string' || !/^returning-uninstall-plan-[a-f0-9]{24}$/u.test(value.planId) ||
-      typeof value.planHash !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(value.planHash) ||
-      typeof value.actorEmail !== 'string' || value.actorEmail !== value.actorEmail.toLowerCase() ||
-      !/^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u.test(value.actorEmail) ||
-      typeof value.accountId !== 'string' || !/^[a-f0-9]{32}$/u.test(value.accountId) ||
-      typeof value.zoneId !== 'string' || !/^[a-f0-9]{32}$/u.test(value.zoneId) ||
-      typeof value.installationId !== 'string' || !/^acg-[a-f0-9]{24}$/u.test(value.installationId)) {
-      throw new DeployError(400, 'session_invalid');
-    }
-    return value as unknown as SealedOauthCookieV8;
-  }
-  if (value.schemaVersion === 9) {
-    let management: URL;
-    try { management = new URL(String(value.managementOrigin)); } catch {
-      throw new DeployError(400, 'session_invalid');
-    }
-    if (Object.keys(value).sort().join(',') !== expectedKeys.sort().join(',') ||
-      value.purpose !== 'management_action_result' ||
-      (value.actionType !== 'source_apply' && value.actionType !== 'runtime_update') ||
-      typeof value.actionId !== 'string' || !/^action_[A-Za-z0-9_-]{32}$/u.test(value.actionId) ||
-      typeof value.expiresAt !== 'number' || !Number.isSafeInteger(value.expiresAt) ||
-      management.protocol !== 'https:' || management.username !== '' || management.password !== '' ||
-      management.port !== '' || management.pathname !== '/' || management.search !== '' || management.hash !== '') {
-      throw new DeployError(400, 'session_invalid');
-    }
-    return value as unknown as SealedOauthCookieV9;
-  }
-  if (
-    Object.keys(value).sort().join(',') !== expectedKeys.sort().join(',') ||
-    (value.schemaVersion !== 2 && value.schemaVersion !== 3) ||
-    (value.purpose !== 'discover' && value.purpose !== 'install' && value.purpose !== 'uninstall') ||
-    typeof value.sessionId !== 'string' ||
-    !/^[A-Za-z0-9_-]{43}$/u.test(value.sessionId) ||
-    typeof value.attemptId !== 'string' ||
-    !/^att_[A-Za-z0-9_-]{32}$/u.test(value.attemptId) ||
-    (value.schemaVersion === 3 && (
-      typeof value.state !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.state)
-    )) ||
-    typeof value.verifier !== 'string' ||
-    !/^[A-Za-z0-9_-]{43}$/u.test(value.verifier) ||
-    typeof value.expiresAt !== 'number' ||
-    !Number.isSafeInteger(value.expiresAt)
-  ) {
-    throw new DeployError(400, 'session_invalid');
-  }
-  return value as unknown as SealedOauthCookie;
+function parseSealedPayload<Input>(input: Input): SealedOauthCookie {
+  if (!isPlainDataTree(input)) throw new DeployError(400, 'session_invalid');
+  const result = v.safeParse(sealedOauthCookieSchema, input);
+  if (!result.success) throw new DeployError(400, 'session_invalid');
+  return result.output;
 }
 
-export async function sealOauthCookie(
+export async function sealOauthCookie<Input>(
   encodedKey: string,
-  payload: SealedOauthCookie,
+  payload: Input,
 ): Promise<string> {
+  const parsed = parseSealedPayload(payload);
   const iv = new Uint8Array(12);
   crypto.getRandomValues(iv);
-  const plaintext = encoder.encode(JSON.stringify(payload));
+  const plaintext = encoder.encode(JSON.stringify(parsed));
   const ciphertext = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv, additionalData: OAUTH_COOKIE_AAD },
     await aesKey(encodedKey),

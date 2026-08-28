@@ -7,6 +7,7 @@
  * tests never construct their starting state by hand.
  */
 import assert from 'node:assert/strict';
+import * as v from 'valibot';
 
 import primaryWorker, { AdminState as PrimaryAdminState } from '../payload/worker/index.js';
 
@@ -61,16 +62,20 @@ const SERVERS = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/server
 const PORTALS = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals`;
 const APPS = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
 const DNS = `/client/v4/zones/${ZONE_ID}/dns_records`;
+const canonicalPrimitiveSchema = v.union([v.null(), v.boolean(), v.string()]);
+const canonicalNumberSchema = v.pipe(v.number(), v.finite());
+const canonicalRecordSchema = v.record(v.string(), v.unknown());
 
 export function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
 export function canonicalJson(value) {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string' ||
-      (typeof value === 'number' && Number.isFinite(value))) return JSON.stringify(value);
+  if (v.is(canonicalPrimitiveSchema, value) || v.is(canonicalNumberSchema, value)) {
+    return JSON.stringify(value);
+  }
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+  if (v.is(canonicalRecordSchema, value) && Object.getPrototypeOf(value) === Object.prototype) {
     return `{${Object.keys(value).sort(compareText).map(
       (key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`,
     ).join(',')}}`;
@@ -79,9 +84,10 @@ export function canonicalJson(value) {
 }
 
 export async function prefixedSha256(value) {
+  const serialized = v.is(v.string(), value) ? value : canonicalJson(value);
   const digest = new Uint8Array(await crypto.subtle.digest(
     'SHA-256',
-    new TextEncoder().encode(typeof value === 'string' ? value : canonicalJson(value)),
+    new TextEncoder().encode(serialized),
   ));
   return `sha256:${Buffer.from(digest).toString('hex')}`;
 }
@@ -340,14 +346,15 @@ export async function uninstallRequest({
   const body = rawBody ?? canonicalJson(await uninstallClaim({
     requestId, readyReceipt, token, configurationHash, installationId, desiredHash,
   }));
-  return new Request(`https://${HOSTNAME}${path}`, {
+  const request = {
     method,
     headers: {
       'content-type': 'application/json',
       'x-ankka-uninstall-signature': signatureHeader ?? await hmac(body, UNINSTALL_NONCE_BYTES),
     },
-    ...(method === 'POST' ? { body } : {}),
-  });
+  };
+  if (method === 'POST') request.body = body;
+  return new Request(`https://${HOSTNAME}${path}`, request);
 }
 
 export async function resealReadyReceipt(receipt) {

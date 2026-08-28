@@ -1,5 +1,8 @@
+import * as v from 'valibot';
+
 import { REQUIRED_OAUTH_SCOPES } from '../src/constants';
 import { base64UrlEncode } from '../src/crypto';
+import type { BoundaryObject } from '../src/boundary';
 import {
   EnvironmentReleaseManifestProvider,
   RELEASE_ENVELOPE_SCHEMA_VERSION,
@@ -16,12 +19,20 @@ import {
   type ReleaseFileRecord,
   type ReleaseManifest,
 } from '../src/release-manifest';
-import { manifest as structuralManifest } from './fixtures';
+import { manifest as structuralManifest, requiredFixture } from './fixtures';
 
 const encoder = new TextEncoder();
+const testEnvelopeSchema = v.strictObject({
+  channel: v.string(),
+  keyId: v.string(),
+  manifest: v.string(),
+  schemaVersion: v.number(),
+  signature: v.string(),
+  signatureContext: v.string(),
+});
 
 async function sha256Hex(value: string | Uint8Array): Promise<string> {
-  const bytes = typeof value === 'string' ? encoder.encode(value) : value;
+  const bytes = v.is(v.string(), value) ? encoder.encode(value) : value;
   const owned = new Uint8Array(bytes.byteLength);
   owned.set(bytes);
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', owned));
@@ -55,11 +66,11 @@ async function releaseFixture(): Promise<{
     path: file.path,
     sha256: await sha256Hex(file.bytes),
   });
-  const adminFiles = [await record(payload[0], 'text/html; charset=utf-8')];
-  const installerFiles = [await record(payload[1], 'text/html; charset=utf-8')];
-  const workerCleanupFiles = [await record(payload[2], 'application/javascript+module')];
-  const workerRetirementFiles = [await record(payload[3], 'application/javascript+module')];
-  const workerFiles = [await record(payload[4], 'application/javascript+module')];
+  const adminFiles = [await record(requiredFixture(payload.at(0), 'admin payload'), 'text/html; charset=utf-8')];
+  const installerFiles = [await record(requiredFixture(payload.at(1), 'installer payload'), 'text/html; charset=utf-8')];
+  const workerCleanupFiles = [await record(requiredFixture(payload.at(2), 'cleanup payload'), 'application/javascript+module')];
+  const workerRetirementFiles = [await record(requiredFixture(payload.at(3), 'retirement payload'), 'application/javascript+module')];
+  const workerFiles = [await record(requiredFixture(payload.at(4), 'worker payload'), 'application/javascript+module')];
   const allFiles = [
     ...adminFiles,
     ...installerFiles,
@@ -100,7 +111,7 @@ async function signer() {
   const publicKey = base64UrlEncode(
     new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey)),
   );
-  const envelope = async (manifestBytes: string, extra: Record<string, unknown> = {}) => {
+  const envelope = async (manifestBytes: string, extra: BoundaryObject = {}) => {
     const channel = 'stable';
     const signature = await crypto.subtle.sign(
       'Ed25519',
@@ -118,6 +129,29 @@ async function signer() {
     });
   };
   return { envelope, publicKey };
+}
+
+function parsedEnvelope(serialized: string): v.InferOutput<typeof testEnvelopeSchema> {
+  return v.parse(testEnvelopeSchema, JSON.parse(serialized));
+}
+
+function withFilePatch<Patch extends object>(
+  manifest: ReleaseManifest,
+  componentName: keyof ReleaseManifest['components'],
+  fileIndex: number,
+  patch: Patch,
+) {
+  const component = manifest.components[componentName];
+  return {
+    ...manifest,
+    components: {
+      ...manifest.components,
+      [componentName]: {
+        ...component,
+        files: component.files.map((file, index) => index === fileIndex ? { ...file, ...patch } : file),
+      },
+    },
+  };
 }
 
 describe('signed rich release gate', () => {
@@ -199,10 +233,13 @@ describe('signed rich release gate', () => {
       fixture.payload,
     )).rejects.toMatchObject({ code: 'release_invalid' });
 
-    const legacy = JSON.parse(stableEnvelope) as Record<string, unknown>;
-    delete legacy.channel;
-    delete legacy.signatureContext;
-    legacy.schemaVersion = 1;
+    const current = parsedEnvelope(stableEnvelope);
+    const legacy = {
+      keyId: current.keyId,
+      manifest: current.manifest,
+      schemaVersion: 1,
+      signature: current.signature,
+    };
     await expect(verifySignedReleaseEnvelope(
       canonicalJson(legacy),
       'stable',
@@ -235,15 +272,11 @@ describe('signed rich release gate', () => {
     const fixture = await releaseFixture();
     const signing = await signer();
     const signatureForOriginal = await signing.envelope(fixture.manifestBytes);
-    const originalEnvelope = JSON.parse(signatureForOriginal) as Record<string, unknown>;
-    const tampered = structuredClone(fixture.manifest) as unknown as Record<string, unknown>;
-    const components = tampered.components as Record<string, Record<string, unknown>>;
-    const worker = components.worker;
-    const files = worker.files as Array<Record<string, unknown>>;
-    files[0].sha256 = 'd'.repeat(64);
-    originalEnvelope.manifest = canonicalJson(tampered);
+    const originalEnvelope = parsedEnvelope(signatureForOriginal);
+    const tampered = withFilePatch(fixture.manifest, 'worker', 0, { sha256: 'd'.repeat(64) });
+    const tamperedEnvelope = { ...originalEnvelope, manifest: canonicalJson(tampered) };
     await expect(verifySignedReleaseEnvelope(
-      canonicalJson(originalEnvelope),
+      canonicalJson(tamperedEnvelope),
       'stable',
       { 'test-key': signing.publicKey },
       fixture.payload,
@@ -253,9 +286,13 @@ describe('signed rich release gate', () => {
   it('rejects signed internal tree drift and any missing, extra, duplicate, resized, or changed payload', async () => {
     const fixture = await releaseFixture();
     const signing = await signer();
-    const changedTree = structuredClone(fixture.manifest) as unknown as Record<string, unknown>;
-    const changedComponents = changedTree.components as Record<string, Record<string, unknown>>;
-    changedComponents.worker.treeSha256 = 'd'.repeat(64);
+    const changedTree = {
+      ...fixture.manifest,
+      components: {
+        ...fixture.manifest.components,
+        worker: { ...fixture.manifest.components.worker, treeSha256: 'd'.repeat(64) },
+      },
+    };
     await expect(verifySignedReleaseEnvelope(
       await signing.envelope(canonicalJson(changedTree)),
       'stable',
@@ -269,10 +306,11 @@ describe('signed rich release gate', () => {
       ...fixture.payload,
       { path: 'payload/admin/extra.js', bytes: encoder.encode('extra') },
     ])).rejects.toMatchObject({ code: 'release_invalid' });
+    const firstPayload = requiredFixture(fixture.payload.at(0), 'first payload');
     await expect(verifyReleasePayload(fixture.manifest, [
-      fixture.payload[0],
-      fixture.payload[0],
-      fixture.payload[2],
+      firstPayload,
+      firstPayload,
+      requiredFixture(fixture.payload.at(2), 'third payload'),
     ])).rejects.toMatchObject({ code: 'release_invalid' });
     await expect(verifyReleasePayload(fixture.manifest, fixture.payload.map((file, index) =>
       index === 0 ? { ...file, bytes: encoder.encode('changed but longer') } : file,
@@ -285,76 +323,105 @@ describe('signed rich release gate', () => {
   it('rejects signed drift in scopes, content types, safety flags, bindings, and envelope fields', async () => {
     const fixture = await releaseFixture();
     const signing = await signer();
-    const mutations: Array<Record<string, unknown>> = [];
-
-    mutations.push({ ...fixture.manifest, oauthScopeIds: REQUIRED_OAUTH_SCOPES.slice().reverse() });
-
-    const contentType = structuredClone(fixture.manifest) as unknown as Record<string, unknown>;
-    const contentComponents = contentType.components as Record<string, Record<string, unknown>>;
-    const contentFiles = contentComponents.worker.files as Array<Record<string, unknown>>;
-    contentFiles[0].contentType = 'text/javascript; charset=utf-8';
-    mutations.push(contentType);
-
-    const observable = structuredClone(fixture.manifest) as unknown as Record<string, unknown>;
-    (observable.cloudflare as Record<string, unknown>).observability = { enabled: true };
-    mutations.push(observable);
-
-    const workersDev = structuredClone(fixture.manifest) as unknown as Record<string, unknown>;
-    (workersDev.cloudflare as Record<string, unknown>).workersDev = true;
-    mutations.push(workersDev);
-
-    const binding = structuredClone(fixture.manifest) as unknown as Record<string, unknown>;
-    const cloudflare = binding.cloudflare as Record<string, unknown>;
-    const durableObjects = cloudflare.durableObjects as Record<string, unknown>;
-    durableObjects.bindings = [{ binding: 'OTHER_STATE', className: 'AdminState' }];
-    mutations.push(binding);
-
-    const durableObjectExport = structuredClone(fixture.manifest) as unknown as Record<string, unknown>;
-    const exportCloudflare = durableObjectExport.cloudflare as Record<string, unknown>;
-    const exportObjects = exportCloudflare.durableObjects as Record<string, unknown>;
-    exportObjects.exports = { AdminState: { storage: 'memory', type: 'durable-object' } };
-    mutations.push(durableObjectExport);
-
-    for (const mutate of [
-      (cloudflare: Record<string, unknown>) => {
-        const assets = cloudflare.assets as Record<string, unknown>;
-        assets.runWorkerFirst = ['/api/*', '/__ankka/bootstrap'];
+    const approved = fixture.manifest.cloudflare;
+    const mutations = [
+      { ...fixture.manifest, oauthScopeIds: REQUIRED_OAUTH_SCOPES.slice().reverse() },
+      withFilePatch(fixture.manifest, 'worker', 0, {
+        contentType: 'text/javascript; charset=utf-8',
+      }),
+      { ...fixture.manifest, cloudflare: { ...approved, observability: { enabled: true } } },
+      { ...fixture.manifest, cloudflare: { ...approved, workersDev: true } },
+      {
+        ...fixture.manifest,
+        cloudflare: {
+          ...approved,
+          durableObjects: {
+            ...approved.durableObjects,
+            bindings: [{ binding: 'OTHER_STATE', className: 'AdminState' }],
+          },
+        },
       },
-      (cloudflare: Record<string, unknown>) => { cloudflare.compatibilityDate = '2026-08-09'; },
-      (cloudflare: Record<string, unknown>) => { cloudflare.previewUrls = true; },
-      (cloudflare: Record<string, unknown>) => { cloudflare.sendMetrics = true; },
-      (cloudflare: Record<string, unknown>) => {
-        cloudflare.dependenciesInstrumentation = { enabled: true };
+      {
+        ...fixture.manifest,
+        cloudflare: {
+          ...approved,
+          durableObjects: {
+            ...approved.durableObjects,
+            exports: { AdminState: { storage: 'memory', type: 'durable-object' } },
+          },
+        },
       },
-      (cloudflare: Record<string, unknown>) => {
-        const bindings = cloudflare.publicBindings as Record<string, unknown>;
-        bindings.variables = [
-          ...bindings.variables as string[],
-          'MUTABLE_ENDPOINT',
-        ];
+      {
+        ...fixture.manifest,
+        cloudflare: {
+          ...approved,
+          assets: { ...approved.assets, runWorkerFirst: ['/api/*', '/__ankka/bootstrap'] },
+        },
       },
-      (cloudflare: Record<string, unknown>) => {
-        const objects = cloudflare.durableObjects as Record<string, unknown>;
-        delete objects.exports;
+      { ...fixture.manifest, cloudflare: { ...approved, compatibilityDate: '2026-08-09' } },
+      { ...fixture.manifest, cloudflare: { ...approved, previewUrls: true } },
+      { ...fixture.manifest, cloudflare: { ...approved, sendMetrics: true } },
+      {
+        ...fixture.manifest,
+        cloudflare: { ...approved, dependenciesInstrumentation: { enabled: true } },
       },
-      (cloudflare: Record<string, unknown>) => {
-        const objects = cloudflare.durableObjects as Record<string, unknown>;
-        objects.migrations = [{ newSqliteClasses: ['AdminState'], tag: 'v1' }];
+      {
+        ...fixture.manifest,
+        cloudflare: {
+          ...approved,
+          publicBindings: {
+            ...approved.publicBindings,
+            variables: [...approved.publicBindings.variables, 'MUTABLE_ENDPOINT'],
+          },
+        },
       },
-      (cloudflare: Record<string, unknown>) => {
-        const variants = cloudflare.workerVariants as Record<string, Record<string, unknown>>;
-        variants.cleanup.migrations = [{ deletedClasses: ['AdminState'], tag: 'v2' }];
+      {
+        ...fixture.manifest,
+        cloudflare: {
+          ...approved,
+          durableObjects: { bindings: approved.durableObjects.bindings },
+        },
       },
-      (cloudflare: Record<string, unknown>) => {
-        const variants = cloudflare.workerVariants as Record<string, Record<string, unknown>>;
-        const retirement = variants.retirement.durableObjects as Record<string, unknown>;
-        retirement.exports = { AdminState: { storage: 'sqlite', type: 'durable-object' } };
+      {
+        ...fixture.manifest,
+        cloudflare: {
+          ...approved,
+          durableObjects: {
+            ...approved.durableObjects,
+            migrations: [{ newSqliteClasses: ['AdminState'], tag: 'v1' }],
+          },
+        },
       },
-    ]) {
-      const changed = structuredClone(fixture.manifest) as unknown as Record<string, unknown>;
-      mutate(changed.cloudflare as Record<string, unknown>);
-      mutations.push(changed);
-    }
+      {
+        ...fixture.manifest,
+        cloudflare: {
+          ...approved,
+          workerVariants: {
+            ...approved.workerVariants,
+            cleanup: {
+              ...approved.workerVariants.cleanup,
+              migrations: [{ deletedClasses: ['AdminState'], tag: 'v2' }],
+            },
+          },
+        },
+      },
+      {
+        ...fixture.manifest,
+        cloudflare: {
+          ...approved,
+          workerVariants: {
+            ...approved.workerVariants,
+            retirement: {
+              ...approved.workerVariants.retirement,
+              durableObjects: {
+                ...approved.workerVariants.retirement.durableObjects,
+                exports: { AdminState: { storage: 'sqlite', type: 'durable-object' } },
+              },
+            },
+          },
+        },
+      },
+    ];
 
     for (const mutation of mutations) {
       await expect(verifySignedReleaseEnvelope(
@@ -376,29 +443,25 @@ describe('signed rich release gate', () => {
   it('rejects inconsistent record, component, and aggregate metadata even when signed', async () => {
     const fixture = await releaseFixture();
     const signing = await signer();
-    const mutations: Array<Record<string, unknown>> = [];
-
-    const fileSize = structuredClone(fixture.manifest) as unknown as Record<string, unknown>;
-    const fileSizeComponents = fileSize.components as Record<string, Record<string, unknown>>;
-    const fileSizeFiles = fileSizeComponents.admin.files as Array<Record<string, unknown>>;
-    fileSizeFiles[0].byteSize = Number(fileSizeFiles[0].byteSize) + 1;
-    mutations.push(fileSize);
-
-    const componentCount = structuredClone(fixture.manifest) as unknown as Record<string, unknown>;
-    const countComponents = componentCount.components as Record<string, Record<string, unknown>>;
-    countComponents.worker.fileCount = 2;
-    mutations.push(componentCount);
-
-    const artifactSize = structuredClone(fixture.manifest) as unknown as Record<string, unknown>;
-    const artifact = artifactSize.artifact as Record<string, unknown>;
-    artifact.byteSize = Number(artifact.byteSize) + 1;
-    mutations.push(artifactSize);
-
-    const unknownRecordField = structuredClone(fixture.manifest) as unknown as Record<string, unknown>;
-    const unknownComponents = unknownRecordField.components as Record<string, Record<string, unknown>>;
-    const unknownFiles = unknownComponents.worker.files as Array<Record<string, unknown>>;
-    unknownFiles[0].downloadUrl = 'https://mutable.invalid/index.js';
-    mutations.push(unknownRecordField);
+    const mutations = [
+      withFilePatch(fixture.manifest, 'admin', 0, {
+        byteSize: requiredFixture(fixture.manifest.components.admin.files.at(0), 'admin file').byteSize + 1,
+      }),
+      {
+        ...fixture.manifest,
+        components: {
+          ...fixture.manifest.components,
+          worker: { ...fixture.manifest.components.worker, fileCount: 2 },
+        },
+      },
+      {
+        ...fixture.manifest,
+        artifact: { ...fixture.manifest.artifact, byteSize: fixture.manifest.artifact.byteSize + 1 },
+      },
+      withFilePatch(fixture.manifest, 'worker', 0, {
+        downloadUrl: 'https://mutable.invalid/index.js',
+      }),
+    ];
 
     for (const mutation of mutations) {
       await expect(verifySignedReleaseEnvelope(

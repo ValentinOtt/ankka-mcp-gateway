@@ -21,7 +21,7 @@ export function OverviewPage() {
     if (!teardownRequested) return
     teardownSection.current?.focus({ preventScroll: true })
     teardownSection.current?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
-  }, [status, teardownRequested])
+  }, [teardownRequested])
   if (!status || !sources) return null
   const mcpUrl = safeMcpUrl(status.gateway.mcpUrl)
   const installed = sources.sources.filter((source) => source.status === 'installed').length
@@ -84,7 +84,7 @@ export function OverviewPage() {
           </div>
           <h2 className="mt-5 text-lg font-semibold tracking-[-0.02em] text-kumo-strong">Your account stays in control</h2>
           <p className="mt-2 text-pretty text-sm leading-6 text-kumo-subtle">
-            Your Cloudflare account controls the runtime, login surface, policies, DNS, MCP source credentials, and logs.
+            Cloudflare owns the runtime, login surface, policies, DNS, credentials, and logs.
           </p>
           <div className="mt-6 space-y-4 border-t border-kumo-line pt-5">
             <div className="flex gap-3">

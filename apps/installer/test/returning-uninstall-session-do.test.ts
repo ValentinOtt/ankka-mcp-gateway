@@ -1,7 +1,15 @@
+import * as v from 'valibot';
+
+import {
+  jsonValueSchema,
+  type BoundaryObject,
+  type JsonObject,
+} from '../src/boundary';
 import { sha256 } from '../src/crypto';
 import { deriveCustomerGatewayInstallationReceiptExpectation } from '../src/customer-bootstrap-request';
 import { GatewayDeploySession } from '../src/durable/gateway-deploy-session';
 import { parseReturningUninstallImportedAuthority } from '../src/returning-uninstall-authority';
+import type { ExactReleaseBundleIdentity } from '../src/exact-release-bundle';
 import { loadInstalledReturningUninstallReleaseBundle } from '../src/reviewed-returning-uninstall-executor';
 import {
   acquireReturningUninstallLease,
@@ -11,7 +19,8 @@ import {
   submitReturningUninstallAction,
   verifyReturningUninstallAction,
 } from '../src/returning-uninstall-journal';
-import { parseDeploySelection } from '../src/schema';
+import { parseReturningUninstallPlan } from '../src/returning-uninstall-plan';
+import { parseDeploySelection, parseStaticDeployPlan } from '../src/schema';
 import {
   FakeState,
   internalRequest,
@@ -38,15 +47,56 @@ const GATEWAY = Object.freeze({
   workerName: 'ankka-gateway-example',
 });
 
-async function responseBody(response: Response): Promise<Record<string, any>> {
-  return response.json() as Promise<Record<string, any>>;
+const responseObjectSchema: v.GenericSchema<JsonObject> = v.record(v.string(), jsonValueSchema);
+const deployPlanResponseSchema = v.looseObject({
+  session: v.looseObject({
+    plan: jsonValueSchema,
+  }),
+});
+const returningPlanResponseSchema = v.looseObject({
+  returningUninstall: v.looseObject({
+    schemaVersion: v.literal(1),
+    status: v.string(),
+    result: jsonValueSchema,
+    plan: jsonValueSchema,
+  }),
+});
+const recoveryPlanResponseSchema = v.looseObject({
+  returningUninstall: v.looseObject({
+    status: v.string(),
+    recoveryAvailable: v.boolean(),
+    plan: jsonValueSchema,
+  }),
+});
+const consumedResponseSchema = v.looseObject({ approvedAt: v.number() });
+const recoveredResponseSchema = v.looseObject({
+  approvedAt: v.number(),
+  plan: jsonValueSchema,
+});
+const journalResponseSchema = v.looseObject({
+  journal: v.looseObject({
+    revision: v.number(),
+    approvalHistory: v.array(jsonValueSchema),
+  }),
+});
+const discoveryStateSchema = v.looseObject({
+  result: v.looseObject({
+    actor: v.looseObject({ email: v.string() }),
+    targets: v.array(v.looseObject({
+      account: v.looseObject({ id: v.string() }),
+    })),
+  }),
+});
+
+async function responseBody(response: Response): Promise<JsonObject> {
+  return v.parse(responseObjectSchema, await response.json());
 }
 
 async function returningReady(planExpiresAt = NOW + 500_000) {
   const state = new FakeState();
   let currentTime = NOW;
   const object = new GatewayDeploySession(
-    state as unknown as DurableObjectState,
+    state,
     undefined,
     () => currentTime,
   );
@@ -97,12 +147,15 @@ async function returningReady(planExpiresAt = NOW + 500_000) {
     targetIdHash: TARGET_ID_HASH,
     now: currentTime,
   }))).status).toBe(200);
-  const deployPlan = (await responseBody(await object.fetch(internalRequest('/plan', 'POST', {
+  const deployPlanResponse = await object.fetch(internalRequest('/plan', 'POST', {
     csrfHash,
     releaseManifest: manifest,
     planExpiresAt: NOW + 600_000,
     now: currentTime,
-  })))).session.plan;
+  }));
+  const deployPlan = parseStaticDeployPlan(
+    v.parse(deployPlanResponseSchema, await deployPlanResponse.json()).session.plan,
+  );
   currentTime = NOW + 5;
   expect((await object.fetch(internalRequest('/authorize', 'POST', {
     csrfHash,
@@ -129,6 +182,7 @@ async function returningReady(planExpiresAt = NOW + 500_000) {
     completedAt: currentTime,
     installationId: null,
     grantRevocation: null,
+    reason: null,
     existingGateway: GATEWAY,
   }))).status).toBe(200);
 
@@ -250,14 +304,21 @@ async function prepareReturning(input: Awaited<ReturnType<typeof returningReady>
     planExpiresAt: input.planExpiresAt,
     now: NOW + 8,
   }));
-  return { response, payload: await responseBody(response) };
+  const payload = v.parse(returningPlanResponseSchema, await response.json());
+  const plan = await parseReturningUninstallPlan(payload.returningUninstall.plan);
+  return {
+    response,
+    payload: {
+      returningUninstall: { ...payload.returningUninstall, plan },
+    },
+  };
 }
 
 describe('GatewayDeploySession returning-customer uninstall lifecycle', () => {
   it('loads only the exact installed release identity and rejects an injected cross-channel bundle', async () => {
     const prepared = await returningReady();
     const authority = await importedAuthority(prepared);
-    let requested: unknown = null;
+    let requested: ExactReleaseBundleIdentity | null = null;
     await expect(loadInstalledReturningUninstallReleaseBundle(async (identity) => {
       requested = identity;
       return verifiedReleaseBundle;
@@ -358,6 +419,7 @@ describe('GatewayDeploySession returning-customer uninstall lifecycle', () => {
       completedAt: NOW + 11,
       installationId: GATEWAY.installationId,
       grantRevocation: 'confirmed',
+      reason: null,
     }));
     expect(prematureSuccess.status).toBe(409);
     const completed = await prepared.object.fetch(internalRequest('/returning-uninstall/complete', 'POST', {
@@ -384,11 +446,14 @@ describe('GatewayDeploySession returning-customer uninstall lifecycle', () => {
       completedAt: NOW + 12,
       installationId: null,
       grantRevocation: null,
+      reason: 'provider_unavailable',
     }))).status).toBe(409);
   });
 
   it('binds the plan to CSRF, actor, account, gateway, exact approval, and one-time action proof', async () => {
-    const cases: Array<(prepared: Awaited<ReturnType<typeof returningReady>>) => unknown> = [
+    const cases: Array<(
+      prepared: Awaited<ReturnType<typeof returningReady>>,
+    ) => BoundaryObject> = [
       (prepared) => ({ ...prepared.action, actorEmail: 'other@example.com' }),
       (prepared) => ({ ...prepared.action, accountId: 'f'.repeat(32) }),
       (prepared) => ({ ...prepared.action, workerName: 'another-worker' }),
@@ -512,8 +577,17 @@ describe('GatewayDeploySession returning-customer uninstall lifecycle', () => {
     }))).status).toBe(200);
 
     retryable.setNow(NOW + 12);
-    const sameAction = await prepareReturning(retryable);
-    expect(sameAction.response.status).toBe(409);
+    const sameAction = await retryable.object.fetch(internalRequest(
+      '/returning-uninstall/plan',
+      'POST',
+      {
+        csrfHash: retryable.csrfHash,
+        action: retryable.action,
+        planExpiresAt: retryable.planExpiresAt,
+        now: NOW + 12,
+      },
+    ));
+    expect(sameAction.status).toBe(409);
     const nextAction = {
       ...retryable.action,
       actionId: `action_${'N'.repeat(32)}`,
@@ -546,7 +620,7 @@ describe('GatewayDeploySession returning-customer uninstall lifecycle', () => {
       now: NOW + 9,
     }))).status).toBe(200);
     prepared.setNow(NOW + 10);
-    const consumed = await responseBody(await prepared.object.fetch(internalRequest(
+    const consumedResponse = await prepared.object.fetch(internalRequest(
       '/returning-uninstall/consume', 'POST', {
         attemptId: RETURNING_ATTEMPT,
         stateHash: await sha256(state),
@@ -554,7 +628,8 @@ describe('GatewayDeploySession returning-customer uninstall lifecycle', () => {
         actionKeyHash: prepared.action.actionKeyHash,
         now: NOW + 10,
       },
-    )));
+    ));
+    const consumed = v.parse(consumedResponseSchema, await consumedResponse.json());
     const authority = await importedAuthority(prepared);
     expect({
       schemaVersion: 1,
@@ -634,23 +709,32 @@ describe('GatewayDeploySession returning-customer uninstall lifecycle', () => {
         now: recoveryNow,
       },
     ));
-    const recoveryPlanBody = await responseBody(recoveryPlanResponse);
+    const recoveryPlanBody = v.parse(recoveryPlanResponseSchema, await recoveryPlanResponse.json());
+    const recoveryPlan = {
+      ...recoveryPlanBody.returningUninstall,
+      plan: await parseReturningUninstallPlan(recoveryPlanBody.returningUninstall.plan),
+    };
     expect({ status: recoveryPlanResponse.status, body: recoveryPlanBody }).toEqual({
       status: 200,
       body: expect.any(Object),
     });
-    const recoveryPlan = recoveryPlanBody.returningUninstall;
     expect(recoveryPlan).toMatchObject({ status: 'planned', recoveryAvailable: true });
 
     const recoveryAttempt = `att_${'H'.repeat(32)}`;
     const recoveryState = 'h'.repeat(43);
     const recoveryVerifier = 'k'.repeat(43);
     prepared.setNow(recoveryNow + 1);
-    const originalDiscovery = structuredClone(
-      prepared.state.storage.values.get('cloudflare-discovery-v1'),
-    ) as Record<string, any>;
-    const wrongActor = structuredClone(originalDiscovery);
-    wrongActor.result.actor.email = 'other@example.com';
+    const originalDiscovery = v.parse(
+      discoveryStateSchema,
+      structuredClone(prepared.state.storage.values.get('cloudflare-discovery-v1')),
+    );
+    const wrongActor = {
+      ...originalDiscovery,
+      result: {
+        ...originalDiscovery.result,
+        actor: { ...originalDiscovery.result.actor, email: 'other@example.com' },
+      },
+    };
     prepared.state.storage.values.set('cloudflare-discovery-v1', wrongActor);
     expect((await prepared.object.fetch(internalRequest(
       '/returning-uninstall/recovery/authorize', 'POST', {
@@ -664,8 +748,18 @@ describe('GatewayDeploySession returning-customer uninstall lifecycle', () => {
         now: recoveryNow + 1,
       },
     ))).status).toBe(409);
-    const wrongAccount = structuredClone(originalDiscovery);
-    wrongAccount.result.targets[0].account.id = 'f'.repeat(32);
+    const firstTarget = originalDiscovery.result.targets[0];
+    if (!firstTarget) throw new Error('missing discovery target');
+    const wrongAccount = {
+      ...originalDiscovery,
+      result: {
+        ...originalDiscovery.result,
+        targets: [
+          { ...firstTarget, account: { ...firstTarget.account, id: 'f'.repeat(32) } },
+          ...originalDiscovery.result.targets.slice(1),
+        ],
+      },
+    };
     prepared.state.storage.values.set('cloudflare-discovery-v1', wrongAccount);
     expect((await prepared.object.fetch(internalRequest(
       '/returning-uninstall/recovery/authorize', 'POST', {
@@ -728,7 +822,7 @@ describe('GatewayDeploySession returning-customer uninstall lifecycle', () => {
       },
     ));
     expect(recovered.status).toBe(200);
-    const recoveredBody = await responseBody(recovered);
+    const recoveredBody = v.parse(recoveredResponseSchema, await recovered.json());
     expect(JSON.stringify(recoveredBody)).not.toMatch(/actionKey|actionKeyHash|workersSubdomain/iu);
     expect((await prepared.object.fetch(internalRequest(
       '/returning-uninstall/recovery/consume', 'POST', {
@@ -738,9 +832,13 @@ describe('GatewayDeploySession returning-customer uninstall lifecycle', () => {
         now: recoveryNow + 2,
       },
     ))).status).toBe(400);
-    const currentJournal = (await responseBody(await prepared.object.fetch(internalRequest(
+    const currentJournalResponse = await prepared.object.fetch(internalRequest(
       '/returning-uninstall-journal', 'GET',
-    )))).journal;
+    ));
+    const currentJournal = v.parse(
+      journalResponseSchema,
+      await currentJournalResponse.json(),
+    ).journal;
     prepared.setNow(recoveryNow + 3);
     const approvedRecovery = await prepared.object.fetch(internalRequest(
       '/returning-uninstall-journal/approval/hosted-recovery', 'POST', {
@@ -754,7 +852,8 @@ describe('GatewayDeploySession returning-customer uninstall lifecycle', () => {
         zoneId: ZONE_ID,
       },
     ));
-    expect((await responseBody(approvedRecovery)).journal.approvalHistory.at(-1)).toMatchObject({
+    const approvedJournal = v.parse(journalResponseSchema, await approvedRecovery.json()).journal;
+    expect(approvedJournal.approvalHistory.at(-1)).toMatchObject({
       authorization: 'hosted_recovery',
       attemptId: recoveryAttempt,
       actionId: prepared.action.actionId,

@@ -91,9 +91,9 @@ import {
   adaptVerifiedReleaseBundleForGatewayDeployments,
   type VerifiedGatewayWorkerReleaseSet,
 } from './release-direct-upload-adapter';
+import { canonicalJson } from './release-manifest';
 import type { StaticDeployPlan } from './schema';
 import type { UninstallExecutionInput, UninstallExecutionResult } from './uninstall-executor';
-import type { UninstallJournalPort } from './uninstall-journal-port';
 import {
   MAX_UNINSTALL_LEASE_MS,
   activeUninstallJournalPlan,
@@ -101,12 +101,19 @@ import {
   prepareUninstallFinalConvergenceRecordAndLocator,
   type CustomerGatewayRemoveRequestAttempt,
   type ManagementDeleteActionName,
+  type ManagementDeleteActionDraft,
+  type NamespaceRetirementActionRecord,
+  type NoManagedResidueActionDraft,
   type ManagementDeleteAttempt,
   type UninstallActionName,
+  type UninstallFinalConvergenceRecord,
   type UninstallJournal,
   type UninstallJournalAction,
-  type UninstallRemovedTombstone,
+  type UninstallJournalCasInput,
+  type UninstallWorkerDeploymentActionRecord,
+  type UninstallWorkerVersionActionRecord,
   type UninstallWorkersDevMutation,
+  type WorkerDeleteActionRecord,
 } from './uninstall-journal';
 import {
   isRecoveryEquivalentUninstallPlan,
@@ -122,6 +129,11 @@ const MAX_CUSTOMER_DISABLE_CYCLES = 8;
 const FRESH_PREFLIGHT_TTL_MS = 60_000;
 const REMOVE_READY_ATTEMPTS = 40;
 const REMOVE_READY_INTERVAL_MS = 1_500;
+const executionCapabilitiesSchema = v.object({
+  journal: v.object({ read: v.function() }),
+  provider: v.object({ preflightManagement: v.function() }),
+  transport: v.function(),
+});
 
 export type ReviewedUninstallFailureCode =
   | 'customer_recovery_unavailable'
@@ -368,7 +380,152 @@ export function createCloudflareReviewedUninstallProviderAdapter(): ReviewedUnin
   });
 }
 
-export interface ReviewedUninstallExecutionInput extends UninstallExecutionInput {
+interface ReviewedInitializeJournalInput {
+  readonly initialization: {
+    readonly schemaVersion: 1;
+    readonly now: number;
+    readonly recoverUntil: number;
+    readonly installJournal: InstallJournal;
+    readonly uninstallPlan: StaticUninstallPlan;
+    readonly uninstallCycleId: string;
+    readonly bindingHash: string;
+    readonly freshPreflight: HostedUninstallManagementPreflightResult;
+  };
+  readonly approval: {
+    readonly attemptId: string;
+    readonly approvedAt: number;
+    readonly authorizedTarget: AuthorizedTarget;
+  };
+}
+
+export interface ReviewedPreparedActionRecords {
+  readonly cleanup_worker_version_create: UninstallWorkerVersionActionRecord;
+  readonly retirement_worker_version_create: UninstallWorkerVersionActionRecord;
+  readonly cleanup_worker_deployment_create: UninstallWorkerDeploymentActionRecord;
+  readonly restore_clean_worker_deployment: UninstallWorkerDeploymentActionRecord;
+  readonly retirement_worker_deployment_create: UninstallWorkerDeploymentActionRecord;
+  readonly management_custom_domain_delete: ManagementDeleteActionDraft;
+  readonly management_admin_policy_delete: ManagementDeleteActionDraft;
+  readonly management_access_application_delete: ManagementDeleteActionDraft;
+  readonly admin_state_namespace_retired: NamespaceRetirementActionRecord;
+  readonly management_worker_delete: WorkerDeleteActionRecord;
+  readonly management_no_managed_residue: NoManagedResidueActionDraft;
+  readonly uninstall_final_convergence: UninstallFinalConvergenceRecord;
+}
+
+export interface ReviewedSubmittedActionValues {
+  readonly cleanup_worker_version_create: UninstallWorkerVersionSubmission;
+  readonly retirement_worker_version_create: UninstallWorkerVersionSubmission;
+  readonly cleanup_worker_deployment_create: UninstallWorkerDeploymentSubmission;
+  readonly restore_clean_worker_deployment: UninstallWorkerDeploymentSubmission;
+  readonly retirement_worker_deployment_create: UninstallWorkerDeploymentSubmission;
+  readonly management_custom_domain_delete: HostedUninstallManagementDeleteSubmission;
+  readonly management_admin_policy_delete: HostedUninstallManagementDeleteSubmission;
+  readonly management_access_application_delete: HostedUninstallManagementDeleteSubmission;
+  readonly admin_state_namespace_retired: AdminStateNamespaceRetirementProof;
+  readonly management_worker_delete: WorkerDeleteSubmission;
+  readonly management_no_managed_residue: HostedUninstallManagementNoManagedResidueResult;
+  readonly uninstall_final_convergence: ReviewedUninstallFinalProjection['locator'];
+}
+
+export interface ReviewedVerifiedActionValues extends Omit<
+  ReviewedSubmittedActionValues,
+  ManagementDeleteActionName | 'management_worker_delete'
+> {
+  readonly management_custom_domain_delete: HostedUninstallManagementAbsenceEvidence;
+  readonly management_admin_policy_delete: HostedUninstallManagementAbsenceEvidence;
+  readonly management_access_application_delete: HostedUninstallManagementAbsenceEvidence;
+  readonly management_worker_delete: WorkerDeletionRecoveryProof;
+}
+
+/** Exact in-process journal contract consumed by the reviewed orchestrator. */
+export interface ReviewedUninstallJournalPort {
+  initialize(input: ReviewedInitializeJournalInput): Promise<UninstallJournal>;
+  read(): Promise<UninstallJournal>;
+  appendApproval(input: UninstallJournalCasInput & {
+    readonly approvedAt: number;
+    readonly authorizedTarget: AuthorizedTarget;
+    readonly candidatePlan: StaticUninstallPlan;
+  }): Promise<UninstallJournal>;
+  acquireLease(input: UninstallJournalCasInput & { readonly leaseExpiresAt: number }): Promise<UninstallJournal>;
+  releaseLease(input: UninstallJournalCasInput): Promise<UninstallJournal>;
+  refreshPreflight(input: UninstallJournalCasInput & {
+    readonly preflight: HostedUninstallManagementPreflightResult;
+  }): Promise<UninstallJournal>;
+  discardPreflight(input: UninstallJournalCasInput): Promise<{ readonly discarded: true }>;
+  appendManagementPreflight(input: UninstallJournalCasInput & {
+    readonly preflight: HostedUninstallManagementPreflightResult;
+  }): Promise<UninstallJournal>;
+  appendManagementDeleteAttempt(input: UninstallJournalCasInput & {
+    readonly action: ManagementDeleteActionName;
+    readonly prerequisites: HostedUninstallManagementDeletePrerequisites;
+    readonly intent: HostedUninstallManagementDeleteIntent;
+  }): Promise<UninstallJournal>;
+  recordManagementDeleteRecovery(input: UninstallJournalCasInput & {
+    readonly action: ManagementDeleteActionName;
+    readonly evidence: HostedUninstallManagementDeleteRecoveryEvidence;
+  }): Promise<UninstallJournal>;
+  prepareAction<Action extends keyof ReviewedPreparedActionRecords>(
+    input: UninstallJournalCasInput & {
+      readonly action: Action;
+      readonly record: ReviewedPreparedActionRecords[Action];
+    },
+  ): Promise<UninstallJournal>;
+  replacePreparedAction<Action extends keyof ReviewedPreparedActionRecords>(
+    input: UninstallJournalCasInput & {
+      readonly action: Action;
+      readonly record: ReviewedPreparedActionRecords[Action];
+    },
+  ): Promise<UninstallJournal>;
+  attachWorkerVersionRecovery(input: UninstallJournalCasInput & {
+    readonly action: 'cleanup_worker_version_create' | 'retirement_worker_version_create';
+    readonly recovery: UninstallWorkerVersionRecoveryRecord;
+  }): Promise<UninstallJournal>;
+  armAction<Action extends keyof ReviewedPreparedActionRecords>(input: UninstallJournalCasInput & {
+    readonly action: Action;
+    readonly value?: Action extends ManagementDeleteActionName
+      ? HostedUninstallManagementDeleteArm
+      : never;
+  }): Promise<UninstallJournal>;
+  recordActionSubmitted<Action extends keyof ReviewedSubmittedActionValues>(
+    input: UninstallJournalCasInput & {
+      readonly action: Action;
+      readonly value: ReviewedSubmittedActionValues[Action];
+    },
+  ): Promise<UninstallJournal>;
+  verifyAction<Action extends keyof ReviewedVerifiedActionValues>(
+    input: UninstallJournalCasInput & {
+      readonly action: Action;
+      readonly value: ReviewedVerifiedActionValues[Action];
+    },
+  ): Promise<UninstallJournal>;
+  appendCustomerRemoveCycle(input: UninstallJournalCasInput & {
+    readonly semantic: CustomerUninstallSemanticRecord;
+  }): Promise<UninstallJournal>;
+  replacePreparedCustomerRemoveCycle(input: UninstallJournalCasInput & {
+    readonly semantic: CustomerUninstallSemanticRecord;
+  }): Promise<UninstallJournal>;
+  prepareCustomerWorkersDevDisable(input: UninstallJournalCasInput): Promise<UninstallJournal>;
+  replacePreparedCustomerWorkersDevDisable(input: UninstallJournalCasInput): Promise<UninstallJournal>;
+  armCustomerWorkersDev(input: UninstallJournalCasInput & { readonly enabled: boolean }): Promise<UninstallJournal>;
+  recordCustomerWorkersDevSubmitted(input: UninstallJournalCasInput & {
+    readonly enabled: boolean;
+    readonly locator: WorkerSubdomainState;
+  }): Promise<UninstallJournal>;
+  verifyCustomerWorkersDev(input: UninstallJournalCasInput & { readonly enabled: boolean }): Promise<UninstallJournal>;
+  recordCustomerWorkersDevNotApplied(input: UninstallJournalCasInput & {
+    readonly enabled: boolean;
+    readonly locator: WorkerSubdomainState;
+  }): Promise<UninstallJournal>;
+  armCustomerRemoveRequest(input: UninstallJournalCasInput): Promise<UninstallJournal>;
+  recordCustomerRemoveRequestSubmitted(input: UninstallJournalCasInput & {
+    readonly locator: CustomerUninstallLocator;
+  }): Promise<UninstallJournal>;
+  verifyCustomerRemoveRequest(input: UninstallJournalCasInput): Promise<UninstallJournal>;
+}
+
+export interface ReviewedUninstallExecutionInput extends Omit<UninstallExecutionInput, 'journal'> {
+  readonly journal: ReviewedUninstallJournalPort;
   readonly provider: ReviewedUninstallProviderAdapter;
   readonly transport: ReviewedUninstallTransport;
   readonly timeoutMs?: number;
@@ -376,8 +533,49 @@ export interface ReviewedUninstallExecutionInput extends UninstallExecutionInput
   readonly randomBytes?: (length: number) => Uint8Array;
 }
 
+/** Pure domain primitives used by the reviewed orchestration. */
+export interface ReviewedUninstallExecutionDependencies {
+  readonly isCompleteInstallJournal: typeof isCompleteInstallJournal;
+  readonly prepareFinalConvergenceRecordAndLocator: typeof prepareFinalConvergenceRecordAndLocator;
+  readonly parseStaticUninstallPlan: typeof parseStaticUninstallPlan;
+  readonly isRecoveryEquivalentUninstallPlan: typeof isRecoveryEquivalentUninstallPlan;
+  readonly adaptVerifiedReleaseBundleForGatewayDeployments:
+    typeof adaptVerifiedReleaseBundleForGatewayDeployments;
+  readonly deriveCustomerUninstallNonce: typeof deriveCustomerUninstallNonce;
+  readonly computeUninstallJournalBindingHash: typeof computeUninstallJournalBindingHash;
+  readonly prepareUninstallFinalConvergenceRecordAndLocator: (
+    journal: UninstallJournal,
+  ) => Promise<ReviewedUninstallFinalProjection>;
+}
+
+export interface ReviewedUninstallFinalProjection {
+  readonly record: {
+    readonly schemaVersion: 1;
+    readonly kind: 'uninstall_final_convergence';
+    readonly convergenceHash: string;
+  };
+  readonly locator: {
+    readonly schemaVersion: 1;
+    readonly status: 'removed';
+    readonly installationId: string;
+    readonly convergenceHash: string;
+  };
+}
+
+const defaultExecutionDependencies: ReviewedUninstallExecutionDependencies = Object.freeze({
+  isCompleteInstallJournal,
+  prepareFinalConvergenceRecordAndLocator,
+  parseStaticUninstallPlan,
+  isRecoveryEquivalentUninstallPlan,
+  adaptVerifiedReleaseBundleForGatewayDeployments,
+  deriveCustomerUninstallNonce,
+  computeUninstallJournalBindingHash,
+  prepareUninstallFinalConvergenceRecordAndLocator,
+});
+
 interface ExecutionContext {
   readonly input: ReviewedUninstallExecutionInput;
+  readonly dependencies: ReviewedUninstallExecutionDependencies;
   readonly installJournal: InstallJournal;
   readonly plan: StaticUninstallPlan;
   readonly releaseSet: VerifiedGatewayWorkerReleaseSet;
@@ -389,26 +587,39 @@ interface ExecutionContext {
   journal: UninstallJournal;
 }
 
+interface UninstallWorkerVersionJournalRecord {
+  readonly accountId: string;
+  readonly artifactSha256: string;
+  readonly componentSha256: string;
+  readonly kind: 'uninstall_worker_version_create';
+  readonly namespacePresence: AdminStateNamespacePresenceProof | null;
+  readonly recovery: null;
+  readonly release: string;
+  readonly schemaVersion: 1;
+  readonly stage: 'cleanup' | 'retirement';
+  readonly uninstallCycleId: string;
+  readonly workerId: string;
+  readonly workerName: string;
+}
+
+interface ManagementDeleteJournalRecord {
+  readonly intent: HostedUninstallManagementDeleteIntent;
+  readonly kind: 'uninstall_management_delete';
+  readonly prerequisites: HostedUninstallManagementDeletePrerequisites;
+  readonly schemaVersion: 1;
+}
+
+interface FreshManagementDeleteDraft {
+  readonly prerequisites: HostedUninstallManagementDeletePrerequisites;
+  readonly intent: HostedUninstallManagementDeleteIntent;
+  readonly record: ManagementDeleteJournalRecord;
+}
+
 function fail(code: ReviewedUninstallFailureCode): never {
   throw new ReviewedUninstallExecutionError(code);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) =>
-      `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('canonical_json_invalid');
-}
-
-function exact(left: unknown, right: unknown): boolean {
+function exact<Left, Right>(left: Left, right: Right): boolean {
   try {
     return canonicalJson(left) === canonicalJson(right);
   } catch {
@@ -482,7 +693,7 @@ function approvalInput(context: ExecutionContext): {
   });
 }
 
-async function readJournalOrNull(port: UninstallJournalPort): Promise<UninstallJournal | null> {
+async function readJournalOrNull(port: ReviewedUninstallJournalPort): Promise<UninstallJournal | null> {
   try {
     return await port.read();
   } catch (error) {
@@ -491,10 +702,10 @@ async function readJournalOrNull(port: UninstallJournalPort): Promise<UninstallJ
   }
 }
 
-async function prepareAction(
+async function prepareAction<Action extends keyof ReviewedPreparedActionRecords>(
   context: ExecutionContext,
-  name: Exclude<UninstallActionName, 'uninstall_fresh_preflight' | 'customer_gateway_remove'>,
-  record: unknown,
+  name: Action,
+  record: ReviewedPreparedActionRecords[Action],
 ): Promise<void> {
   context.journal = await context.input.journal.prepareAction({
     expectedRevision: context.journal.revision,
@@ -505,10 +716,10 @@ async function prepareAction(
   });
 }
 
-async function replacePreparedAction(
+async function replacePreparedAction<Action extends keyof ReviewedPreparedActionRecords>(
   context: ExecutionContext,
-  name: Exclude<UninstallActionName, 'uninstall_fresh_preflight' | 'customer_gateway_remove'>,
-  record: unknown,
+  name: Action,
+  record: ReviewedPreparedActionRecords[Action],
 ): Promise<void> {
   context.journal = await context.input.journal.replacePreparedAction({
     expectedRevision: context.journal.revision,
@@ -524,25 +735,27 @@ async function replacePreparedAction(
  * value's own timestamp to equal the transition's `now`, and the wall clock
  * advances while the provider prepares the arm.
  */
-async function armAction(
+async function armAction<Action extends keyof ReviewedPreparedActionRecords>(
   context: ExecutionContext,
-  name: Exclude<UninstallActionName, 'uninstall_fresh_preflight' | 'customer_gateway_remove'>,
-  value?: unknown,
+  name: Action,
+  value?: Action extends ManagementDeleteActionName ? HostedUninstallManagementDeleteArm : never,
   armedAt?: number,
 ): Promise<void> {
-  context.journal = await context.input.journal.armAction({
+  const transition = {
     expectedRevision: context.journal.revision,
     attemptId: context.input.attemptId,
     now: armedAt ?? executionNow(context),
     action: name,
-    ...(value === undefined ? {} : { value }),
-  });
+  };
+  context.journal = value === undefined
+    ? await context.input.journal.armAction(transition)
+    : await context.input.journal.armAction({ ...transition, value });
 }
 
-async function submittedAction(
+async function submittedAction<Action extends keyof ReviewedSubmittedActionValues>(
   context: ExecutionContext,
-  name: Exclude<UninstallActionName, 'uninstall_fresh_preflight' | 'customer_gateway_remove'>,
-  value: unknown,
+  name: Action,
+  value: ReviewedSubmittedActionValues[Action],
 ): Promise<void> {
   context.journal = await context.input.journal.recordActionSubmitted({
     expectedRevision: context.journal.revision,
@@ -553,10 +766,10 @@ async function submittedAction(
   });
 }
 
-async function verifiedAction(
+async function verifiedAction<Action extends keyof ReviewedVerifiedActionValues>(
   context: ExecutionContext,
-  name: Exclude<UninstallActionName, 'uninstall_fresh_preflight' | 'customer_gateway_remove'>,
-  value: unknown,
+  name: Action,
+  value: ReviewedVerifiedActionValues[Action],
 ): Promise<void> {
   context.journal = await context.input.journal.verifyAction({
     expectedRevision: context.journal.revision,
@@ -567,15 +780,47 @@ async function verifiedAction(
   });
 }
 
-function knownLifecycleSubmission<T extends
-  UninstallWorkerVersionSubmission | UninstallWorkerDeploymentSubmission | WorkerDeleteSubmission>(
-  error: unknown,
-  kind: T['kind'],
-  predicate: (value: T) => boolean,
-): T | null {
-  if (!(error instanceof CloudflareUninstallWorkerLifecycleError)) return null;
-  const candidates = error.submissions.filter((submission) => submission.kind === kind) as T[];
-  return candidates.length === 1 && predicate(candidates[0]) ? candidates[0] : null;
+function lifecycleSubmissions<ErrorValue>(
+  error: ErrorValue,
+): readonly (UninstallWorkerVersionSubmission | UninstallWorkerDeploymentSubmission | WorkerDeleteSubmission)[] {
+  return error instanceof CloudflareUninstallWorkerLifecycleError
+    ? error.submissions
+    : Object.freeze([]);
+}
+
+function knownVersionSubmission<ErrorValue>(
+  error: ErrorValue,
+  predicate: (value: UninstallWorkerVersionSubmission) => boolean,
+): UninstallWorkerVersionSubmission | null {
+  const candidates = lifecycleSubmissions(error).filter(
+    (submission): submission is UninstallWorkerVersionSubmission =>
+      submission.kind === 'uninstall_worker_version',
+  );
+  const candidate = candidates.length === 1 ? candidates.at(0) : undefined;
+  return candidate !== undefined && predicate(candidate) ? candidate : null;
+}
+
+function knownDeploymentSubmission<ErrorValue>(
+  error: ErrorValue,
+  predicate: (value: UninstallWorkerDeploymentSubmission) => boolean,
+): UninstallWorkerDeploymentSubmission | null {
+  const candidates = lifecycleSubmissions(error).filter(
+    (submission): submission is UninstallWorkerDeploymentSubmission =>
+      submission.kind === 'uninstall_worker_deployment',
+  );
+  const candidate = candidates.length === 1 ? candidates.at(0) : undefined;
+  return candidate !== undefined && predicate(candidate) ? candidate : null;
+}
+
+function knownWorkerDeleteSubmission<ErrorValue>(
+  error: ErrorValue,
+  predicate: (value: WorkerDeleteSubmission) => boolean,
+): WorkerDeleteSubmission | null {
+  const candidates = lifecycleSubmissions(error).filter(
+    (submission): submission is WorkerDeleteSubmission => submission.kind === 'uninstall_worker_delete',
+  );
+  const candidate = candidates.length === 1 ? candidates.at(0) : undefined;
+  return candidate !== undefined && predicate(candidate) ? candidate : null;
 }
 
 function cleanupVariables(context: ExecutionContext): UninstallCleanupVariables {
@@ -636,7 +881,7 @@ function versionRecord(
   context: ExecutionContext,
   stage: 'cleanup' | 'retirement',
   namespacePresence: AdminStateNamespacePresenceProof | null,
-): Record<string, unknown> {
+): UninstallWorkerVersionJournalRecord {
   const release = stage === 'cleanup' ? context.releaseSet.cleanup : context.releaseSet.retirement;
   return Object.freeze({
     schemaVersion: 1,
@@ -715,9 +960,8 @@ async function convergeWorkerVersion(
       try {
         submission = await context.input.provider.submitVersion(mutation, context.call);
       } catch (error) {
-        submission = knownLifecycleSubmission<UninstallWorkerVersionSubmission>(
+        submission = knownVersionSubmission(
           error,
-          'uninstall_worker_version',
           (candidate) => candidate.stage === stage &&
             candidate.requestHash === mutation.recovery.requestHash,
         );
@@ -805,9 +1049,8 @@ async function convergeWorkerDeployment(
       try {
         submission = await context.input.provider.submitDeployment(intent, context.call);
       } catch (error) {
-        submission = knownLifecycleSubmission<UninstallWorkerDeploymentSubmission>(
+        submission = knownDeploymentSubmission(
           error,
-          'uninstall_worker_deployment',
           (candidate) => candidate.stage === stage && candidate.requestHash === intent.requestHash,
         );
         if (!submission) submission = await inspectDeploymentTwice(context, intent);
@@ -938,14 +1181,19 @@ async function freshCustomerMutation(
   context: ExecutionContext,
   workersSubdomain: AccountWorkersSubdomain,
 ): Promise<CustomerUninstallMutationPlan> {
-  return context.input.provider.prepareCustomerRequest({
+  const base = {
     installJournal: context.installJournal,
     uninstallPlan: context.plan,
     approval: approvalInput(context),
     accountWorkersSubdomain: workersSubdomain,
     nowMs: executionNow(context),
-    ...(context.input.randomBytes === undefined ? {} : { randomBytes: context.input.randomBytes }),
-  });
+  };
+  return context.input.randomBytes === undefined
+    ? context.input.provider.prepareCustomerRequest(base)
+    : context.input.provider.prepareCustomerRequest({
+      ...base,
+      randomBytes: context.input.randomBytes,
+    });
 }
 
 async function appendOrReplaceCustomerCycle(
@@ -1298,11 +1546,7 @@ async function appendFreshManagementPreflight(context: ExecutionContext): Promis
 async function freshManagementDeleteDraft(
   context: ExecutionContext,
   name: ManagementDeleteActionName,
-): Promise<{
-  readonly prerequisites: HostedUninstallManagementDeletePrerequisites;
-  readonly intent: HostedUninstallManagementDeleteIntent;
-  readonly record: Record<string, unknown>;
-}> {
+): Promise<FreshManagementDeleteDraft> {
   const prerequisites = managementPrerequisites(context, name);
   const intent = await context.input.provider.prepareManagementDeleteIntent(
     activeApprovalContext(context.journal),
@@ -1560,9 +1804,8 @@ async function convergeWorkerDelete(
       try {
         submission = await context.input.provider.submitWorkerDelete(intent, proofInput, context.call);
       } catch (error) {
-        submission = knownLifecycleSubmission<WorkerDeleteSubmission>(
+        submission = knownWorkerDeleteSubmission(
           error,
-          'uninstall_worker_delete',
           (candidate) => candidate.requestHash === intent.requestHash,
         );
         if (!submission) {
@@ -1643,9 +1886,13 @@ async function convergeNoManagedResidue(
   return current.locator;
 }
 
-async function convergeFinalAction(context: ExecutionContext): Promise<UninstallRemovedTombstone> {
+async function convergeFinalAction(
+  context: ExecutionContext,
+): Promise<ReviewedUninstallFinalProjection['locator']> {
   const name = 'uninstall_final_convergence' as const;
-  const prepared = await prepareUninstallFinalConvergenceRecordAndLocator(context.journal);
+  const prepared = await context.dependencies.prepareUninstallFinalConvergenceRecordAndLocator(
+    context.journal,
+  );
   let current = action(context.journal, name);
   if (!current) {
     await prepareAction(context, name, prepared.record);
@@ -1677,19 +1924,18 @@ function validateExecutionInput(input: ReviewedUninstallExecutionInput): void {
     !UNINSTALL_CYCLE_ID.test(input.uninstallCycleId) ||
     !Number.isSafeInteger(input.approvedAt) || input.approvedAt < 0 ||
     !Number.isSafeInteger(input.recoverUntil) || input.recoverUntil <= 0 ||
-    typeof input.journal?.read !== 'function' ||
-    typeof input.provider?.preflightManagement !== 'function' ||
-    typeof input.transport !== 'function') fail('reviewed_adapter_invalid');
+    !v.safeParse(executionCapabilitiesSchema, input).success) fail('reviewed_adapter_invalid');
 }
 
 async function initializeOrRecoverContext(
   input: ReviewedUninstallExecutionInput,
+  dependencies: ReviewedUninstallExecutionDependencies,
 ): Promise<ExecutionContext> {
   validateExecutionInput(input);
-  const plan = await parseStaticUninstallPlan(input.uninstallPlan);
+  const plan = await dependencies.parseStaticUninstallPlan(input.uninstallPlan);
   const installJournal = input.installJournal;
-  if (!isCompleteInstallJournal(installJournal)) fail('journal_recovery_mismatch');
-  const rebuiltInstall = await prepareFinalConvergenceRecordAndLocator(installJournal);
+  if (!dependencies.isCompleteInstallJournal(installJournal)) fail('journal_recovery_mismatch');
+  const rebuiltInstall = await dependencies.prepareFinalConvergenceRecordAndLocator(installJournal);
   const finalInstall = finalInstallLocator(installJournal);
   if (!exact(rebuiltInstall.locator, finalInstall) ||
     !exact(installJournal.target, input.target) ||
@@ -1697,19 +1943,24 @@ async function initializeOrRecoverContext(
     plan.release.id !== installJournal.releasePin.release ||
     plan.release.aggregateSha256 !== installJournal.releasePin.artifactSha256 ||
     input.recoverUntil !== installJournal.recoverUntil) fail('journal_recovery_mismatch');
-  const releaseSet = await adaptVerifiedReleaseBundleForGatewayDeployments(input.releaseBundle);
+  const releaseSet = await dependencies.adaptVerifiedReleaseBundleForGatewayDeployments(
+    input.releaseBundle,
+  );
   // The root installation receipt remains pinned to the originally installed
   // release. Cleanup and retirement code may come from a newer, independently
   // verified release after normal runtime updates; their plain-text ownership
   // bindings below deliberately continue to carry the root receipt release.
-  const call: ReviewedUninstallProviderCall = Object.freeze({
+  const callBase: ReviewedUninstallProviderCall = {
     accessToken: input.accessToken,
     transport: input.transport,
-    ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
-  });
+  };
+  const call = input.timeoutMs === undefined
+    ? Object.freeze(callBase)
+    : Object.freeze({ ...callBase, timeoutMs: input.timeoutMs });
   const workerName = plan.gateway.workerName;
   const base = {
     input,
+    dependencies,
     installJournal,
     plan,
     releaseSet,
@@ -1738,7 +1989,7 @@ async function initializeOrRecoverContext(
       activeAttemptId: input.attemptId,
     });
     const freshPreflight = await input.provider.preflightManagement(managementContext, call, wallNow);
-    const bindingHash = await computeUninstallJournalBindingHash({
+    const bindingHash = await dependencies.computeUninstallJournalBindingHash({
       installJournal,
       uninstallPlan: plan,
       uninstallCycleId: input.uninstallCycleId,
@@ -1762,7 +2013,7 @@ async function initializeOrRecoverContext(
     });
   } else {
     if (!exact(journal.installJournal, installJournal) ||
-      !await isRecoveryEquivalentUninstallPlan(journal.uninstallPlan, plan) ||
+      !await dependencies.isRecoveryEquivalentUninstallPlan(journal.uninstallPlan, plan) ||
       journal.uninstallCycleId !== input.uninstallCycleId ||
       journal.recoverUntil !== input.recoverUntil) fail('journal_recovery_mismatch');
     const approval = journal.approvalHistory.find((entry) => entry.attemptId === input.attemptId);
@@ -1823,10 +2074,11 @@ async function initializeOrRecoverContext(
  * runtime dependency: callers must inject the adapter, transport, same-DO
  * journal port, fresh OAuth grant, and namespace-bound nonce derivation key.
  */
-export async function executeReviewedUninstall(
+async function executeReviewedUninstallWithDependencies(
   input: ReviewedUninstallExecutionInput,
+  dependencies: ReviewedUninstallExecutionDependencies,
 ): Promise<UninstallExecutionResult> {
-  const context = await initializeOrRecoverContext(input);
+  const context = await initializeOrRecoverContext(input, dependencies);
   try {
   const workersSubdomain = await input.provider.getAccountWorkersSubdomain({
     ...context.call,
@@ -1836,7 +2088,7 @@ export async function executeReviewedUninstall(
     namespaceInspectionInput(context),
     await input.provider.inspectAdminStateNamespace(namespaceInspectionInput(context), context.call),
   );
-  const uninstallNonce = await deriveCustomerUninstallNonce(
+  const uninstallNonce = await dependencies.deriveCustomerUninstallNonce(
     input.uninstallNonceDerivationKey,
     context.installJournal,
   );
@@ -1926,3 +2178,16 @@ export async function executeReviewedUninstall(
     throw error;
   }
 }
+
+export function createReviewedUninstallExecutor(
+  dependencies: ReviewedUninstallExecutionDependencies,
+): (input: ReviewedUninstallExecutionInput) => Promise<UninstallExecutionResult> {
+  return (input) => executeReviewedUninstallWithDependencies(input, dependencies);
+}
+
+export async function executeReviewedUninstall(
+  input: ReviewedUninstallExecutionInput,
+): Promise<UninstallExecutionResult> {
+  return executeReviewedUninstallWithDependencies(input, defaultExecutionDependencies);
+}
+import * as v from 'valibot';

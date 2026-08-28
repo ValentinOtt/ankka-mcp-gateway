@@ -11,12 +11,24 @@
  */
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+import * as v from 'valibot';
 
 const TOKEN_ENDPOINT = 'https://dash.cloudflare.com/oauth2/token';
 const CALLBACK_URL = 'https://deploy.ankka.ai/oauth/callback';
 const CLIENT_ID = /^[A-Za-z0-9_-]{16,128}$/u;
 const MAX_SECRET_BYTES = 512;
 const MAX_RESPONSE_BYTES = 16 * 1024;
+const FUNCTION_SCHEMA = v.function();
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
+
+function hasControlCharacter(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return true;
+  }
+  return false;
+}
 
 export class OauthClientPairPreflightError extends Error {
   constructor(code) {
@@ -65,20 +77,21 @@ async function boundedText(response) {
 function standardError(serialized) {
   try {
     const parsed = JSON.parse(serialized);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
-      typeof parsed.error === 'string' ? parsed.error : null;
+    return v.is(OBJECT_SCHEMA, parsed) && !Array.isArray(parsed) &&
+      v.is(STRING_SCHEMA, parsed.error) ? parsed.error : null;
   } catch {
     return null;
   }
 }
 
 export async function verifyOauthClientPair({ clientId, readClientSecret, transport = fetch }) {
-  if (!CLIENT_ID.test(clientId) || typeof readClientSecret !== 'function' || typeof transport !== 'function') {
+  if (!CLIENT_ID.test(clientId) || !v.is(FUNCTION_SCHEMA, readClientSecret) ||
+      !v.is(FUNCTION_SCHEMA, transport)) {
     fail('input_invalid');
   }
   const clientSecret = await readClientSecret();
-  if (typeof clientSecret !== 'string' || clientSecret.length < 16 || clientSecret.length > MAX_SECRET_BYTES ||
-      /[:\u0000-\u001f\u007f]/u.test(clientSecret)) fail('input_invalid');
+  if (!v.is(STRING_SCHEMA, clientSecret) || clientSecret.length < 16 || clientSecret.length > MAX_SECRET_BYTES ||
+      clientSecret.includes(':') || hasControlCharacter(clientSecret)) fail('input_invalid');
   const authorizationBytes = Buffer.from(`${clientId}:${clientSecret}`, 'utf8');
   let response;
   try {

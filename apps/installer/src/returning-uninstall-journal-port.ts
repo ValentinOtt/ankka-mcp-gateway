@@ -1,3 +1,11 @@
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  boundaryValueSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+} from './boundary';
 import { DeployError, isDeployErrorCode } from './errors';
 import {
   requireReturningUninstallJournal,
@@ -15,17 +23,29 @@ export interface ReturningUninstallJournalFetcher { fetch(request: Request): Pro
 
 interface Cas { readonly expectedRevision: number; readonly attemptId: string; readonly now: number }
 
+interface InitializeReturningUninstallJournalInput {
+  readonly now: number;
+  readonly plan: ReturningUninstallPlan;
+  readonly authority: ReturningUninstallImportedAuthority;
+  readonly attemptId: string;
+  readonly approvedAt: number;
+  readonly accountId: string;
+  readonly zoneId: string;
+  readonly recoverUntil: number;
+}
+
+type ReturningUninstallJournalRequestBody =
+  | Cas
+  | InitializeReturningUninstallJournalInput
+  | (Cas & { readonly approvedAt: number; readonly plan: ReturningUninstallPlan; readonly authority: ReturningUninstallImportedAuthority })
+  | (Cas & { readonly approvedAt: number; readonly plan: ReturningUninstallPlan; readonly actorEmail: string; readonly accountId: string; readonly zoneId: string })
+  | (Cas & { readonly expiresAt: number })
+  | (Cas & { readonly name: ReturningUninstallActionName; readonly record: BoundaryValue })
+  | (Cas & { readonly name: ReturningUninstallActionName })
+  | (Cas & { readonly name: ReturningUninstallActionName; readonly locator: BoundaryValue });
+
 export interface ReturningUninstallJournalPort {
-  initialize(input: {
-    readonly now: number;
-    readonly plan: ReturningUninstallPlan;
-    readonly authority: ReturningUninstallImportedAuthority;
-    readonly attemptId: string;
-    readonly approvedAt: number;
-    readonly accountId: string;
-    readonly zoneId: string;
-    readonly recoverUntil: number;
-  }): Promise<ReturningUninstallJournal>;
+  initialize(input: InitializeReturningUninstallJournalInput): Promise<ReturningUninstallJournal>;
   read(): Promise<ReturningUninstallJournal>;
   appendApproval(input: Cas & {
     readonly approvedAt: number;
@@ -41,23 +61,23 @@ export interface ReturningUninstallJournalPort {
   }): Promise<ReturningUninstallJournal>;
   acquireLease(input: Cas & { readonly expiresAt: number }): Promise<ReturningUninstallJournal>;
   releaseLease(input: Cas): Promise<ReturningUninstallJournal>;
-  prepare(input: Cas & { readonly name: ReturningUninstallActionName; readonly record: unknown }): Promise<ReturningUninstallJournal>;
+  prepare(input: Cas & { readonly name: ReturningUninstallActionName; readonly record: BoundaryValue }): Promise<ReturningUninstallJournal>;
   arm(input: Cas & { readonly name: ReturningUninstallActionName }): Promise<ReturningUninstallJournal>;
-  submit(input: Cas & { readonly name: ReturningUninstallActionName; readonly locator: unknown }): Promise<ReturningUninstallJournal>;
-  verify(input: Cas & { readonly name: ReturningUninstallActionName; readonly locator: unknown }): Promise<ReturningUninstallJournal>;
+  submit(input: Cas & { readonly name: ReturningUninstallActionName; readonly locator: BoundaryValue }): Promise<ReturningUninstallJournal>;
+  verify(input: Cas & { readonly name: ReturningUninstallActionName; readonly locator: BoundaryValue }): Promise<ReturningUninstallJournal>;
 }
 
-function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+function record(value: BoundaryValue): value is BoundaryObject {
+  return v.is(boundaryObjectSchema, value);
 }
 
-async function json(response: Response): Promise<unknown> {
+async function json(response: Response): Promise<BoundaryValue> {
   const declared = Number(response.headers.get('content-length') ?? '0');
   if (declared > MAX_BYTES) throw new DeployError(500, 'session_invalid');
   const text = await response.text();
   if (new TextEncoder().encode(text).byteLength > MAX_BYTES) throw new DeployError(500, 'session_invalid');
   try {
-    const value = JSON.parse(text) as unknown;
+    const value = v.parse(boundaryValueSchema, JSON.parse(text));
     assertSecretFree(value);
     return value;
   } catch { throw new DeployError(500, 'session_invalid'); }
@@ -75,23 +95,32 @@ async function journal(response: Response): Promise<ReturningUninstallJournal> {
   return requireReturningUninstallJournal(body.journal);
 }
 
-function request(path: string, method: 'GET' | 'POST', body?: unknown): Request {
+function request(
+  path: string,
+  method: 'GET' | 'POST',
+  body?: ReturningUninstallJournalRequestBody,
+): Request {
   let encoded: string | undefined;
   if (body !== undefined) {
     try { assertSecretFree(body); encoded = JSON.stringify(body); }
     catch { throw new DeployError(400, 'bad_request'); }
   }
-  return new Request(new URL(path, ORIGIN), {
-    method,
-    headers: encoded === undefined ? undefined : { 'content-type': 'application/json' },
-    body: encoded,
-  });
+  const init: RequestInit = { method };
+  if (encoded !== undefined) {
+    init.headers = { 'content-type': 'application/json' };
+    init.body = encoded;
+  }
+  return new Request(new URL(path, ORIGIN), init);
 }
 
 export function createReturningUninstallJournalPort(
   fetcher: ReturningUninstallJournalFetcher,
 ): ReturningUninstallJournalPort {
-  const call = async (path: string, method: 'GET' | 'POST', body?: unknown): Promise<ReturningUninstallJournal> => {
+  const call = async (
+    path: string,
+    method: 'GET' | 'POST',
+    body?: ReturningUninstallJournalRequestBody,
+  ): Promise<ReturningUninstallJournal> => {
     let response: Response;
     try { response = await fetcher.fetch(request(path, method, body)); }
     catch (error) {

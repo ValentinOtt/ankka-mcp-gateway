@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
+import * as v from 'valibot';
 import {
   SYNTHETIC_MAX_BODY_BYTES,
   handleSyntheticMcpRequest,
@@ -7,6 +8,7 @@ import {
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 9610;
+const tcpAddressSchema = v.object({ port: v.pipe(v.number(), v.integer()) });
 
 export async function startSyntheticMcpServer({
   host = DEFAULT_HOST,
@@ -62,11 +64,12 @@ export async function startSyntheticMcpServer({
   });
 
   const address = server.address();
-  if (!address || typeof address === 'string') {
+  const parsedAddress = v.safeParse(tcpAddressSchema, address);
+  if (!parsedAddress.success) {
     await closeServer(server);
     throw new Error('Synthetic MCP listener did not return a TCP address');
   }
-  const origin = `http://${DEFAULT_HOST}:${address.port}`;
+  const origin = `http://${DEFAULT_HOST}:${parsedAddress.output.port}`;
 
   return Object.freeze({
     origin,

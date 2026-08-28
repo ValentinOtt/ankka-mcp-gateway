@@ -6,10 +6,10 @@ import {
   CanaryLifecycleError,
   previewCloudflareCanaryLifecycle,
   runCloudflareCanaryLifecycle,
-} from '../src/canary-runner.mjs';
-import { buildGatewayDesiredState } from '../src/plan.mjs';
-import { ownershipMarker, receiptChecksum } from '../src/receipt.mjs';
-import { applyGateway, planLiveGateway } from '../src/reconciler.mjs';
+} from '../src/canary-runner.ts';
+import { buildGatewayDesiredState } from '../src/plan.ts';
+import { ownershipMarker, receiptChecksum } from '../src/receipt.ts';
+import { applyGateway, planLiveGateway } from '../src/reconciler.ts';
 
 const ACCOUNT_ID = 'a'.repeat(32);
 const ZONE_ID = 'b'.repeat(32);
@@ -314,9 +314,6 @@ function dependencies(overrides = {}) {
   const cleanupStore = overrides.cleanupStore ?? new MemoryReceiptStore();
   return {
     cloudflare: cloudflare(),
-    provider,
-    receiptStore,
-    cleanupStore,
     inspectSyntheticUpstream: async () => fixtureEvidence(),
     verifyInstalledGateway: async () => ({
       ready: true,

@@ -1,3 +1,6 @@
+import * as v from 'valibot';
+
+import { boundaryObjectSchema } from '../src/boundary';
 import { sha256 } from '../src/crypto';
 import { GatewayDeploySession } from '../src/durable/gateway-deploy-session';
 import { MAX_INSTALL_RECOVERY_RETENTION_MS } from '../src/install-journal';
@@ -8,10 +11,17 @@ import {
   NOW,
   selectionInput,
 } from './fixtures';
+import { responseJson } from './boundary';
 
-async function body(response: Response): Promise<Record<string, any>> {
-  return response.json() as Promise<Record<string, any>>;
-}
+const planResponseSchema = v.object({
+  session: v.object({
+    plan: v.object({ planHash: v.string(), planId: v.string() }),
+  }),
+});
+const errorResponseSchema = v.object({ error: v.object({ code: v.string() }) });
+const consumedResponseSchema = v.object({ recoverUntil: v.number() });
+const publicResponseSchema = v.object({ discovery: boundaryObjectSchema });
+const discoveredTargetResponseSchema = v.object({ discoveredTarget: boundaryObjectSchema });
 
 describe('GatewayDeploySession SQLite Durable Object state machine', () => {
   const csrf = 'c'.repeat(43);
@@ -23,7 +33,7 @@ describe('GatewayDeploySession SQLite Durable Object state machine', () => {
     const state = new FakeState();
     let currentTime = NOW;
     const object = new GatewayDeploySession(
-      state as unknown as DurableObjectState,
+      state,
       undefined,
       () => currentTime,
     );
@@ -44,7 +54,7 @@ describe('GatewayDeploySession SQLite Durable Object state machine', () => {
       planExpiresAt,
       now: NOW + 2,
     }));
-    const plan = (await body(planResponse)).session.plan;
+    const plan = (await responseJson(planResponse, planResponseSchema)).session.plan;
     return { state, object, csrfHash, plan, setNow: (value: number) => { currentTime = value; } };
   }
 
@@ -74,7 +84,7 @@ describe('GatewayDeploySession SQLite Durable Object state machine', () => {
     const state = new FakeState();
     let currentTime = NOW;
     const object = new GatewayDeploySession(
-      state as unknown as DurableObjectState,
+      state,
       undefined,
       () => currentTime,
     );
@@ -107,7 +117,7 @@ describe('GatewayDeploySession SQLite Durable Object state machine', () => {
       malformedPii: 'owner@example.com',
     });
     state.storage.alarmAt = NOW;
-    const object = new GatewayDeploySession(state as unknown as DurableObjectState);
+    const object = new GatewayDeploySession(state);
     await object.alarm();
     expect(state.storage.values.size).toBe(0);
     expect(state.storage.alarmAt).toBeNull();
@@ -133,7 +143,7 @@ describe('GatewayDeploySession SQLite Durable Object state machine', () => {
       now: NOW + 3,
     }));
     expect(response.status).toBe(409);
-    expect(await body(response)).toEqual({ error: { code: 'session_conflict' } });
+    expect(await responseJson(response, errorResponseSchema)).toEqual({ error: { code: 'session_conflict' } });
   });
 
   it('consumes an OAuth state exactly once before any exchange', async () => {
@@ -157,12 +167,12 @@ describe('GatewayDeploySession SQLite Durable Object state machine', () => {
     };
     const consumed = await object.fetch(internalRequest('/consume', 'POST', consume));
     expect(consumed.status).toBe(200);
-    expect(await body(consumed)).toMatchObject({
+    expect(await responseJson(consumed, consumedResponseSchema)).toMatchObject({
       recoverUntil: NOW + 1_800_000 + MAX_INSTALL_RECOVERY_RETENTION_MS,
     });
     const replay = await object.fetch(internalRequest('/consume', 'POST', consume));
     expect(replay.status).toBe(400);
-    expect(await body(replay)).toEqual({ error: { code: 'oauth_state_invalid' } });
+    expect(await responseJson(replay, errorResponseSchema)).toEqual({ error: { code: 'oauth_state_invalid' } });
   });
 
   it('caps authorization at the approved plan and accepts only the T-minus-one-second boundary', async () => {
@@ -222,7 +232,7 @@ describe('GatewayDeploySession SQLite Durable Object state machine', () => {
       now: planExpiresAt,
     }));
     expect(rejected.status).toBe(400);
-    expect(await body(rejected)).toEqual({ error: { code: 'oauth_state_invalid' } });
+    expect(await responseJson(rejected, errorResponseSchema)).toEqual({ error: { code: 'oauth_state_invalid' } });
   });
 
   it('rejects a forged CSRF value and an unrecognized completion code', async () => {
@@ -260,29 +270,33 @@ describe('GatewayDeploySession SQLite Durable Object state machine', () => {
     const invalid = await object.fetch(internalRequest('/complete', 'POST', {
       attemptId,
       code: 'surprise_provider_body',
+      reason: null,
       completedAt: NOW + 5,
       installationId: null,
       grantRevocation: null,
     }));
     expect(invalid.status).toBe(400);
-    expect(await body(invalid)).toEqual({ error: { code: 'bad_request' } });
+    expect(await responseJson(invalid, errorResponseSchema)).toEqual({ error: { code: 'bad_request' } });
 
     const missingReceiptIdentity = await object.fetch(internalRequest('/complete', 'POST', {
       attemptId,
       code: 'install_complete',
+      reason: null,
       completedAt: NOW + 5,
       installationId: null,
       grantRevocation: 'confirmed',
     }));
     expect(missingReceiptIdentity.status).toBe(409);
-    expect(await body(missingReceiptIdentity)).toEqual({ error: { code: 'session_conflict' } });
+    expect(await responseJson(missingReceiptIdentity, errorResponseSchema)).toEqual({
+      error: { code: 'session_conflict' },
+    });
   });
 
   it('retains only secret-free discovery, binds selection to its opaque target, and returns the target internally', async () => {
     const state = new FakeState();
     let currentTime = NOW;
     const object = new GatewayDeploySession(
-      state as unknown as DurableObjectState,
+      state,
       undefined,
       () => currentTime,
     );
@@ -324,7 +338,10 @@ describe('GatewayDeploySession SQLite Durable Object state machine', () => {
       grantRevocation: 'confirmed',
       completedAt: currentTime,
     }))).status).toBe(200);
-    const publicResponse = await body(await object.fetch(internalRequest('/public', 'GET')));
+    const publicResponse = await responseJson(
+      await object.fetch(internalRequest('/public', 'GET')),
+      publicResponseSchema,
+    );
     expect(publicResponse.discovery).toEqual({
       schemaVersion: 1,
       status: 'ready',
@@ -351,7 +368,7 @@ describe('GatewayDeploySession SQLite Durable Object state machine', () => {
       planExpiresAt: NOW + 600_000,
       now: currentTime,
     }));
-    const plan = (await body(planResponse)).session.plan;
+    const plan = (await responseJson(planResponse, planResponseSchema)).session.plan;
     currentTime = NOW + 5;
     await object.fetch(internalRequest('/authorize', 'POST', {
       csrfHash,
@@ -365,12 +382,12 @@ describe('GatewayDeploySession SQLite Durable Object state machine', () => {
       now: currentTime,
     }));
     currentTime = NOW + 6;
-    const consumed = await body(await object.fetch(internalRequest('/consume', 'POST', {
+    const consumed = await responseJson(await object.fetch(internalRequest('/consume', 'POST', {
       attemptId: `att_${'z'.repeat(32)}`,
       stateHash: await sha256('x'.repeat(43)),
       verifierHash: await sha256('y'.repeat(43)),
       now: currentTime,
-    })));
+    })), discoveredTargetResponseSchema);
     expect(consumed.discoveredTarget).toMatchObject({
       targetIdHash,
       account: { id: 'a'.repeat(32), name: 'Primary account' },

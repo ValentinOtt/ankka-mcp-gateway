@@ -1,3 +1,6 @@
+import * as v from 'valibot';
+
+import { boundaryValueSchema } from './boundary';
 import { DeployError, isDeployErrorCode, type DeployErrorCode, isFailureReason } from './errors';
 import { assertSecretFree } from './schema';
 import { parseStaticUninstallPlan, type StaticUninstallPlan } from './uninstall-plan';
@@ -13,6 +16,58 @@ export type UninstallSessionStatus =
   | 'uninstalling'
   | 'removed'
   | 'failed';
+const uninstallSessionStatuses = Object.freeze([
+  'planned',
+  'authorizing',
+  'uninstalling',
+  'removed',
+  'failed',
+] as const);
+const uninstallSessionStatusSchema = v.picklist(uninstallSessionStatuses);
+const safeTimeSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
+const uninstallOauthAttemptSchema = v.strictObject({
+  attemptId: v.string(),
+  expiresAt: safeTimeSchema,
+  purpose: v.literal('uninstall'),
+  stateHash: v.string(),
+  usedAt: v.nullable(safeTimeSchema),
+  verifierHash: v.string(),
+});
+const completeUninstallResultSchema = v.strictObject({
+  code: v.literal('uninstall_complete'),
+  completedAt: safeTimeSchema,
+  grantRevocation: v.picklist(['confirmed', 'unconfirmed']),
+  installationId: v.string(),
+});
+const failedUninstallResultSchema = v.strictObject({
+  code: v.string(),
+  completedAt: safeTimeSchema,
+  reason: v.optional(v.string()),
+});
+const storedUninstallControlSchema = v.strictObject({
+  createdAt: safeTimeSchema,
+  installationId: v.string(),
+  installBindingHash: v.string(),
+  oauthAttempt: v.nullable(boundaryValueSchema),
+  plan: boundaryValueSchema,
+  recoverUntil: safeTimeSchema,
+  result: v.nullable(boundaryValueSchema),
+  schemaVersion: v.literal(1),
+  status: uninstallSessionStatusSchema,
+  updatedAt: safeTimeSchema,
+});
+const publicUninstallSessionSchema = v.strictObject({
+  plan: boundaryValueSchema,
+  recoverUntil: safeTimeSchema,
+  result: v.nullable(boundaryValueSchema),
+  schemaVersion: v.literal(1),
+  status: uninstallSessionStatusSchema,
+  updatedAt: safeTimeSchema,
+});
+const publicUninstallRecoverySchema = v.strictObject({
+  recoverUntil: safeTimeSchema,
+  status: v.literal('recovery_required'),
+});
 
 export interface StoredUninstallOauthAttempt {
   readonly purpose: 'uninstall';
@@ -59,109 +114,99 @@ export interface PublicUninstallSession {
   readonly result: UninstallResult | null;
 }
 
+/** Secret-free subset exposed to the installer UI projection. */
+export type PublicUninstallPlan = Pick<
+  StaticUninstallPlan,
+  | 'schemaVersion'
+  | 'writesPerformed'
+  | 'installationId'
+  | 'release'
+  | 'steps'
+  | 'providerNotice'
+  | 'planId'
+  | 'planHash'
+  | 'expiresAt'
+>;
+
 export interface PublicUninstallRecovery {
   readonly status: 'recovery_required';
   readonly recoverUntil: number;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
-    Object.getPrototypeOf(value) === Object.prototype;
-}
-
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
-}
-
-function safeTime(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-function parseAttempt(value: unknown): StoredUninstallOauthAttempt | null {
+function parseAttempt<Input>(value: Input): StoredUninstallOauthAttempt | null {
   if (value === null) return null;
-  if (!isRecord(value) || !exactKeys(value, [
-    'purpose', 'attemptId', 'stateHash', 'verifierHash', 'expiresAt', 'usedAt',
-  ]) || value.purpose !== 'uninstall' || typeof value.attemptId !== 'string' ||
-    !ATTEMPT_ID.test(value.attemptId) || typeof value.stateHash !== 'string' ||
-    !HASH.test(value.stateHash) || typeof value.verifierHash !== 'string' ||
-    !HASH.test(value.verifierHash) || !safeTime(value.expiresAt) ||
-    (value.usedAt !== null && (!safeTime(value.usedAt) || value.usedAt >= value.expiresAt))) return null;
+  const result = v.safeParse(uninstallOauthAttemptSchema, value);
+  if (!result.success || !ATTEMPT_ID.test(result.output.attemptId) ||
+    !HASH.test(result.output.stateHash) || !HASH.test(result.output.verifierHash) ||
+    (result.output.usedAt !== null && result.output.usedAt >= result.output.expiresAt)) return null;
   return Object.freeze({
     purpose: 'uninstall',
-    attemptId: value.attemptId,
-    stateHash: value.stateHash,
-    verifierHash: value.verifierHash,
-    expiresAt: value.expiresAt,
-    usedAt: value.usedAt as number | null,
+    attemptId: result.output.attemptId,
+    stateHash: result.output.stateHash,
+    verifierHash: result.output.verifierHash,
+    expiresAt: result.output.expiresAt,
+    usedAt: result.output.usedAt,
   });
 }
 
-function parseResult(value: unknown): UninstallResult | null {
+function parseResult<Input>(value: Input): UninstallResult | null {
   if (value === null) return null;
-  if (!isRecord(value) || !safeTime(value.completedAt)) return null;
-  if (value.code === 'uninstall_complete') {
-    if (!exactKeys(value, ['code', 'completedAt', 'installationId', 'grantRevocation']) ||
-      typeof value.installationId !== 'string' || !INSTALLATION_ID.test(value.installationId) ||
-      (value.grantRevocation !== 'confirmed' && value.grantRevocation !== 'unconfirmed')) return null;
+  const complete = v.safeParse(completeUninstallResultSchema, value);
+  if (complete.success) {
+    if (!INSTALLATION_ID.test(complete.output.installationId)) return null;
+    return Object.freeze(complete.output);
+  }
+  const failed = v.safeParse(failedUninstallResultSchema, value);
+  if (!failed.success || !isDeployErrorCode(failed.output.code)) return null;
+  if (failed.output.reason !== undefined) {
+    if (!isFailureReason(failed.output.reason)) return null;
     return Object.freeze({
-      code: 'uninstall_complete',
-      completedAt: value.completedAt,
-      installationId: value.installationId,
-      grantRevocation: value.grantRevocation,
+      code: failed.output.code,
+      completedAt: failed.output.completedAt,
+      reason: failed.output.reason,
     });
   }
-  if (!isDeployErrorCode(value.code)) return null;
-  if (exactKeys(value, ['code', 'completedAt', 'reason'])) {
-    if (!isFailureReason(value.reason)) return null;
-    return Object.freeze({ code: value.code, completedAt: value.completedAt, reason: value.reason });
-  }
-  if (!exactKeys(value, ['code', 'completedAt'])) return null;
-  return Object.freeze({ code: value.code, completedAt: value.completedAt });
+  return Object.freeze({ code: failed.output.code, completedAt: failed.output.completedAt });
 }
 
-export async function requireStoredUninstallControl(value: unknown): Promise<StoredUninstallControl> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'status', 'installationId', 'installBindingHash', 'createdAt', 'updatedAt',
-    'recoverUntil', 'plan', 'oauthAttempt', 'result',
-  ]) || value.schemaVersion !== 1 || !['planned', 'authorizing', 'uninstalling', 'removed', 'failed']
-    .includes(String(value.status)) || typeof value.installationId !== 'string' ||
-    !INSTALLATION_ID.test(value.installationId) || typeof value.installBindingHash !== 'string' ||
-    !PREFIXED_SHA256.test(value.installBindingHash) || !safeTime(value.createdAt) ||
-    !safeTime(value.updatedAt) || !safeTime(value.recoverUntil) || value.createdAt > value.updatedAt ||
-    value.updatedAt >= value.recoverUntil) throw new DeployError(500, 'session_invalid');
+export async function requireStoredUninstallControl<Input>(value: Input): Promise<StoredUninstallControl> {
+  const parsed = v.safeParse(storedUninstallControlSchema, value);
+  if (!parsed.success) throw new DeployError(500, 'session_invalid');
+  const input = parsed.output;
+  if (!INSTALLATION_ID.test(input.installationId) ||
+    !PREFIXED_SHA256.test(input.installBindingHash) || input.createdAt > input.updatedAt ||
+    input.updatedAt >= input.recoverUntil) throw new DeployError(500, 'session_invalid');
 
   let plan: StaticUninstallPlan;
   try {
-    plan = await parseStaticUninstallPlan(value.plan);
+    plan = await parseStaticUninstallPlan(input.plan);
   } catch {
     throw new DeployError(500, 'session_invalid');
   }
-  const attempt = parseAttempt(value.oauthAttempt);
-  const result = parseResult(value.result);
-  const status = value.status as UninstallSessionStatus;
+  const attempt = parseAttempt(input.oauthAttempt);
+  const result = parseResult(input.result);
+  const { status } = input;
   if (
-    plan.installationId !== value.installationId || plan.expiresAt > value.recoverUntil ||
-    (value.oauthAttempt !== null && attempt === null) || (value.result !== null && result === null) ||
+    plan.installationId !== input.installationId || plan.expiresAt > input.recoverUntil ||
+    (input.oauthAttempt !== null && attempt === null) || (input.result !== null && result === null) ||
     (status === 'planned' && (attempt !== null || result !== null)) ||
     (status === 'authorizing' && (!attempt || attempt.usedAt !== null || result !== null)) ||
     (status === 'uninstalling' && (!attempt || attempt.usedAt === null || result !== null)) ||
     (status === 'removed' && (attempt === null || attempt.usedAt === null || result?.code !== 'uninstall_complete')) ||
     (status === 'failed' && (attempt === null || attempt.usedAt === null || !result || result.code === 'uninstall_complete')) ||
-    (attempt !== null && (attempt.expiresAt > plan.expiresAt || attempt.expiresAt > value.recoverUntil)) ||
-    (result !== null && (result.completedAt < (attempt?.usedAt ?? value.createdAt) ||
-      result.completedAt >= value.recoverUntil))
+    (attempt !== null && (attempt.expiresAt > plan.expiresAt || attempt.expiresAt > input.recoverUntil)) ||
+    (result !== null && (result.completedAt < (attempt?.usedAt ?? input.createdAt) ||
+      result.completedAt >= input.recoverUntil))
   ) throw new DeployError(500, 'session_invalid');
 
   const control: StoredUninstallControl = Object.freeze({
     schemaVersion: 1,
     status,
-    installationId: value.installationId,
-    installBindingHash: value.installBindingHash,
-    createdAt: value.createdAt,
-    updatedAt: value.updatedAt,
-    recoverUntil: value.recoverUntil,
+    installationId: input.installationId,
+    installBindingHash: input.installBindingHash,
+    createdAt: input.createdAt,
+    updatedAt: input.updatedAt,
+    recoverUntil: input.recoverUntil,
     plan,
     oauthAttempt: attempt,
     result,
@@ -181,22 +226,22 @@ export function publicUninstallSession(control: StoredUninstallControl): PublicU
   });
 }
 
-export async function parsePublicUninstallSession(value: unknown): Promise<PublicUninstallSession | null> {
+export async function parsePublicUninstallSession<Input>(value: Input): Promise<PublicUninstallSession | null> {
   if (value === null) return null;
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'status', 'recoverUntil', 'updatedAt', 'plan', 'result',
-  ]) || value.schemaVersion !== 1 || !['planned', 'authorizing', 'uninstalling', 'removed', 'failed']
-    .includes(String(value.status)) || !safeTime(value.recoverUntil) || !safeTime(value.updatedAt) ||
-    value.updatedAt >= value.recoverUntil) throw new DeployError(500, 'session_invalid');
+  const parsed = v.safeParse(publicUninstallSessionSchema, value);
+  if (!parsed.success || parsed.output.updatedAt >= parsed.output.recoverUntil) {
+    throw new DeployError(500, 'session_invalid');
+  }
+  const input = parsed.output;
   let plan: StaticUninstallPlan;
   try {
-    plan = await parseStaticUninstallPlan(value.plan);
+    plan = await parseStaticUninstallPlan(input.plan);
   } catch {
     throw new DeployError(500, 'session_invalid');
   }
-  const result = parseResult(value.result);
-  const status = value.status as UninstallSessionStatus;
-  if (plan.expiresAt > value.recoverUntil || (value.result !== null && result === null) ||
+  const result = parseResult(input.result);
+  const { status } = input;
+  if (plan.expiresAt > input.recoverUntil || (input.result !== null && result === null) ||
     ((status === 'planned' || status === 'authorizing' || status === 'uninstalling') && result !== null) ||
     (status === 'removed' && result?.code !== 'uninstall_complete') ||
     (status === 'failed' && (!result || result.code === 'uninstall_complete'))) {
@@ -205,18 +250,18 @@ export async function parsePublicUninstallSession(value: unknown): Promise<Publi
   return Object.freeze({
     schemaVersion: 1,
     status,
-    recoverUntil: value.recoverUntil,
-    updatedAt: value.updatedAt,
+    recoverUntil: input.recoverUntil,
+    updatedAt: input.updatedAt,
     plan,
     result,
   });
 }
 
-export function parsePublicUninstallRecovery(value: unknown): PublicUninstallRecovery | null {
+export function parsePublicUninstallRecovery<Input>(value: Input): PublicUninstallRecovery | null {
   if (value === null) return null;
-  if (!isRecord(value) || !exactKeys(value, ['status', 'recoverUntil']) ||
-    value.status !== 'recovery_required' || !safeTime(value.recoverUntil)) {
+  const result = v.safeParse(publicUninstallRecoverySchema, value);
+  if (!result.success) {
     throw new DeployError(500, 'session_invalid');
   }
-  return Object.freeze({ status: 'recovery_required', recoverUntil: value.recoverUntil });
+  return Object.freeze(result.output);
 }

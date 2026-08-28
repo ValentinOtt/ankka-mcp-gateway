@@ -37,14 +37,56 @@ const SOURCE_ID = /^source-[a-f0-9]{16}$/u;
 const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const NONCE = /^[A-Za-z0-9_-]{43}$/u;
 const SIGNATURE = /^sha256=[a-f0-9]{64}$/u;
-const CONTROL = /[\u0000-\u001f\u007f]/u;
+const OBJECT_TAG = Object.prototype.toString;
+const FUNCTION_SOURCE = Function.prototype.toString;
+
+function hasPrimitiveTag(value, tag) {
+  return Object(value) !== value && OBJECT_TAG.call(value) === tag;
+}
+
+function isText(value) {
+  return hasPrimitiveTag(value, '[object String]');
+}
+
+function hasControlCharacter(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return true;
+  }
+  return false;
+}
+
+function isFiniteNumber(value) {
+  return hasPrimitiveTag(value, '[object Number]') && Number.isFinite(value);
+}
+
+function isBoolean(value) {
+  return hasPrimitiveTag(value, '[object Boolean]');
+}
+
+function isReference(value) {
+  return value !== null && value !== undefined && Object(value) === value;
+}
+
+function isCallable(value) {
+  try {
+    FUNCTION_SOURCE.call(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isObjectReference(value) {
+  return isReference(value) && !isCallable(value);
+}
 
 function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function isRecord(value) {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (value === null || !isObjectReference(value) || Array.isArray(value)) return false;
   try {
     if (Object.getPrototypeOf(value) !== Object.prototype) return false;
     const descriptors = Object.getOwnPropertyDescriptors(value);
@@ -64,10 +106,8 @@ function exactKeys(value, expected) {
 }
 
 function isPlainData(value, seen = new Set()) {
-  if (value === null || ['boolean', 'number', 'string'].includes(typeof value)) {
-    return typeof value !== 'number' || Number.isFinite(value);
-  }
-  if (typeof value !== 'object' || seen.has(value)) return false;
+  if (value === null || isBoolean(value) || isText(value) || isFiniteNumber(value)) return true;
+  if (!isObjectReference(value) || seen.has(value)) return false;
   seen.add(value);
   if (Array.isArray(value)) return value.every((entry) => isPlainData(entry, seen));
   if (!isRecord(value)) return false;
@@ -75,10 +115,10 @@ function isPlainData(value, seen = new Set()) {
 }
 
 function canonicalJson(value) {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+  if (value === null || isBoolean(value) || isText(value)) {
     return JSON.stringify(value);
   }
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
+  if (isFiniteNumber(value)) return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (isRecord(value)) {
     return `{${Object.keys(value)
@@ -92,7 +132,7 @@ function canonicalJson(value) {
 async function sha256(value) {
   const digest = new Uint8Array(await crypto.subtle.digest(
     'SHA-256',
-    new TextEncoder().encode(typeof value === 'string' ? value : canonicalJson(value)),
+    new TextEncoder().encode(isText(value) ? value : canonicalJson(value)),
   ));
   return `sha256:${[...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
@@ -119,7 +159,7 @@ function recovery(reason) {
 
 function hostname(value) {
   if (
-    typeof value !== 'string' || value.length > 253 || value !== value.toLowerCase() ||
+    !isText(value) || value.length > 253 || value !== value.toLowerCase() ||
     value.includes(':') || /^(?:\d+\.)+\d+$/u.test(value)
   ) return false;
   const labels = value.split('.');
@@ -127,7 +167,7 @@ function hostname(value) {
 }
 
 function canonicalBase64Url32(value) {
-  if (typeof value !== 'string' || !NONCE.test(value)) return null;
+  if (!isText(value) || !NONCE.test(value)) return null;
   let decoded;
   try {
     const raw = atob(`${value.replaceAll('-', '+').replaceAll('_', '/')}=`);
@@ -151,7 +191,7 @@ function canonicalBase64Url32(value) {
 }
 
 function hexBytes(value) {
-  if (typeof value !== 'string' || !SIGNATURE.test(value)) return null;
+  if (!isText(value) || !SIGNATURE.test(value)) return null;
   return Uint8Array.from(value.slice('sha256='.length).match(/../gu) ?? [], (hex) => (
     Number.parseInt(hex, 16)
   ));
@@ -228,9 +268,11 @@ async function readBoundedText(request, limit) {
 
 function parseProvider(value, policy) {
   if (!exactKeys(value, policy ? ['id', 'parentId'] : ['id'])) return null;
-  if (typeof value.id !== 'string' || !SAFE_ID.test(value.id)) return null;
-  if (policy && (typeof value.parentId !== 'string' || !SAFE_ID.test(value.parentId))) return null;
-  return Object.freeze({ id: value.id, ...(policy ? { parentId: value.parentId } : {}) });
+  if (!isText(value.id) || !SAFE_ID.test(value.id)) return null;
+  if (policy && (!isText(value.parentId) || !SAFE_ID.test(value.parentId))) return null;
+  const provider = { id: value.id };
+  if (policy) provider.parentId = value.parentId;
+  return Object.freeze(provider);
 }
 
 async function parseReadyReceipt(value, expected) {
@@ -244,7 +286,7 @@ async function parseReadyReceipt(value, expected) {
     !Number.isSafeInteger(value.revision) || value.revision < 0 ||
     value.release !== expected.release.id || !RELEASE.test(value.release) ||
     value.desiredHash !== expected.desiredHash || !HASH.test(value.desiredHash) ||
-    value.pending !== null || typeof value.checksum !== 'string' || !HASH.test(value.checksum) ||
+    value.pending !== null || !isText(value.checksum) || !HASH.test(value.checksum) ||
     !exactKeys(value.target, ['accountId', 'zoneId', 'zoneName', 'hostname']) ||
     value.target.accountId !== expected.target.accountId || value.target.zoneId !== expected.target.zoneId ||
     value.target.zoneName !== expected.target.zoneName || !hostname(value.target.hostname) ||
@@ -252,7 +294,7 @@ async function parseReadyReceipt(value, expected) {
     !exactKeys(value.accessPolicy, ['identityType', 'identityCount', 'identitiesHash']) ||
     value.accessPolicy.identityType !== 'email' || !Number.isSafeInteger(value.accessPolicy.identityCount) ||
     value.accessPolicy.identityCount < 1 || value.accessPolicy.identityCount > 10_000 ||
-    typeof value.accessPolicy.identitiesHash !== 'string' || !HASH.test(value.accessPolicy.identitiesHash) ||
+    !isText(value.accessPolicy.identitiesHash) || !HASH.test(value.accessPolicy.identitiesHash) ||
     !Array.isArray(value.resources)
   ) return null;
 
@@ -272,16 +314,18 @@ async function parseReadyReceipt(value, expected) {
       : ['kind', 'key', 'provider', 'desiredHash', 'marker'])) return null;
     const provider = parseProvider(resource.provider, policy);
     if (
-      !provider || resource.kind !== kind || typeof resource.key !== 'string' ||
-      !RESOURCE_KEY.test(resource.key) || typeof resource.desiredHash !== 'string' ||
+      !provider || resource.kind !== kind || !isText(resource.key) ||
+      !RESOURCE_KEY.test(resource.key) || !isText(resource.desiredHash) ||
       !HASH.test(resource.desiredHash) ||
       resource.marker !== `acg:v1:${value.installationId}:${resource.key}` ||
       (policy && (resource.identityHash !== value.accessPolicy.identitiesHash || !HASH.test(resource.identityHash)))
     ) return null;
-    resources.push(Object.freeze({
+    const parsedResource = {
       kind, key: resource.key, provider, desiredHash: resource.desiredHash,
-      marker: resource.marker, ...(policy ? { identityHash: resource.identityHash } : {}),
-    }));
+      marker: resource.marker,
+    };
+    if (policy) parsedResource.identityHash = resource.identityHash;
+    resources.push(Object.freeze(parsedResource));
   }
   const sourceApplication = resources.find((resource) => resource.kind === 'source_access_application');
   const sourcePolicy = resources.find((resource) => resource.kind === 'source_access_policy');
@@ -328,10 +372,10 @@ function parseSourceResource(value, index, installationId) {
   if (!exactKeys(value, policy
     ? ['kind', 'key', 'provider', 'desiredHash', 'marker', 'identityHash']
     : ['kind', 'key', 'provider', 'desiredHash', 'marker']) || value.kind !== kind ||
-      typeof value.key !== 'string' || !RESOURCE_KEY.test(value.key) ||
-      typeof value.desiredHash !== 'string' || !HASH.test(value.desiredHash) ||
+      !isText(value.key) || !RESOURCE_KEY.test(value.key) ||
+      !isText(value.desiredHash) || !HASH.test(value.desiredHash) ||
       value.marker !== `acg:v1:${installationId}:${value.key}` ||
-      (policy && (typeof value.identityHash !== 'string' || !HASH.test(value.identityHash)))) return null;
+      (policy && (!isText(value.identityHash) || !HASH.test(value.identityHash)))) return null;
   const provider = parseProvider(value.provider, policy);
   return provider ? Object.freeze({ ...value, provider }) : null;
 }
@@ -341,8 +385,8 @@ function parseManagementControl(value, claim) {
     'schemaVersion', 'installationId', 'accountId', 'portal', 'audienceEmails', 'sourceOwnership',
   ]) || value.schemaVersion !== 1 || value.installationId !== claim.expected.installationId ||
       value.accountId !== claim.target.accountId || !exactKeys(value.portal, ['id', 'name', 'hostname', 'marker']) ||
-      typeof value.portal.id !== 'string' || !SAFE_ID.test(value.portal.id) ||
-      typeof value.portal.name !== 'string' || value.portal.name.length < 2 || value.portal.name.length > 80 ||
+      !isText(value.portal.id) || !SAFE_ID.test(value.portal.id) ||
+      !isText(value.portal.name) || value.portal.name.length < 2 || value.portal.name.length > 80 ||
       !hostname(value.portal.hostname) || value.portal.marker !== `acg:v1:${value.installationId}:${value.portal.id}` ||
       !Array.isArray(value.audienceEmails) || value.audienceEmails.length < 1 || value.audienceEmails.length > 51 ||
       !Array.isArray(value.sourceOwnership) || value.sourceOwnership.length > 32) return null;
@@ -373,16 +417,23 @@ function parseManagementSources(value) {
     const legacy = exactKeys(source, ['id', 'label', 'url', 'enabledTools', 'status']);
     const current = exactKeys(source, ['id', 'label', 'url', 'authMode', 'enabledTools', 'status']);
     if ((!legacy && !current) || !SOURCE_ID.test(source.id) ||
-        typeof source.label !== 'string' || !Array.isArray(source.enabledTools) ||
+        !isText(source.label) || !Array.isArray(source.enabledTools) ||
         source.enabledTools.length < 1 || source.enabledTools.length > 64 ||
         (source.status !== 'installed' && source.status !== 'draft')) return null;
     const authMode = legacy ? 'none' : source.authMode;
     if (authMode !== 'none' && authMode !== 'oauth') return null;
-    const tools = source.enabledTools.filter((tool) => typeof tool === 'string' && /^[A-Za-z0-9_.:/-]{1,128}$/u.test(tool));
+    const tools = source.enabledTools.filter((tool) => isText(tool) && /^[A-Za-z0-9_.:/-]{1,128}$/u.test(tool));
     if (tools.length !== source.enabledTools.length || new Set(tools).size !== tools.length) return null;
     sources.push(Object.freeze({ ...source, authMode, enabledTools: Object.freeze([...tools]) }));
   }
   return Object.freeze({ ...value, sources: Object.freeze(sources) });
+}
+
+function isSourceCleanupResourceKey(value) {
+  if (!isText(value)) return false;
+  const [kind, sourceId, resourceKey, extra] = value.split('\0');
+  return extra === undefined && /^[a-z_]+$/u.test(kind) &&
+    SOURCE_ID.test(sourceId) && /^[a-z0-9-]+$/u.test(resourceKey);
 }
 
 function parseSourceCleanupState(value, controlHash, installationId) {
@@ -393,8 +444,7 @@ function parseSourceCleanupState(value, controlHash, installationId) {
       value.controlHash !== controlHash || (value.status !== 'uninstalling' && value.status !== 'removed') ||
       !['not_started', 'send_armed', 'submitted', 'complete'].includes(value.portalPhase) ||
       !Array.isArray(value.removedKeys) ||
-      value.removedKeys.some((key) => typeof key !== 'string' ||
-        !/^[a-z_]+\u0000source-[a-f0-9]{16}\u0000[a-z0-9-]+$/u.test(key)) ||
+      value.removedKeys.some((key) => !isSourceCleanupResourceKey(key)) ||
       new Set(value.removedKeys).size !== value.removedKeys.length) return null;
   let pending = null;
   if (value.pending !== null) {
@@ -409,7 +459,7 @@ function parseSourceCleanupState(value, controlHash, installationId) {
 }
 
 function parseEnvironment(env) {
-  if (!env || typeof env !== 'object') return null;
+  if (!env || !isObjectReference(env)) return null;
   const value = {
     accountId: env.CLOUDFLARE_ACCOUNT_ID,
     zoneId: env.CLOUDFLARE_ZONE_ID,
@@ -420,11 +470,11 @@ function parseEnvironment(env) {
     uninstallNonce: env.ANKKA_UNINSTALL_NONCE,
   };
   if (
-    typeof value.accountId !== 'string' || !ACCOUNT_ID.test(value.accountId) ||
-    typeof value.zoneId !== 'string' || !ACCOUNT_ID.test(value.zoneId) ||
-    !hostname(value.zoneName) || typeof value.release !== 'string' || !RELEASE.test(value.release) ||
-    typeof value.releaseSha256 !== 'string' || !HASH.test(value.releaseSha256) ||
-    value.zeroTrustReady !== 'true' || typeof value.uninstallNonce !== 'string' || !NONCE.test(value.uninstallNonce)
+    !isText(value.accountId) || !ACCOUNT_ID.test(value.accountId) ||
+    !isText(value.zoneId) || !ACCOUNT_ID.test(value.zoneId) ||
+    !hostname(value.zoneName) || !isText(value.release) || !RELEASE.test(value.release) ||
+    !isText(value.releaseSha256) || !HASH.test(value.releaseSha256) ||
+    value.zeroTrustReady !== 'true' || !isText(value.uninstallNonce) || !NONCE.test(value.uninstallNonce)
   ) return null;
   return Object.freeze(value);
 }
@@ -435,7 +485,7 @@ async function parseClaim(value, environment, nowMs) {
     'expected', 'cloudflareAccessToken',
   ])) return null;
   if (
-    value.schemaVersion !== 1 || typeof value.requestId !== 'string' || !REQUEST_ID.test(value.requestId) ||
+    value.schemaVersion !== 1 || !isText(value.requestId) || !REQUEST_ID.test(value.requestId) ||
     !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
     value.expiresAt <= value.issuedAt || value.expiresAt - value.issuedAt > REQUEST_LIFETIME_SECONDS ||
     !exactKeys(value.target, ['accountId', 'zoneId', 'zoneName']) ||
@@ -444,12 +494,12 @@ async function parseClaim(value, environment, nowMs) {
     !exactKeys(value.release, ['id', 'artifactSha256']) || value.release.id !== environment.release ||
     value.release.artifactSha256 !== environment.releaseSha256 ||
     !exactKeys(value.expected, ['configurationHash', 'installationId', 'desiredHash', 'readyReceipt']) ||
-    typeof value.expected.configurationHash !== 'string' || !HASH.test(value.expected.configurationHash) ||
-    typeof value.expected.installationId !== 'string' || !INSTALLATION_ID.test(value.expected.installationId) ||
-    typeof value.expected.desiredHash !== 'string' || !HASH.test(value.expected.desiredHash) ||
-    typeof value.cloudflareAccessToken !== 'string' || value.cloudflareAccessToken.length === 0 ||
+    !isText(value.expected.configurationHash) || !HASH.test(value.expected.configurationHash) ||
+    !isText(value.expected.installationId) || !INSTALLATION_ID.test(value.expected.installationId) ||
+    !isText(value.expected.desiredHash) || !HASH.test(value.expected.desiredHash) ||
+    !isText(value.cloudflareAccessToken) || value.cloudflareAccessToken.length === 0 ||
     value.cloudflareAccessToken.length > 16 * 1024 || value.cloudflareAccessToken.trim() !== value.cloudflareAccessToken ||
-    CONTROL.test(value.cloudflareAccessToken)
+    hasControlCharacter(value.cloudflareAccessToken)
   ) return null;
   const now = Math.floor(nowMs / 1_000);
   if (value.issuedAt > now + MAX_CLOCK_SKEW_SECONDS || value.expiresAt < now ||
@@ -588,7 +638,7 @@ function liveOwnershipMatches(resource, result, receipt) {
     return result.description === resource.marker;
   }
   if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
-    return typeof result.name === 'string' &&
+    return isText(result.name) &&
       (result.name === resource.marker || result.name.endsWith(` [${resource.marker}]`));
   }
   if (resource.kind === 'dns_record') {
@@ -746,7 +796,7 @@ function portalIsRootOnly(value, control, expected) {
       (Object.hasOwn(mapping, 'updated_prompts') &&
         (!Array.isArray(mapping.updated_prompts) || mapping.updated_prompts.length !== 0))) return false;
   const tools = mapping.updated_tools.map((tool) => isRecord(tool) && tool.enabled === true ? tool.name : null);
-  return tools.every((tool) => typeof tool === 'string') &&
+  return tools.every((tool) => isText(tool)) &&
     canonicalJson([...tools].sort(compareText)) === canonicalJson(
       desired.updated_tools.map((tool) => tool.name).sort(compareText),
     );
@@ -847,15 +897,15 @@ function validStoredState(value, claim) {
     value.configurationHash !== claim.expected.configurationHash ||
     value.desiredHash !== claim.expected.desiredHash || !exactReceiptAuthority(value.release, claim.release) ||
     !exactReceiptAuthority(value.rootReceipt, claim.expected.readyReceipt) ||
-    typeof value.uninstallId !== 'string' || !/^uninstall-[a-f0-9]{24}$/u.test(value.uninstallId) ||
+    !isText(value.uninstallId) || !/^uninstall-[a-f0-9]{24}$/u.test(value.uninstallId) ||
     !Array.isArray(value.removedKinds) ||
     value.removedKinds.some((kind, index) => kind !== expectedDeleteOrder[index])
   ) return false;
   if (value.pending !== null) {
     if (!exactKeys(value.pending, ['kind', 'key', 'requestId', 'phase']) ||
       value.pending.kind !== expectedDeleteOrder[value.removedKinds.length] ||
-      typeof value.pending.key !== 'string' || !RESOURCE_KEY.test(value.pending.key) ||
-      typeof value.pending.requestId !== 'string' || !REQUEST_ID.test(value.pending.requestId) ||
+      !isText(value.pending.key) || !RESOURCE_KEY.test(value.pending.key) ||
+      !isText(value.pending.requestId) || !REQUEST_ID.test(value.pending.requestId) ||
       !['send_armed', 'submitted', 'not_applied'].includes(value.pending.phase)) return false;
     const resource = resourceByKind(value.rootReceipt, value.pending.kind);
     if (!resource || resource.key !== value.pending.key) return false;
@@ -1242,8 +1292,8 @@ async function handleUninstallRequest(request, env, nowMs = Date.now()) {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'POST' });
   }
   const verified = await verifyRequest(request, env, nowMs);
-  if (!verified || !env.ADMIN_STATE || typeof env.ADMIN_STATE.idFromName !== 'function' ||
-      typeof env.ADMIN_STATE.get !== 'function') {
+  if (!verified || !env.ADMIN_STATE || !isCallable(env.ADMIN_STATE.idFromName) ||
+      !isCallable(env.ADMIN_STATE.get)) {
     return fixedJson(400, { schemaVersion: 1, error: 'uninstall_rejected', retryable: false });
   }
   let stub;
@@ -1254,7 +1304,7 @@ async function handleUninstallRequest(request, env, nowMs = Date.now()) {
   } catch {
     return recovery('uninstall_recovery_required');
   }
-  if (!stub || typeof stub.fetch !== 'function' || !managementStub || typeof managementStub.fetch !== 'function') {
+  if (!stub || !isCallable(stub.fetch) || !managementStub || !isCallable(managementStub.fetch)) {
     return recovery('uninstall_recovery_required');
   }
   try {

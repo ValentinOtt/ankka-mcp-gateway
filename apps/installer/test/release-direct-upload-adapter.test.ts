@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 import { REQUIRED_OAUTH_SCOPES } from '../src/constants';
 import { prepareVerifiedWorkerRelease } from '../src/cloudflare-worker-direct-upload';
 import {
@@ -14,6 +16,7 @@ import {
   type ReleaseFileRecord,
   type ReleaseManifest,
 } from '../src/release-manifest';
+import { requiredFixture } from './fixtures';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -28,7 +31,7 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 async function sha256(value: Uint8Array | string): Promise<string> {
-  const bytes = typeof value === 'string' ? encoder.encode(value) : value;
+  const bytes = v.is(v.string(), value) ? encoder.encode(value) : value;
   const owned = new Uint8Array(bytes.byteLength);
   owned.set(bytes);
   return bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', owned)));
@@ -138,25 +141,40 @@ async function fixture(): Promise<Fixture> {
   };
 }
 
-function replacePayload(
+function replacePayload<Payload>(
   bundle: VerifiedReleaseBundle,
-  payload: readonly unknown[],
-): VerifiedReleaseBundle {
-  return { ...bundle, payload } as unknown as VerifiedReleaseBundle;
+  payload: Payload,
+) {
+  return { ...bundle, payload };
 }
 
-function rawManifest(manifest: ReleaseManifest): Record<string, unknown> {
-  return JSON.parse(canonicalJson(manifest)) as Record<string, unknown>;
-}
-
-function replaceManifest(
+function replaceManifest<Manifest>(
   bundle: VerifiedReleaseBundle,
-  manifest: unknown,
-): VerifiedReleaseBundle {
-  return { ...bundle, manifest } as unknown as VerifiedReleaseBundle;
+  manifest: Manifest,
+) {
+  return { ...bundle, manifest };
 }
 
-async function expectInvalid(bundle: VerifiedReleaseBundle): Promise<void> {
+function withFilePatch<Patch extends object>(
+  manifest: ReleaseManifest,
+  componentName: keyof ReleaseManifest['components'],
+  fileIndex: number,
+  patch: Patch,
+) {
+  const component = manifest.components[componentName];
+  return {
+    ...manifest,
+    components: {
+      ...manifest.components,
+      [componentName]: {
+        ...component,
+        files: component.files.map((entry, index) => index === fileIndex ? { ...entry, ...patch } : entry),
+      },
+    },
+  };
+}
+
+async function expectInvalid<Input>(bundle: Input): Promise<void> {
   await expect(adaptVerifiedReleaseBundleForWorkerDirectUpload(bundle)).rejects.toMatchObject({
     code: 'release_invalid',
     status: 503,
@@ -288,29 +306,33 @@ describe('verified release bundle direct-upload adapter', () => {
   it('reads fresh immutable Blob contents instead of sharing prior output arrays', async () => {
     const input = await fixture();
     const first = await adaptVerifiedReleaseBundleForWorkerDirectUpload(input.bundle);
-    const expected = first.worker.modules[0].bytes[0];
-    first.worker.modules[0].bytes[0] ^= 0xff;
+    const firstModule = requiredFixture(first.worker.modules.at(0), 'first worker module');
+    const expected = requiredFixture(firstModule.bytes.at(0), 'first worker byte');
+    firstModule.bytes[0] = expected ^ 0xff;
 
     const second = await adaptVerifiedReleaseBundleForWorkerDirectUpload(input.bundle);
-    expect(second.worker.modules[0].bytes[0]).toBe(expected);
+    const secondModule = requiredFixture(second.worker.modules.at(0), 'second worker module');
+    expect(secondModule.bytes.at(0)).toBe(expected);
   });
 
   it('rejects missing, extra, duplicate, and traversal payload paths', async () => {
     const input = await fixture();
     const payload = input.bundle.payload;
+    const first = requiredFixture(payload.at(0), 'first payload');
+    const third = requiredFixture(payload.at(2), 'third payload');
     await expectInvalid(replacePayload(input.bundle, payload.slice(1)));
     await expectInvalid(replacePayload(
       input.bundle,
       payload.filter((entry) => !entry.path.startsWith('payload/installer/')),
     ));
     await expectInvalid(replacePayload(input.bundle, [
-      { ...payload[0], path: 'payload/admin/extra.js' },
+      { ...first, path: 'payload/admin/extra.js' },
       ...payload.slice(1),
     ]));
-    await expectInvalid(replacePayload(input.bundle, [payload[0], payload[0], ...payload.slice(2)]));
+    await expectInvalid(replacePayload(input.bundle, [first, first, ...payload.slice(2)]));
     await expectInvalid(replacePayload(input.bundle, [
       ...payload.slice(0, 2),
-      { ...payload[2], path: 'payload/installer/../worker/index.js' },
+      { ...third, path: 'payload/installer/../worker/index.js' },
       ...payload.slice(3),
     ]));
   });
@@ -318,16 +340,18 @@ describe('verified release bundle direct-upload adapter', () => {
   it('rejects payload metadata that is not the exact manifest record relation', async () => {
     const input = await fixture();
     const payload = input.bundle.payload;
+    const first = requiredFixture(payload.at(0), 'first payload');
+    const second = requiredFixture(payload.at(1), 'second payload');
     await expectInvalid(replacePayload(input.bundle, [
-      { ...payload[0], sha256: payload[1].sha256 },
+      { ...first, sha256: second.sha256 },
       ...payload.slice(1),
     ]));
     await expectInvalid(replacePayload(input.bundle, [
-      { ...payload[0], contentType: 'application/javascript+module' },
+      { ...first, contentType: 'application/javascript+module' },
       ...payload.slice(1),
     ]));
     await expectInvalid(replacePayload(input.bundle, [
-      { ...payload[0], byteSize: payload[0].byteSize + 1 },
+      { ...first, byteSize: first.byteSize + 1 },
       ...payload.slice(1),
     ]));
   });
@@ -335,29 +359,31 @@ describe('verified release bundle direct-upload adapter', () => {
   it('rejects Blob type, size, and byte-digest mismatches', async () => {
     const input = await fixture();
     const payload = input.bundle.payload;
+    const first = requiredFixture(payload.at(0), 'first payload');
     await expectInvalid(replacePayload(input.bundle, [
-      { ...payload[0], bytes: new Blob(['wrong type and bytes'], { type: 'text/plain' }) },
+      { ...first, bytes: new Blob(['wrong type and bytes'], { type: 'text/plain' }) },
       ...payload.slice(1),
     ]));
     await expectInvalid(replacePayload(input.bundle, [
-      { ...payload[0], bytes: new Blob([new Uint8Array(payload[0].byteSize + 1)], { type: payload[0].contentType }) },
+      { ...first, bytes: new Blob([new Uint8Array(first.byteSize + 1)], { type: first.contentType }) },
       ...payload.slice(1),
     ]));
-    const original = new Uint8Array(await payload[0].bytes.arrayBuffer());
-    original[0] ^= 0xff;
+    const original = new Uint8Array(await first.bytes.arrayBuffer());
+    const firstByte = requiredFixture(original.at(0), 'first payload byte');
+    original[0] = firstByte ^ 0xff;
     await expectInvalid(replacePayload(input.bundle, [
-      { ...payload[0], bytes: new Blob([original], { type: payload[0].contentType }) },
+      { ...first, bytes: new Blob([original], { type: first.contentType }) },
       ...payload.slice(1),
     ]));
   });
 
   it('rejects unknown bundle and payload fields', async () => {
     const input = await fixture();
-    await expectInvalid({ ...input.bundle, provider: 'r2' } as unknown as VerifiedReleaseBundle);
+    await expectInvalid({ ...input.bundle, provider: 'r2' });
     await expectInvalid({
       ...input.bundle,
       envelope: { ...input.bundle.envelope, provider: 'r2' },
-    } as unknown as VerifiedReleaseBundle);
+    });
     await expectInvalid(replacePayload(input.bundle, [
       { ...input.bundle.payload[0], mutableUrl: 'https://example.invalid' },
       ...input.bundle.payload.slice(1),
@@ -366,12 +392,12 @@ describe('verified release bundle direct-upload adapter', () => {
 
   it('rejects a non-Ed25519 provenance marker or malformed key id', async () => {
     const input = await fixture();
-    await expectInvalid({ ...input.bundle, verification: 'checksum' } as unknown as VerifiedReleaseBundle);
+    await expectInvalid({ ...input.bundle, verification: 'checksum' });
     await expectInvalid({ ...input.bundle, keyId: '../release-key' });
     await expectInvalid({
       ...input.bundle,
       envelope: { ...input.bundle.envelope, channel: 'canary' },
-    } as unknown as VerifiedReleaseBundle);
+    });
     await expectInvalid({
       ...input.bundle,
       envelope: {
@@ -380,58 +406,91 @@ describe('verified release bundle direct-upload adapter', () => {
         schemaVersion: 1,
         signature: input.bundle.envelope.signature,
       },
-    } as unknown as VerifiedReleaseBundle);
+    });
   });
 
   it('re-validates component and aggregate tree hashes', async () => {
     const input = await fixture();
-    const componentMismatch = rawManifest(input.manifest);
-    const components = componentMismatch.components as Record<string, Record<string, unknown>>;
-    components.worker.treeSha256 = 'f'.repeat(64);
+    const componentMismatch = {
+      ...input.manifest,
+      components: {
+        ...input.manifest.components,
+        worker: { ...input.manifest.components.worker, treeSha256: 'f'.repeat(64) },
+      },
+    };
     await expectInvalid(replaceManifest(input.bundle, componentMismatch));
 
-    const aggregateMismatch = rawManifest(input.manifest);
-    (aggregateMismatch.artifact as Record<string, unknown>).treeSha256 = 'e'.repeat(64);
+    const aggregateMismatch = {
+      ...input.manifest,
+      artifact: { ...input.manifest.artifact, treeSha256: 'e'.repeat(64) },
+    };
     await expectInvalid(replaceManifest(input.bundle, aggregateMismatch));
   });
 
   it('rejects a manifest record placed under the wrong component', async () => {
     const input = await fixture();
-    const manifest = rawManifest(input.manifest);
-    const components = manifest.components as Record<string, Record<string, unknown>>;
-    const adminFiles = components.admin.files as Array<Record<string, unknown>>;
-    adminFiles[0].path = 'payload/worker/app.js';
+    const manifest = withFilePatch(input.manifest, 'admin', 0, { path: 'payload/worker/app.js' });
     await expectInvalid(replaceManifest(input.bundle, manifest));
   });
 
   it('rejects Cloudflare Durable Object migrations or a changed exports contract', async () => {
     const input = await fixture();
-    const withMigrations = rawManifest(input.manifest);
-    const cloudflare = withMigrations.cloudflare as Record<string, unknown>;
-    cloudflare.durableObjects = {
-      ...(cloudflare.durableObjects as Record<string, unknown>),
-      migrations: [{ new_sqlite_classes: ['AdminState'], tag: 'v1' }],
+    const approved = input.manifest.cloudflare;
+    const withMigrations = {
+      ...input.manifest,
+      cloudflare: {
+        ...approved,
+        durableObjects: {
+          ...approved.durableObjects,
+          migrations: [{ new_sqlite_classes: ['AdminState'], tag: 'v1' }],
+        },
+      },
     };
     await expectInvalid(replaceManifest(input.bundle, withMigrations));
 
-    const changedExports = rawManifest(input.manifest);
-    const changedCloudflare = changedExports.cloudflare as Record<string, Record<string, unknown>>;
-    changedCloudflare.durableObjects.exports = {
-      AdminState: { storage: 'durable', type: 'durable-object' },
+    const changedExports = {
+      ...input.manifest,
+      cloudflare: {
+        ...approved,
+        durableObjects: {
+          ...approved.durableObjects,
+          exports: { AdminState: { storage: 'durable', type: 'durable-object' } },
+        },
+      },
     };
     await expectInvalid(replaceManifest(input.bundle, changedExports));
 
-    const cleanupMigration = rawManifest(input.manifest);
-    const cleanupCloudflare = cleanupMigration.cloudflare as Record<string, Record<string, unknown>>;
-    const cleanupVariants = cleanupCloudflare.workerVariants as Record<string, Record<string, unknown>>;
-    cleanupVariants.cleanup.migrations = [{ deletedClasses: ['AdminState'], tag: 'v2' }];
+    const cleanupMigration = {
+      ...input.manifest,
+      cloudflare: {
+        ...approved,
+        workerVariants: {
+          ...approved.workerVariants,
+          cleanup: {
+            ...approved.workerVariants.cleanup,
+            migrations: [{ deletedClasses: ['AdminState'], tag: 'v2' }],
+          },
+        },
+      },
+    };
     await expectInvalid(replaceManifest(input.bundle, cleanupMigration));
 
-    const retirementDrift = rawManifest(input.manifest);
-    const retirementCloudflare = retirementDrift.cloudflare as Record<string, Record<string, unknown>>;
-    const variants = retirementCloudflare.workerVariants as Record<string, Record<string, unknown>>;
-    const retirementObjects = variants.retirement.durableObjects as Record<string, unknown>;
-    retirementObjects.exports = { AdminState: { storage: 'sqlite', type: 'durable-object' } };
+    const retirementDrift = {
+      ...input.manifest,
+      cloudflare: {
+        ...approved,
+        workerVariants: {
+          ...approved.workerVariants,
+          retirement: {
+            ...approved.workerVariants.retirement,
+            durableObjects: {
+              ...approved.workerVariants.retirement.durableObjects,
+              exports: { AdminState: { storage: 'sqlite', type: 'durable-object' } },
+            },
+          },
+        },
+      },
+    };
     await expectInvalid(replaceManifest(input.bundle, retirementDrift));
   });
 

@@ -1,3 +1,16 @@
+import * as v from 'valibot';
+
+import { boundaryValueSchema, type BoundaryValue } from './boundary';
+import {
+  parseAccountWorkersSubdomain,
+  parseActiveGatewayRuntime,
+  parseCurrentGatewayVersion,
+  parseCurrentGatewayWorker,
+  parseGatewayRuntimeBindings,
+  parseGatewayWorkerDomains,
+  parseGatewayWorkerSubdomainState,
+} from './cloudflare-gateway-runtime-state';
+import type { GatewayWorkerPlainTextBindings } from './cloudflare-worker-direct-upload';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 import { base64UrlDecode } from './crypto';
 import { DeployError } from './errors';
@@ -21,30 +34,22 @@ const EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u;
 const INSTALLATION_ID = /^acg-[a-f0-9]{24}$/u;
 const RELEASE = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[a-z0-9.-]+)?$/u;
 const REQUEST_ID = /^[A-Za-z0-9_-]{22}$/u;
-const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
-const WORKER_ID = /^[a-f0-9]{32}$/u;
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const READY_ATTEMPTS = 20;
-const BINDING_NAMES = Object.freeze([
-  'ADMIN_EMAILS',
-  'ANKKA_GATEWAY_RELEASE',
-  'ANKKA_GATEWAY_RELEASE_SHA256',
-  'ANKKA_MANAGEMENT_HOSTNAME',
-  'ANKKA_UPDATE_CHANNEL',
-  'ANKKA_UPDATE_KEY_ID',
-  'ANKKA_UPDATE_PUBLIC_KEY',
-  'ANKKA_WORKERS_SUBDOMAIN',
-  'ANKKA_WORKER_NAME',
-  'CF_ACCESS_AUD',
-  'CF_ACCESS_ISSUER',
-  'CLOUDFLARE_ACCOUNT_ID',
-  'CLOUDFLARE_ZONE_ID',
-  'CLOUDFLARE_ZONE_NAME',
-  'ZERO_TRUST_READY',
-] as const);
+const providerEnvelopeSchema = v.looseObject({
+  result: boundaryValueSchema,
+  success: v.literal(true),
+});
+const applyResultSchema = v.strictObject({
+  actionId: v.string(),
+  installationId: v.string(),
+  removedResourceCount: v.pipe(v.number(), v.safeInteger(), v.minValue(4), v.maxValue(103)),
+  schemaVersion: v.literal(1),
+  status: v.literal('gateway_removed'),
+});
 
-type CurrentRuntimeBindings = Readonly<Record<(typeof BINDING_NAMES)[number], string>>;
+type CurrentRuntimeBindings = GatewayWorkerPlainTextBindings;
 
 export interface ReturningUninstallActionRelayInput extends ReturningUninstallAuthorityExpectation {
   readonly actionKey: string;
@@ -63,14 +68,9 @@ function conflict(): never {
   throw new DeployError(409, 'session_conflict');
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, expectedKeys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...expectedKeys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+function unsafeGatewayNameCharacter(character: string): boolean {
+  const codePoint = character.codePointAt(0);
+  return codePoint === undefined || codePoint <= 0x1f || codePoint === 0x7f || '<>{}\\'.includes(character);
 }
 
 function validateInput(input: ReturningUninstallActionRelayInput, now: number): URL {
@@ -81,9 +81,9 @@ function validateInput(input: ReturningUninstallActionRelayInput, now: number): 
     !DNS_LABEL.test(input.workersSubdomain) || !ACTION_KEY.test(input.actionKey) ||
     !ACCESS_TOKEN.test(input.accessToken) || input.actorEmail !== input.actorEmail.toLowerCase() ||
     !EMAIL.test(input.actorEmail) || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= now ||
-    input.expiresAt > now + 10 * 60 * 1000 || typeof input.gatewayName !== 'string' ||
+    input.expiresAt > now + 10 * 60 * 1000 || !v.is(v.string(), input.gatewayName) ||
     input.gatewayName.length < 1 || input.gatewayName.length > 128 ||
-    /[\u0000-\u001f\u007f<>{}\\]/u.test(input.gatewayName) ||
+    [...input.gatewayName].some(unsafeGatewayNameCharacter) ||
     !input.portalHostname.includes('.') || input.portalHostname !== input.portalHostname.toLowerCase() ||
     input.portalHostname.split('.').some((label) => !DNS_LABEL.test(label)) ||
     management.protocol !== 'https:' ||
@@ -96,15 +96,20 @@ function providerUrl(accountId: string, path: string): URL {
   return new URL(`/client/v4/accounts/${encodeURIComponent(accountId)}${path}`, CLOUDFLARE_API_ORIGIN);
 }
 
-async function providerResult(input: ReturningUninstallActionRelayInput, path: string, init: RequestInit): Promise<unknown> {
+async function providerResult(
+  input: ReturningUninstallActionRelayInput,
+  path: string,
+  init: RequestInit,
+): Promise<BoundaryValue> {
   return withDeadline(async (signal) => {
+    const headers = new Headers({
+      accept: 'application/json',
+      authorization: `Bearer ${input.accessToken}`,
+    });
+    if (init.body !== undefined && init.body !== null) headers.set('content-type', 'application/json');
     const response = await input.transport(providerUrl(input.accountId, path), {
       ...init,
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${input.accessToken}`,
-        ...(init.body ? { 'content-type': 'application/json' } : {}),
-      },
+      headers,
       redirect: 'manual',
       signal,
     });
@@ -114,21 +119,20 @@ async function providerResult(input: ReturningUninstallActionRelayInput, path: s
     }
     const body = await readBoundedText(response, 'oauth_grant_invalid', MAX_RESPONSE_BYTES);
     if (!response.ok) throw new DeployError(502, 'oauth_grant_invalid');
-    let envelope: unknown;
-    try { envelope = JSON.parse(body); } catch { throw new DeployError(502, 'oauth_grant_invalid'); }
-    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
-      (envelope as Record<string, unknown>).success !== true || !Object.hasOwn(envelope, 'result')) {
+    try {
+      const envelope = v.safeParse(providerEnvelopeSchema, JSON.parse(body));
+      if (!envelope.success) throw new DeployError(502, 'oauth_grant_invalid');
+      return envelope.output.result;
+    } catch (error) {
+      if (error instanceof DeployError) throw error;
       throw new DeployError(502, 'oauth_grant_invalid');
     }
-    return (envelope as Record<string, unknown>).result;
   }, 'oauth_grant_invalid');
 }
 
-function subdomainState(value: unknown, expected: boolean): void {
-  if (!value || typeof value !== 'object' || Array.isArray(value) ||
-    Object.keys(value).sort().join(',') !== 'enabled,previews_enabled' ||
-    (value as Record<string, unknown>).enabled !== expected ||
-    (value as Record<string, unknown>).previews_enabled !== false) {
+function subdomainState(value: BoundaryValue, expected: boolean): void {
+  const state = parseGatewayWorkerSubdomainState(value);
+  if (!state || state.enabled !== expected) {
     throw new DeployError(409, 'session_conflict');
   }
 }
@@ -150,38 +154,16 @@ async function setSubdomain(input: ReturningUninstallActionRelayInput, enabled: 
   await readSubdomain(input, enabled);
 }
 
-function activeVersionId(value: unknown): string {
-  if (!isRecord(value) || !exactKeys(value, ['deployments']) || !Array.isArray(value.deployments) ||
-    value.deployments.length < 1 || value.deployments.length > 1_000) conflict();
-  const active = value.deployments[0];
-  if (!isRecord(active) || !UUID.test(String(active.id)) || !Array.isArray(active.versions) ||
-    active.versions.length !== 1 || !isRecord(active.versions[0]) ||
-    active.versions[0].percentage !== 100 || !UUID.test(String(active.versions[0].version_id))) conflict();
-  return String(active.versions[0].version_id);
+function activeVersionId(value: BoundaryValue): string {
+  const active = parseActiveGatewayRuntime(value);
+  if (!active) conflict();
+  return active.versionId;
 }
 
-function currentBindings(value: unknown): CurrentRuntimeBindings {
-  if (!isRecord(value) || !Array.isArray(value.bindings) ||
-    value.bindings.length !== BINDING_NAMES.length + 2 || value.main_module !== 'index.js' ||
-    value.compatibility_date !== '2026-08-08' || Object.hasOwn(value, 'migrations') ||
-    Object.hasOwn(value, 'migration_tag')) conflict();
-  const bindings = new Map<string, Record<string, unknown>>();
-  for (const binding of value.bindings) {
-    if (!isRecord(binding) || typeof binding.name !== 'string' || bindings.has(binding.name)) conflict();
-    bindings.set(binding.name, binding);
-  }
-  const admin = bindings.get('ADMIN_STATE');
-  const assets = bindings.get('ASSETS');
-  if (!admin || admin.type !== 'durable_object_namespace' || admin.class_name !== 'AdminState' ||
-    !assets || !exactKeys(assets, ['name', 'type']) || assets.type !== 'assets') conflict();
-  const output = {} as Record<(typeof BINDING_NAMES)[number], string>;
-  for (const name of BINDING_NAMES) {
-    const binding = bindings.get(name);
-    if (!binding || !exactKeys(binding, ['name', 'text', 'type']) || binding.type !== 'plain_text' ||
-      typeof binding.text !== 'string' || binding.text.length < 1 || binding.text.length > 4_096) conflict();
-    output[name] = binding.text;
-  }
-  return Object.freeze(output);
+function currentBindings(value: BoundaryValue): CurrentRuntimeBindings {
+  const bindings = parseGatewayRuntimeBindings(value);
+  if (!bindings) conflict();
+  return bindings;
 }
 
 function validateRuntimeBindings(
@@ -214,8 +196,9 @@ async function verifyCurrentRuntime(
     `/workers/workers/${encodeURIComponent(input.workerName)}`,
     { method: 'GET' },
   );
-  if (!isRecord(worker) || worker.name !== input.workerName || !WORKER_ID.test(String(worker.id)) ||
-    !Array.isArray(worker.tags) || !worker.tags.includes('ankka-mcp-gateway')) conflict();
+  const currentWorker = parseCurrentGatewayWorker(worker);
+  if (!currentWorker || currentWorker.name !== input.workerName ||
+      !currentWorker.tags.includes('ankka-mcp-gateway')) conflict();
   const versionId = activeVersionId(await providerResult(
     input,
     `/workers/scripts/${encodeURIComponent(input.workerName)}/deployments`,
@@ -223,10 +206,11 @@ async function verifyCurrentRuntime(
   ));
   const version = await providerResult(
     input,
-    `/workers/workers/${String(worker.id)}/versions/${versionId}`,
+    `/workers/workers/${currentWorker.id}/versions/${versionId}`,
     { method: 'GET' },
   );
-  if (!isRecord(version) || version.id !== versionId) conflict();
+  const currentVersion = parseCurrentGatewayVersion(version);
+  if (!currentVersion || currentVersion.id !== versionId) conflict();
   const bindings = currentBindings(version);
   validateRuntimeBindings(input, management, bindings);
   return bindings;
@@ -263,16 +247,16 @@ async function validateProviderOrigin(
   management: URL,
 ): Promise<CurrentRuntimeBindings> {
   const subdomain = await providerResult(input, '/workers/subdomain', { method: 'GET' });
-  if (!subdomain || typeof subdomain !== 'object' || Array.isArray(subdomain) ||
-    Object.keys(subdomain).join(',') !== 'subdomain' ||
-    (subdomain as Record<string, unknown>).subdomain !== input.workersSubdomain) {
+  if (parseAccountWorkersSubdomain(subdomain) !== input.workersSubdomain) {
     throw new DeployError(409, 'session_conflict');
   }
   const query = new URLSearchParams({ hostname: management.hostname, page: '1', per_page: '50' });
-  const domains = await providerResult(input, `/workers/domains?${query}`, { method: 'GET' });
-  if (!Array.isArray(domains) || domains.length !== 1 || !domains[0] ||
-    typeof domains[0] !== 'object' || Array.isArray(domains[0])) throw new DeployError(409, 'session_conflict');
-  const domain = domains[0] as Record<string, unknown>;
+  const domains = parseGatewayWorkerDomains(
+    await providerResult(input, `/workers/domains?${query}`, { method: 'GET' }),
+  );
+  if (!domains || domains.length !== 1) throw new DeployError(409, 'session_conflict');
+  const domain = domains[0];
+  if (!domain) throw new DeployError(409, 'session_conflict');
   if (domain.hostname !== management.hostname || domain.service !== input.workerName ||
     (domain.environment !== undefined && domain.environment !== 'production')) {
     throw new DeployError(409, 'session_conflict');
@@ -339,9 +323,13 @@ async function prove(input: ReturningUninstallActionRelayInput, now: number): Pr
     throw new DeployError(409, 'session_conflict');
   }
   const serialized = await readBoundedText(response, 'session_conflict', MAX_RESPONSE_BYTES);
-  let parsed: unknown;
-  try { parsed = JSON.parse(serialized); } catch { throw new DeployError(409, 'session_conflict'); }
-  return parseReturningUninstallImportedAuthority(parsed, input);
+  try {
+    const parsed = v.parse(boundaryValueSchema, JSON.parse(serialized));
+    return parseReturningUninstallImportedAuthority(parsed, input);
+  } catch (error) {
+    if (error instanceof DeployError) throw error;
+    throw new DeployError(409, 'session_conflict');
+  }
 }
 
 export interface ReturningUninstallApplyResult {
@@ -386,21 +374,19 @@ async function apply(
     throw new DeployError(409, 'session_conflict');
   }
   const serialized = await readBoundedText(response, 'session_conflict', MAX_RESPONSE_BYTES);
-  let value: unknown;
-  try { value = JSON.parse(serialized); } catch { throw new DeployError(409, 'session_conflict'); }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  let result: v.SafeParseResult<typeof applyResultSchema>;
+  try {
+    result = v.safeParse(applyResultSchema, JSON.parse(serialized));
+  } catch {
     throw new DeployError(409, 'session_conflict');
   }
-  const result = value as Record<string, unknown>;
-  if (Object.keys(result).sort().join(',') !==
-      'actionId,installationId,removedResourceCount,schemaVersion,status' ||
-    result.schemaVersion !== 1 || result.actionId !== input.actionId ||
-    result.status !== 'gateway_removed' || result.installationId !== input.installationId ||
-    !Number.isSafeInteger(result.removedResourceCount) || (result.removedResourceCount as number) < 4 ||
-    (result.removedResourceCount as number) > 103) {
-    throw new DeployError(409, 'session_conflict');
-  }
-  return Object.freeze(result as unknown as ReturningUninstallApplyResult);
+  if (!result.success || result.output.actionId !== input.actionId ||
+      result.output.installationId !== input.installationId) throw new DeployError(409, 'session_conflict');
+  return Object.freeze(result.output);
+}
+
+function operationFailure<Value>(error: Value): Error {
+  return error instanceof Error ? error : new DeployError(409, 'session_conflict');
 }
 
 /**
@@ -413,7 +399,7 @@ export async function relayReturningUninstallAction(
   const now = input.now?.() ?? Date.now();
   const management = validateInput(input, now);
   let routeMayBeEnabled = false;
-  let operationError: unknown = null;
+  let operationError: Error | null = null;
   let authority: ReturningUninstallImportedAuthority | null = null;
   try {
     const bindings = await validateProviderOrigin(input, management);
@@ -424,7 +410,7 @@ export async function relayReturningUninstallAction(
     authority = await prove(input, now);
     bindAuthorityToCurrentRuntime(input, authority, bindings);
   } catch (error) {
-    operationError = error;
+    operationError = operationFailure(error);
   } finally {
     if (routeMayBeEnabled) {
       try { await setSubdomain(input, false); }
@@ -444,10 +430,10 @@ export async function applyReturningUninstallAction(
   proveCurrentRuntime: () => Promise<void>,
 ): Promise<ReturningUninstallApplyResult> {
   const now = input.now?.() ?? Date.now();
-  if (!REQUEST_ID.test(requestId) || typeof proveCurrentRuntime !== 'function') invalid();
+  if (!REQUEST_ID.test(requestId) || !v.is(v.function(), proveCurrentRuntime)) invalid();
   const management = validateInput(input, now);
   let routeMayBeEnabled = false;
-  let operationError: unknown = null;
+  let operationError: Error | null = null;
   let result: ReturningUninstallApplyResult | null = null;
   try {
     const bindings = await validateProviderOrigin(input, management);
@@ -461,7 +447,7 @@ export async function applyReturningUninstallAction(
     await proveCurrentRuntime();
     result = await apply(input, requestId, now);
   } catch (error) {
-    operationError = error;
+    operationError = operationFailure(error);
   } finally {
     if (routeMayBeEnabled) {
       try { await setSubdomain(input, false); }

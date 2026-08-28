@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as v from 'valibot';
 import {
   prepareVerifiedWorkerRelease,
   prepareWorkerVersionMutation,
@@ -42,6 +43,7 @@ import {
   createCloudflareReviewedInstallProviderAdapter,
   executeReviewedInstall,
   type ReviewedInstallExecutionInput,
+  type ReviewedInstallProviderCall,
   type ReviewedInstallProviderAdapter,
 } from '../src/reviewed-install-executor';
 import { adaptVerifiedReleaseBundleForWorkerDirectUpload } from '../src/release-direct-upload-adapter';
@@ -60,6 +62,7 @@ import {
   type StaticDeployPlan,
 } from '../src/schema';
 import { REQUIRED_OAUTH_SCOPES } from '../src/constants';
+import { requiredFixture } from './fixtures';
 import { readyInstallationReceiptFixture } from './provider-neutral-installation-receipt-fixture';
 
 const NOW = 1_787_444_000_000;
@@ -114,7 +117,7 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 async function sha256(value: Uint8Array | string): Promise<string> {
-  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+  const bytes = v.is(v.string(), value) ? new TextEncoder().encode(value) : value;
   const owned = new Uint8Array(new ArrayBuffer(bytes.byteLength));
   owned.set(bytes);
   return bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', owned)));
@@ -168,11 +171,11 @@ async function releaseBundle(): Promise<VerifiedReleaseBundle> {
     oauthScopeIds: REQUIRED_OAUTH_SCOPES,
     cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
     components: {
-      admin: await component([records[0]]),
-      installer: await component([records[1]]),
-      worker: await component([records[4]]),
-      workerCleanup: await component([records[2]]),
-      workerRetirement: await component([records[3]]),
+      admin: await component([requiredFixture(records.at(0), 'admin release record')]),
+      installer: await component([requiredFixture(records.at(1), 'installer release record')]),
+      worker: await component([requiredFixture(records.at(4), 'worker release record')]),
+      workerCleanup: await component([requiredFixture(records.at(2), 'cleanup release record')]),
+      workerRetirement: await component([requiredFixture(records.at(3), 'retirement release record')]),
     },
     artifact: {
       fileCount: records.length,
@@ -547,7 +550,7 @@ class FakeProvider implements ReviewedInstallProviderAdapter {
   async verifyWorkerVersion(
     recovery: WorkerVersionRecoveryRecord,
     locator: VersionSubmission,
-    _call?: unknown,
+    _call?: ReviewedInstallProviderCall,
     expectedNamespaceId?: string,
   ) {
     if (this.versions.get(recovery.phase)?.versionId !== locator.versionId) throw new Error('version mismatch');
@@ -608,7 +611,7 @@ class FakeProvider implements ReviewedInstallProviderAdapter {
 
   async proveActiveWorkerVersion(
     recovery: WorkerVersionRecoveryRecord,
-    _call: unknown,
+    _call: ReviewedInstallProviderCall,
     expectedNamespaceId: string,
   ) {
     this.events.push(`read:active-version:${recovery.phase}`);
@@ -813,7 +816,7 @@ describe('isolated reviewed install executor', () => {
       },
     });
     expect(requests).toHaveLength(1);
-    expect(requests[0].url).toContain('/assets-upload-session');
+    expect(requiredFixture(requests.at(0), 'asset upload session request').url).toContain('/assets-upload-session');
     expect(plan.recovery).toEqual(recovery);
     expect(JSON.stringify(plan.recovery)).not.toContain('asset-session-completion-jwt');
   });
@@ -1100,9 +1103,10 @@ describe('isolated reviewed install executor', () => {
     const bootstrap = fixture.journal.value?.actions.find((entry) => entry.name === 'customer_bootstrap_submit');
     if (bootstrap?.record.kind !== 'customer_bootstrap_submit') throw new Error('bootstrap missing');
     expect(bootstrap.record.attempts).toHaveLength(2);
-    expect(bootstrap.record.attempts[0]).toMatchObject({ phase: 'send_armed', locator: null });
-    expect(bootstrap.record.attempts[0].disable?.phase).toBe('verified');
-    expect(bootstrap.record.attempts[1]).toMatchObject({
+    const initialAttempt = requiredFixture(bootstrap.record.attempts.at(0), 'initial bootstrap attempt');
+    expect(initialAttempt).toMatchObject({ phase: 'send_armed', locator: null });
+    expect(initialAttempt.disable?.phase).toBe('verified');
+    expect(requiredFixture(bootstrap.record.attempts.at(1), 'recovery bootstrap attempt')).toMatchObject({
       approvalAttemptId: ATTEMPT_TWO,
       phase: 'verified',
       locator: { status: 'ready', resumed: false },
@@ -1141,7 +1145,7 @@ describe('isolated reviewed install executor', () => {
       );
       if (interrupted?.record.kind !== 'customer_bootstrap_submit') throw new Error('bootstrap missing');
       expect(interrupted.record.attempts).toHaveLength(2);
-      const inherited = interrupted.record.attempts[1];
+      const inherited = requiredFixture(interrupted.record.attempts.at(1), 'inherited bootstrap attempt');
       expect(inherited.enable).toMatchObject({
         approvalAttemptId: ATTEMPT_TWO,
         phase: storedPhase,
@@ -1173,16 +1177,17 @@ describe('isolated reviewed install executor', () => {
       );
       if (converged?.record.kind !== 'customer_bootstrap_submit') throw new Error('bootstrap missing');
       expect(converged.record.attempts).toHaveLength(3);
-      expect(converged.record.attempts[1].enable).toMatchObject({
+      const recoveredAttempt = requiredFixture(converged.record.attempts.at(1), 'recovered bootstrap attempt');
+      expect(recoveredAttempt.enable).toMatchObject({
         approvalAttemptId: ATTEMPT_TWO,
         phase: 'verified',
       });
-      expect(converged.record.attempts[1].disable).toMatchObject({
+      expect(recoveredAttempt.disable).toMatchObject({
         approvalAttemptId: ATTEMPT_THREE,
         phase: 'verified',
         locator: { enabled: false, previewsEnabled: false },
       });
-      expect(converged.record.attempts[2]).toMatchObject({
+      expect(requiredFixture(converged.record.attempts.at(2), 'final bootstrap attempt')).toMatchObject({
         approvalAttemptId: ATTEMPT_THREE,
         phase: 'verified',
         locator: { status: 'ready' },
@@ -1253,6 +1258,7 @@ describe('isolated reviewed install executor', () => {
       ATTEMPT_ONE,
       ATTEMPT_TWO,
     ]);
-    expect(bootstrap.record.attempts[1].locator).toMatchObject({ status: 'ready', resumed: true });
+    expect(requiredFixture(bootstrap.record.attempts.at(1), 'resumed bootstrap attempt').locator)
+      .toMatchObject({ status: 'ready', resumed: true });
   });
 });

@@ -32,11 +32,20 @@ export interface InstallJournalPort {
   appendCustomerBootstrapCycle(input: AppendCustomerBootstrapAttemptInput): Promise<InstallJournal>;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+type InstallJournalRequestBody =
+  | AcquireInstallJournalLeaseInput
+  | AppendCustomerBootstrapAttemptInput
+  | CreateInstallJournalInput
+  | InstallJournalCasInput
+  | PrepareInstallJournalActionInput
+  | SubmitInstallJournalActionInput
+  | TransitionInstallJournalActionInput;
+
+function isRecord(value: BoundaryValue): value is BoundaryObject {
+  return v.is(boundaryObjectSchema, value);
 }
 
-async function boundedJson(response: Response): Promise<unknown> {
+async function boundedJson(response: Response): Promise<BoundaryValue> {
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
   if (!contentType.startsWith('application/json')) throw new DeployError(500, 'session_invalid');
   const declared = response.headers.get('content-length');
@@ -67,7 +76,10 @@ async function boundedJson(response: Response): Promise<unknown> {
     offset += chunk.byteLength;
   }
   try {
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
+    return v.parse(
+      boundaryValueSchema,
+      JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)),
+    );
   } catch {
     throw new DeployError(500, 'session_invalid');
   }
@@ -87,7 +99,11 @@ async function journalResponse(response: Response): Promise<InstallJournal> {
   return requireInstallJournal(body.journal);
 }
 
-function request(path: string, method: 'GET' | 'POST', body?: unknown): Request {
+function request(
+  path: string,
+  method: 'GET' | 'POST',
+  body?: InstallJournalRequestBody,
+): Request {
   if (body !== undefined) {
     try {
       assertSecretFree(body);
@@ -103,15 +119,20 @@ function request(path: string, method: 'GET' | 'POST', body?: unknown): Request 
       throw new DeployError(400, 'bad_request', reason);
     }
   }
-  return new Request(new URL(path, INTERNAL_ORIGIN), {
-    method,
-    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const init: RequestInit = { method };
+  if (body !== undefined) {
+    init.headers = { 'content-type': 'application/json' };
+    init.body = JSON.stringify(body);
+  }
+  return new Request(new URL(path, INTERNAL_ORIGIN), init);
 }
 
 export function createInstallJournalPort(fetcher: InstallJournalFetcher): InstallJournalPort {
-  const call = async (path: string, method: 'GET' | 'POST', body?: unknown): Promise<InstallJournal> => {
+  const call = async (
+    path: string,
+    method: 'GET' | 'POST',
+    body?: InstallJournalRequestBody,
+  ): Promise<InstallJournal> => {
     return journalResponse(await fetcher.fetch(request(path, method, body)));
   };
   return Object.freeze({
@@ -131,3 +152,11 @@ export function createInstallJournalPort(fetcher: InstallJournalFetcher): Instal
     ),
   });
 }
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  boundaryValueSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+} from './boundary';

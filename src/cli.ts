@@ -6,9 +6,16 @@ import {
   executeCanaryPreflightCommand,
   validateCloudflareId,
   validateHostname,
-} from './canary-command.mjs';
-import { validateGatewayConfig } from './config.mjs';
-import { buildGatewayPlan } from './plan.mjs';
+} from './canary-command.ts';
+import { validateGatewayConfig } from './config.ts';
+import { jsonValueSchema, type JsonValue } from './json.ts';
+import {
+  buildGatewayPlan,
+  type GatewayPlan,
+  type PlanBlocker,
+  type PlanChange,
+} from './plan.ts';
+import * as v from 'valibot';
 
 const USAGE = `Usage:
   npm run validate -- <gateway.config.json>
@@ -16,10 +23,44 @@ const USAGE = `Usage:
   npm --silent run canary:preflight -- --account-id <32-character-id> --zone-id <32-character-id> --hostname <gateway.example.com> [--json]`;
 
 class CliUsageError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = 'CliUsageError';
   }
+}
+
+type CliInvocation =
+  | { readonly command: 'help' }
+  | { readonly command: 'validate'; readonly configFile: string }
+  | {
+    readonly accessFile: string;
+    readonly command: 'plan';
+    readonly configFile: string;
+    readonly json: boolean;
+    readonly observedFile: string;
+    readonly release?: string;
+  }
+  | {
+    readonly accountId: string;
+    readonly command: 'canary-preflight';
+    readonly hostname: string;
+    readonly json: boolean;
+    readonly zoneId: string;
+  };
+
+interface PlanParseState {
+  accessFile?: string;
+  configFile: string;
+  json: boolean;
+  observedFile?: string;
+  release?: string;
+}
+
+interface CanaryParseState {
+  accountId?: string;
+  hostname?: string;
+  json: boolean;
+  zoneId?: string;
 }
 
 try {
@@ -34,7 +75,8 @@ try {
         `${config.sources.reduce((total, source) => total + source.enabledTools.length, 0)} tool(s).`,
     );
   } else if (invocation.command === 'plan') {
-    const config = validateGatewayConfig(await readJson(invocation.configFile));
+    const config = await readJson(invocation.configFile);
+    validateGatewayConfig(config);
     const observed = await readJson(invocation.observedFile);
     const access = await readJson(invocation.accessFile);
     const plan = await buildGatewayPlan(config, observed, {
@@ -59,43 +101,44 @@ try {
   process.exitCode = usageError ? 2 : 1;
 }
 
-function parseArguments(args) {
+function parseArguments(args: readonly string[]): CliInvocation {
   if (args.includes('--help') || args.includes('-h')) return { command: 'help' };
   if (args.length === 0) {
     throw new CliUsageError('A command is required.');
   }
+  const command = args[0];
+  if (command === undefined) throw new CliUsageError('A command is required.');
 
   // Keep the original `npm run validate -- file.json` interface stable.
-  if (args[0] !== 'plan' && args[0] !== 'validate' && args[0] !== 'canary') {
-    if (args.length !== 1 || args[0].startsWith('-')) {
+  if (command !== 'plan' && command !== 'validate' && command !== 'canary') {
+    if (args.length !== 1 || command.startsWith('-')) {
       throw new CliUsageError('The validate command accepts exactly one configuration file.');
     }
-    return { command: 'validate', configFile: args[0] };
+    return { command: 'validate', configFile: command };
   }
 
-  if (args[0] === 'validate') {
-    if (args.length !== 2 || args[1].startsWith('-')) {
+  if (command === 'validate') {
+    const configFile = args[1];
+    if (args.length !== 2 || configFile === undefined || configFile.startsWith('-')) {
       throw new CliUsageError('The validate command requires exactly one configuration file.');
     }
-    return { command: 'validate', configFile: args[1] };
+    return { command: 'validate', configFile };
   }
 
-  if (args[0] === 'canary') return parseCanaryArguments(args);
+  if (command === 'canary') return parseCanaryArguments(args);
 
-  const invocation = {
-    command: 'plan',
-    configFile: args[1],
-    observedFile: undefined,
-    accessFile: undefined,
-    json: false,
-    release: undefined,
-  };
-  if (!invocation.configFile || invocation.configFile.startsWith('-')) {
+  const configFile = args[1];
+  if (configFile === undefined || configFile.startsWith('-')) {
     throw new CliUsageError('The plan command requires a configuration file.');
   }
+  const invocation: PlanParseState = {
+    configFile,
+    json: false,
+  };
 
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
+    if (argument === undefined) throw new CliUsageError('A plan option is required.');
     if (argument === '--json') {
       if (invocation.json) throw new CliUsageError('--json may only be provided once.');
       invocation.json = true;
@@ -108,7 +151,7 @@ function parseArguments(args) {
       if (!value || value.startsWith('-')) {
         throw new CliUsageError(`${argument} requires a value.`);
       }
-      const property =
+      const property: 'accessFile' | 'observedFile' | 'release' =
         argument === '--observed'
           ? 'observedFile'
           : argument === '--access'
@@ -138,22 +181,35 @@ function parseArguments(args) {
       '--release must be an identifier of at most 80 letters, numbers, dots, underscores, pluses, or hyphens.',
     );
   }
-  return invocation;
+  if (invocation.release === undefined) {
+    return {
+      command: 'plan',
+      configFile: invocation.configFile,
+      observedFile: invocation.observedFile,
+      accessFile: invocation.accessFile,
+      json: invocation.json,
+    };
+  }
+  return {
+    command: 'plan',
+    configFile: invocation.configFile,
+    observedFile: invocation.observedFile,
+    accessFile: invocation.accessFile,
+    json: invocation.json,
+    release: invocation.release,
+  };
 }
 
-function parseCanaryArguments(args) {
+function parseCanaryArguments(args: readonly string[]): CliInvocation {
   if (args[1] !== 'preflight') {
     throw new CliUsageError('The canary command requires the preflight subcommand.');
   }
-  const invocation = {
-    command: 'canary-preflight',
-    accountId: undefined,
-    zoneId: undefined,
-    hostname: undefined,
+  const invocation: CanaryParseState = {
     json: false,
   };
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
+    if (argument === undefined) throw new CliUsageError('A canary option is required.');
     if (argument === '--json') {
       if (invocation.json) throw new CliUsageError('--json may only be provided once.');
       invocation.json = true;
@@ -189,81 +245,85 @@ function parseCanaryArguments(args) {
   }
   validateCloudflareId(invocation.accountId, 'account');
   validateCloudflareId(invocation.zoneId, 'zone');
-  invocation.hostname = validateHostname(invocation.hostname);
-  return invocation;
+  return {
+    command: 'canary-preflight',
+    accountId: invocation.accountId,
+    zoneId: invocation.zoneId,
+    hostname: validateHostname(invocation.hostname),
+    json: invocation.json,
+  };
 }
 
-async function readJson(file) {
-  let raw;
+async function readJson(file: string): Promise<JsonValue> {
+  let raw: string;
   try {
     raw = await readFile(file, 'utf8');
   } catch (error) {
-    throw new Error(`Could not read ${file}: ${error instanceof Error ? error.message : 'unknown error'}`);
+    throw new Error(
+      `Could not read ${file}: ${error instanceof Error ? error.message : 'unknown error'}`,
+      { cause: error },
+    );
   }
   try {
-    return JSON.parse(raw);
+    return v.parse(jsonValueSchema, JSON.parse(raw));
   } catch (error) {
-    throw new Error(`${file} is not valid JSON: ${error instanceof Error ? error.message : 'parse failed'}`);
+    throw new Error(
+      `${file} is not valid JSON: ${error instanceof Error ? error.message : 'parse failed'}`,
+      { cause: error },
+    );
   }
 }
 
-function renderPlan(plan) {
+function renderPlan(plan: GatewayPlan): string {
   const lines = [
     `Plan: ${display(plan.planId)}`,
     `Installation: ${display(plan.installationId)}`,
     `Desired state: ${display(plan.desiredHash)}`,
     `Release: ${display(plan.release)}`,
     '',
-    `Blockers (${list(plan.blockers).length}):`,
+    `Blockers (${plan.blockers.length}):`,
     ...renderList(plan.blockers, describeBlocker),
     '',
-    `Required provider capabilities (${list(plan.requiredCapabilities).length}):`,
+    `Required provider capabilities (${plan.requiredCapabilities.length}):`,
     ...renderList(plan.requiredCapabilities, describeCapability),
     '  OAuth consent: not requested by offline planning.',
     '',
-    `Changes (${list(plan.changes).length}):`,
+    `Changes (${plan.changes.length}):`,
     ...renderList(plan.changes, describeAction),
     '',
-    `Removal preview, non-authoritative (${list(plan.uninstall).length}):`,
+    `Removal preview, non-authoritative (${plan.uninstall.length}):`,
     ...renderList(plan.uninstall, describeAction),
   ];
   return lines.join('\n');
 }
 
-function renderList(value, describe) {
-  const items = list(value);
+function renderList<Item>(
+  items: readonly Item[],
+  describe: (item: Item) => string,
+): readonly string[] {
   return items.length === 0 ? ['  - none'] : items.map((item) => `  - ${describe(item)}`);
 }
 
-function describeBlocker(item) {
-  if (typeof item === 'string') return display(item);
-  return joinKnown(item, ['code', 'message']);
+function describeBlocker(item: PlanBlocker): string {
+  return joinDistinct([item.code, item.message]);
 }
 
-function describeCapability(item) {
-  if (typeof item === 'string') return display(item);
-  return joinKnown(item, ['capability', 'name']);
+function describeCapability(item: string): string {
+  return display(item);
 }
 
-function describeAction(item) {
-  if (typeof item === 'string') return display(item);
-  return joinKnown(item, ['action', 'kind', 'resourceKind', 'key', 'resourceKey', 'id']);
+function describeAction(item: PlanChange): string {
+  return joinDistinct([item.action, item.kind, item.key]);
 }
 
-function joinKnown(item, fields) {
-  if (item === null || typeof item !== 'object' || Array.isArray(item)) return 'unavailable';
-  const parts = [];
-  for (const field of fields) {
-    const value = item[field];
-    if (typeof value === 'string' && value.length > 0 && !parts.includes(value)) parts.push(value);
+function joinDistinct(values: readonly string[]): string {
+  const parts: string[] = [];
+  for (const value of values) {
+    if (value.length > 0 && !parts.includes(value)) parts.push(value);
   }
   return parts.length > 0 ? parts.map(display).join(' ') : 'unavailable';
 }
 
-function display(value) {
-  return typeof value === 'string' && value.length > 0 ? value.replaceAll(/[\r\n\t]/g, ' ') : 'unavailable';
-}
-
-function list(value) {
-  return Array.isArray(value) ? value : [];
+function display(value: string): string {
+  return value.length > 0 ? value.replaceAll(/[\r\n\t]/g, ' ') : 'unavailable';
 }

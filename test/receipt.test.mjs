@@ -11,7 +11,7 @@ import {
   receiptChecksum,
   updateInstallationReceipt,
   validateInstallationReceipt,
-} from '../src/receipt.mjs';
+} from '../src/receipt.ts';
 
 const HASH_A = `sha256:${'a'.repeat(64)}`;
 const HASH_B = `sha256:${'b'.repeat(64)}`;
@@ -79,12 +79,13 @@ function createIntent(overrides = {}) {
 }
 
 async function emptyReceipt(overrides = {}) {
-  return createInstallationReceipt({
+  const input = {
     plan: plan(overrides.plan),
     target: target(overrides.target),
-    ...(overrides.accessPolicy ? { accessPolicy: overrides.accessPolicy } : {}),
-    ...(overrides.resources ? { resources: overrides.resources } : {}),
-  });
+  };
+  if (overrides.accessPolicy) input.accessPolicy = overrides.accessPolicy;
+  if (overrides.resources) input.resources = overrides.resources;
+  return createInstallationReceipt(input);
 }
 
 test('creates a strict, checksum-protected, non-secret v1 receipt', async () => {

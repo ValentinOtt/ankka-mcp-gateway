@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import * as v from 'valibot';
 import { describe, expect, it } from 'vitest';
 import {
   ReviewedCanaryGenerationError,
@@ -67,8 +68,10 @@ const ISOLATED_TARGET = Object.freeze({
   workerName: 'ankka-gateway-deploy-isolated-proof',
 });
 
+const canonicalRecordSchema = v.record(v.string(), v.unknown());
+
 function canonicalJson(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (!v.is(canonicalRecordSchema, value) && !Array.isArray(value)) return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   return `{${Object.keys(value).sort().map(
     (key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`,
@@ -216,6 +219,9 @@ describe('offline reviewed canary artifact generator', () => {
       });
       expect(record.buildProvenance.bundles.map((entry) => entry.kind)).toEqual(['active', 'rollback']);
       for (const bundle of record.buildProvenance.bundles) {
+        expect(bundle.sourceInputs.map((entry) => entry.path)).toContain(
+          'node_modules/valibot/dist/index.mjs',
+        );
         expect(bundle.sourceInputs.map((entry) => entry.path)).toContain('src/reviewed-runtime.ts');
         expect(bundle.sourceInputs.map((entry) => entry.path)).toContain(
           'src/durable/gateway-deploy-session.ts',

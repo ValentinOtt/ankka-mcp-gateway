@@ -1,3 +1,11 @@
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  boundaryValueSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+} from '../boundary';
 import { DeployError, isDeployErrorCode, stableError, type DeployErrorCode, isFailureReason } from '../errors';
 import { OAUTH_ATTEMPT_TTL_MS, SESSION_TTL_MS } from '../constants';
 import { constantTimeEqual } from '../crypto';
@@ -22,7 +30,7 @@ import {
   serverTimeInstallJournalPrepare,
   submitInstallJournalAction,
   verifyInstallJournalAction,
-  type InstallActionName,
+  INSTALL_ACTION_ORDER,
   type InstallJournal,
 } from '../install-journal';
 import {
@@ -68,8 +76,6 @@ import {
   verifyCustomerGatewayWorkersDev,
   verifyUninstallJournalAction,
   refreshUninstallJournalPreflight,
-  type ManagementDeleteActionName,
-  type UninstallActionName,
   type UninstallJournal,
 } from '../uninstall-journal';
 import {
@@ -93,6 +99,7 @@ import {
   type StoredReturningUninstall,
 } from '../returning-uninstall-session';
 import { buildReturningUninstallPlan } from '../returning-uninstall-plan';
+import { requireReturningUninstallImportedAuthority } from '../returning-uninstall-authority';
 import {
   acquireReturningUninstallLease,
   appendReturningUninstallHostedRecoveryApproval,
@@ -105,7 +112,7 @@ import {
   requireReturningUninstallJournal,
   submitReturningUninstallAction,
   verifyReturningUninstallAction,
-  type ReturningUninstallActionName,
+  RETURNING_UNINSTALL_ACTION_ORDER,
   type ReturningUninstallJournal,
 } from '../returning-uninstall-journal';
 import {
@@ -123,53 +130,225 @@ const UNINSTALL_JOURNAL_STORAGE_KEY = 'uninstall-journal-v1';
 const DISCOVERY_STORAGE_KEY = 'cloudflare-discovery-v1';
 const RETURNING_UNINSTALL_STORAGE_KEY = 'returning-uninstall-v1';
 const RETURNING_UNINSTALL_JOURNAL_STORAGE_KEY = 'returning-uninstall-journal-v1';
+type GatewayDeploySessionEnvironment = Readonly<Record<never, never>>;
 
-async function jsonBody(request: Request): Promise<Record<string, unknown>> {
+export interface GatewayDeploySessionTransaction {
+  get<Value = unknown>(key: string): Promise<Value | undefined>;
+  put<Value>(key: string, value: Value): Promise<void>;
+}
+
+export interface GatewayDeploySessionStorage extends GatewayDeploySessionTransaction {
+  delete(key: string): Promise<boolean>;
+  deleteAll(): Promise<void>;
+  transaction<Value>(
+    closure: (transaction: GatewayDeploySessionTransaction) => Promise<Value>,
+  ): Promise<Value>;
+  setAlarm(scheduledTime: number | Date): Promise<void>;
+  deleteAlarm(): Promise<void>;
+}
+
+export interface GatewayDeploySessionState {
+  readonly storage: GatewayDeploySessionStorage;
+}
+
+interface RetainedInstallAuthority {
+  readonly session: StoredDeploySession;
+  readonly journal: InstallJournal;
+}
+const safeIntegerSchema = v.pipe(v.number(), v.safeInteger());
+const csrfHashSchema = v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{43}$/u));
+const oauthAttemptIdSchema = v.pipe(v.string(), v.regex(/^att_[A-Za-z0-9_-]{32}$/u));
+const oauthHashSchema = v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{43}$/u));
+const targetIdHashSchema = v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u));
+const installActionNameSchema = v.picklist(INSTALL_ACTION_ORDER);
+const returningUninstallActionNameSchema = v.picklist(RETURNING_UNINSTALL_ACTION_ORDER);
+const revisionAttemptNowSchema = {
+  expectedRevision: safeIntegerSchema,
+  attemptId: oauthAttemptIdSchema,
+  now: safeIntegerSchema,
+};
+const oauthConsumeBodySchema = v.strictObject({
+  attemptId: oauthAttemptIdSchema,
+  stateHash: oauthHashSchema,
+  verifierHash: oauthHashSchema,
+  now: safeIntegerSchema,
+});
+const oauthAuthorizeBodyEntries = {
+  csrfHash: csrfHashSchema,
+  attemptId: oauthAttemptIdSchema,
+  stateHash: oauthHashSchema,
+  verifierHash: oauthHashSchema,
+  attemptExpiresAt: safeIntegerSchema,
+  now: safeIntegerSchema,
+};
+const cloudflareDiscoveryResultSchema = v.custom<CloudflareDiscoveryResult>(
+  (value) => v.is(boundaryObjectSchema, value),
+);
+const returningActionAuthoritySchema = v.strictObject({
+  actionId: v.pipe(v.string(), v.regex(/^action_[A-Za-z0-9_-]{32}$/u)),
+  actionKeyHash: oauthHashSchema,
+  actorEmail: v.string(),
+  accountId: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
+  workerName: v.pipe(v.string(), v.regex(/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)),
+  workersSubdomain: v.string(),
+  managementOrigin: v.string(),
+  expiresAt: safeIntegerSchema,
+});
+const reviewedPlanAuthorizationSchema = v.strictObject({
+  ...oauthAuthorizeBodyEntries,
+  approvedPlanId: v.string(),
+  approvedPlanHash: v.string(),
+});
+const failureReasonSchema = v.custom<string>((value) => isFailureReason(value));
+const successfulReturningCompletionSchema = v.strictObject({
+  attemptId: oauthAttemptIdSchema,
+  code: v.literal('returning_uninstall_complete'),
+  completedAt: safeIntegerSchema,
+  installationId: v.string(),
+  grantRevocation: v.picklist(['confirmed', 'unconfirmed']),
+  reason: v.null(),
+});
+const failedReturningCompletionSchema = v.strictObject({
+  attemptId: oauthAttemptIdSchema,
+  code: v.string(),
+  completedAt: safeIntegerSchema,
+  installationId: v.null(),
+  grantRevocation: v.null(),
+  reason: v.nullable(failureReasonSchema),
+});
+const returningCompletionBodySchema = v.union([
+  successfulReturningCompletionSchema,
+  failedReturningCompletionSchema,
+]);
+const mutableUninstallActionSchema = v.picklist([
+  'cleanup_worker_version_create',
+  'cleanup_worker_deployment_create',
+  'restore_clean_worker_deployment',
+  'management_custom_domain_delete',
+  'management_admin_policy_delete',
+  'management_access_application_delete',
+  'retirement_worker_version_create',
+  'retirement_worker_deployment_create',
+  'admin_state_namespace_retired',
+  'management_worker_delete',
+  'management_no_managed_residue',
+  'uninstall_final_convergence',
+]);
+const versionRecoveryActionSchema = v.picklist([
+  'cleanup_worker_version_create',
+  'retirement_worker_version_create',
+]);
+const managementDeleteActionSchema = v.picklist([
+  'management_custom_domain_delete',
+  'management_admin_policy_delete',
+  'management_access_application_delete',
+]);
+const uninstallTransitionBaseEntries = {
+  ...revisionAttemptNowSchema,
+  action: mutableUninstallActionSchema,
+};
+const uninstallArmBodySchema = v.union([
+  v.strictObject(uninstallTransitionBaseEntries),
+  v.strictObject({ ...uninstallTransitionBaseEntries, value: boundaryValueSchema }),
+]);
+const uninstallValueBodySchema = v.strictObject({
+  ...uninstallTransitionBaseEntries,
+  value: boundaryValueSchema,
+});
+type UninstallTransitionInput = v.InferOutput<typeof uninstallArmBodySchema>;
+const uninstallCompletionBodySchema = v.union([
+  v.strictObject({
+    attemptId: oauthAttemptIdSchema,
+    code: v.literal('uninstall_complete'),
+    completedAt: safeIntegerSchema,
+    installationId: v.string(),
+    grantRevocation: v.picklist(['confirmed', 'unconfirmed']),
+    reason: v.null(),
+  }),
+  v.strictObject({
+    attemptId: oauthAttemptIdSchema,
+    code: v.string(),
+    completedAt: safeIntegerSchema,
+    installationId: v.null(),
+    grantRevocation: v.null(),
+    reason: v.nullable(failureReasonSchema),
+  }),
+]);
+const successfulInstallCompletionSchema = v.strictObject({
+  attemptId: oauthAttemptIdSchema,
+  code: v.literal('install_complete'),
+  completedAt: safeIntegerSchema,
+  installationId: v.nullable(v.string()),
+  grantRevocation: v.nullable(v.picklist(['confirmed', 'unconfirmed'])),
+  reason: v.null(),
+});
+const failedInstallCompletionSchema = v.strictObject({
+  attemptId: oauthAttemptIdSchema,
+  code: v.string(),
+  completedAt: safeIntegerSchema,
+  installationId: v.null(),
+  grantRevocation: v.null(),
+  reason: v.nullable(failureReasonSchema),
+  existingGateway: v.optional(boundaryValueSchema),
+});
+const installCompletionBodySchema = v.union([
+  successfulInstallCompletionSchema,
+  failedInstallCompletionSchema,
+]);
+
+async function jsonBody(request: Request): Promise<BoundaryObject> {
   if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) {
     throw new DeployError(400, 'bad_request');
   }
-  let input: unknown;
+  let input: BoundaryValue;
   try {
-    input = await request.json();
+    const candidate = v.safeParse(boundaryValueSchema, await request.json());
+    if (!candidate.success) throw new DeployError(400, 'bad_request');
+    input = candidate.output;
   } catch {
     throw new DeployError(400, 'bad_request');
   }
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw new DeployError(400, 'bad_request');
-  }
-  return input as Record<string, unknown>;
+  const candidate = v.safeParse(boundaryObjectSchema, input);
+  if (!candidate.success) throw new DeployError(400, 'bad_request');
+  return candidate.output;
 }
 
-function internalJson(value: unknown, status = 200): Response {
+async function parsedJsonBody<Schema extends v.GenericSchema>(
+  request: Request,
+  schema: Schema,
+): Promise<v.InferOutput<Schema>> {
+  const candidate = v.safeParse(schema, await jsonBody(request));
+  if (!candidate.success) throw new DeployError(400, 'bad_request');
+  return candidate.output;
+}
+
+function internalJson<Value>(value: Value, status = 200): Response {
   return new Response(JSON.stringify(value), {
     status,
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
   });
 }
 
-function exactKeys(input: Record<string, unknown>, keys: readonly string[]): void {
-  if (Object.keys(input).sort().join(',') !== [...keys].sort().join(',')) {
-    throw new DeployError(400, 'bad_request');
-  }
+function storedRevision<Value>(value: Value): number | null {
+  const candidate = v.safeParse(v.object({ revision: v.pipe(v.number(), v.safeInteger()) }), value);
+  return candidate.success ? candidate.output.revision : null;
 }
 
-function exactKeysAre(input: Record<string, unknown>, keys: readonly string[]): boolean {
-  return Object.keys(input).sort().join(',') === [...keys].sort().join(',');
+function storedObject<Value>(value: Value): BoundaryObject | null {
+  const candidate = v.safeParse(boundaryObjectSchema, value);
+  return candidate.success ? candidate.output : null;
 }
 
-function storedRevision(value: unknown): number | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const revision = (value as Record<string, unknown>).revision;
-  return typeof revision === 'number' && Number.isSafeInteger(revision) ? revision : null;
-}
-
-function completionCode(value: unknown): 'install_complete' | DeployErrorCode {
-  if (value === 'install_complete' || isDeployErrorCode(value)) return value;
+function failureCode<Value>(value: Value): DeployErrorCode {
+  const candidate = v.safeParse(v.string(), value);
+  if (candidate.success && isDeployErrorCode(candidate.output)) return candidate.output;
   throw new DeployError(400, 'bad_request');
 }
 
-function uninstallCompletionCode(value: unknown): 'uninstall_complete' | DeployErrorCode {
-  if (value === 'uninstall_complete' || isDeployErrorCode(value)) return value;
+function uninstallCompletionCode<Value>(value: Value): 'uninstall_complete' | DeployErrorCode {
+  const candidate = v.safeParse(v.string(), value);
+  if (candidate.success && candidate.output === 'uninstall_complete') return 'uninstall_complete';
+  if (candidate.success && isDeployErrorCode(candidate.output)) return candidate.output;
   throw new DeployError(400, 'bad_request');
 }
 
@@ -188,8 +367,8 @@ export class GatewayDeploySession {
   private readonly clock: () => number;
 
   constructor(
-    private readonly state: DurableObjectState,
-    _environment?: unknown,
+    private readonly state: GatewayDeploySessionState,
+    _environment?: GatewayDeploySessionEnvironment,
     clock: () => number = Date.now,
   ) {
     this.clock = clock;
@@ -365,7 +544,7 @@ export class GatewayDeploySession {
         if (request.method === 'DELETE' && pathname === '/destroy') return await this.destroy(request);
         return internalJson({ error: { code: 'bad_request' } }, 404);
       } catch (error) {
-        const stable = stableError(error);
+        const stable = stableError(error instanceof Error ? error : undefined);
         return internalJson({ error: { code: stable.code } }, stable.status);
       }
     });
@@ -451,9 +630,7 @@ export class GatewayDeploySession {
     assertSecretFree(journal);
     await this.state.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(RETURNING_UNINSTALL_JOURNAL_STORAGE_KEY);
-      const retained = stored && typeof stored === 'object' && !Array.isArray(stored)
-        ? stored as Record<string, unknown>
-        : null;
+      const retained = storedObject(stored);
       if ((journal.revision === 0 && stored !== undefined) ||
         (journal.revision > 0 && (storedRevision(stored) !== journal.revision - 1 ||
           retained?.bindingHash !== journal.bindingHash))) throw new DeployError(409, 'session_conflict');
@@ -568,9 +745,7 @@ export class GatewayDeploySession {
     assertSecretFree(validated);
     await this.state.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(INSTALL_JOURNAL_STORAGE_KEY);
-      const storedRecord = stored && typeof stored === 'object' && !Array.isArray(stored)
-        ? stored as Record<string, unknown>
-        : null;
+      const storedRecord = storedObject(stored);
       if (
         (validated.revision === 0 && stored !== undefined) ||
         (validated.revision > 0 && (
@@ -618,9 +793,7 @@ export class GatewayDeploySession {
     assertSecretFree(validated);
     await this.state.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(UNINSTALL_JOURNAL_STORAGE_KEY);
-      const record = stored && typeof stored === 'object' && !Array.isArray(stored)
-        ? stored as Record<string, unknown>
-        : null;
+      const record = storedObject(stored);
       if ((validated.revision === 0 && stored !== undefined) ||
         (validated.revision > 0 && (storedRevision(stored) !== validated.revision - 1 ||
           record?.bindingHash !== validated.bindingHash ||
@@ -638,14 +811,12 @@ export class GatewayDeploySession {
   }
 
   private async initialize(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['csrfHash', 'createdAt', 'expiresAt']);
-    if (
-      typeof input.csrfHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(input.csrfHash) ||
-      typeof input.createdAt !== 'number' || !Number.isSafeInteger(input.createdAt) ||
-      typeof input.expiresAt !== 'number' || !Number.isSafeInteger(input.expiresAt) ||
-      input.expiresAt <= input.createdAt
-    ) {
+    const input = await parsedJsonBody(request, v.strictObject({
+      csrfHash: csrfHashSchema,
+      createdAt: safeIntegerSchema,
+      expiresAt: safeIntegerSchema,
+    }));
+    if (input.expiresAt <= input.createdAt) {
       throw new DeployError(400, 'bad_request');
     }
     const now = this.wallTime();
@@ -675,11 +846,7 @@ export class GatewayDeploySession {
   }
 
   private async synchronizeCsrf(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['csrfHash']);
-    if (typeof input.csrfHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(input.csrfHash)) {
-      throw new DeployError(400, 'bad_request');
-    }
+    const input = await parsedJsonBody(request, v.strictObject({ csrfHash: csrfHashSchema }));
     const session = await this.stored();
     if (!session) throw new DeployError(404, 'session_invalid');
     if (!constantTimeEqual(input.csrfHash, session.csrfHash)) {
@@ -768,11 +935,13 @@ export class GatewayDeploySession {
   }
 
   private async saveSelection(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, 'targetIdHash' in input
-      ? ['csrfHash', 'selection', 'targetIdHash', 'now']
-      : ['csrfHash', 'selection', 'now']);
-    const targetIdHash = 'targetIdHash' in input ? input.targetIdHash : null;
+    const input = await parsedJsonBody(request, v.strictObject({
+      csrfHash: v.string(),
+      selection: boundaryValueSchema,
+      targetIdHash: v.optional(boundaryValueSchema),
+      now: safeIntegerSchema,
+    }));
+    const targetIdHash = input.targetIdHash ?? null;
     const session = await this.stored();
     if (!session) throw new DeployError(404, 'session_invalid');
     const now = this.wallTime();
@@ -784,13 +953,12 @@ export class GatewayDeploySession {
     if (session.status === 'installing' || session.status === 'succeeded') {
       throw new DeployError(409, 'session_conflict');
     }
-    if (typeof input.csrfHash !== 'string') throw new DeployError(403, 'csrf_invalid');
     verifyHash(input.csrfHash, session.csrfHash);
     const selection = parseDeploySelection(input.selection);
     const discovery = await this.storedDiscovery();
     if (discovery) {
       if (discovery.status !== 'ready' || !discovery.result ||
-        typeof targetIdHash !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(targetIdHash)) {
+        !v.is(targetIdHashSchema, targetIdHash)) {
         throw new DeployError(409, 'session_conflict');
       }
       const target = discovery.result.targets.find((candidate) => candidate.targetIdHash === targetIdHash);
@@ -817,22 +985,24 @@ export class GatewayDeploySession {
   }
 
   private async previewPlan(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['csrfHash', 'releaseManifest', 'planExpiresAt', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      csrfHash: v.string(),
+      releaseManifest: boundaryValueSchema,
+      planExpiresAt: safeIntegerSchema,
+      now: safeIntegerSchema,
+    }));
     const session = await this.stored();
     if (!session?.selection) throw new DeployError(409, 'session_conflict');
     const now = this.wallTime();
     const journal = await this.storedJournal(session);
     if (journal && hasArmedInstallJournalAction(journal)) throw new DeployError(409, 'session_conflict');
     if (
-      now >= session.expiresAt ||
-      typeof input.planExpiresAt !== 'number' || input.planExpiresAt <= now ||
+      now >= session.expiresAt || input.planExpiresAt <= now ||
       input.planExpiresAt > session.expiresAt
     ) throw new DeployError(410, 'session_expired');
     if (session.status === 'installing' || session.status === 'succeeded') {
       throw new DeployError(409, 'session_conflict');
     }
-    if (typeof input.csrfHash !== 'string') throw new DeployError(403, 'csrf_invalid');
     verifyHash(input.csrfHash, session.csrfHash);
     const manifest = parseReleaseManifest(input.releaseManifest);
     const plan = await buildStaticDeployPlan(session.selection, manifest, input.planExpiresAt);
@@ -850,42 +1020,31 @@ export class GatewayDeploySession {
   }
 
   private async authorize(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, [
-      'csrfHash',
-      'releaseManifest',
-      'approvedPlanId',
-      'approvedPlanHash',
-      'attemptId',
-      'stateHash',
-      'verifierHash',
-      'attemptExpiresAt',
-      'now',
-    ]);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...oauthAuthorizeBodyEntries,
+      releaseManifest: boundaryObjectSchema,
+      approvedPlanId: v.string(),
+      approvedPlanHash: v.string(),
+    }));
     const session = await this.stored();
     if (!session?.selection || !session.plan) throw new DeployError(409, 'session_conflict');
     const now = this.wallTime();
     const journal = await this.storedJournal(session);
-    const recovery = hasRecoverableJournal(session, journal);
-    const authorizationDeadline = recovery
-      ? Math.min((journal as InstallJournal).recoverUntil, session.plan.expiresAt)
+    const recoveryJournal = hasRecoverableJournal(session, journal) ? journal : null;
+    const authorizationDeadline = recoveryJournal
+      ? Math.min(recoveryJournal.recoverUntil, session.plan.expiresAt)
       : session.expiresAt;
     if (now >= authorizationDeadline) {
       throw new DeployError(410, 'session_expired');
     }
-    if ((session.status === 'installing' && !recovery) || session.status === 'succeeded') {
+    if ((session.status === 'installing' && !recoveryJournal) || session.status === 'succeeded') {
       throw new DeployError(409, 'session_conflict');
     }
-    if (typeof input.csrfHash !== 'string') throw new DeployError(403, 'csrf_invalid');
     verifyHash(input.csrfHash, session.csrfHash);
     if (
-      typeof input.attemptId !== 'string' || !/^att_[A-Za-z0-9_-]{32}$/u.test(input.attemptId) ||
-      typeof input.stateHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(input.stateHash) ||
-      typeof input.verifierHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(input.verifierHash) ||
-      typeof input.attemptExpiresAt !== 'number' ||
       input.attemptExpiresAt <= now ||
       input.attemptExpiresAt > authorizationDeadline || input.attemptExpiresAt > session.plan.expiresAt ||
-      !input.releaseManifest || typeof input.releaseManifest !== 'object' || Array.isArray(input.releaseManifest)
+      !input.releaseManifest
     ) {
       throw new DeployError(400, 'bad_request');
     }
@@ -923,25 +1082,22 @@ export class GatewayDeploySession {
   }
 
   private async consume(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['attemptId', 'stateHash', 'verifierHash', 'now']);
+    const input = await parsedJsonBody(request, oauthConsumeBodySchema);
     const session = await this.stored();
     if (!session?.oauthAttempt || !session.selection || !session.plan) {
       throw new DeployError(400, 'oauth_state_invalid');
     }
     const journal = await this.storedJournal(session);
     const now = this.wallTime();
-    const recovery = hasRecoverableJournal(session, journal);
+    const recoveryJournal = hasRecoverableJournal(session, journal) ? journal : null;
     const attempt = session.oauthAttempt;
     if (
       session.status !== 'authorizing' ||
       attempt.usedAt !== null ||
       now >= attempt.expiresAt ||
       now >= session.plan.expiresAt ||
-      (recovery && now >= (journal as InstallJournal).recoverUntil) ||
+      (recoveryJournal && now >= recoveryJournal.recoverUntil) ||
       input.attemptId !== attempt.attemptId ||
-      typeof input.stateHash !== 'string' ||
-      typeof input.verifierHash !== 'string' ||
       !constantHashes(input.stateHash, attempt.stateHash, input.verifierHash, attempt.verifierHash)
     ) {
       throw new DeployError(400, 'oauth_state_invalid');
@@ -966,8 +1122,7 @@ export class GatewayDeploySession {
   }
 
   private async authorizeDiscovery(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['csrfHash', 'attemptId', 'stateHash', 'verifierHash', 'attemptExpiresAt', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject(oauthAuthorizeBodyEntries));
     const session = await this.stored();
     if (!session) throw new DeployError(404, 'session_invalid');
     const now = this.wallTime();
@@ -975,13 +1130,8 @@ export class GatewayDeploySession {
       session.selection !== null || session.plan !== null) {
       throw new DeployError(409, 'session_conflict');
     }
-    if (typeof input.csrfHash !== 'string') throw new DeployError(403, 'csrf_invalid');
     verifyHash(input.csrfHash, session.csrfHash);
-    if (typeof input.attemptId !== 'string' || !/^att_[A-Za-z0-9_-]{32}$/u.test(input.attemptId) ||
-      typeof input.stateHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(input.stateHash) ||
-      typeof input.verifierHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(input.verifierHash) ||
-      typeof input.attemptExpiresAt !== 'number' || !Number.isSafeInteger(input.attemptExpiresAt) ||
-      input.attemptExpiresAt <= now || input.attemptExpiresAt > session.expiresAt ||
+    if (input.attemptExpiresAt <= now || input.attemptExpiresAt > session.expiresAt ||
       input.attemptExpiresAt > now + OAUTH_ATTEMPT_TTL_MS) {
       throw new DeployError(400, 'bad_request');
     }
@@ -1006,15 +1156,13 @@ export class GatewayDeploySession {
   }
 
   private async consumeDiscovery(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['attemptId', 'stateHash', 'verifierHash', 'now']);
+    const input = await parsedJsonBody(request, oauthConsumeBodySchema);
     const discovery = await this.storedDiscovery();
     const now = this.wallTime();
     const attempt = discovery?.oauthAttempt;
     if (!discovery || discovery.status !== 'authorizing' || !attempt || attempt.usedAt !== null ||
       now >= attempt.expiresAt || now >= discovery.expiresAt ||
-      input.attemptId !== attempt.attemptId || typeof input.stateHash !== 'string' ||
-      typeof input.verifierHash !== 'string' ||
+      input.attemptId !== attempt.attemptId ||
       !constantHashes(input.stateHash, attempt.stateHash, input.verifierHash, attempt.verifierHash)) {
       throw new DeployError(400, 'oauth_state_invalid');
     }
@@ -1027,14 +1175,18 @@ export class GatewayDeploySession {
   }
 
   private async completeDiscovery(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['attemptId', 'code', 'result', 'grantRevocation', 'completedAt']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      attemptId: oauthAttemptIdSchema,
+      code: v.string(),
+      result: v.nullable(cloudflareDiscoveryResultSchema),
+      grantRevocation: v.nullable(v.picklist(['confirmed', 'unconfirmed'])),
+      completedAt: safeIntegerSchema,
+    }));
     const discovery = await this.storedDiscovery();
     const attempt = discovery?.oauthAttempt;
     const now = this.wallTime();
     if (!discovery || discovery.status !== 'authorizing' || !attempt || attempt.usedAt === null ||
       input.attemptId !== attempt.attemptId ||
-      typeof input.completedAt !== 'number' || !Number.isSafeInteger(input.completedAt) ||
       now < attempt.usedAt || now >= discovery.expiresAt) {
       throw new DeployError(409, 'session_conflict');
     }
@@ -1046,7 +1198,7 @@ export class GatewayDeploySession {
         ...discovery,
         status: 'ready',
         updatedAt: now,
-        result: input.result as CloudflareDiscoveryResult,
+        result: input.result,
         selectedTargetIdHash: null,
         failureCode: null,
         grantRevocation: input.grantRevocation,
@@ -1069,21 +1221,29 @@ export class GatewayDeploySession {
     return internalJson({ accepted: true });
   }
 
-  private requireInstallAttempt(session: StoredDeploySession, attemptId: unknown): string {
+  private requireInstallAttempt<Input>(session: StoredDeploySession, attemptId: Input): string {
+    const candidate = v.safeParse(oauthAttemptIdSchema, attemptId);
     if (
-      typeof attemptId !== 'string' || session.status !== 'installing' ||
+      !candidate.success || session.status !== 'installing' ||
       !session.oauthAttempt || session.oauthAttempt.usedAt === null ||
-      session.oauthAttempt.attemptId !== attemptId
+      session.oauthAttempt.attemptId !== candidate.output
     ) throw new DeployError(409, 'session_conflict');
-    return attemptId;
+    return candidate.output;
   }
 
   private async initializeInstallJournal(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, [
-      'schemaVersion', 'now', 'recoverUntil', 'selection', 'plan', 'releasePin', 'target',
-      'installationId', 'bindingHash', 'gatewayFreshPreflight',
-    ]);
+    const input = await parsedJsonBody(request, v.strictObject({
+      schemaVersion: v.literal(1),
+      now: safeIntegerSchema,
+      recoverUntil: safeIntegerSchema,
+      selection: boundaryValueSchema,
+      plan: boundaryValueSchema,
+      releasePin: boundaryValueSchema,
+      target: boundaryValueSchema,
+      installationId: v.string(),
+      bindingHash: v.string(),
+      gatewayFreshPreflight: boundaryValueSchema,
+    }));
     const session = await this.stored();
     if (!session?.selection || !session.plan || !session.oauthAttempt || session.oauthAttempt.usedAt === null) {
       throw new DeployError(409, 'session_conflict');
@@ -1141,18 +1301,20 @@ export class GatewayDeploySession {
   }
 
   private async createRecoveryPlan(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['csrfHash', 'releaseManifest', 'planExpiresAt', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      csrfHash: v.string(),
+      releaseManifest: boundaryValueSchema,
+      planExpiresAt: safeIntegerSchema,
+      now: safeIntegerSchema,
+    }));
     const session = await this.stored();
     if (!session?.selection || !session.plan) throw new DeployError(409, 'session_conflict');
     let journal = await this.storedJournal(session);
     if (!hasRecoverableJournal(session, journal)) throw new DeployError(409, 'session_conflict');
     const now = this.wallTime();
-    if (typeof input.csrfHash !== 'string') throw new DeployError(403, 'csrf_invalid');
     verifyHash(input.csrfHash, session.csrfHash);
     if (
-      now < journal.updatedAt || now >= journal.recoverUntil || typeof input.planExpiresAt !== 'number' ||
-      !Number.isSafeInteger(input.planExpiresAt) || input.planExpiresAt <= now ||
+      now < journal.updatedAt || now >= journal.recoverUntil || input.planExpiresAt <= now ||
       input.planExpiresAt > now + OAUTH_ATTEMPT_TTL_MS || input.planExpiresAt > journal.recoverUntil
     ) throw new DeployError(410, 'session_expired');
     if (journal.lease) {
@@ -1184,8 +1346,7 @@ export class GatewayDeploySession {
   }
 
   private async appendInstallApproval(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject(revisionAttemptNowSchema));
     const session = await this.stored();
     if (!session?.plan || !session.oauthAttempt || session.oauthAttempt.usedAt === null) {
       throw new DeployError(409, 'session_conflict');
@@ -1195,7 +1356,7 @@ export class GatewayDeploySession {
     if (!journal) throw new DeployError(409, 'session_conflict');
     const now = this.wallTime();
     const next = appendInstallJournalApproval(journal, session.plan, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId,
       approvedAt: session.oauthAttempt.usedAt,
       now,
@@ -1205,8 +1366,10 @@ export class GatewayDeploySession {
   }
 
   private async acquireInstallLease(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'leaseExpiresAt']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      leaseExpiresAt: safeIntegerSchema,
+    }));
     const session = await this.stored();
     if (!session) throw new DeployError(409, 'session_conflict');
     const attemptId = this.requireInstallAttempt(session, input.attemptId);
@@ -1221,7 +1384,7 @@ export class GatewayDeploySession {
       journal.recoverUntil,
     );
     const next = acquireInstallJournalLease(journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId,
       now,
       leaseExpiresAt,
@@ -1231,8 +1394,7 @@ export class GatewayDeploySession {
   }
 
   private async releaseInstallLease(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject(revisionAttemptNowSchema));
     const session = await this.stored();
     if (!session) throw new DeployError(409, 'session_conflict');
     const attemptId = this.requireInstallAttempt(session, input.attemptId);
@@ -1240,7 +1402,7 @@ export class GatewayDeploySession {
     if (!journal) throw new DeployError(409, 'session_conflict');
     const now = this.wallTime();
     const next = releaseInstallJournalLease(journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId,
       now,
     });
@@ -1249,8 +1411,11 @@ export class GatewayDeploySession {
   }
 
   private async prepareInstallAction(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'action', 'record']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      action: installActionNameSchema,
+      record: boundaryValueSchema,
+    }));
     const session = await this.stored();
     if (!session) throw new DeployError(409, 'session_conflict');
     const attemptId = this.requireInstallAttempt(session, input.attemptId);
@@ -1258,10 +1423,10 @@ export class GatewayDeploySession {
     if (!journal) throw new DeployError(409, 'session_conflict');
     const now = this.wallTime();
     const next = await prepareInstallJournalAction(journal, serverTimeInstallJournalPrepare({
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId,
-      now: input.now as number,
-      action: input.action as InstallActionName,
+      now: input.now,
+      action: input.action,
       record: input.record,
     }, now));
     await this.putJournal(session, next);
@@ -1273,8 +1438,11 @@ export class GatewayDeploySession {
   }
 
   private async submitInstallAction(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'action', 'locator']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      action: installActionNameSchema,
+      locator: boundaryValueSchema,
+    }));
     const session = await this.stored();
     if (!session) throw new DeployError(409, 'session_conflict');
     const attemptId = this.requireInstallAttempt(session, input.attemptId);
@@ -1282,10 +1450,10 @@ export class GatewayDeploySession {
     if (!journal) throw new DeployError(409, 'session_conflict');
     const now = this.wallTime();
     const next = await submitInstallJournalAction(journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId,
       now,
-      action: input.action as InstallActionName,
+      action: input.action,
       locator: input.locator,
     });
     await this.putJournal(session, next);
@@ -1297,8 +1465,10 @@ export class GatewayDeploySession {
   }
 
   private async appendBootstrapAttempt(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'attempt']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      attempt: boundaryValueSchema,
+    }));
     const session = await this.stored();
     if (!session) throw new DeployError(409, 'session_conflict');
     const attemptId = this.requireInstallAttempt(session, input.attemptId);
@@ -1306,7 +1476,7 @@ export class GatewayDeploySession {
     if (!journal) throw new DeployError(409, 'session_conflict');
     const now = this.wallTime();
     const next = await appendCustomerBootstrapAttempt(journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId,
       now,
       attempt: input.attempt,
@@ -1316,8 +1486,10 @@ export class GatewayDeploySession {
   }
 
   private async transitionInstallAction(request: Request, transition: 'arm' | 'verified'): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'action']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      action: installActionNameSchema,
+    }));
     const session = await this.stored();
     if (!session) throw new DeployError(409, 'session_conflict');
     const attemptId = this.requireInstallAttempt(session, input.attemptId);
@@ -1325,10 +1497,10 @@ export class GatewayDeploySession {
     if (!journal) throw new DeployError(409, 'session_conflict');
     const now = this.wallTime();
     const transitionInput = {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId,
       now,
-      action: input.action as InstallActionName,
+      action: input.action,
     };
     const next = transition === 'arm'
       ? armInstallJournalAction(journal, transitionInput)
@@ -1341,7 +1513,7 @@ export class GatewayDeploySession {
     session: StoredDeploySession | null,
     journal: InstallJournal | null,
     now: number,
-  ): { session: StoredDeploySession; journal: InstallJournal } {
+  ): RetainedInstallAuthority {
     if (!session || !journal || session.status !== 'succeeded' ||
       session.result?.code !== 'install_complete' || !isCompleteInstallJournal(journal) ||
       session.result.installationId !== journal.installationId) {
@@ -1353,12 +1525,15 @@ export class GatewayDeploySession {
     return { session, journal };
   }
 
-  private requireExactReleasePin(input: unknown, journal: InstallJournal): void {
-    if (!input || typeof input !== 'object' || Array.isArray(input)) {
-      throw new DeployError(400, 'bad_request');
-    }
-    const pin = input as Record<string, unknown>;
-    exactKeys(pin, ['verification', 'keyId', 'release', 'artifactSha256']);
+  private requireExactReleasePin<Input>(input: Input, journal: InstallJournal): void {
+    const candidate = v.safeParse(v.strictObject({
+      verification: v.string(),
+      keyId: v.string(),
+      release: v.string(),
+      artifactSha256: v.string(),
+    }), input);
+    if (!candidate.success) throw new DeployError(400, 'bad_request');
+    const pin = candidate.output;
     if (pin.verification !== journal.releasePin.verification || pin.keyId !== journal.releasePin.keyId ||
       pin.release !== journal.releasePin.release || pin.artifactSha256 !== journal.releasePin.artifactSha256) {
       throw new DeployError(409, 'session_conflict');
@@ -1366,17 +1541,19 @@ export class GatewayDeploySession {
   }
 
   private async previewUninstallPlan(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['csrfHash', 'releasePin', 'planExpiresAt', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      csrfHash: v.string(),
+      releasePin: boundaryValueSchema,
+      planExpiresAt: safeIntegerSchema,
+      now: safeIntegerSchema,
+    }));
     const session = await this.stored();
     const installJournal = await this.storedJournal(session);
     const now = this.wallTime();
     const authority = this.requireRetainedInstallAuthority(session, installJournal, now);
-    if (typeof input.csrfHash !== 'string') throw new DeployError(403, 'csrf_invalid');
     verifyHash(input.csrfHash, authority.session.csrfHash);
     this.requireExactReleasePin(input.releasePin, authority.journal);
-    if (typeof input.planExpiresAt !== 'number' || !Number.isSafeInteger(input.planExpiresAt) ||
-      input.planExpiresAt <= now || input.planExpiresAt > now + OAUTH_ATTEMPT_TTL_MS ||
+    if (input.planExpiresAt <= now || input.planExpiresAt > now + OAUTH_ATTEMPT_TTL_MS ||
       input.planExpiresAt > authority.journal.recoverUntil) throw new DeployError(410, 'session_expired');
 
     const existing = await this.storedUninstallControl(authority.session, authority.journal);
@@ -1407,11 +1584,12 @@ export class GatewayDeploySession {
   }
 
   private async authorizeUninstall(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, [
-      'csrfHash', 'releasePin', 'approvedPlanId', 'approvedPlanHash', 'attemptId', 'stateHash',
-      'verifierHash', 'attemptExpiresAt', 'now',
-    ]);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...oauthAuthorizeBodyEntries,
+      releasePin: boundaryValueSchema,
+      approvedPlanId: v.string(),
+      approvedPlanHash: v.string(),
+    }));
     const session = await this.stored();
     const installJournal = await this.storedJournal(session);
     const now = this.wallTime();
@@ -1419,15 +1597,10 @@ export class GatewayDeploySession {
     const control = await this.storedUninstallControl(authority.session, authority.journal);
     const uninstallJournal = await this.storedUninstallJournal(authority.session, authority.journal, control);
     if (!control || control.status !== 'planned') throw new DeployError(409, 'session_conflict');
-    if (typeof input.csrfHash !== 'string') throw new DeployError(403, 'csrf_invalid');
     verifyHash(input.csrfHash, authority.session.csrfHash);
     this.requireExactReleasePin(input.releasePin, authority.journal);
     if (input.approvedPlanId !== control.plan.planId || input.approvedPlanHash !== control.plan.planHash ||
-      now >= control.plan.expiresAt || typeof input.attemptId !== 'string' ||
-      !/^att_[A-Za-z0-9_-]{32}$/u.test(input.attemptId) || typeof input.stateHash !== 'string' ||
-      !/^[A-Za-z0-9_-]{43}$/u.test(input.stateHash) || typeof input.verifierHash !== 'string' ||
-      !/^[A-Za-z0-9_-]{43}$/u.test(input.verifierHash) ||
-      typeof input.attemptExpiresAt !== 'number' || !Number.isSafeInteger(input.attemptExpiresAt) ||
+      now >= control.plan.expiresAt ||
       input.attemptExpiresAt <= now || input.attemptExpiresAt > control.plan.expiresAt ||
       input.attemptExpiresAt > control.recoverUntil ||
       uninstallJournal?.approvalHistory.some((approval) => approval.attemptId === input.attemptId)) {
@@ -1452,8 +1625,10 @@ export class GatewayDeploySession {
   }
 
   private async consumeUninstall(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['purpose', 'attemptId', 'stateHash', 'verifierHash', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      purpose: v.literal('uninstall'),
+      ...oauthConsumeBodySchema.entries,
+    }));
     const session = await this.stored();
     const installJournal = await this.storedJournal(session);
     const now = this.wallTime();
@@ -1464,7 +1639,6 @@ export class GatewayDeploySession {
     if (!control || control.status !== 'authorizing' || !attempt || attempt.purpose !== 'uninstall' ||
       input.purpose !== 'uninstall' || attempt.usedAt !== null || now >= attempt.expiresAt ||
       now >= control.plan.expiresAt || input.attemptId !== attempt.attemptId ||
-      typeof input.stateHash !== 'string' || typeof input.verifierHash !== 'string' ||
       !constantHashes(input.stateHash, attempt.stateHash, input.verifierHash, attempt.verifierHash)) {
       throw new DeployError(400, 'oauth_state_invalid');
     }
@@ -1484,8 +1658,12 @@ export class GatewayDeploySession {
   }
 
   private async prepareReturningUninstall(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['csrfHash', 'action', 'planExpiresAt', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      csrfHash: v.string(),
+      action: returningActionAuthoritySchema,
+      planExpiresAt: safeIntegerSchema,
+      now: safeIntegerSchema,
+    }));
     const session = await this.stored();
     const now = this.wallTime();
     const gateway = session?.result?.code === 'existing_gateway_detected'
@@ -1498,20 +1676,11 @@ export class GatewayDeploySession {
     const recoveryActive = Boolean(existingJournal && now < existingJournal.recoverUntil);
     if (!session || session.status !== 'failed' || !gateway || !discovery?.result || !target ||
       (now >= session.expiresAt && !recoveryActive)) throw new DeployError(409, 'session_conflict');
-    if (typeof input.csrfHash !== 'string') throw new DeployError(403, 'csrf_invalid');
     verifyHash(input.csrfHash, session.csrfHash);
-    if (!input.action || typeof input.action !== 'object' || Array.isArray(input.action)) {
-      throw new DeployError(400, 'bad_request');
-    }
-    const action = input.action as Record<string, unknown>;
-    exactKeys(action, [
-      'actionId', 'actionKeyHash', 'actorEmail', 'accountId', 'workerName',
-      'workersSubdomain', 'managementOrigin', 'expiresAt',
-    ]);
+    const action = input.action;
     if (action.actorEmail !== discovery.result.actor.email || action.accountId !== target.account.id ||
       action.workerName !== gateway.workerName || action.managementOrigin !== `https://${gateway.managementHostname}` ||
-      action.expiresAt !== input.planExpiresAt || typeof input.planExpiresAt !== 'number' ||
-      !Number.isSafeInteger(input.planExpiresAt) || input.planExpiresAt <= now ||
+      action.expiresAt !== input.planExpiresAt || input.planExpiresAt <= now ||
       input.planExpiresAt > (existingJournal?.recoverUntil ?? existing?.recoverUntil ?? session.expiresAt)) {
       throw new DeployError(409, 'session_conflict');
     }
@@ -1533,7 +1702,7 @@ export class GatewayDeploySession {
       updatedAt: now,
       recoverUntil,
       plan,
-      action: action as unknown as StoredReturningUninstall['action'],
+      action,
       oauthAttempt: null,
       result: null,
     };
@@ -1542,11 +1711,7 @@ export class GatewayDeploySession {
   }
 
   private async authorizeReturningUninstall(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, [
-      'csrfHash', 'approvedPlanId', 'approvedPlanHash', 'attemptId', 'stateHash',
-      'verifierHash', 'attemptExpiresAt', 'now',
-    ]);
+    const input = await parsedJsonBody(request, reviewedPlanAuthorizationSchema);
     const session = await this.stored();
     const control = await this.storedReturningUninstall(session);
     const now = this.wallTime();
@@ -1554,13 +1719,8 @@ export class GatewayDeploySession {
       now >= control.plan.expiresAt) {
       throw new DeployError(409, 'session_conflict');
     }
-    if (typeof input.csrfHash !== 'string') throw new DeployError(403, 'csrf_invalid');
     verifyHash(input.csrfHash, session.csrfHash);
     if (input.approvedPlanId !== control.plan.planId || input.approvedPlanHash !== control.plan.planHash ||
-      typeof input.attemptId !== 'string' || !/^att_[A-Za-z0-9_-]{32}$/u.test(input.attemptId) ||
-      typeof input.stateHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(input.stateHash) ||
-      typeof input.verifierHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(input.verifierHash) ||
-      typeof input.attemptExpiresAt !== 'number' || !Number.isSafeInteger(input.attemptExpiresAt) ||
       input.attemptExpiresAt <= now || input.attemptExpiresAt > control.plan.expiresAt) {
       throw new DeployError(409, 'session_conflict');
     }
@@ -1583,8 +1743,10 @@ export class GatewayDeploySession {
   }
 
   private async consumeReturningUninstall(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['attemptId', 'stateHash', 'verifierHash', 'actionKeyHash', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...oauthConsumeBodySchema.entries,
+      actionKeyHash: oauthHashSchema,
+    }));
     const session = await this.stored();
     const control = await this.storedReturningUninstall(session);
     const attempt = control?.oauthAttempt;
@@ -1592,8 +1754,6 @@ export class GatewayDeploySession {
     if (!session || !control || control.status !== 'authorizing' || !attempt ||
       attempt.purpose !== 'customer_action' || attempt.usedAt !== null ||
       now >= attempt.expiresAt || now >= control.plan.expiresAt || input.attemptId !== attempt.attemptId ||
-      typeof input.stateHash !== 'string' || typeof input.verifierHash !== 'string' ||
-      typeof input.actionKeyHash !== 'string' ||
       !constantHashes(input.stateHash, attempt.stateHash, input.verifierHash, attempt.verifierHash) ||
       !constantTimeEqual(input.actionKeyHash, control.action.actionKeyHash)) {
       throw new DeployError(400, 'oauth_state_invalid');
@@ -1643,11 +1803,13 @@ export class GatewayDeploySession {
   }
 
   private async prepareReturningUninstallRecovery(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['csrfHash', 'planExpiresAt', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      csrfHash: v.string(),
+      planExpiresAt: safeIntegerSchema,
+      now: safeIntegerSchema,
+    }));
     const authority = await this.returningUninstallRecoveryAuthority();
     const now = this.wallTime();
-    if (typeof input.csrfHash !== 'string') throw new DeployError(403, 'csrf_invalid');
     verifyHash(input.csrfHash, authority.session.csrfHash);
     const priorAttempt = authority.control.oauthAttempt;
     const retryable = authority.control.status === 'failed' || (
@@ -1656,7 +1818,6 @@ export class GatewayDeploySession {
       )
     );
     if (!retryable || now < authority.journal.updatedAt || now >= authority.journal.recoverUntil ||
-      typeof input.planExpiresAt !== 'number' || !Number.isSafeInteger(input.planExpiresAt) ||
       input.planExpiresAt <= now || input.planExpiresAt > now + OAUTH_ATTEMPT_TTL_MS ||
       input.planExpiresAt > authority.journal.recoverUntil) {
       throw new DeployError(409, 'session_conflict');
@@ -1696,24 +1857,15 @@ export class GatewayDeploySession {
   }
 
   private async authorizeReturningUninstallRecovery(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, [
-      'csrfHash', 'approvedPlanId', 'approvedPlanHash', 'attemptId', 'stateHash',
-      'verifierHash', 'attemptExpiresAt', 'now',
-    ]);
+    const input = await parsedJsonBody(request, reviewedPlanAuthorizationSchema);
     const authority = await this.returningUninstallRecoveryAuthority();
     const now = this.wallTime();
     if (authority.control.status !== 'planned' || now >= authority.control.plan.expiresAt) {
       throw new DeployError(409, 'session_conflict');
     }
-    if (typeof input.csrfHash !== 'string') throw new DeployError(403, 'csrf_invalid');
     verifyHash(input.csrfHash, authority.session.csrfHash);
     if (input.approvedPlanId !== authority.control.plan.planId ||
       input.approvedPlanHash !== authority.control.plan.planHash ||
-      typeof input.attemptId !== 'string' || !/^att_[A-Za-z0-9_-]{32}$/u.test(input.attemptId) ||
-      typeof input.stateHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(input.stateHash) ||
-      typeof input.verifierHash !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(input.verifierHash) ||
-      typeof input.attemptExpiresAt !== 'number' || !Number.isSafeInteger(input.attemptExpiresAt) ||
       input.attemptExpiresAt <= now || input.attemptExpiresAt > authority.control.plan.expiresAt ||
       input.attemptExpiresAt > authority.journal.recoverUntil) {
       throw new DeployError(409, 'session_conflict');
@@ -1742,15 +1894,13 @@ export class GatewayDeploySession {
   }
 
   private async consumeReturningUninstallRecovery(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['attemptId', 'stateHash', 'verifierHash', 'now']);
+    const input = await parsedJsonBody(request, oauthConsumeBodySchema);
     const authority = await this.returningUninstallRecoveryAuthority();
     const attempt = authority.control.oauthAttempt;
     const now = this.wallTime();
     if (authority.control.status !== 'authorizing' || !attempt || attempt.purpose !== 'hosted_recovery' ||
       attempt.usedAt !== null || now >= attempt.expiresAt || now >= authority.control.plan.expiresAt ||
       now >= authority.journal.recoverUntil || input.attemptId !== attempt.attemptId ||
-      typeof input.stateHash !== 'string' || typeof input.verifierHash !== 'string' ||
       !constantHashes(input.stateHash, attempt.stateHash, input.verifierHash, attempt.verifierHash)) {
       throw new DeployError(400, 'oauth_state_invalid');
     }
@@ -1771,39 +1921,40 @@ export class GatewayDeploySession {
   }
 
   private async completeReturningUninstall(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, input.code === 'returning_uninstall_complete'
-      ? ['attemptId', 'code', 'completedAt', 'installationId', 'grantRevocation']
-      : input.reason === undefined
-        ? ['attemptId', 'code', 'completedAt', 'installationId', 'grantRevocation']
-        : ['attemptId', 'code', 'completedAt', 'installationId', 'grantRevocation', 'reason']);
+    const input = await parsedJsonBody(request, returningCompletionBodySchema);
     const session = await this.stored();
     const control = await this.storedReturningUninstall(session);
     const now = this.wallTime();
     const attempt = control?.oauthAttempt;
-    const success = input.code === 'returning_uninstall_complete';
+    const successfulInput = v.safeParse(successfulReturningCompletionSchema, input);
+    const success = successfulInput.success;
     const journal = await this.storedReturningUninstallJournal(session, control);
     const final = journal?.actions.at(-1);
     if (!session || !control || control.status !== 'removing' || !attempt || attempt.usedAt === null ||
       input.attemptId !== attempt.attemptId || (input.code !== 'returning_uninstall_complete' &&
-        !isDeployErrorCode(input.code)) || (input.reason !== undefined && !isFailureReason(input.reason)) ||
-      (success && (input.reason !== undefined || input.installationId !== control.plan.gateway.installationId ||
+        !isDeployErrorCode(input.code)) ||
+      (success && (input.installationId !== control.plan.gateway.installationId ||
         (input.grantRevocation !== 'confirmed' && input.grantRevocation !== 'unconfirmed') ||
         !journal || journal.lease !== null || final?.name !== 'final_convergence' ||
-        final.phase !== 'verified' || !final.locator || typeof final.locator !== 'object' ||
-        (final.locator as Record<string, unknown>).status !== 'removed')) ||
+        final.phase !== 'verified' || !v.is(v.object({ status: v.literal('removed') }), final.locator))) ||
       (!success && (input.installationId !== null || input.grantRevocation !== null))) {
       throw new DeployError(409, 'session_conflict');
     }
-    const result: StoredReturningUninstall['result'] = success
-      ? {
-          code: 'returning_uninstall_complete', completedAt: now,
-          installationId: input.installationId as string,
-          grantRevocation: input.grantRevocation as 'confirmed' | 'unconfirmed',
-        }
-      : input.reason === undefined
-        ? { code: input.code as DeployErrorCode, completedAt: now }
-        : { code: input.code as DeployErrorCode, completedAt: now, reason: input.reason as string };
+    let result: NonNullable<StoredReturningUninstall['result']>;
+    if (successfulInput.success) {
+      result = {
+        code: 'returning_uninstall_complete',
+        completedAt: now,
+        installationId: successfulInput.output.installationId,
+        grantRevocation: successfulInput.output.grantRevocation,
+      };
+    } else {
+      const failedInput = v.parse(failedReturningCompletionSchema, input);
+      const code = failureCode(failedInput.code);
+      result = failedInput.reason === null
+        ? { code, completedAt: now }
+        : { code, completedAt: now, reason: failedInput.reason };
+    }
     const next: StoredReturningUninstall = {
       ...control,
       status: success ? 'removed' : 'failed',
@@ -1814,47 +1965,53 @@ export class GatewayDeploySession {
     return internalJson({ returningUninstall: publicReturningUninstall(next) });
   }
 
-  private async activeReturningUninstallOperation(attemptId: unknown): Promise<{
+  private async activeReturningUninstallOperation<Input>(attemptId: Input): Promise<{
     readonly now: number;
     readonly session: StoredDeploySession;
     readonly control: StoredReturningUninstall;
     readonly journal: ReturningUninstallJournal | null;
     readonly attemptId: string;
   }> {
+    const attemptCandidate = v.safeParse(oauthAttemptIdSchema, attemptId);
     const session = await this.stored();
     const control = await this.storedReturningUninstall(session);
     const now = this.wallTime();
     const attempt = control?.oauthAttempt;
     if (!session || !control || control.status !== 'removing' || !attempt || attempt.usedAt === null ||
-      typeof attemptId !== 'string' || attempt.attemptId !== attemptId || now >= control.plan.expiresAt) {
+      !attemptCandidate.success || attempt.attemptId !== attemptCandidate.output || now >= control.plan.expiresAt) {
       throw new DeployError(409, 'session_conflict');
     }
     const journal = await this.storedReturningUninstallJournal(session, control);
-    return { now, session, control, journal, attemptId };
+    return { now, session, control, journal, attemptId: attemptCandidate.output };
   }
 
   private async initializeReturningUninstallJournal(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, [
-      'now', 'plan', 'authority', 'attemptId', 'approvedAt', 'accountId', 'zoneId', 'recoverUntil',
-    ]);
+    const input = await parsedJsonBody(request, v.strictObject({
+      now: safeIntegerSchema,
+      plan: boundaryValueSchema,
+      authority: boundaryValueSchema,
+      attemptId: oauthAttemptIdSchema,
+      approvedAt: safeIntegerSchema,
+      accountId: v.string(),
+      zoneId: v.string(),
+      recoverUntil: safeIntegerSchema,
+    }));
     const context = await this.activeReturningUninstallOperation(input.attemptId);
-    const authority = input.authority && typeof input.authority === 'object' && !Array.isArray(input.authority)
-      ? input.authority as Record<string, unknown> : null;
+    const authority = await requireReturningUninstallImportedAuthority(input.authority);
     if (context.journal || context.control.oauthAttempt?.purpose !== 'customer_action' ||
       input.approvedAt !== context.control.oauthAttempt.usedAt ||
       JSON.stringify(input.plan) !== JSON.stringify(context.control.plan) ||
       input.recoverUntil !== context.control.recoverUntil || input.accountId !== context.control.action.accountId ||
-      authority?.actionId !== context.control.action.actionId ||
+      authority.actionId !== context.control.action.actionId ||
       authority.actorEmail !== context.control.action.actorEmail) throw new DeployError(409, 'session_conflict');
     const journal = await createReturningUninstallJournal({
       now: context.now,
       plan: context.control.plan,
-      authority: input.authority as never,
+      authority,
       attemptId: context.attemptId,
-      approvedAt: input.approvedAt as number,
-      accountId: input.accountId as string,
-      zoneId: input.zoneId as string,
+      approvedAt: input.approvedAt,
+      accountId: input.accountId,
+      zoneId: input.zoneId,
       recoverUntil: context.control.recoverUntil,
     });
     await this.putReturningUninstallJournal(context.session, context.control, journal);
@@ -1870,36 +2027,42 @@ export class GatewayDeploySession {
   }
 
   private async appendReturningUninstallJournalApproval(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'approvedAt', 'now', 'plan', 'authority']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      approvedAt: safeIntegerSchema,
+      plan: boundaryValueSchema,
+      authority: boundaryValueSchema,
+    }));
     const context = await this.activeReturningUninstallOperation(input.attemptId);
-    const authority = input.authority && typeof input.authority === 'object' && !Array.isArray(input.authority)
-      ? input.authority as Record<string, unknown> : null;
+    const authority = await requireReturningUninstallImportedAuthority(input.authority);
     if (!context.journal || input.approvedAt !== context.control.oauthAttempt?.usedAt ||
       context.control.oauthAttempt?.purpose !== 'customer_action' ||
       JSON.stringify(input.plan) !== JSON.stringify(context.control.plan) ||
-      authority?.actionId !== context.control.action.actionId ||
+      authority.actionId !== context.control.action.actionId ||
       authority.actorEmail !== context.control.action.actorEmail) {
       throw new DeployError(409, 'session_conflict');
     }
     const journal = await appendReturningUninstallApproval(context.journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
-      approvedAt: input.approvedAt as number,
+      approvedAt: input.approvedAt,
       now: context.now,
       plan: context.control.plan,
-      authority: input.authority as never,
+      authority,
     });
     await this.putReturningUninstallJournal(context.session, context.control, journal);
     return internalJson({ journal });
   }
 
   private async appendReturningUninstallHostedRecoveryJournalApproval(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, [
-      'expectedRevision', 'attemptId', 'approvedAt', 'now', 'plan',
-      'actorEmail', 'accountId', 'zoneId',
-    ]);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      approvedAt: safeIntegerSchema,
+      plan: boundaryValueSchema,
+      actorEmail: v.string(),
+      accountId: v.string(),
+      zoneId: v.string(),
+    }));
     const context = await this.activeReturningUninstallOperation(input.attemptId);
     const target = selectedDiscoveredTarget(await this.storedDiscovery());
     if (!context.journal || context.control.oauthAttempt?.purpose !== 'hosted_recovery' || !target ||
@@ -1910,41 +2073,42 @@ export class GatewayDeploySession {
       throw new DeployError(409, 'session_conflict');
     }
     const journal = await appendReturningUninstallHostedRecoveryApproval(context.journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
-      approvedAt: input.approvedAt as number,
+      approvedAt: input.approvedAt,
       now: context.now,
       plan: context.control.plan,
-      actorEmail: input.actorEmail as string,
-      accountId: input.accountId as string,
-      zoneId: input.zoneId as string,
+      actorEmail: input.actorEmail,
+      accountId: input.accountId,
+      zoneId: input.zoneId,
     });
     await this.putReturningUninstallJournal(context.session, context.control, journal);
     return internalJson({ journal });
   }
 
   private async acquireReturningUninstallJournalLease(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'expiresAt']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      expiresAt: safeIntegerSchema,
+    }));
     const context = await this.activeReturningUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const journal = await acquireReturningUninstallLease(context.journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
-      expiresAt: Math.min(input.expiresAt as number, context.control.plan.expiresAt),
+      expiresAt: Math.min(input.expiresAt, context.control.plan.expiresAt),
     });
     await this.putReturningUninstallJournal(context.session, context.control, journal);
     return internalJson({ journal });
   }
 
   private async releaseReturningUninstallJournalLease(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject(revisionAttemptNowSchema));
     const context = await this.activeReturningUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const journal = await releaseReturningUninstallLease(context.journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
     });
@@ -1953,15 +2117,18 @@ export class GatewayDeploySession {
   }
 
   private async prepareReturningUninstallJournalAction(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'name', 'record']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      name: returningUninstallActionNameSchema,
+      record: boundaryValueSchema,
+    }));
     const context = await this.activeReturningUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const journal = await prepareReturningUninstallAction(context.journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
-      name: input.name as ReturningUninstallActionName,
+      name: input.name,
       record: input.record,
     });
     await this.putReturningUninstallJournal(context.session, context.control, journal);
@@ -1972,23 +2139,33 @@ export class GatewayDeploySession {
     request: Request,
     phase: 'arm' | 'submit' | 'verify',
   ): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, phase === 'arm'
-      ? ['expectedRevision', 'attemptId', 'now', 'name']
-      : ['expectedRevision', 'attemptId', 'now', 'name', 'locator']);
+    const input = phase === 'arm'
+      ? await parsedJsonBody(request, v.strictObject({
+          ...revisionAttemptNowSchema,
+          name: returningUninstallActionNameSchema,
+        }))
+      : await parsedJsonBody(request, v.strictObject({
+          ...revisionAttemptNowSchema,
+          name: returningUninstallActionNameSchema,
+          locator: boundaryValueSchema,
+        }));
     const context = await this.activeReturningUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const base = {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
-      name: input.name as ReturningUninstallActionName,
+      name: input.name,
     };
-    const journal = phase === 'arm'
-      ? await armReturningUninstallAction(context.journal, base)
-      : phase === 'submit'
-        ? await submitReturningUninstallAction(context.journal, { ...base, locator: input.locator })
-        : await verifyReturningUninstallAction(context.journal, { ...base, locator: input.locator });
+    let journal: ReturningUninstallJournal;
+    if (phase === 'arm') {
+      journal = await armReturningUninstallAction(context.journal, base);
+    } else {
+      const locator = v.parse(boundaryValueSchema, 'locator' in input ? input.locator : null);
+      journal = phase === 'submit'
+        ? await submitReturningUninstallAction(context.journal, { ...base, locator })
+        : await verifyReturningUninstallAction(context.journal, { ...base, locator });
+    }
     await this.putReturningUninstallJournal(context.session, context.control, journal);
     return internalJson({ journal });
   }
@@ -2005,16 +2182,17 @@ export class GatewayDeploySession {
     return this.transitionReturningUninstallJournalAction(request, 'verify');
   }
 
-  private requireUninstallAttempt(control: StoredUninstallControl, attemptId: unknown): string {
-    if (typeof attemptId !== 'string' || control.status !== 'uninstalling' ||
+  private requireUninstallAttempt<Input>(control: StoredUninstallControl, attemptId: Input): string {
+    const candidate = v.safeParse(oauthAttemptIdSchema, attemptId);
+    if (!candidate.success || control.status !== 'uninstalling' ||
       !control.oauthAttempt || control.oauthAttempt.purpose !== 'uninstall' ||
-      control.oauthAttempt.usedAt === null || control.oauthAttempt.attemptId !== attemptId) {
+      control.oauthAttempt.usedAt === null || control.oauthAttempt.attemptId !== candidate.output) {
       throw new DeployError(409, 'session_conflict');
     }
-    return attemptId;
+    return candidate.output;
   }
 
-  private async activeUninstallOperation(attemptId: unknown): Promise<{
+  private async activeUninstallOperation<Input>(attemptId: Input): Promise<{
     readonly now: number;
     readonly session: StoredDeploySession;
     readonly installJournal: InstallJournal;
@@ -2041,21 +2219,27 @@ export class GatewayDeploySession {
   }
 
   private async initializeUninstallJournal(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['initialization', 'approval']);
-    if (!input.initialization || typeof input.initialization !== 'object' || Array.isArray(input.initialization) ||
-      !input.approval || typeof input.approval !== 'object' || Array.isArray(input.approval)) {
-      throw new DeployError(400, 'bad_request');
-    }
-    const approval = input.approval as Record<string, unknown>;
-    exactKeys(approval, ['attemptId', 'approvedAt', 'authorizedTarget']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      initialization: v.strictObject({
+        schemaVersion: v.literal(1),
+        now: safeIntegerSchema,
+        recoverUntil: safeIntegerSchema,
+        installJournal: boundaryValueSchema,
+        uninstallPlan: boundaryValueSchema,
+        uninstallCycleId: v.string(),
+        bindingHash: v.string(),
+        freshPreflight: boundaryValueSchema,
+      }),
+      approval: v.strictObject({
+        attemptId: oauthAttemptIdSchema,
+        approvedAt: safeIntegerSchema,
+        authorizedTarget: boundaryValueSchema,
+      }),
+    }));
+    const approval = input.approval;
     const context = await this.activeUninstallOperation(approval.attemptId);
     if (context.journal) throw new DeployError(409, 'session_conflict');
-    const initialization = input.initialization as Record<string, unknown>;
-    exactKeys(initialization, [
-      'schemaVersion', 'now', 'recoverUntil', 'installJournal', 'uninstallPlan',
-      'uninstallCycleId', 'bindingHash', 'freshPreflight',
-    ]);
+    const initialization = input.initialization;
     const approvedAt = context.control.oauthAttempt?.usedAt;
     if (approvedAt === null || approvedAt === undefined || approval.approvedAt !== approvedAt) {
       throw new DeployError(409, 'session_conflict');
@@ -2096,10 +2280,12 @@ export class GatewayDeploySession {
   }
 
   private async appendUninstallApproval(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, [
-      'expectedRevision', 'attemptId', 'now', 'approvedAt', 'authorizedTarget', 'candidatePlan',
-    ]);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      approvedAt: safeIntegerSchema,
+      authorizedTarget: boundaryValueSchema,
+      candidatePlan: boundaryValueSchema,
+    }));
     const context = await this.activeUninstallOperation(input.attemptId);
     const approvedAt = context.control.oauthAttempt?.usedAt;
     if (!context.journal || approvedAt === null || approvedAt === undefined || input.approvedAt !== approvedAt ||
@@ -2107,7 +2293,7 @@ export class GatewayDeploySession {
       throw new DeployError(409, 'session_conflict');
     }
     const journal = await appendUninstallJournalApproval(context.journal, context.control.plan, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       approvedAt,
       authorizedTarget: input.authorizedTarget,
@@ -2118,8 +2304,10 @@ export class GatewayDeploySession {
   }
 
   private async acquireUninstallLease(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'leaseExpiresAt']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      leaseExpiresAt: safeIntegerSchema,
+    }));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const leaseExpiresAt = Math.min(
@@ -2128,7 +2316,7 @@ export class GatewayDeploySession {
       context.control.recoverUntil,
     );
     const journal = acquireUninstallJournalLease(context.journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
       leaseExpiresAt,
@@ -2143,12 +2331,14 @@ export class GatewayDeploySession {
   }
 
   private async refreshUninstallPreflight(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'preflight']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      preflight: boundaryValueSchema,
+    }));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const journal = await refreshUninstallJournalPreflight(context.journal, input.preflight, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
     });
@@ -2157,12 +2347,11 @@ export class GatewayDeploySession {
   }
 
   private async discardUninstallPreflight(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject(revisionAttemptNowSchema));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     discardPreflightOnlyUninstallJournal(context.journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
     });
@@ -2172,12 +2361,14 @@ export class GatewayDeploySession {
   }
 
   private async appendUninstallManagementPreflight(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'preflight']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      preflight: boundaryValueSchema,
+    }));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const journal = await appendUninstallManagementPreflight(context.journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
       preflight: input.preflight,
@@ -2195,15 +2386,18 @@ export class GatewayDeploySession {
   }
 
   private async writePreparedUninstallAction(request: Request, replace: boolean): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'action', 'record']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      action: mutableUninstallActionSchema,
+      record: boundaryValueSchema,
+    }));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const transition = {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
-      action: input.action as Exclude<UninstallActionName, 'uninstall_fresh_preflight' | 'customer_gateway_remove'>,
+      action: input.action,
       record: input.record,
     };
     const journal = replace
@@ -2214,15 +2408,18 @@ export class GatewayDeploySession {
   }
 
   private async attachUninstallVersionRecovery(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'action', 'recovery']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      action: versionRecoveryActionSchema,
+      recovery: boundaryValueSchema,
+    }));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const journal = await attachUninstallWorkerVersionRecovery(context.journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
-      action: input.action as 'cleanup_worker_version_create' | 'retirement_worker_version_create',
+      action: input.action,
       recovery: input.recovery,
     });
     await this.putUninstallJournal(context.session, context.installJournal, context.control, journal);
@@ -2230,44 +2427,44 @@ export class GatewayDeploySession {
   }
 
   private async armUninstallAction(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    if (!exactKeysAre(input, ['expectedRevision', 'attemptId', 'now', 'action']) &&
-      !exactKeysAre(input, ['expectedRevision', 'attemptId', 'now', 'action', 'value'])) {
-      throw new DeployError(400, 'bad_request');
-    }
+    const input = await parsedJsonBody(request, uninstallArmBodySchema);
     return this.transitionUninstallAction(input, 'arm');
   }
 
   private async submitUninstallAction(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'action', 'value']);
+    const input = await parsedJsonBody(request, uninstallValueBodySchema);
     return this.transitionUninstallAction(input, 'submitted');
   }
 
   private async verifyUninstallAction(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'action', 'value']);
+    const input = await parsedJsonBody(request, uninstallValueBodySchema);
     return this.transitionUninstallAction(input, 'verified');
   }
 
   private async transitionUninstallAction(
-    input: Record<string, unknown>,
+    input: UninstallTransitionInput,
     transition: 'arm' | 'submitted' | 'verified',
   ): Promise<Response> {
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
-    const value = {
-      expectedRevision: input.expectedRevision as number,
+    const base = {
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
-      action: input.action as Exclude<UninstallActionName, 'uninstall_fresh_preflight' | 'customer_gateway_remove'>,
-      ...(Object.hasOwn(input, 'value') ? { value: input.value } : {}),
+      action: input.action,
     };
-    const journal = transition === 'arm'
-      ? await armUninstallJournalAction(context.journal, value)
-      : transition === 'submitted'
-        ? await submitUninstallJournalAction(context.journal, value as typeof value & { value: unknown })
-        : await verifyUninstallJournalAction(context.journal, value as typeof value & { value: unknown });
+    let journal: UninstallJournal;
+    if (transition === 'arm') {
+      journal = 'value' in input
+        ? await armUninstallJournalAction(context.journal, { ...base, value: input.value })
+        : await armUninstallJournalAction(context.journal, base);
+    } else {
+      if (!('value' in input)) throw new DeployError(400, 'bad_request');
+      const value = { ...base, value: input.value };
+      journal = transition === 'submitted'
+        ? await submitUninstallJournalAction(context.journal, value)
+        : await verifyUninstallJournalAction(context.journal, value);
+    }
     await this.putUninstallJournal(context.session, context.installJournal, context.control, journal);
     return internalJson({ journal });
   }
@@ -2281,12 +2478,14 @@ export class GatewayDeploySession {
   }
 
   private async writeCustomerRemoveCycle(request: Request, replace: boolean): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'semantic']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      semantic: boundaryValueSchema,
+    }));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const change = {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
       semantic: input.semantic,
@@ -2307,12 +2506,11 @@ export class GatewayDeploySession {
   }
 
   private async writeCustomerWorkersDevDisable(request: Request, replace: boolean): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject(revisionAttemptNowSchema));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const change = {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
     };
@@ -2343,30 +2541,37 @@ export class GatewayDeploySession {
     request: Request,
     transition: 'arm' | 'submitted' | 'verified' | 'not_applied',
   ): Promise<Response> {
-    const input = await jsonBody(request);
     const needsLocator = transition === 'submitted' || transition === 'not_applied';
-    exactKeys(input, needsLocator
-      ? ['expectedRevision', 'attemptId', 'now', 'enabled', 'locator']
-      : ['expectedRevision', 'attemptId', 'now', 'enabled']);
+    const input = needsLocator
+      ? await parsedJsonBody(request, v.strictObject({
+          ...revisionAttemptNowSchema,
+          enabled: v.boolean(),
+          locator: boundaryValueSchema,
+        }))
+      : await parsedJsonBody(request, v.strictObject({
+          ...revisionAttemptNowSchema,
+          enabled: v.boolean(),
+        }));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
-    const change = {
-      expectedRevision: input.expectedRevision as number,
+    const base = {
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
-      enabled: input.enabled as boolean,
-      ...(needsLocator ? { locator: input.locator } : {}),
+      enabled: input.enabled,
     };
-    const journal = transition === 'arm'
-      ? await armCustomerGatewayWorkersDev(context.journal, change)
-      : transition === 'submitted'
-        ? submitCustomerGatewayWorkersDev(context.journal, change as typeof change & { locator: unknown })
-        : transition === 'verified'
-          ? verifyCustomerGatewayWorkersDev(context.journal, change)
-          : recordCustomerGatewayWorkersDevNotApplied(
-            context.journal,
-            change as typeof change & { locator: unknown },
-          );
+    let journal: UninstallJournal;
+    if (transition === 'arm') {
+      journal = await armCustomerGatewayWorkersDev(context.journal, base);
+    } else if (transition === 'verified') {
+      journal = verifyCustomerGatewayWorkersDev(context.journal, base);
+    } else {
+      if (!('locator' in input)) throw new DeployError(400, 'bad_request');
+      const change = { ...base, locator: input.locator };
+      journal = transition === 'submitted'
+        ? submitCustomerGatewayWorkersDev(context.journal, change)
+        : recordCustomerGatewayWorkersDevNotApplied(context.journal, change);
+    }
     await this.putUninstallJournal(context.session, context.installJournal, context.control, journal);
     return internalJson({ journal });
   }
@@ -2387,42 +2592,49 @@ export class GatewayDeploySession {
     request: Request,
     transition: 'arm' | 'submitted' | 'verified',
   ): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, transition === 'submitted'
-      ? ['expectedRevision', 'attemptId', 'now', 'locator']
-      : ['expectedRevision', 'attemptId', 'now']);
+    const input = transition === 'submitted'
+      ? await parsedJsonBody(request, v.strictObject({
+          ...revisionAttemptNowSchema,
+          locator: boundaryValueSchema,
+        }))
+      : await parsedJsonBody(request, v.strictObject(revisionAttemptNowSchema));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
-    const change = {
-      expectedRevision: input.expectedRevision as number,
+    const base = {
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
-      ...(transition === 'submitted' ? { locator: input.locator } : {}),
     };
-    const journal = transition === 'arm'
-      ? armCustomerGatewayRemoveRequest(context.journal, change)
-      : transition === 'submitted'
-        ? await submitCustomerGatewayRemoveRequest(
-          context.journal,
-          change as typeof change & { locator: unknown },
-        )
-        : verifyCustomerGatewayRemoveRequest(context.journal, change);
+    let journal: UninstallJournal;
+    if (transition === 'arm') {
+      journal = armCustomerGatewayRemoveRequest(context.journal, base);
+    } else if (transition === 'verified') {
+      journal = verifyCustomerGatewayRemoveRequest(context.journal, base);
+    } else {
+      if (!('locator' in input)) throw new DeployError(400, 'bad_request');
+      journal = await submitCustomerGatewayRemoveRequest(context.journal, {
+        ...base,
+        locator: input.locator,
+      });
+    }
     await this.putUninstallJournal(context.session, context.installJournal, context.control, journal);
     return internalJson({ journal });
   }
 
   private async appendManagementDeleteAttempt(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, [
-      'expectedRevision', 'attemptId', 'now', 'action', 'prerequisites', 'intent',
-    ]);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      action: managementDeleteActionSchema,
+      prerequisites: boundaryValueSchema,
+      intent: boundaryValueSchema,
+    }));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const journal = await appendUninstallManagementDeleteAttempt(context.journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
-      action: input.action as ManagementDeleteActionName,
+      action: input.action,
       prerequisites: input.prerequisites,
       intent: input.intent,
     });
@@ -2431,15 +2643,18 @@ export class GatewayDeploySession {
   }
 
   private async recordManagementDeleteRecovery(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now', 'action', 'evidence']);
+    const input = await parsedJsonBody(request, v.strictObject({
+      ...revisionAttemptNowSchema,
+      action: managementDeleteActionSchema,
+      evidence: boundaryValueSchema,
+    }));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const journal = await recordUninstallManagementDeleteRecovery(context.journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
-      action: input.action as ManagementDeleteActionName,
+      action: input.action,
       evidence: input.evidence,
     });
     await this.putUninstallJournal(context.session, context.installJournal, context.control, journal);
@@ -2454,12 +2669,11 @@ export class GatewayDeploySession {
       context: Awaited<ReturnType<GatewayDeploySession['activeUninstallOperation']>>,
     ) => UninstallJournal,
   ): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['expectedRevision', 'attemptId', 'now']);
+    const input = await parsedJsonBody(request, v.strictObject(revisionAttemptNowSchema));
     const context = await this.activeUninstallOperation(input.attemptId);
     if (!context.journal) throw new DeployError(409, 'session_conflict');
     const journal = transition(context.journal, {
-      expectedRevision: input.expectedRevision as number,
+      expectedRevision: input.expectedRevision,
       attemptId: context.attemptId,
       now: context.now,
     }, context);
@@ -2468,13 +2682,7 @@ export class GatewayDeploySession {
   }
 
   private async completeUninstall(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, 'reason' in input
-      ? ['attemptId', 'code', 'completedAt', 'installationId', 'grantRevocation', 'reason']
-      : ['attemptId', 'code', 'completedAt', 'installationId', 'grantRevocation']);
-    if ('reason' in input && input.reason !== null && !isFailureReason(input.reason)) {
-      throw new DeployError(400, 'bad_request');
-    }
+    const input = await parsedJsonBody(request, uninstallCompletionBodySchema);
     const session = await this.stored();
     const installJournal = await this.storedJournal(session);
     const now = this.wallTime();
@@ -2520,21 +2728,15 @@ export class GatewayDeploySession {
   }
 
   private async complete(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, [
-      'attemptId', 'code', 'completedAt', 'installationId', 'grantRevocation',
-      ...('reason' in input ? ['reason'] : []),
-      ...('existingGateway' in input ? ['existingGateway'] : []),
-    ]);
-    if ('reason' in input && input.reason !== null && !isFailureReason(input.reason)) {
-      throw new DeployError(400, 'bad_request');
-    }
-    const existingGateway = 'existingGateway' in input
-      ? parseExistingAnkkaGatewaySummary(input.existingGateway)
+    const input = await parsedJsonBody(request, installCompletionBodySchema);
+    const successfulInput = v.safeParse(successfulInstallCompletionSchema, input);
+    const failedInput = v.safeParse(failedInstallCompletionSchema, input);
+    const existingGateway = failedInput.success && failedInput.output.existingGateway !== undefined
+      ? parseExistingAnkkaGatewaySummary(failedInput.output.existingGateway)
       : null;
     const session = await this.stored();
     const journal = await this.storedJournal(session);
-    const code = completionCode(input.code);
+    const code = successfulInput.success ? 'install_complete' : failureCode(input.code);
     const completedAt = this.wallTime();
     const completionDeadline = journal && (isPartialInstallJournal(journal) || isCompleteInstallJournal(journal))
       ? journal.recoverUntil
@@ -2550,33 +2752,34 @@ export class GatewayDeploySession {
       throw new DeployError(409, 'session_conflict');
     }
     let result: DeployResult;
-    if (code === 'install_complete') {
+    if (successfulInput.success) {
       if (
         !journal || !isCompleteInstallJournal(journal) ||
-        typeof input.installationId !== 'string' ||
-        !/^acg-[a-f0-9]{24}$/u.test(input.installationId) ||
-        input.installationId !== journal.installationId ||
-        (input.grantRevocation !== 'confirmed' && input.grantRevocation !== 'unconfirmed')
+        successfulInput.output.installationId !== journal.installationId ||
+        (successfulInput.output.grantRevocation !== 'confirmed' &&
+          successfulInput.output.grantRevocation !== 'unconfirmed')
       ) throw new DeployError(409, 'session_conflict');
       result = {
         code,
         completedAt,
-        installationId: input.installationId,
-        grantRevocation: input.grantRevocation,
+        installationId: successfulInput.output.installationId,
+        grantRevocation: successfulInput.output.grantRevocation,
       };
     } else {
-      if (input.installationId !== null || input.grantRevocation !== null) {
-        throw new DeployError(409, 'session_conflict');
-      }
+      if (!failedInput.success) throw new DeployError(400, 'bad_request');
+      const errorCode = failureCode(failedInput.output.code);
       if ((code === 'existing_gateway_detected') !== (existingGateway !== null)) {
         throw new DeployError(409, 'session_conflict');
       }
-      result = {
-        code,
-        completedAt,
-        ...(isFailureReason(input.reason) ? { reason: input.reason } : {}),
-        ...(existingGateway ? { existingGateway } : {}),
-      };
+      if (failedInput.output.reason !== null && existingGateway) {
+        result = { code: errorCode, completedAt, reason: failedInput.output.reason, existingGateway };
+      } else if (failedInput.output.reason !== null) {
+        result = { code: errorCode, completedAt, reason: failedInput.output.reason };
+      } else if (existingGateway) {
+        result = { code: errorCode, completedAt, existingGateway };
+      } else {
+        result = { code: errorCode, completedAt };
+      }
     }
     const next: StoredDeploySession = {
       ...session,
@@ -2589,11 +2792,9 @@ export class GatewayDeploySession {
   }
 
   private async destroy(request: Request): Promise<Response> {
-    const input = await jsonBody(request);
-    exactKeys(input, ['csrfHash']);
+    const input = await parsedJsonBody(request, v.strictObject({ csrfHash: v.string() }));
     const session = await this.stored();
     if (!session) return new Response(null, { status: 204 });
-    if (typeof input.csrfHash !== 'string') throw new DeployError(403, 'csrf_invalid');
     verifyHash(input.csrfHash, session.csrfHash);
     const journal = await this.storedJournal(session);
     if (journal && hasArmedInstallJournalAction(journal)) throw new DeployError(409, 'session_conflict');

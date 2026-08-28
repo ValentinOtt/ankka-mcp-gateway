@@ -7,7 +7,7 @@ import {
   ReceiptStoreError,
   STALE_LOCK_RECOVERY_CONFIRMATION,
   createFileReceiptStore,
-} from '../src/receipt-store.mjs';
+} from '../src/receipt-store.ts';
 
 async function fixture(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'acg-receipt-store-'));

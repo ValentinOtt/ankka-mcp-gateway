@@ -1,3 +1,11 @@
+import * as v from 'valibot';
+
+import {
+  boundaryObjectSchema,
+  jsonValueSchema,
+  type BoundaryObject,
+} from './boundary';
+import { canonicalJson } from './canonical-json';
 import type { AuthorizedTarget } from './cloudflare-target';
 import {
   parseHostedUninstallManagementAbsenceEvidence,
@@ -53,6 +61,7 @@ import {
   type InstallJournal,
 } from './install-journal';
 import { assertSecretFree } from './schema';
+import { deepFreezePlainData as deepFreeze, isPlainDataTree } from './plain-data';
 import {
   buildStaticUninstallPlan,
   isRecoveryEquivalentUninstallPlan,
@@ -72,6 +81,206 @@ const MAX_WORKERS_DEV_DISABLE_ATTEMPTS = 8;
 const MAX_MANAGEMENT_DELETE_ATTEMPTS = 8;
 const MAX_MANAGEMENT_PREFLIGHTS = 32;
 const FRESH_PREFLIGHT_TTL_MS = 60_000;
+const safeIntegerSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
+const attemptIdSchema = v.pipe(v.string(), v.regex(ATTEMPT_ID));
+const uninstallCycleIdSchema = v.pipe(v.string(), v.regex(UNINSTALL_CYCLE_ID));
+const prefixedSha256Schema = v.pipe(v.string(), v.regex(PREFIXED_SHA256));
+const sha256Schema = v.pipe(v.string(), v.regex(SHA256));
+const computeUninstallBindingInputSchema = v.strictObject({
+  installJournal: jsonValueSchema,
+  uninstallPlan: jsonValueSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+});
+const createUninstallJournalSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  now: safeIntegerSchema,
+  recoverUntil: safeIntegerSchema,
+  installJournal: jsonValueSchema,
+  uninstallPlan: jsonValueSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  bindingHash: prefixedSha256Schema,
+  freshPreflight: jsonValueSchema,
+});
+const createUninstallApprovalSchema = v.strictObject({
+  attemptId: attemptIdSchema,
+  approvedAt: safeIntegerSchema,
+  authorizedTarget: jsonValueSchema,
+});
+const uninstallWorkerVersionRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('uninstall_worker_version_create'),
+  stage: v.picklist(['cleanup', 'retirement']),
+  accountId: v.string(),
+  workerName: v.string(),
+  workerId: v.string(),
+  uninstallCycleId: uninstallCycleIdSchema,
+  namespacePresence: v.nullable(jsonValueSchema),
+  release: v.string(),
+  artifactSha256: v.string(),
+  componentSha256: sha256Schema,
+  recovery: v.nullable(jsonValueSchema),
+});
+const uninstallWorkerDeploymentRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('uninstall_worker_deployment_create'),
+  stage: v.picklist(['cleanup', 'retirement', 'restore_clean']),
+  intent: jsonValueSchema,
+});
+const managementDeleteActionNameSchema = v.picklist([
+  'management_custom_domain_delete',
+  'management_admin_policy_delete',
+  'management_access_application_delete',
+]);
+const uninstallManagementDeletePhaseSchema = v.picklist([
+  'prepared',
+  'send_armed',
+  'submitted',
+  'verified',
+  'not_applied',
+]);
+const attemptReferenceSchema = v.object({ attemptId: attemptIdSchema });
+const domainDeletePrerequisitesSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  action: v.literal('management_custom_domain_delete'),
+  preflight: jsonValueSchema,
+});
+const managementDeleteAttemptSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  prerequisites: jsonValueSchema,
+  intent: jsonValueSchema,
+  phase: uninstallManagementDeletePhaseSchema,
+  arm: jsonValueSchema,
+  submission: jsonValueSchema,
+  recovery: jsonValueSchema,
+  locator: jsonValueSchema,
+  preparedAt: safeIntegerSchema,
+  sendArmedAt: v.nullable(safeIntegerSchema),
+  submittedAt: v.nullable(safeIntegerSchema),
+  submittedByAttemptId: v.nullable(attemptIdSchema),
+  verifiedAt: v.nullable(safeIntegerSchema),
+  verifiedByAttemptId: v.nullable(attemptIdSchema),
+});
+const managementDeleteRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('uninstall_management_delete'),
+  action: managementDeleteActionNameSchema,
+  attempts: v.pipe(
+    v.array(managementDeleteAttemptSchema),
+    v.minLength(1),
+    v.maxLength(MAX_MANAGEMENT_DELETE_ATTEMPTS),
+  ),
+});
+const managementDeleteDraftSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('uninstall_management_delete'),
+  prerequisites: jsonValueSchema,
+  intent: jsonValueSchema,
+});
+const noManagedResidueDraftSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('management_no_managed_residue'),
+  result: jsonValueSchema,
+});
+const uninstallActionPhaseSchema = v.picklist(['prepared', 'send_armed', 'submitted', 'verified']);
+const uninstallWorkersDevPhaseSchema = v.picklist([
+  'prepared',
+  'send_armed',
+  'submitted',
+  'verified',
+  'not_applied',
+]);
+const workersDevLocatorSchema = v.strictObject({
+  enabled: v.boolean(),
+  previewsEnabled: v.literal(false),
+});
+const workersDevMutationSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('uninstall_workers_dev'),
+  approvalAttemptId: attemptIdSchema,
+  accountId: v.string(),
+  workerName: v.string(),
+  uninstallCycleId: uninstallCycleIdSchema,
+  enabled: v.boolean(),
+  previewsEnabled: v.literal(false),
+  requestHash: sha256Schema,
+  phase: uninstallWorkersDevPhaseSchema,
+  locator: v.nullable(workersDevLocatorSchema),
+  preparedAt: safeIntegerSchema,
+  sendArmedAt: v.nullable(safeIntegerSchema),
+  submittedAt: v.nullable(safeIntegerSchema),
+  submittedByAttemptId: v.nullable(attemptIdSchema),
+  verifiedAt: v.nullable(safeIntegerSchema),
+  verifiedByAttemptId: v.nullable(attemptIdSchema),
+});
+const customerGatewayRemoveAttemptSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  approvalAttemptId: attemptIdSchema,
+  semantic: jsonValueSchema,
+  enable: jsonValueSchema,
+  requestPhase: uninstallActionPhaseSchema,
+  locator: jsonValueSchema,
+  disableAttempts: v.pipe(v.array(jsonValueSchema), v.maxLength(MAX_WORKERS_DEV_DISABLE_ATTEMPTS)),
+  preparedAt: safeIntegerSchema,
+  sendArmedAt: v.nullable(safeIntegerSchema),
+  submittedAt: v.nullable(safeIntegerSchema),
+  submittedByAttemptId: v.nullable(attemptIdSchema),
+  verifiedAt: v.nullable(safeIntegerSchema),
+  verifiedByAttemptId: v.nullable(attemptIdSchema),
+});
+const customerGatewayRemoveRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('customer_gateway_remove'),
+  accountId: v.string(),
+  zoneId: v.string(),
+  zoneName: v.string(),
+  workerName: v.string(),
+  installationId: v.string(),
+  uninstallCycleId: uninstallCycleIdSchema,
+  attempts: v.pipe(
+    v.array(customerGatewayRemoveAttemptSchema),
+    v.minLength(1),
+    v.maxLength(MAX_CUSTOMER_REMOVE_CYCLES),
+  ),
+});
+const namespaceRetirementRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('admin_state_namespace_retired'),
+  proof: jsonValueSchema,
+});
+const workerDeleteRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('management_worker_delete'),
+  intent: jsonValueSchema,
+  submission: jsonValueSchema,
+});
+const noManagedResidueRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('management_no_managed_residue'),
+  result: jsonValueSchema,
+  preparedByAttemptId: attemptIdSchema,
+  armedByAttemptId: v.nullable(attemptIdSchema),
+  submittedByAttemptId: v.nullable(attemptIdSchema),
+  verifiedByAttemptId: v.nullable(attemptIdSchema),
+});
+const uninstallFinalConvergenceRecordSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('uninstall_final_convergence'),
+  convergenceHash: prefixedSha256Schema,
+});
+const uninstallApprovalSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  attemptId: attemptIdSchema,
+  approvedAt: safeIntegerSchema,
+  recordedAt: safeIntegerSchema,
+  plan: jsonValueSchema,
+  authorizedTarget: jsonValueSchema,
+});
+const uninstallLeaseSchema = v.strictObject({
+  attemptId: attemptIdSchema,
+  acquiredAt: safeIntegerSchema,
+  expiresAt: safeIntegerSchema,
+});
+const preflightLocatorSchema = v.strictObject({ attestationSha256: sha256Schema });
 
 export const MAX_UNINSTALL_LEASE_MS = 5 * 60 * 1_000;
 
@@ -91,6 +300,37 @@ export const UNINSTALL_ACTION_ORDER = Object.freeze([
   'management_no_managed_residue',
   'uninstall_final_convergence',
 ] as const);
+
+const persistedUninstallActionSchema = v.strictObject({
+  name: v.picklist(UNINSTALL_ACTION_ORDER),
+  phase: uninstallActionPhaseSchema,
+  record: jsonValueSchema,
+  locator: jsonValueSchema,
+  preparedAt: safeIntegerSchema,
+  sendArmedAt: v.nullable(safeIntegerSchema),
+  submittedAt: v.nullable(safeIntegerSchema),
+  verifiedAt: v.nullable(safeIntegerSchema),
+});
+const uninstallJournalSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  revision: safeIntegerSchema,
+  createdAt: safeIntegerSchema,
+  updatedAt: safeIntegerSchema,
+  recoverUntil: safeIntegerSchema,
+  installJournal: jsonValueSchema,
+  uninstallPlan: jsonValueSchema,
+  uninstallCycleId: uninstallCycleIdSchema,
+  bindingHash: prefixedSha256Schema,
+  approvalHistory: v.pipe(v.array(uninstallApprovalSchema), v.minLength(1), v.maxLength(MAX_APPROVALS)),
+  managementPreflightHistory: v.pipe(v.array(jsonValueSchema), v.maxLength(MAX_MANAGEMENT_PREFLIGHTS)),
+  lease: v.nullable(uninstallLeaseSchema),
+  leaseAttemptIds: v.pipe(v.array(attemptIdSchema), v.maxLength(MAX_LEASE_ATTEMPTS)),
+  actions: v.pipe(
+    v.array(persistedUninstallActionSchema),
+    v.minLength(1),
+    v.maxLength(UNINSTALL_ACTION_ORDER.length),
+  ),
+});
 
 export type UninstallActionName = (typeof UNINSTALL_ACTION_ORDER)[number];
 export type UninstallActionPhase = 'prepared' | 'send_armed' | 'submitted' | 'verified';
@@ -376,76 +616,26 @@ function conflict(): never {
   throw new DeployError(409, 'session_conflict');
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
-    Object.getPrototypeOf(value) === Object.prototype;
+function isRecord<Value>(value: Value): value is Value & BoundaryObject {
+  return v.is(boundaryObjectSchema, value);
 }
 
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+function exactKeys<Value extends object>(value: Value, expected: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   const sorted = [...expected].sort();
   return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]);
 }
 
-function safeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+function safeInteger<Value>(value: Value): value is Value & number {
+  return v.is(safeIntegerSchema, value);
 }
 
-function isPlainDataTree(
-  value: unknown,
-  budget = { nodes: 250_000, characters: 16 * 1024 * 1024 },
-  depth = 0,
-): boolean {
-  if (budget.nodes-- <= 0 || depth > 64) return false;
-  if (value === null || typeof value === 'boolean') return true;
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (typeof value === 'string') {
-    budget.characters -= value.length;
-    return budget.characters >= 0;
-  }
-  if (typeof value !== 'object') return false;
-  let prototype: object | null;
-  let descriptors: Record<PropertyKey, PropertyDescriptor>;
-  let keys: readonly PropertyKey[];
-  try {
-    prototype = Object.getPrototypeOf(value);
-    descriptors = Object.getOwnPropertyDescriptors(value);
-    keys = Reflect.ownKeys(value);
-  } catch {
-    return false;
-  }
-  if (keys.some((key) => typeof key !== 'string')) return false;
-  if (Array.isArray(value)) {
-    if (prototype !== Array.prototype || keys.length !== value.length + 1) return false;
-    const length = descriptors.length;
-    if (!length || !('value' in length) || length.value !== value.length) return false;
-    for (let index = 0; index < value.length; index += 1) {
-      const descriptor = descriptors[String(index)];
-      if (!descriptor || descriptor.enumerable !== true || !('value' in descriptor) ||
-        !isPlainDataTree(descriptor.value, budget, depth + 1)) return false;
-    }
-    return true;
-  }
-  if (prototype !== Object.prototype) return false;
-  return keys.every((key) => {
-    const descriptor = descriptors[key];
-    return Boolean(descriptor && descriptor.enumerable === true && 'value' in descriptor &&
-      isPlainDataTree(descriptor.value, budget, depth + 1));
-  });
+function referencedAttemptId<Input>(value: Input): string | null {
+  const candidate = v.safeParse(attemptReferenceSchema, value);
+  return candidate.success ? candidate.output.attemptId : null;
 }
 
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) =>
-      `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('canonical_json_invalid');
-}
-
-function canonicalEqual(left: unknown, right: unknown): boolean {
+function canonicalEqual<Left, Right>(left: Left, right: Right): boolean {
   try {
     return canonicalJson(left) === canonicalJson(right);
   } catch {
@@ -453,14 +643,7 @@ function canonicalEqual(left: unknown, right: unknown): boolean {
   }
 }
 
-function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
-  if (value === null || typeof value !== 'object' || seen.has(value)) return value;
-  seen.add(value);
-  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child, seen);
-  return Object.freeze(value);
-}
-
-function assertDurable(value: unknown, status = 400): void {
+function assertDurable<Value>(value: Value, status = 400): void {
   try {
     if (!isPlainDataTree(value)) invalid(status);
     assertSecretFree(value);
@@ -472,12 +655,13 @@ function assertDurable(value: unknown, status = 400): void {
 
 function installFinalLocator(journal: InstallJournal): InstallFinalConvergenceLocator | null {
   const action = journal.actions[journal.actions.length - 1];
-  if (action?.name !== 'final_convergence' || action.phase !== 'verified' || !action.locator ||
-    !('status' in action.locator) || action.locator.status !== 'converged') return null;
-  return action.locator as InstallFinalConvergenceLocator;
+  const locator = action?.locator;
+  if (action?.name !== 'final_convergence' || action.phase !== 'verified' || !locator ||
+    !('status' in locator) || locator.status !== 'converged') return null;
+  return locator;
 }
 
-async function requireCompleteInstallAuthority(value: unknown): Promise<{
+async function requireCompleteInstallAuthority<Input>(value: Input): Promise<{
   readonly journal: InstallJournal;
   readonly final: InstallFinalConvergenceLocator;
 }> {
@@ -489,7 +673,7 @@ async function requireCompleteInstallAuthority(value: unknown): Promise<{
   return deepFreeze({ journal, final });
 }
 
-function targetMatches(left: unknown, right: AuthorizedTarget): left is AuthorizedTarget {
+function targetMatches<Input>(left: Input, right: AuthorizedTarget): left is Input & AuthorizedTarget {
   return canonicalEqual(left, right);
 }
 
@@ -506,8 +690,8 @@ function approvalContext(
     (entry) => entry.attemptId === approval.attemptId,
   );
   if (activeIndex < 0) invalid();
-  return deepFreeze({
-    schemaVersion: 1 as const,
+  const context: HostedUninstallManagementContext = {
+    schemaVersion: 1,
     installJournal: journal.installJournal,
     approvalHistory: journal.approvalHistory.slice(0, activeIndex + 1).map((entry) => ({
       attemptId: entry.attemptId,
@@ -515,7 +699,8 @@ function approvalContext(
       authorizedTarget: entry.authorizedTarget,
     })),
     activeAttemptId: approval.attemptId,
-  });
+  };
+  return deepFreeze(context);
 }
 
 function activeApproval(journal: Pick<UninstallJournal, 'approvalHistory'>): UninstallJournalApproval {
@@ -528,9 +713,9 @@ export function activeUninstallJournalPlan(journal: UninstallJournal): StaticUni
   return activeApproval(journal).plan;
 }
 
-async function exactReviewedPlan(
+async function exactReviewedPlan<Input>(
   installJournal: InstallJournal,
-  value: unknown,
+  value: Input,
 ): Promise<StaticUninstallPlan> {
   const parsed = await parseStaticUninstallPlan(value);
   const rebuilt = await buildStaticUninstallPlan(installJournal, parsed.createdAt, parsed.expiresAt);
@@ -543,10 +728,11 @@ export async function computeUninstallJournalBindingHash(input: {
   readonly uninstallPlan: unknown;
   readonly uninstallCycleId: string;
 }): Promise<string> {
-  if (!isRecord(input) || !exactKeys(input, ['installJournal', 'uninstallPlan', 'uninstallCycleId']) ||
-    typeof input.uninstallCycleId !== 'string' || !UNINSTALL_CYCLE_ID.test(input.uninstallCycleId)) invalid(400);
-  const authority = await requireCompleteInstallAuthority(input.installJournal);
-  const plan = await exactReviewedPlan(authority.journal, input.uninstallPlan);
+  const candidate = v.safeParse(computeUninstallBindingInputSchema, input);
+  if (!candidate.success) invalid(400);
+  const parsedInput = candidate.output;
+  const authority = await requireCompleteInstallAuthority(parsedInput.installJournal);
+  const plan = await exactReviewedPlan(authority.journal, parsedInput.uninstallPlan);
   return `sha256:${await sha256Hex(canonicalJson({
     schemaVersion: 1,
     install: {
@@ -560,7 +746,7 @@ export async function computeUninstallJournalBindingHash(input: {
       planId: plan.planId,
       planHash: plan.planHash,
       authorityHash: plan.authorityHash,
-      cycleId: input.uninstallCycleId,
+      cycleId: parsedInput.uninstallCycleId,
     },
     target: authority.journal.target,
     release: {
@@ -572,7 +758,7 @@ export async function computeUninstallJournalBindingHash(input: {
 
 function revisionCas(journal: UninstallJournal, input: UninstallJournalCasInput): void {
   if (!safeInteger(input.expectedRevision) || input.expectedRevision !== journal.revision ||
-    typeof input.attemptId !== 'string' || !ATTEMPT_ID.test(input.attemptId) ||
+    !ATTEMPT_ID.test(input.attemptId) ||
     !safeInteger(input.now) || input.now < journal.updatedAt || input.now >= journal.recoverUntil) conflict();
 }
 
@@ -602,54 +788,50 @@ function replaceJournal(
   return next;
 }
 
-export async function createUninstallJournal(
-  value: unknown,
+export async function createUninstallJournal<Input>(
+  value: Input,
   approvalInput: CreateUninstallJournalApprovalInput,
 ): Promise<UninstallJournal> {
   assertDurable(value, 400);
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'now', 'recoverUntil', 'installJournal', 'uninstallPlan',
-    'uninstallCycleId', 'bindingHash', 'freshPreflight',
-  ]) || !isRecord(approvalInput) || !exactKeys(approvalInput, [
-    'attemptId', 'approvedAt', 'authorizedTarget',
-  ])) invalid(400);
-  const authority = await requireCompleteInstallAuthority(value.installJournal);
-  const plan = await exactReviewedPlan(authority.journal, value.uninstallPlan);
+  const journalCandidate = v.safeParse(createUninstallJournalSchema, value);
+  const approvalCandidate = v.safeParse(createUninstallApprovalSchema, approvalInput);
+  if (!journalCandidate.success || !approvalCandidate.success) invalid(400);
+  const journalInput = journalCandidate.output;
+  const parsedApprovalInput = approvalCandidate.output;
+  const authority = await requireCompleteInstallAuthority(journalInput.installJournal);
+  const plan = await exactReviewedPlan(authority.journal, journalInput.uninstallPlan);
   if (
-    value.schemaVersion !== 1 || !safeInteger(value.now) || !safeInteger(value.recoverUntil) ||
-    value.recoverUntil <= value.now || value.recoverUntil > authority.journal.recoverUntil ||
-    value.now < authority.journal.updatedAt || value.now >= plan.expiresAt || plan.expiresAt > value.recoverUntil ||
-    typeof value.uninstallCycleId !== 'string' || !UNINSTALL_CYCLE_ID.test(value.uninstallCycleId) ||
-    typeof value.bindingHash !== 'string' || !PREFIXED_SHA256.test(value.bindingHash) ||
-    typeof approvalInput.attemptId !== 'string' || !ATTEMPT_ID.test(approvalInput.attemptId) ||
-    installAttemptWasUsed(authority.journal, approvalInput.attemptId) ||
-    !safeInteger(approvalInput.approvedAt) || approvalInput.approvedAt > value.now ||
-    approvalInput.approvedAt < plan.createdAt || approvalInput.approvedAt >= plan.expiresAt ||
-    !targetMatches(approvalInput.authorizedTarget, authority.journal.target)
+    journalInput.recoverUntil <= journalInput.now || journalInput.recoverUntil > authority.journal.recoverUntil ||
+    journalInput.now < authority.journal.updatedAt || journalInput.now >= plan.expiresAt ||
+    plan.expiresAt > journalInput.recoverUntil ||
+    installAttemptWasUsed(authority.journal, parsedApprovalInput.attemptId) ||
+    parsedApprovalInput.approvedAt > journalInput.now ||
+    parsedApprovalInput.approvedAt < plan.createdAt || parsedApprovalInput.approvedAt >= plan.expiresAt ||
+    !targetMatches(parsedApprovalInput.authorizedTarget, authority.journal.target)
   ) invalid(400);
   const bindingHash = await computeUninstallJournalBindingHash({
     installJournal: authority.journal,
     uninstallPlan: plan,
-    uninstallCycleId: value.uninstallCycleId,
+    uninstallCycleId: journalInput.uninstallCycleId,
   });
-  if (bindingHash !== value.bindingHash) invalid(400);
-  const approval = deepFreeze({
-    schemaVersion: 1 as const,
-    attemptId: approvalInput.attemptId,
-    approvedAt: approvalInput.approvedAt,
-    recordedAt: value.now,
+  if (bindingHash !== journalInput.bindingHash) invalid(400);
+  const approval: UninstallJournalApproval = deepFreeze({
+    schemaVersion: 1,
+    attemptId: parsedApprovalInput.attemptId,
+    approvedAt: parsedApprovalInput.approvedAt,
+    recordedAt: journalInput.now,
     plan,
     authorizedTarget: authority.journal.target,
   });
   const base: UninstallJournal = {
     schemaVersion: 1,
     revision: 0,
-    createdAt: value.now,
-    updatedAt: value.now,
-    recoverUntil: value.recoverUntil,
+    createdAt: journalInput.now,
+    updatedAt: journalInput.now,
+    recoverUntil: journalInput.recoverUntil,
     installJournal: authority.journal,
     uninstallPlan: plan,
-    uninstallCycleId: value.uninstallCycleId,
+    uninstallCycleId: journalInput.uninstallCycleId,
     bindingHash,
     approvalHistory: Object.freeze([approval]),
     managementPreflightHistory: Object.freeze([]),
@@ -659,29 +841,30 @@ export async function createUninstallJournal(
   };
   const preflight = await parseHostedUninstallManagementPreflightResult(
     approvalContext(base, approval),
-    value.freshPreflight,
+    journalInput.freshPreflight,
   );
   if (!preflight || preflight.attemptId !== approval.attemptId ||
-    preflight.checkedAt < approval.approvedAt || preflight.checkedAt > value.now ||
-    value.now >= preflight.expiresAt || value.now - preflight.checkedAt > FRESH_PREFLIGHT_TTL_MS) invalid(400);
-  const preflightAction = deepFreeze({
-    name: 'uninstall_fresh_preflight' as const,
-    phase: 'verified' as const,
+    preflight.checkedAt < approval.approvedAt || preflight.checkedAt > journalInput.now ||
+    journalInput.now >= preflight.expiresAt ||
+    journalInput.now - preflight.checkedAt > FRESH_PREFLIGHT_TTL_MS) invalid(400);
+  const preflightAction: UninstallJournalAction = deepFreeze({
+    name: 'uninstall_fresh_preflight',
+    phase: 'verified',
     record: preflight,
     locator: { attestationSha256: preflight.attestationSha256 },
-    preparedAt: value.now,
-    sendArmedAt: value.now,
-    submittedAt: value.now,
-    verifiedAt: value.now,
+    preparedAt: journalInput.now,
+    sendArmedAt: journalInput.now,
+    submittedAt: journalInput.now,
+    verifiedAt: journalInput.now,
   });
-  const journal = deepFreeze({ ...base, actions: [preflightAction] });
+  const journal: UninstallJournal = deepFreeze({ ...base, actions: [preflightAction] });
   assertDurable(journal);
   return journal;
 }
 
-export async function appendUninstallJournalApproval(
+export async function appendUninstallJournalApproval<PlanInput>(
   journal: UninstallJournal,
-  candidatePlan: unknown,
+  candidatePlan: PlanInput,
   input: AppendUninstallJournalApprovalInput,
 ): Promise<UninstallJournal> {
   revisionCas(journal, { expectedRevision: input.expectedRevision, attemptId: input.attemptId, now: input.now });
@@ -698,8 +881,8 @@ export async function appendUninstallJournalApproval(
     plan.expiresAt <= input.now || plan.expiresAt < previous.plan.expiresAt ||
     plan.expiresAt > journal.recoverUntil ||
     !await isRecoveryEquivalentUninstallPlan(journal.uninstallPlan, plan)) conflict();
-  const approval = deepFreeze({
-    schemaVersion: 1 as const,
+  const approval: UninstallJournalApproval = deepFreeze({
+    schemaVersion: 1,
     attemptId: input.attemptId,
     approvedAt: input.approvedAt,
     recordedAt: input.now,
@@ -741,9 +924,9 @@ export function expireUninstallJournalLease(journal: UninstallJournal, now: numb
   return replaceJournal(journal, Math.min(Math.max(journal.updatedAt, now), journal.recoverUntil - 1), { lease: null });
 }
 
-export async function refreshUninstallJournalPreflight(
+export async function refreshUninstallJournalPreflight<PreflightInput>(
   journal: UninstallJournal,
-  value: unknown,
+  value: PreflightInput,
   input: UninstallJournalCasInput,
 ): Promise<UninstallJournal> {
   cas(journal, input, true);
@@ -756,9 +939,9 @@ export async function refreshUninstallJournalPreflight(
   );
   if (!preflight || preflight.checkedAt < approval.approvedAt || preflight.checkedAt > input.now ||
     input.now >= preflight.expiresAt || input.now - preflight.checkedAt > FRESH_PREFLIGHT_TTL_MS) invalid(400);
-  const action = deepFreeze({
-    name: 'uninstall_fresh_preflight' as const,
-    phase: 'verified' as const,
+  const action: UninstallJournalAction = deepFreeze({
+    name: 'uninstall_fresh_preflight',
+    phase: 'verified',
     record: preflight,
     locator: { attestationSha256: preflight.attestationSha256 },
     preparedAt: input.now,
@@ -890,12 +1073,12 @@ function workerIdentity(journal: UninstallJournal): {
   readonly namespaceId: string;
 } {
   const final = installFinal(journal);
-  return {
+  return Object.freeze({
     accountId: journal.installJournal.target.account.id,
     workerName: journal.uninstallPlan.gateway.workerName,
     workerId: final.workerId,
     namespaceId: final.adminStateNamespaceId,
-  };
+  });
 }
 
 function installedAccountWorkersSubdomain(journal: UninstallJournal): string | null {
@@ -912,9 +1095,9 @@ async function customerSemanticMatchesAuthority(
   semantic: CustomerUninstallSemanticRecord,
   journal: UninstallJournal,
 ): Promise<boolean> {
-  const recoveryProbe = {
-    schemaVersion: 1 as const,
-    status: 'recovery_required' as const,
+  const recoveryProbe: Extract<CustomerUninstallLocator, { readonly status: 'recovery_required' }> = {
+    schemaVersion: 1,
+    status: 'recovery_required',
     requestId: semantic.requestId,
     accountId: semantic.accountId,
     zoneId: semantic.zoneId,
@@ -932,8 +1115,8 @@ async function customerSemanticMatchesAuthority(
     uninstallPlanHash: semantic.uninstallPlanHash,
     authorityHash: semantic.authorityHash,
     approvalAttemptId: semantic.approvalAttemptId,
-    reason: 'uninstall_blocked' as const,
-    freshGrantRequired: true as const,
+    reason: 'uninstall_blocked',
+    freshGrantRequired: true,
   };
   const parsed = await parseCustomerUninstallLocator(
     recoveryProbe,
@@ -957,44 +1140,54 @@ function lifecycleIdentityMatches(
     value.workerId === expected.workerId && value.uninstallCycleId === journal.uninstallCycleId;
 }
 
-function parseLifecycleSubmission<T extends CloudflareUninstallWorkerLifecycleSubmission['kind']>(
-  value: unknown,
-  kind: T,
+function parseLifecycleSubmission<Input>(
+  value: Input,
+  kind: 'uninstall_worker_version',
   journal: UninstallJournal,
-): Extract<CloudflareUninstallWorkerLifecycleSubmission, { readonly kind: T }> | null {
+): UninstallWorkerVersionSubmission | null;
+function parseLifecycleSubmission<Input>(
+  value: Input,
+  kind: 'uninstall_worker_deployment',
+  journal: UninstallJournal,
+): UninstallWorkerDeploymentSubmission | null;
+function parseLifecycleSubmission<Input>(
+  value: Input,
+  kind: 'uninstall_worker_delete',
+  journal: UninstallJournal,
+): WorkerDeleteSubmission | null;
+function parseLifecycleSubmission<Input>(
+  value: Input,
+  kind: CloudflareUninstallWorkerLifecycleSubmission['kind'],
+  journal: UninstallJournal,
+): CloudflareUninstallWorkerLifecycleSubmission | null {
   const parsed = parseCloudflareUninstallWorkerLifecycleSubmission(value);
-  return parsed && parsed.kind === kind && lifecycleIdentityMatches(parsed, journal)
-    ? parsed as Extract<CloudflareUninstallWorkerLifecycleSubmission, { readonly kind: T }>
-    : null;
+  return parsed?.kind === kind && lifecycleIdentityMatches(parsed, journal) ? parsed : null;
 }
 
-async function parseVersionActionRecord(
-  value: unknown,
+async function parseVersionActionRecord<Input>(
+  value: Input,
   stage: 'cleanup' | 'retirement',
   journal: UninstallJournal,
 ): Promise<UninstallWorkerVersionActionRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'kind', 'stage', 'accountId', 'workerName', 'workerId', 'uninstallCycleId',
-    'namespacePresence', 'release', 'artifactSha256', 'componentSha256', 'recovery',
-  ]) || value.schemaVersion !== 1 || value.kind !== 'uninstall_worker_version_create' || value.stage !== stage ||
-    typeof value.accountId !== 'string' || typeof value.workerName !== 'string' || typeof value.workerId !== 'string' ||
-    typeof value.uninstallCycleId !== 'string' || !lifecycleIdentityMatches(value as never, journal) ||
-    value.release !== journal.uninstallPlan.release.id ||
-    value.artifactSha256 !== journal.uninstallPlan.release.aggregateSha256 ||
-    typeof value.componentSha256 !== 'string' || !SHA256.test(value.componentSha256)) return null;
+  const candidate = v.safeParse(uninstallWorkerVersionRecordSchema, value);
+  if (!candidate.success) return null;
+  const recordInput = candidate.output;
+  if (recordInput.stage !== stage || !lifecycleIdentityMatches(recordInput, journal) ||
+    recordInput.release !== journal.uninstallPlan.release.id ||
+    recordInput.artifactSha256 !== journal.uninstallPlan.release.aggregateSha256) return null;
   const identity = workerIdentity(journal);
   let namespacePresence: AdminStateNamespacePresenceProof | null = null;
   if (stage === 'cleanup') {
-    namespacePresence = parseAdminStateNamespacePresenceProof(value.namespacePresence);
+    namespacePresence = parseAdminStateNamespacePresenceProof(recordInput.namespacePresence);
     if (!namespacePresence || !lifecycleIdentityMatches(namespacePresence, journal) ||
       namespacePresence.namespaceId !== identity.namespaceId) return null;
-  } else if (value.namespacePresence !== null) return null;
+  } else if (recordInput.namespacePresence !== null) return null;
   let recovery: UninstallWorkerVersionRecoveryRecord | null = null;
-  if (value.recovery !== null) {
-    recovery = await parseUninstallWorkerVersionRecoveryRecord(value.recovery);
+  if (recordInput.recovery !== null) {
+    recovery = await parseUninstallWorkerVersionRecoveryRecord(recordInput.recovery);
     if (!recovery || recovery.stage !== stage || !lifecycleIdentityMatches(recovery, journal) ||
-      recovery.release !== value.release || recovery.artifactSha256 !== value.artifactSha256 ||
-      recovery.componentSha256 !== value.componentSha256 ||
+      recovery.release !== recordInput.release || recovery.artifactSha256 !== recordInput.artifactSha256 ||
+      recovery.componentSha256 !== recordInput.componentSha256 ||
       (stage === 'cleanup' && (recovery.stage !== 'cleanup' || recovery.namespaceId !== identity.namespaceId))) return null;
   }
   return deepFreeze({
@@ -1006,9 +1199,9 @@ async function parseVersionActionRecord(
     workerId: identity.workerId,
     uninstallCycleId: journal.uninstallCycleId,
     namespacePresence,
-    release: value.release,
-    artifactSha256: value.artifactSha256,
-    componentSha256: value.componentSha256,
+    release: recordInput.release,
+    artifactSha256: recordInput.artifactSha256,
+    componentSha256: recordInput.componentSha256,
     recovery,
   });
 }
@@ -1027,14 +1220,14 @@ function expectedVersionIdForDeployment(
     : null;
 }
 
-async function parseDeploymentActionRecord(
-  value: unknown,
+async function parseDeploymentActionRecord<Input>(
+  value: Input,
   stage: 'cleanup' | 'retirement' | 'restore_clean',
   journal: UninstallJournal,
 ): Promise<UninstallWorkerDeploymentActionRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, ['schemaVersion', 'kind', 'stage', 'intent']) ||
-    value.schemaVersion !== 1 || value.kind !== 'uninstall_worker_deployment_create' || value.stage !== stage) return null;
-  const intent = await parseUninstallWorkerDeploymentMutationIntent(value.intent);
+  const candidate = v.safeParse(uninstallWorkerDeploymentRecordSchema, value);
+  if (!candidate.success || candidate.output.stage !== stage) return null;
+  const intent = await parseUninstallWorkerDeploymentMutationIntent(candidate.output.intent);
   const versionId = expectedVersionIdForDeployment(journal, stage);
   if (!intent || intent.stage !== stage || !lifecycleIdentityMatches(intent, journal) ||
     !versionId || intent.versionId !== versionId) return null;
@@ -1063,47 +1256,48 @@ function expectedManagementPrerequisites(
   return deepFreeze({ schemaVersion: 1, action, domainAbsence: domain, policyAbsence: policy });
 }
 
-async function parseManagementDeleteActionRecord(
-  value: unknown,
+async function parseManagementDeleteActionRecord<Input>(
+  value: Input,
   action: 'management_custom_domain_delete' | 'management_admin_policy_delete' |
     'management_access_application_delete',
   journal: UninstallJournal,
 ): Promise<ManagementDeleteActionRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, ['schemaVersion', 'kind', 'action', 'attempts']) ||
-    value.schemaVersion !== 1 || value.kind !== 'uninstall_management_delete' ||
-    value.action !== action || !Array.isArray(value.attempts) || value.attempts.length < 1 ||
-    value.attempts.length > MAX_MANAGEMENT_DELETE_ATTEMPTS) return null;
+  const candidate = v.safeParse(managementDeleteRecordSchema, value);
+  if (!candidate.success || candidate.output.action !== action) return null;
   const expectedPrerequisites = expectedManagementPrerequisites(journal, action);
   if (!expectedPrerequisites) return null;
   const attempts: ManagementDeleteAttempt[] = [];
   let previousDomainPreflightIndex = -1;
-  for (const raw of value.attempts) {
-    if (!isRecord(raw) || !exactKeys(raw, [
-      'schemaVersion', 'prerequisites', 'intent', 'phase', 'arm', 'submission', 'recovery',
-      'locator', 'preparedAt', 'sendArmedAt', 'submittedAt', 'submittedByAttemptId',
-      'verifiedAt', 'verifiedByAttemptId',
-    ]) || raw.schemaVersion !== 1 || !isRecord(raw.intent) ||
-      typeof raw.intent.attemptId !== 'string' || ![
-        'prepared', 'send_armed', 'submitted', 'verified', 'not_applied',
-      ].includes(String(raw.phase))) return null;
-    const originApproval = approvalByAttempt(journal, raw.intent.attemptId);
+  for (const raw of candidate.output.attempts) {
+    const originAttemptId = referencedAttemptId(raw.intent);
+    if (!originAttemptId) return null;
+    const originApproval = approvalByAttempt(journal, originAttemptId);
     const originContext = originApproval ? contextForAttempt(journal, originApproval.attemptId) : null;
-    if (!originApproval || !originContext || !safeInteger(raw.preparedAt) ||
+    if (!originApproval || !originContext ||
       raw.preparedAt < originApproval.recordedAt || raw.preparedAt >= originApproval.plan.expiresAt ||
       raw.preparedAt > journal.updatedAt) return null;
-    const prerequisites = raw.prerequisites as HostedUninstallManagementDeletePrerequisites;
+    let prerequisites: HostedUninstallManagementDeletePrerequisites;
+    let domainPrerequisites: Extract<HostedUninstallManagementDeletePrerequisites, {
+      readonly action: 'management_custom_domain_delete';
+    }> | null = null;
     if (action === 'management_custom_domain_delete') {
-      if (!isRecord(prerequisites) || !('preflight' in prerequisites)) return null;
+      const prerequisiteCandidate = v.safeParse(domainDeletePrerequisitesSchema, raw.prerequisites);
+      if (!prerequisiteCandidate.success) return null;
       const preflightIndex = journal.managementPreflightHistory.findIndex(
-        (entry) => canonicalEqual(entry, prerequisites.preflight),
+        (entry) => canonicalEqual(entry, prerequisiteCandidate.output.preflight),
       );
+      const preflight = journal.managementPreflightHistory[preflightIndex];
       if (preflightIndex < 0 || preflightIndex <= previousDomainPreflightIndex ||
-        !isRecord(prerequisites.preflight) || prerequisites.preflight.attemptId !== raw.intent.attemptId ||
-        !safeInteger(prerequisites.preflight.checkedAt) || !safeInteger(prerequisites.preflight.expiresAt) ||
-        raw.preparedAt < prerequisites.preflight.checkedAt || raw.preparedAt >= prerequisites.preflight.expiresAt ||
-        raw.preparedAt - prerequisites.preflight.checkedAt > FRESH_PREFLIGHT_TTL_MS) return null;
+        !preflight || preflight.attemptId !== originAttemptId ||
+        raw.preparedAt < preflight.checkedAt || raw.preparedAt >= preflight.expiresAt ||
+        raw.preparedAt - preflight.checkedAt > FRESH_PREFLIGHT_TTL_MS) return null;
       previousDomainPreflightIndex = preflightIndex;
-    } else if (!canonicalEqual(prerequisites, expectedPrerequisites)) return null;
+      domainPrerequisites = deepFreeze({ schemaVersion: 1, action, preflight });
+      prerequisites = domainPrerequisites;
+    } else {
+      if (!canonicalEqual(raw.prerequisites, expectedPrerequisites)) return null;
+      prerequisites = expectedPrerequisites;
+    }
     const intent = await parseHostedUninstallManagementDeleteIntent(originContext, prerequisites, raw.intent);
     if (!intent || intent.kind !== action || attempts.some(
       (attempt) => attempt.intent.attemptId === intent.attemptId,
@@ -1125,58 +1319,55 @@ async function parseManagementDeleteActionRecord(
       )
       : null;
     if (raw.submission !== null && !submission) return null;
-    const phase = raw.phase as UninstallManagementDeletePhase;
+    const phase = raw.phase;
     const armed = phase !== 'prepared';
     const submitted = phase === 'submitted' ||
       ((phase === 'verified' || phase === 'not_applied') && submission !== null);
     const terminal = phase === 'verified' || phase === 'not_applied';
-    const submittedApproval = typeof raw.submittedByAttemptId === 'string'
+    const submittedApproval = raw.submittedByAttemptId !== null
       ? approvalByAttempt(journal, raw.submittedByAttemptId)
       : null;
-    const verifiedApproval = typeof raw.verifiedByAttemptId === 'string'
+    const verifiedApproval = raw.verifiedByAttemptId !== null
       ? approvalByAttempt(journal, raw.verifiedByAttemptId)
       : null;
     const originApprovalIndex = approvalIndexByAttempt(journal, intent.attemptId);
-    const submittedApprovalIndex = typeof raw.submittedByAttemptId === 'string'
+    const submittedApprovalIndex = raw.submittedByAttemptId !== null
       ? approvalIndexByAttempt(journal, raw.submittedByAttemptId)
       : -1;
-    const verifiedApprovalIndex = typeof raw.verifiedByAttemptId === 'string'
+    const verifiedApprovalIndex = raw.verifiedByAttemptId !== null
       ? approvalIndexByAttempt(journal, raw.verifiedByAttemptId)
       : -1;
-    if (armed !== Boolean(arm) || submitted !== Boolean(submission) ||
-      safeInteger(raw.sendArmedAt) !== armed || safeInteger(raw.submittedAt) !== submitted ||
-      safeInteger(raw.verifiedAt) !== terminal ||
-      submitted !== Boolean(submittedApproval) || terminal !== Boolean(verifiedApproval) ||
+    if (armed !== (arm !== null) || submitted !== (submission !== null) ||
+      armed !== (raw.sendArmedAt !== null) || submitted !== (raw.submittedAt !== null) ||
+      terminal !== (raw.verifiedAt !== null) ||
+      submitted !== (submittedApproval !== null) || terminal !== (verifiedApproval !== null) ||
       (!submitted && raw.submittedByAttemptId !== null) ||
       (submitted && raw.submittedByAttemptId !== intent.attemptId) ||
       (!terminal && raw.verifiedByAttemptId !== null) ||
       (submitted && submittedApprovalIndex < originApprovalIndex) ||
       (terminal && verifiedApprovalIndex < (submitted ? submittedApprovalIndex : originApprovalIndex)) ||
-      (armed && (raw.sendArmedAt !== arm?.armedAt || (raw.sendArmedAt as number) < raw.preparedAt)) ||
-      (submitted && (raw.submittedAt as number) < (raw.sendArmedAt as number)) ||
-      (terminal && (raw.verifiedAt as number) <
-        ((raw.submittedAt ?? raw.sendArmedAt) as number)) ||
-      (submitted && ((raw.submittedAt as number) <
-        (submittedApproval as UninstallJournalApproval).recordedAt ||
-        (raw.submittedAt as number) >= (submittedApproval as UninstallJournalApproval).plan.expiresAt)) ||
-      (terminal && ((raw.verifiedAt as number) <
-        (verifiedApproval as UninstallJournalApproval).recordedAt ||
-        (raw.verifiedAt as number) >= (verifiedApproval as UninstallJournalApproval).plan.expiresAt)) ||
       [raw.sendArmedAt, raw.submittedAt, raw.verifiedAt].some(
-        (time) => typeof time === 'number' && time > journal.updatedAt,
-      ) || (arm && action === 'management_custom_domain_delete' &&
-        (arm.armedAt >= (prerequisites as Extract<HostedUninstallManagementDeletePrerequisites, {
-          readonly action: 'management_custom_domain_delete';
-        }>).preflight.expiresAt ||
-        arm.armedAt - (prerequisites as Extract<HostedUninstallManagementDeletePrerequisites, {
-          readonly action: 'management_custom_domain_delete';
-        }>).preflight.checkedAt > FRESH_PREFLIGHT_TTL_MS))) return null;
+        (time) => time !== null && time > journal.updatedAt,
+      )) return null;
+    if (armed && (!arm || raw.sendArmedAt === null || raw.sendArmedAt !== arm.armedAt ||
+      raw.sendArmedAt < raw.preparedAt)) return null;
+    if (submitted && (!submission || raw.submittedAt === null || raw.sendArmedAt === null ||
+      !submittedApproval || raw.submittedAt < raw.sendArmedAt ||
+      raw.submittedAt < submittedApproval.recordedAt ||
+      raw.submittedAt >= submittedApproval.plan.expiresAt)) return null;
+    const priorTerminalTime = raw.submittedAt ?? raw.sendArmedAt;
+    if (terminal && (raw.verifiedAt === null || priorTerminalTime === null || !verifiedApproval ||
+      raw.verifiedAt < priorTerminalTime || raw.verifiedAt < verifiedApproval.recordedAt ||
+      raw.verifiedAt >= verifiedApproval.plan.expiresAt)) return null;
+    if (arm && domainPrerequisites &&
+      (arm.armedAt >= domainPrerequisites.preflight.expiresAt ||
+        arm.armedAt - domainPrerequisites.preflight.checkedAt > FRESH_PREFLIGHT_TTL_MS)) return null;
     let recovery: HostedUninstallManagementStillPresentEvidence | null = null;
     let locator: HostedUninstallManagementAbsenceEvidence | null = null;
     if (phase === 'not_applied') {
-      if (!arm || raw.locator !== null || !isRecord(raw.recovery) ||
-        typeof raw.recovery.attemptId !== 'string') return null;
-      const recoveryContext = contextForAttempt(journal, raw.recovery.attemptId);
+      const recoveryAttemptId = referencedAttemptId(raw.recovery);
+      if (!arm || raw.locator !== null || !recoveryAttemptId) return null;
+      const recoveryContext = contextForAttempt(journal, recoveryAttemptId);
       const parsed = recoveryContext
         ? await parseHostedUninstallManagementDeleteRecoveryEvidence(
           recoveryContext,
@@ -1190,9 +1381,9 @@ async function parseManagementDeleteActionRecord(
         parsed.attemptId !== raw.verifiedByAttemptId) return null;
       recovery = parsed;
     } else if (phase === 'verified') {
-      if (!arm || raw.recovery !== null || !isRecord(raw.locator) ||
-        typeof raw.locator.attemptId !== 'string') return null;
-      const evidenceContext = contextForAttempt(journal, raw.locator.attemptId);
+      const evidenceAttemptId = referencedAttemptId(raw.locator);
+      if (!arm || raw.recovery !== null || !evidenceAttemptId) return null;
+      const evidenceContext = contextForAttempt(journal, evidenceAttemptId);
       locator = evidenceContext ? await parseHostedUninstallManagementAbsenceEvidence(
         evidenceContext,
         intent,
@@ -1203,12 +1394,13 @@ async function parseManagementDeleteActionRecord(
     } else if (raw.recovery !== null || raw.locator !== null) return null;
     const previous = attempts[attempts.length - 1];
     if (previous && (previous.phase !== 'not_applied' ||
-      raw.preparedAt < (previous.verifiedAt as number) ||
+      previous.verifiedAt === null || previous.verifiedByAttemptId === null ||
+      raw.preparedAt < previous.verifiedAt ||
       originApprovalIndex < approvalIndexByAttempt(
         journal,
-        previous.verifiedByAttemptId as string,
+        previous.verifiedByAttemptId,
       ))) return null;
-    attempts.push(deepFreeze({
+    const attempt: ManagementDeleteAttempt = deepFreeze({
       schemaVersion: 1,
       prerequisites,
       intent,
@@ -1217,34 +1409,37 @@ async function parseManagementDeleteActionRecord(
       submission,
       recovery,
       locator,
-      preparedAt: raw.preparedAt as number,
-      sendArmedAt: armed ? raw.sendArmedAt as number : null,
-      submittedAt: submitted ? raw.submittedAt as number : null,
-      submittedByAttemptId: submitted ? raw.submittedByAttemptId as string : null,
-      verifiedAt: terminal ? raw.verifiedAt as number : null,
-      verifiedByAttemptId: terminal ? raw.verifiedByAttemptId as string : null,
-    }));
+      preparedAt: raw.preparedAt,
+      sendArmedAt: raw.sendArmedAt,
+      submittedAt: raw.submittedAt,
+      submittedByAttemptId: raw.submittedByAttemptId,
+      verifiedAt: raw.verifiedAt,
+      verifiedByAttemptId: raw.verifiedByAttemptId,
+    });
+    attempts.push(attempt);
   }
   return deepFreeze({ schemaVersion: 1, kind: 'uninstall_management_delete', action, attempts });
 }
 
-async function parseManagementDeleteDraft(
-  value: unknown,
+async function parseManagementDeleteDraft<Input>(
+  value: Input,
   action: 'management_custom_domain_delete' | 'management_admin_policy_delete' |
     'management_access_application_delete',
   journal: UninstallJournal,
 ): Promise<ManagementDeleteActionDraft | null> {
-  if (!isRecord(value) || !exactKeys(value, ['schemaVersion', 'kind', 'prerequisites', 'intent']) ||
-    value.schemaVersion !== 1 || value.kind !== 'uninstall_management_delete' ||
-    !isRecord(value.intent) || typeof value.intent.attemptId !== 'string') return null;
+  const candidate = v.safeParse(managementDeleteDraftSchema, value);
+  if (!candidate.success) return null;
+  const draft = candidate.output;
+  const intentAttemptId = referencedAttemptId(draft.intent);
+  if (!intentAttemptId) return null;
   const approval = activeApproval(journal);
   const prerequisites = expectedManagementPrerequisites(journal, action);
-  if (!prerequisites || value.intent.attemptId !== approval.attemptId ||
-    !canonicalEqual(value.prerequisites, prerequisites)) return null;
+  if (!prerequisites || intentAttemptId !== approval.attemptId ||
+    !canonicalEqual(draft.prerequisites, prerequisites)) return null;
   const intent = await parseHostedUninstallManagementDeleteIntent(
     activeManagementContext(journal),
     prerequisites,
-    value.intent,
+    draft.intent,
   );
   return intent?.kind === action
     ? deepFreeze({ schemaVersion: 1, kind: 'uninstall_management_delete', prerequisites, intent })
@@ -1296,17 +1491,16 @@ function noManagedResidueMatchesVerifiedPrerequisites(
     canonicalEqual(result.evidence.workerDeletion, workerDeletion);
 }
 
-async function parseNoManagedResidueDraft(
-  value: unknown,
+async function parseNoManagedResidueDraft<Input>(
+  value: Input,
   journal: UninstallJournal,
 ): Promise<NoManagedResidueActionDraft | null> {
-  if (!isRecord(value) || !exactKeys(value, ['schemaVersion', 'kind', 'result']) ||
-    value.schemaVersion !== 1 || value.kind !== 'management_no_managed_residue' ||
-    !isRecord(value.result) || typeof value.result.attemptId !== 'string' ||
-    value.result.attemptId !== activeApproval(journal).attemptId) return null;
+  const candidate = v.safeParse(noManagedResidueDraftSchema, value);
+  if (!candidate.success ||
+    referencedAttemptId(candidate.output.result) !== activeApproval(journal).attemptId) return null;
   const result = await parseHostedUninstallManagementNoManagedResidueResult(
     activeManagementContext(journal),
-    value.result,
+    candidate.output.result,
   );
   return result?.uninstallCycleId === journal.uninstallCycleId &&
     noManagedResidueMatchesVerifiedPrerequisites(journal, result)
@@ -1314,26 +1508,27 @@ async function parseNoManagedResidueDraft(
     : null;
 }
 
-function validPhaseTimes(value: {
-  readonly phase: unknown;
-  readonly preparedAt: unknown;
-  readonly sendArmedAt: unknown;
-  readonly submittedAt: unknown;
-  readonly verifiedAt: unknown;
-}, minimum: number, maximum: number): boolean {
-  if (!['prepared', 'send_armed', 'submitted', 'verified'].includes(String(value.phase)) ||
-    !safeInteger(value.preparedAt) || value.preparedAt < minimum || value.preparedAt > maximum) return false;
-  const phase = value.phase as UninstallActionPhase;
+interface UninstallPhaseTimes {
+  readonly phase: UninstallActionPhase;
+  readonly preparedAt: number;
+  readonly sendArmedAt: number | null;
+  readonly submittedAt: number | null;
+  readonly verifiedAt: number | null;
+}
+
+function validPhaseTimes(value: UninstallPhaseTimes, minimum: number, maximum: number): boolean {
+  if (value.preparedAt < minimum || value.preparedAt > maximum) return false;
+  const phase = value.phase;
   const armed = phase !== 'prepared';
   const submitted = phase === 'submitted' || phase === 'verified';
   const verified = phase === 'verified';
-  return armed === safeInteger(value.sendArmedAt) && submitted === safeInteger(value.submittedAt) &&
-    verified === safeInteger(value.verifiedAt) &&
-    (!armed || (value.sendArmedAt as number) >= value.preparedAt) &&
-    (!submitted || (value.submittedAt as number) >= (value.sendArmedAt as number)) &&
-    (!verified || (value.verifiedAt as number) >= (value.submittedAt as number)) &&
+  return armed === (value.sendArmedAt !== null) && submitted === (value.submittedAt !== null) &&
+    verified === (value.verifiedAt !== null) &&
+    (value.sendArmedAt === null || value.sendArmedAt >= value.preparedAt) &&
+    (value.submittedAt === null || value.sendArmedAt !== null && value.submittedAt >= value.sendArmedAt) &&
+    (value.verifiedAt === null || value.submittedAt !== null && value.verifiedAt >= value.submittedAt) &&
     [value.sendArmedAt, value.submittedAt, value.verifiedAt].every(
-      (time) => time === null || (safeInteger(time) && time <= maximum),
+      (time) => time === null || time <= maximum,
     );
 }
 
@@ -1341,60 +1536,45 @@ async function workersDevRequestHash(enabled: boolean): Promise<string> {
   return sha256Hex(canonicalJson({ enabled, previews_enabled: false }));
 }
 
-async function parseWorkersDevMutation(
-  value: unknown,
+async function parseWorkersDevMutation<Input>(
+  value: Input,
   enabled: boolean,
   journal: UninstallJournal,
 ): Promise<UninstallWorkersDevMutation | null> {
-  const approvalAttemptId = isRecord(value) && typeof value.approvalAttemptId === 'string'
-    ? value.approvalAttemptId
-    : null;
-  const approval = approvalAttemptId ? approvalByAttempt(journal, approvalAttemptId) : null;
-  const phase = isRecord(value) && typeof value.phase === 'string'
-    ? value.phase as UninstallWorkersDevPhase
-    : null;
-  const submittedByAttemptId = isRecord(value) && typeof value.submittedByAttemptId === 'string'
-    ? value.submittedByAttemptId
-    : null;
-  const verifiedByAttemptId = isRecord(value) && typeof value.verifiedByAttemptId === 'string'
-    ? value.verifiedByAttemptId
-    : null;
+  const candidate = v.safeParse(workersDevMutationSchema, value);
+  if (!candidate.success) return null;
+  const mutation = candidate.output;
+  const approval = approvalByAttempt(journal, mutation.approvalAttemptId);
+  const phase = mutation.phase;
+  const submittedByAttemptId = mutation.submittedByAttemptId;
+  const verifiedByAttemptId = mutation.verifiedByAttemptId;
   const submittedApproval = submittedByAttemptId
     ? approvalByAttempt(journal, submittedByAttemptId)
     : null;
   const verifiedApproval = verifiedByAttemptId
     ? approvalByAttempt(journal, verifiedByAttemptId)
     : null;
-  const basePhaseValid = isRecord(value) && phase !== 'not_applied' && validPhaseTimes(
-    value as Record<string, unknown> & {
-      phase: unknown; preparedAt: unknown; sendArmedAt: unknown; submittedAt: unknown; verifiedAt: unknown;
-    },
+  const basePhaseValid = phase !== 'not_applied' && validPhaseTimes(
+    { ...mutation, phase },
     journal.createdAt,
     journal.updatedAt,
   );
-  const notAppliedPhaseValid = phase === 'not_applied' && isRecord(value) &&
-    safeInteger(value.preparedAt) && safeInteger(value.sendArmedAt) &&
-    value.submittedAt === null && safeInteger(value.verifiedAt) &&
-    value.preparedAt >= journal.createdAt && value.sendArmedAt >= value.preparedAt &&
-    value.verifiedAt >= value.sendArmedAt && value.verifiedAt <= journal.updatedAt;
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'kind', 'approvalAttemptId', 'accountId', 'workerName', 'uninstallCycleId',
-    'enabled', 'previewsEnabled', 'requestHash', 'phase', 'locator', 'preparedAt',
-    'sendArmedAt', 'submittedAt', 'submittedByAttemptId', 'verifiedAt', 'verifiedByAttemptId',
-  ]) || value.schemaVersion !== 1 || value.kind !== 'uninstall_workers_dev' || value.enabled !== enabled ||
-    value.previewsEnabled !== false || typeof value.approvalAttemptId !== 'string' ||
-    !approval ||
-    typeof value.accountId !== 'string' || typeof value.workerName !== 'string' ||
-    typeof value.uninstallCycleId !== 'string' ||
-    !lifecycleIdentityMatches({ ...value, workerId: workerIdentity(journal).workerId } as never, journal) ||
-    typeof value.requestHash !== 'string' || value.requestHash !== await workersDevRequestHash(enabled) ||
+  const notAppliedPhaseValid = phase === 'not_applied' && mutation.sendArmedAt !== null &&
+    mutation.submittedAt === null && mutation.verifiedAt !== null &&
+    mutation.preparedAt >= journal.createdAt && mutation.sendArmedAt >= mutation.preparedAt &&
+    mutation.verifiedAt >= mutation.sendArmedAt && mutation.verifiedAt <= journal.updatedAt;
+  const identity = workerIdentity(journal);
+  if (mutation.enabled !== enabled || !approval ||
+    mutation.accountId !== identity.accountId || mutation.workerName !== identity.workerName ||
+    mutation.uninstallCycleId !== journal.uninstallCycleId ||
+    mutation.requestHash !== await workersDevRequestHash(enabled) ||
     (!basePhaseValid && !notAppliedPhaseValid) ||
-    (value.preparedAt as number) < approval.recordedAt ||
-    !approvalWasActiveAt(journal, approval.attemptId, value.preparedAt as number) ||
-    [value.preparedAt, value.sendArmedAt].some(
-      (time) => typeof time === 'number' && time >= approval.plan.expiresAt,
+    mutation.preparedAt < approval.recordedAt ||
+    !approvalWasActiveAt(journal, approval.attemptId, mutation.preparedAt) ||
+    [mutation.preparedAt, mutation.sendArmedAt].some(
+      (time) => time !== null && time >= approval.plan.expiresAt,
     )) return null;
-  const parsedPhase = phase as UninstallWorkersDevPhase;
+  const parsedPhase = phase;
   const submitted = parsedPhase === 'submitted' || parsedPhase === 'verified';
   const notApplied = parsedPhase === 'not_applied';
   const verified = parsedPhase === 'verified' || notApplied;
@@ -1405,43 +1585,43 @@ async function parseWorkersDevMutation(
   const verifiedApprovalIndex = verifiedByAttemptId
     ? approvalIndexByAttempt(journal, verifiedByAttemptId)
     : -1;
-  if (submitted !== Boolean(submittedApproval) || verified !== Boolean(verifiedApproval) ||
-    (!submitted && value.submittedByAttemptId !== null) ||
-    (!verified && value.verifiedByAttemptId !== null) ||
+  if (submitted !== (submittedApproval !== null) || verified !== (verifiedApproval !== null) ||
+    (!submitted && mutation.submittedByAttemptId !== null) ||
+    (!verified && mutation.verifiedByAttemptId !== null) ||
     (submitted && submittedApprovalIndex < originApprovalIndex) ||
-    (verified && verifiedApprovalIndex < (submitted ? submittedApprovalIndex : originApprovalIndex)) ||
-    (submitted && ((value.submittedAt as number) < (submittedApproval as UninstallJournalApproval).recordedAt ||
-      (value.submittedAt as number) >= (submittedApproval as UninstallJournalApproval).plan.expiresAt ||
-      !approvalWasActiveAt(journal, submittedByAttemptId as string, value.submittedAt as number))) ||
-    (verified && ((value.verifiedAt as number) < (verifiedApproval as UninstallJournalApproval).recordedAt ||
-      (value.verifiedAt as number) >= (verifiedApproval as UninstallJournalApproval).plan.expiresAt ||
-      !approvalWasActiveAt(journal, verifiedByAttemptId as string, value.verifiedAt as number)))) return null;
+    (verified && verifiedApprovalIndex < (submitted ? submittedApprovalIndex : originApprovalIndex))) return null;
+  if (submitted && (!submittedApproval || submittedByAttemptId === null || mutation.submittedAt === null ||
+    mutation.submittedAt < submittedApproval.recordedAt ||
+    mutation.submittedAt >= submittedApproval.plan.expiresAt ||
+    !approvalWasActiveAt(journal, submittedByAttemptId, mutation.submittedAt))) return null;
+  if (verified && (!verifiedApproval || verifiedByAttemptId === null || mutation.verifiedAt === null ||
+    mutation.verifiedAt < verifiedApproval.recordedAt || mutation.verifiedAt >= verifiedApproval.plan.expiresAt ||
+    !approvalWasActiveAt(journal, verifiedByAttemptId, mutation.verifiedAt))) return null;
   let locator: { readonly enabled: boolean; readonly previewsEnabled: false } | null = null;
   if (submitted || notApplied) {
-    if (!isRecord(value.locator) || !exactKeys(value.locator, ['enabled', 'previewsEnabled']) ||
-      value.locator.enabled !== (notApplied ? !enabled : enabled) ||
-      value.locator.previewsEnabled !== false) return null;
+    if (!mutation.locator || mutation.locator.enabled !== (notApplied ? !enabled : enabled)) return null;
     locator = deepFreeze({ enabled: notApplied ? !enabled : enabled, previewsEnabled: false });
-  } else if (value.locator !== null) return null;
-  return deepFreeze({
+  } else if (mutation.locator !== null) return null;
+  const parsed: UninstallWorkersDevMutation = deepFreeze({
     schemaVersion: 1,
     kind: 'uninstall_workers_dev',
-    approvalAttemptId: value.approvalAttemptId,
-    accountId: value.accountId,
-    workerName: value.workerName,
-    uninstallCycleId: value.uninstallCycleId,
+    approvalAttemptId: mutation.approvalAttemptId,
+    accountId: mutation.accountId,
+    workerName: mutation.workerName,
+    uninstallCycleId: mutation.uninstallCycleId,
     enabled,
     previewsEnabled: false,
-    requestHash: value.requestHash,
+    requestHash: mutation.requestHash,
     phase: parsedPhase,
     locator,
-    preparedAt: value.preparedAt as number,
-    sendArmedAt: parsedPhase === 'prepared' ? null : value.sendArmedAt as number,
-    submittedAt: submitted ? value.submittedAt as number : null,
-    submittedByAttemptId: submitted ? submittedByAttemptId : null,
-    verifiedAt: verified ? value.verifiedAt as number : null,
-    verifiedByAttemptId: verified ? verifiedByAttemptId : null,
+    preparedAt: mutation.preparedAt,
+    sendArmedAt: mutation.sendArmedAt,
+    submittedAt: mutation.submittedAt,
+    submittedByAttemptId,
+    verifiedAt: mutation.verifiedAt,
+    verifiedByAttemptId,
   });
+  return parsed;
 }
 
 function latestDisableAttempt(
@@ -1468,27 +1648,21 @@ function customerAttemptCanBeFollowedByFreshCycle(
   return disable?.phase === 'verified' && disable.locator?.enabled === false && requestCanBeRetried;
 }
 
-async function parseCustomerGatewayRemoveRecord(
-  value: unknown,
+async function parseCustomerGatewayRemoveRecord<Input>(
+  value: Input,
   journal: UninstallJournal,
 ): Promise<CustomerGatewayRemoveActionRecord | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'kind', 'accountId', 'zoneId', 'zoneName', 'workerName', 'installationId',
-    'uninstallCycleId', 'attempts',
-  ]) || value.schemaVersion !== 1 || value.kind !== 'customer_gateway_remove' ||
-    value.accountId !== journal.installJournal.target.account.id ||
-    value.zoneId !== journal.installJournal.target.zone.id || value.zoneName !== journal.installJournal.target.zone.name ||
-    value.workerName !== journal.uninstallPlan.gateway.workerName ||
-    value.installationId !== journal.installJournal.installationId || value.uninstallCycleId !== journal.uninstallCycleId ||
-    !Array.isArray(value.attempts) || value.attempts.length < 1 ||
-    value.attempts.length > MAX_CUSTOMER_REMOVE_CYCLES) return null;
+  const candidate = v.safeParse(customerGatewayRemoveRecordSchema, value);
+  if (!candidate.success) return null;
+  const recordInput = candidate.output;
+  if (recordInput.accountId !== journal.installJournal.target.account.id ||
+    recordInput.zoneId !== journal.installJournal.target.zone.id ||
+    recordInput.zoneName !== journal.installJournal.target.zone.name ||
+    recordInput.workerName !== journal.uninstallPlan.gateway.workerName ||
+    recordInput.installationId !== journal.installJournal.installationId ||
+    recordInput.uninstallCycleId !== journal.uninstallCycleId) return null;
   const attempts: CustomerGatewayRemoveRequestAttempt[] = [];
-  for (const raw of value.attempts) {
-    if (!isRecord(raw) || !exactKeys(raw, [
-      'schemaVersion', 'approvalAttemptId', 'semantic', 'enable', 'requestPhase', 'locator', 'disableAttempts',
-      'preparedAt', 'sendArmedAt', 'submittedAt', 'submittedByAttemptId', 'verifiedAt',
-      'verifiedByAttemptId',
-    ]) || raw.schemaVersion !== 1 || typeof raw.approvalAttemptId !== 'string') return null;
+  for (const raw of recordInput.attempts) {
     const approval = approvalByAttempt(journal, raw.approvalAttemptId);
     const semantic = parseCustomerUninstallSemanticRecord(raw.semantic);
     const enable = await parseWorkersDevMutation(raw.enable, true, journal);
@@ -1501,9 +1675,9 @@ async function parseCustomerGatewayRemoveRecord(
       : prior ? latestDisableAttempt(prior)?.verifiedAt : null;
     if (!approval || !semantic || !enable || !await customerSemanticMatchesAuthority(semantic, journal) ||
       semantic.approvalAttemptId !== approval.attemptId ||
-      enable.approvalAttemptId !== approval.attemptId || semantic.accountId !== value.accountId ||
-      semantic.zoneId !== value.zoneId || semantic.zoneName !== value.zoneName ||
-      semantic.workerName !== value.workerName || semantic.installationId !== value.installationId ||
+      enable.approvalAttemptId !== approval.attemptId || semantic.accountId !== recordInput.accountId ||
+      semantic.zoneId !== recordInput.zoneId || semantic.zoneName !== recordInput.zoneName ||
+      semantic.workerName !== recordInput.workerName || semantic.installationId !== recordInput.installationId ||
       semantic.uninstallPlanId !== approval.plan.planId || semantic.uninstallPlanHash !== approval.plan.planHash ||
       semantic.authorityHash !== approval.plan.authorityHash || semantic.installBindingHash !== journal.installJournal.bindingHash ||
       semantic.installConvergenceHash !== installFinal(journal).convergenceHash ||
@@ -1514,15 +1688,15 @@ async function parseCustomerGatewayRemoveRecord(
       semantic.release.artifactSha256 !== `sha256:${journal.installJournal.releasePin.artifactSha256}` ||
       semantic.expiresAt * 1_000 > approval.plan.expiresAt ||
       semantic.expiresAt * 1_000 > journal.recoverUntil ||
-      semantic.issuedAt * 1_000 > (raw.preparedAt as number) ||
-      semantic.expiresAt * 1_000 <= (raw.preparedAt as number) ||
+      semantic.issuedAt * 1_000 > raw.preparedAt ||
+      semantic.expiresAt * 1_000 <= raw.preparedAt ||
       attempts.some((attempt) => attempt.approvalAttemptId === approval.attemptId ||
         attempt.semantic.requestId === semantic.requestId) ||
       (prior && !customerAttemptCanBeFollowedByFreshCycle(prior)) ||
       (priorTerminalAttemptId && approvalIndexByAttempt(journal, approval.attemptId) <
         approvalIndexByAttempt(journal, priorTerminalAttemptId)) ||
       (priorTerminalAt !== null && priorTerminalAt !== undefined &&
-        (raw.preparedAt as number) < priorTerminalAt) ||
+        raw.preparedAt < priorTerminalAt) ||
       raw.preparedAt !== enable.preparedAt ||
       !validPhaseTimes({
         phase: raw.requestPhase,
@@ -1531,13 +1705,13 @@ async function parseCustomerGatewayRemoveRecord(
         submittedAt: raw.submittedAt,
         verifiedAt: raw.verifiedAt,
       }, approval.approvedAt, journal.updatedAt)) return null;
-    const requestPhase = raw.requestPhase as UninstallActionPhase;
+    const requestPhase = raw.requestPhase;
     const requestSubmitted = requestPhase === 'submitted' || requestPhase === 'verified';
     const requestVerified = requestPhase === 'verified';
-    const submittedApproval = typeof raw.submittedByAttemptId === 'string'
+    const submittedApproval = raw.submittedByAttemptId !== null
       ? approvalByAttempt(journal, raw.submittedByAttemptId)
       : null;
-    const verifiedApproval = typeof raw.verifiedByAttemptId === 'string'
+    const verifiedApproval = raw.verifiedByAttemptId !== null
       ? approvalByAttempt(journal, raw.verifiedByAttemptId)
       : null;
     const originApprovalIndex = approvalIndexByAttempt(journal, approval.attemptId);
@@ -1547,30 +1721,25 @@ async function parseCustomerGatewayRemoveRecord(
     const verifiedApprovalIndex = verifiedApproval
       ? approvalIndexByAttempt(journal, verifiedApproval.attemptId)
       : -1;
-    if (requestPhase !== 'prepared' && (
-      enable.phase !== 'verified' || (raw.sendArmedAt as number) < (enable.verifiedAt as number) ||
-      (raw.sendArmedAt as number) >= semantic.expiresAt * 1_000
-    )) return null;
-    if (requestSubmitted !== Boolean(submittedApproval) || requestVerified !== Boolean(verifiedApproval) ||
+    if (requestPhase !== 'prepared' && (enable.phase !== 'verified' || enable.verifiedAt === null ||
+      raw.sendArmedAt === null || raw.sendArmedAt < enable.verifiedAt ||
+      raw.sendArmedAt >= semantic.expiresAt * 1_000)) return null;
+    if (requestSubmitted !== (submittedApproval !== null) || requestVerified !== (verifiedApproval !== null) ||
       (!requestSubmitted && raw.submittedByAttemptId !== null) ||
       (!requestVerified && raw.verifiedByAttemptId !== null) ||
       (requestSubmitted && submittedApprovalIndex < originApprovalIndex) ||
-      (requestVerified && verifiedApprovalIndex < submittedApprovalIndex) ||
-      (requestSubmitted && ((raw.submittedAt as number) <
-        (submittedApproval as UninstallJournalApproval).recordedAt ||
-        (raw.submittedAt as number) >= (submittedApproval as UninstallJournalApproval).plan.expiresAt ||
-        !approvalWasActiveAt(journal, raw.submittedByAttemptId as string, raw.submittedAt as number))) ||
-      (requestVerified && ((raw.verifiedAt as number) <
-        (verifiedApproval as UninstallJournalApproval).recordedAt ||
-        (raw.verifiedAt as number) >= (verifiedApproval as UninstallJournalApproval).plan.expiresAt ||
-        !approvalWasActiveAt(journal, raw.verifiedByAttemptId as string, raw.verifiedAt as number)))) return null;
+      (requestVerified && verifiedApprovalIndex < submittedApprovalIndex)) return null;
+    if (requestSubmitted && (!submittedApproval || raw.submittedByAttemptId === null || raw.submittedAt === null ||
+      raw.submittedAt < submittedApproval.recordedAt || raw.submittedAt >= submittedApproval.plan.expiresAt ||
+      !approvalWasActiveAt(journal, raw.submittedByAttemptId, raw.submittedAt))) return null;
+    if (requestVerified && (!verifiedApproval || raw.verifiedByAttemptId === null || raw.verifiedAt === null ||
+      raw.verifiedAt < verifiedApproval.recordedAt || raw.verifiedAt >= verifiedApproval.plan.expiresAt ||
+      !approvalWasActiveAt(journal, raw.verifiedByAttemptId, raw.verifiedAt))) return null;
     let locator: CustomerUninstallLocator | null = null;
     if (requestSubmitted) {
       locator = await parseCustomerUninstallLocator(raw.locator, semantic, journal.installJournal);
       if (!locator || (requestPhase === 'verified' && locator.status !== 'removed')) return null;
     } else if (raw.locator !== null) return null;
-    if (!Array.isArray(raw.disableAttempts) ||
-      raw.disableAttempts.length > MAX_WORKERS_DEV_DISABLE_ATTEMPTS) return null;
     const disableAttempts: UninstallWorkersDevMutation[] = [];
     const latestRequestActorIndex = requestVerified
       ? verifiedApprovalIndex
@@ -1584,14 +1753,15 @@ async function parseCustomerGatewayRemoveRecord(
       const previousDisable = disableAttempts[disableAttempts.length - 1];
       const disableApproval = disable ? approvalByAttempt(journal, disable.approvalAttemptId) : null;
       if (!disable || !disableApproval || enable.phase !== 'verified' ||
+        enable.verifiedByAttemptId === null || enable.verifiedAt === null ||
         approvalIndexByAttempt(journal, disable.approvalAttemptId) < approvalIndexByAttempt(
           journal,
-          enable.verifiedByAttemptId as string,
+          enable.verifiedByAttemptId,
         ) ||
         approvalIndexByAttempt(journal, disable.approvalAttemptId) < latestRequestActorIndex ||
-        disable.preparedAt < (enable.verifiedAt as number) ||
+        disable.preparedAt < enable.verifiedAt ||
         (requestPhase !== 'prepared' && disableAttempts.length === 0 &&
-          disable.preparedAt < (raw.sendArmedAt as number)) ||
+          (raw.sendArmedAt === null || disable.preparedAt < raw.sendArmedAt)) ||
         (requestPhase === 'prepared' && disableAttempts.length === 0 &&
           disable.approvalAttemptId === approval.attemptId &&
           disable.preparedAt < semantic.expiresAt * 1_000) ||
@@ -1599,18 +1769,19 @@ async function parseCustomerGatewayRemoveRecord(
         disableAttempts.some((entry) => entry.approvalAttemptId === disable.approvalAttemptId) ||
         (previousDisable && (previousDisable.phase !== 'not_applied' ||
           previousDisable.locator?.enabled !== true ||
+          previousDisable.verifiedByAttemptId === null || previousDisable.verifiedAt === null ||
           disable.approvalAttemptId === previousDisable.approvalAttemptId ||
           approvalIndexByAttempt(journal, disable.approvalAttemptId) < approvalIndexByAttempt(
             journal,
-            previousDisable.verifiedByAttemptId as string,
+            previousDisable.verifiedByAttemptId,
           ) ||
-          disable.preparedAt < (previousDisable.verifiedAt as number)))) return null;
+          disable.preparedAt < previousDisable.verifiedAt))) return null;
       disableAttempts.push(disable);
     }
     if (enable.phase === 'not_applied' && (
       requestPhase !== 'prepared' || raw.locator !== null || disableAttempts.length !== 0
     )) return null;
-    attempts.push(deepFreeze({
+    const attempt: CustomerGatewayRemoveRequestAttempt = deepFreeze({
       schemaVersion: 1,
       approvalAttemptId: approval.attemptId,
       semantic,
@@ -1618,23 +1789,24 @@ async function parseCustomerGatewayRemoveRecord(
       requestPhase,
       locator,
       disableAttempts,
-      preparedAt: raw.preparedAt as number,
-      sendArmedAt: requestPhase === 'prepared' ? null : raw.sendArmedAt as number,
-      submittedAt: requestSubmitted ? raw.submittedAt as number : null,
-      submittedByAttemptId: requestSubmitted ? raw.submittedByAttemptId as string : null,
-      verifiedAt: requestPhase === 'verified' ? raw.verifiedAt as number : null,
-      verifiedByAttemptId: requestVerified ? raw.verifiedByAttemptId as string : null,
-    }));
+      preparedAt: raw.preparedAt,
+      sendArmedAt: raw.sendArmedAt,
+      submittedAt: raw.submittedAt,
+      submittedByAttemptId: raw.submittedByAttemptId,
+      verifiedAt: raw.verifiedAt,
+      verifiedByAttemptId: raw.verifiedByAttemptId,
+    });
+    attempts.push(attempt);
   }
   return deepFreeze({
     schemaVersion: 1,
     kind: 'customer_gateway_remove',
-    accountId: value.accountId,
-    zoneId: value.zoneId,
-    zoneName: value.zoneName,
-    workerName: value.workerName,
-    installationId: value.installationId,
-    uninstallCycleId: value.uninstallCycleId,
+    accountId: recordInput.accountId,
+    zoneId: recordInput.zoneId,
+    zoneName: recordInput.zoneName,
+    workerName: recordInput.workerName,
+    installationId: recordInput.installationId,
+    uninstallCycleId: recordInput.uninstallCycleId,
     attempts,
   });
 }
@@ -1649,13 +1821,14 @@ function customerActionSummary(record: CustomerGatewayRemoveActionRecord): Omit<
   const removed = attempt.requestPhase === 'verified' && attempt.locator?.status === 'removed';
   const disabled = disable?.phase === 'verified' && disable.locator?.enabled === false;
   if (removed && disabled) {
+    if (attempt.verifiedAt === null || disable.verifiedAt === null) invalid();
     return {
       phase: 'verified',
       locator: attempt.locator,
       preparedAt: attempt.preparedAt,
       sendArmedAt: attempt.sendArmedAt,
       submittedAt: attempt.submittedAt,
-      verifiedAt: Math.max(attempt.verifiedAt as number, disable?.verifiedAt as number),
+      verifiedAt: Math.max(attempt.verifiedAt, disable.verifiedAt),
     };
   }
   const eventTimes = [
@@ -1664,7 +1837,7 @@ function customerActionSummary(record: CustomerGatewayRemoveActionRecord): Omit<
     ...attempt.disableAttempts.flatMap((entry) => [
       entry.sendArmedAt, entry.submittedAt, entry.verifiedAt,
     ]),
-  ].filter((time): time is number => typeof time === 'number');
+  ].filter((time): time is number => time !== null);
   const phase: UninstallActionPhase = attempt.requestPhase === 'submitted' || attempt.requestPhase === 'verified'
     ? 'submitted'
     : attempt.requestPhase === 'send_armed' || attempt.enable.phase !== 'prepared' ||
@@ -1681,9 +1854,9 @@ function customerActionSummary(record: CustomerGatewayRemoveActionRecord): Omit<
   };
 }
 
-async function parseActionRecord(
+async function parseActionRecord<Input>(
   name: UninstallActionName,
-  value: unknown,
+  value: Input,
   journal: UninstallJournal,
 ): Promise<UninstallActionRecord | null> {
   if (name === 'cleanup_worker_version_create') return parseVersionActionRecord(value, 'cleanup', journal);
@@ -1697,9 +1870,9 @@ async function parseActionRecord(
     return parseManagementDeleteActionRecord(value, name, journal);
   }
   if (name === 'admin_state_namespace_retired') {
-    if (!isRecord(value) || !exactKeys(value, ['schemaVersion', 'kind', 'proof']) ||
-      value.schemaVersion !== 1 || value.kind !== name) return null;
-    const proof = parseAdminStateNamespaceRetirementProof(value.proof);
+    const candidate = v.safeParse(namespaceRetirementRecordSchema, value);
+    if (!candidate.success) return null;
+    const proof = parseAdminStateNamespaceRetirementProof(candidate.output.proof);
     const retirement = verifiedAction(journal, 'retirement_worker_version_create')?.locator;
     if (!proof || !lifecycleIdentityMatches(proof, journal) || proof.namespaceId !== workerIdentity(journal).namespaceId ||
       !retirement || !('kind' in retirement) || retirement.kind !== 'uninstall_worker_version' ||
@@ -1707,51 +1880,47 @@ async function parseActionRecord(
     return deepFreeze({ schemaVersion: 1, kind: name, proof });
   }
   if (name === 'management_worker_delete') {
-    if (!isRecord(value) || !exactKeys(value, ['schemaVersion', 'kind', 'intent', 'submission']) ||
-      value.schemaVersion !== 1 || value.kind !== name) return null;
-    const intent = await parseWorkerDeleteMutationIntent(value.intent);
+    const candidate = v.safeParse(workerDeleteRecordSchema, value);
+    if (!candidate.success) return null;
+    const intent = await parseWorkerDeleteMutationIntent(candidate.output.intent);
     const namespace = verifiedAction(journal, 'admin_state_namespace_retired')?.locator;
     if (!intent || !lifecycleIdentityMatches(intent, journal) ||
       !namespace || !('kind' in namespace) || namespace.kind !== 'admin_state_namespace_retirement' ||
       !canonicalEqual(intent.retirementProof, namespace)) return null;
-    const submission = value.submission === null ? null :
-      parseLifecycleSubmission(value.submission, 'uninstall_worker_delete', journal);
-    if (value.submission !== null && (!submission || submission.requestHash !== intent.requestHash ||
+    const submission = candidate.output.submission === null ? null :
+      parseLifecycleSubmission(candidate.output.submission, 'uninstall_worker_delete', journal);
+    if (candidate.output.submission !== null && (!submission || submission.requestHash !== intent.requestHash ||
       submission.retirementProofCommitment !== intent.retirementProofCommitment)) return null;
     return deepFreeze({ schemaVersion: 1, kind: name, intent, submission });
   }
   if (name === 'management_no_managed_residue') {
-    if (!isRecord(value) || !exactKeys(value, [
-      'schemaVersion', 'kind', 'result', 'preparedByAttemptId', 'armedByAttemptId',
-      'submittedByAttemptId', 'verifiedByAttemptId',
-    ]) ||
-      value.schemaVersion !== 1 || value.kind !== name || !isRecord(value.result) ||
-      typeof value.result.attemptId !== 'string' || typeof value.preparedByAttemptId !== 'string' ||
-      value.preparedByAttemptId !== value.result.attemptId ||
-      ![value.armedByAttemptId, value.submittedByAttemptId, value.verifiedByAttemptId].every(
-        (attemptId) => attemptId === null ||
-          (typeof attemptId === 'string' && approvalByAttempt(journal, attemptId) !== null),
+    const candidate = v.safeParse(noManagedResidueRecordSchema, value);
+    if (!candidate.success) return null;
+    const recordInput = candidate.output;
+    const resultAttemptId = referencedAttemptId(recordInput.result);
+    if (!resultAttemptId || recordInput.preparedByAttemptId !== resultAttemptId ||
+      ![recordInput.armedByAttemptId, recordInput.submittedByAttemptId, recordInput.verifiedByAttemptId].every(
+        (attemptId) => attemptId === null || approvalByAttempt(journal, attemptId) !== null,
       )) return null;
-    const context = contextForAttempt(journal, value.result.attemptId);
-    const result = context ? await parseHostedUninstallManagementNoManagedResidueResult(context, value.result) : null;
+    const context = contextForAttempt(journal, resultAttemptId);
+    const result = context ? await parseHostedUninstallManagementNoManagedResidueResult(context, recordInput.result) : null;
     if (!result || result.uninstallCycleId !== journal.uninstallCycleId ||
       !noManagedResidueMatchesVerifiedPrerequisites(journal, result)) return null;
     return deepFreeze({
       schemaVersion: 1,
       kind: name,
       result,
-      preparedByAttemptId: value.preparedByAttemptId,
-      armedByAttemptId: value.armedByAttemptId as string | null,
-      submittedByAttemptId: value.submittedByAttemptId as string | null,
-      verifiedByAttemptId: value.verifiedByAttemptId as string | null,
+      preparedByAttemptId: recordInput.preparedByAttemptId,
+      armedByAttemptId: recordInput.armedByAttemptId,
+      submittedByAttemptId: recordInput.submittedByAttemptId,
+      verifiedByAttemptId: recordInput.verifiedByAttemptId,
     });
   }
   if (name === 'uninstall_final_convergence') {
-    if (!isRecord(value) || !exactKeys(value, ['schemaVersion', 'kind', 'convergenceHash']) ||
-      value.schemaVersion !== 1 || value.kind !== name || typeof value.convergenceHash !== 'string' ||
-      !PREFIXED_SHA256.test(value.convergenceHash)) return null;
+    const candidate = v.safeParse(uninstallFinalConvergenceRecordSchema, value);
+    if (!candidate.success) return null;
     const expected = await finalConvergenceProjection(journal);
-    return value.convergenceHash === expected.record.convergenceHash ? expected.record : null;
+    return candidate.output.convergenceHash === expected.record.convergenceHash ? expected.record : null;
   }
   return null;
 }
@@ -1843,7 +2012,7 @@ export async function prepareUninstallJournalAction(
 ): Promise<UninstallJournal> {
   cas(journal, input, true);
   if (!actionPrerequisites(journal, input.action)) conflict();
-  const context = { ...journal, updatedAt: input.now } as UninstallJournal;
+  const context: UninstallJournal = { ...journal, updatedAt: input.now };
   let record: UninstallActionRecord;
   if (isManagementDeleteActionName(input.action)) {
     const draft = await parseManagementDeleteDraft(input.record, input.action, context);
@@ -1870,9 +2039,9 @@ export async function prepareUninstallJournalAction(
     if (!parsed) invalid(400);
     record = parsed;
   }
-  const action = deepFreeze({
+  const action: UninstallJournalAction = deepFreeze({
     name: input.action,
-    phase: 'prepared' as const,
+    phase: 'prepared',
     record,
     locator: null,
     preparedAt: input.now,
@@ -1891,7 +2060,7 @@ export async function replacePreparedUninstallJournalAction(
   const index = UNINSTALL_ACTION_ORDER.indexOf(input.action);
   const existing = journal.actions[index];
   if (!existing || existing.phase !== 'prepared' || index !== journal.actions.length - 1) conflict();
-  const context = { ...journal, updatedAt: input.now } as UninstallJournal;
+  const context: UninstallJournal = { ...journal, updatedAt: input.now };
   let record: UninstallActionRecord;
   if (isManagementDeleteActionName(input.action)) {
     if (!('kind' in existing.record) || existing.record.kind !== 'uninstall_management_delete' ||
@@ -1951,7 +2120,7 @@ export async function appendUninstallManagementDeleteAttempt(
     kind: 'uninstall_management_delete',
     prerequisites: input.prerequisites,
     intent: input.intent,
-  }, input.action, { ...journal, updatedAt: input.now } as UninstallJournal);
+  }, input.action, { ...journal, updatedAt: input.now });
   if (!draft || draft.intent.attemptId === previous.intent.attemptId) invalid(400);
   requireFreshDomainDeleteDraft(journal, draft, input.attemptId, input.now);
   const record = deepFreeze({
@@ -2031,9 +2200,9 @@ export async function armUninstallJournalAction(
       input.value,
     );
     if (!arm || arm.armedAt !== input.now) invalid(400);
-    const armedAttempt = deepFreeze({
+    const armedAttempt: ManagementDeleteAttempt = deepFreeze({
       ...attempt,
-      phase: 'send_armed' as const,
+      phase: 'send_armed',
       arm,
       sendArmedAt: input.now,
     });
@@ -2053,10 +2222,10 @@ export async function armUninstallJournalAction(
   }, input.now);
 }
 
-async function parseActionSubmission(
+async function parseActionSubmission<Input>(
   journal: UninstallJournal,
   action: UninstallJournalAction,
-  value: unknown,
+  value: Input,
   now: number,
   attemptId: string,
 ): Promise<{ readonly record: UninstallActionRecord; readonly locator: UninstallActionLocator | null } | null> {
@@ -2088,9 +2257,9 @@ async function parseActionSubmission(
       value,
     ) : null;
     if (!attempt || !submission) return null;
-    const submittedAttempt = deepFreeze({
+    const submittedAttempt: ManagementDeleteAttempt = deepFreeze({
       ...attempt,
-      phase: 'submitted' as const,
+      phase: 'submitted',
       submission,
       submittedAt: now,
       submittedByAttemptId: attemptId,
@@ -2148,10 +2317,10 @@ export async function submitUninstallJournalAction(
   }, input.now);
 }
 
-async function parseActionVerification(
+async function parseActionVerification<Input>(
   journal: UninstallJournal,
   action: UninstallJournalAction,
-  value: unknown,
+  value: Input,
 ): Promise<UninstallActionLocator | null> {
   if (!('kind' in action.record)) return null;
   if (action.record.kind === 'uninstall_worker_version_create') {
@@ -2211,10 +2380,10 @@ export async function verifyUninstallJournalAction(
     if (!attempt || attempt.phase !== 'submitted' || !('status' in locator) || locator.status !== 'absent') {
       conflict();
     }
-    const verifiedAttempt = deepFreeze({
+    const verifiedAttempt: ManagementDeleteAttempt = deepFreeze({
       ...attempt,
-      phase: 'verified' as const,
-      locator: locator as HostedUninstallManagementAbsenceEvidence,
+      phase: 'verified',
+      locator,
       verifiedAt: input.now,
       verifiedByAttemptId: input.attemptId,
     });
@@ -2310,7 +2479,7 @@ function customerActionAndRecord(journal: UninstallJournal): {
   const index = customerActionIndex();
   const action = journal.actions[index];
   if (!action || !('kind' in action.record) || action.record.kind !== 'customer_gateway_remove') conflict();
-  return { index, action, record: action.record };
+  return Object.freeze({ index, action, record: action.record });
 }
 
 function replaceCustomerAction(
@@ -2381,9 +2550,9 @@ export async function appendCustomerGatewayRemoveAttempt(
     verifiedAt: null,
     verifiedByAttemptId: null,
   });
-  const candidate = {
-    schemaVersion: 1 as const,
-    kind: 'customer_gateway_remove' as const,
+  const candidate: CustomerGatewayRemoveActionRecord = {
+    schemaVersion: 1,
+    kind: 'customer_gateway_remove',
     accountId: identity.accountId,
     zoneId: journal.installJournal.target.zone.id,
     zoneName: journal.installJournal.target.zone.name,
@@ -2392,12 +2561,12 @@ export async function appendCustomerGatewayRemoveAttempt(
     uninstallCycleId: journal.uninstallCycleId,
     attempts: [...attempts, attempt],
   };
-  const context = { ...journal, updatedAt: input.now } as UninstallJournal;
+  const context: UninstallJournal = { ...journal, updatedAt: input.now };
   const record = await parseCustomerGatewayRemoveRecord(candidate, context);
   if (!record) invalid(400);
   if (!existing) {
-    const action = deepFreeze({
-      name: 'customer_gateway_remove' as const,
+    const action: UninstallJournalAction = deepFreeze({
+      name: 'customer_gateway_remove',
       record,
       ...customerActionSummary(record),
     });
@@ -2461,10 +2630,8 @@ export async function replacePreparedCustomerGatewayRemoveAttempt(
     ...current.record,
     attempts: [...current.record.attempts.slice(0, -1), replacement],
   };
-  const parsed = await parseCustomerGatewayRemoveRecord(
-    candidate,
-    { ...journal, updatedAt: input.now } as UninstallJournal,
-  );
+  const context: UninstallJournal = { ...journal, updatedAt: input.now };
+  const parsed = await parseCustomerGatewayRemoveRecord(candidate, context);
   if (!parsed) invalid(400);
   return replaceCustomerAction(journal, parsed, input.now);
 }
@@ -2563,10 +2730,8 @@ export async function replacePreparedCustomerGatewayWorkersDevDisable(
       replacement,
     ]),
   });
-  const parsed = await parseCustomerGatewayRemoveRecord(
-    { ...current.record, attempts },
-    { ...journal, updatedAt: input.now } as UninstallJournal,
-  );
+  const context: UninstallJournal = { ...journal, updatedAt: input.now };
+  const parsed = await parseCustomerGatewayRemoveRecord({ ...current.record, attempts }, context);
   if (!parsed) invalid(400);
   return replaceCustomerAction(journal, parsed, input.now);
 }
@@ -2848,38 +3013,38 @@ export async function prepareUninstallFinalConvergenceRecordAndLocator(
   return prepared;
 }
 
-async function parseApproval(
-  value: unknown,
+async function parseApproval<Input>(
+  value: Input,
   installJournal: InstallJournal,
   baseline: StaticUninstallPlan,
   recoverUntil: number,
 ): Promise<UninstallJournalApproval | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'attemptId', 'approvedAt', 'recordedAt', 'plan', 'authorizedTarget',
-  ]) || value.schemaVersion !== 1 || typeof value.attemptId !== 'string' || !ATTEMPT_ID.test(value.attemptId) ||
-    installAttemptWasUsed(installJournal, value.attemptId) ||
-    !safeInteger(value.approvedAt) || !safeInteger(value.recordedAt) || value.approvedAt > value.recordedAt ||
-    !targetMatches(value.authorizedTarget, installJournal.target)) return null;
+  const candidate = v.safeParse(uninstallApprovalSchema, value);
+  if (!candidate.success) return null;
+  const approvalInput = candidate.output;
+  if (installAttemptWasUsed(installJournal, approvalInput.attemptId) ||
+    approvalInput.approvedAt > approvalInput.recordedAt ||
+    !targetMatches(approvalInput.authorizedTarget, installJournal.target)) return null;
   let plan: StaticUninstallPlan;
   try {
-    plan = await exactReviewedPlan(installJournal, value.plan);
+    plan = await exactReviewedPlan(installJournal, approvalInput.plan);
   } catch {
     return null;
   }
-  if (value.approvedAt < plan.createdAt || value.approvedAt >= plan.expiresAt ||
-    value.recordedAt < plan.createdAt || value.recordedAt >= plan.expiresAt ||
+  if (approvalInput.approvedAt < plan.createdAt || approvalInput.approvedAt >= plan.expiresAt ||
+    approvalInput.recordedAt < plan.createdAt || approvalInput.recordedAt >= plan.expiresAt ||
     plan.expiresAt > recoverUntil || !await isRecoveryEquivalentUninstallPlan(baseline, plan)) return null;
   return deepFreeze({
     schemaVersion: 1,
-    attemptId: value.attemptId,
-    approvedAt: value.approvedAt,
-    recordedAt: value.recordedAt,
+    attemptId: approvalInput.attemptId,
+    approvedAt: approvalInput.approvedAt,
+    recordedAt: approvalInput.recordedAt,
     plan,
     authorizedTarget: installJournal.target,
   });
 }
 
-function actionPhaseShape(record: UninstallActionRecord, phase: UninstallActionPhase): boolean {
+function actionPhaseMatchesRecord(record: UninstallActionRecord, phase: UninstallActionPhase): boolean {
   if (!('kind' in record)) return false;
   if (record.kind === 'uninstall_worker_version_create') {
     return phase === 'prepared' || record.recovery !== null;
@@ -2908,10 +3073,10 @@ function actionPhaseShape(record: UninstallActionRecord, phase: UninstallActionP
   return true;
 }
 
-async function parsePersistedActionLocator(
+async function parsePersistedActionLocator<Input>(
   journal: UninstallJournal,
   action: UninstallJournalAction,
-  value: unknown,
+  value: Input,
 ): Promise<UninstallActionLocator | null> {
   if (action.phase === 'prepared' || action.phase === 'send_armed') return value === null ? null : null;
   if (!('kind' in action.record)) return null;
@@ -2952,81 +3117,82 @@ async function parsePersistedActionLocator(
   return null;
 }
 
-async function parsePersistedAction(
-  value: unknown,
+async function parsePersistedAction<Input>(
+  value: Input,
   expectedName: UninstallActionName,
   partial: UninstallJournal,
 ): Promise<UninstallJournalAction | null> {
-  if (!isRecord(value) || !exactKeys(value, [
-    'name', 'phase', 'record', 'locator', 'preparedAt', 'sendArmedAt', 'submittedAt', 'verifiedAt',
-  ]) || value.name !== expectedName) return null;
+  const candidate = v.safeParse(persistedUninstallActionSchema, value);
+  if (!candidate.success || candidate.output.name !== expectedName) return null;
+  const actionInput = candidate.output;
   const managementDelete = isManagementDeleteActionName(expectedName);
   if (!managementDelete && !validPhaseTimes({
-      phase: value.phase,
-      preparedAt: value.preparedAt,
-      sendArmedAt: value.sendArmedAt,
-      submittedAt: value.submittedAt,
-      verifiedAt: value.verifiedAt,
+      phase: actionInput.phase,
+      preparedAt: actionInput.preparedAt,
+      sendArmedAt: actionInput.sendArmedAt,
+      submittedAt: actionInput.submittedAt,
+      verifiedAt: actionInput.verifiedAt,
     }, partial.createdAt, partial.updatedAt)) return null;
-  if (managementDelete && !['prepared', 'send_armed', 'submitted', 'verified'].includes(
-    String(value.phase),
-  )) return null;
-  const phase = value.phase as UninstallActionPhase;
+  const phase = actionInput.phase;
   if (expectedName === 'uninstall_fresh_preflight') {
-    if (phase !== 'verified' || !isRecord(value.record) || typeof value.record.attemptId !== 'string') return null;
-    const approval = approvalByAttempt(partial, value.record.attemptId);
+    const recordAttemptId = referencedAttemptId(actionInput.record);
+    const locatorCandidate = v.safeParse(preflightLocatorSchema, actionInput.locator);
+    if (phase !== 'verified' || !recordAttemptId || !locatorCandidate.success ||
+      actionInput.sendArmedAt === null || actionInput.submittedAt === null ||
+      actionInput.verifiedAt === null) return null;
+    const approval = approvalByAttempt(partial, recordAttemptId);
     const context = approval ? approvalContext(partial, approval) : null;
-    const record = context ? await parseHostedUninstallManagementPreflightResult(context, value.record) : null;
-    if (!record || !isRecord(value.locator) || !exactKeys(value.locator, ['attestationSha256']) ||
-      value.locator.attestationSha256 !== record.attestationSha256 ||
+    const record = context ? await parseHostedUninstallManagementPreflightResult(context, actionInput.record) : null;
+    if (!record || locatorCandidate.output.attestationSha256 !== record.attestationSha256 ||
       !approval || record.checkedAt < approval.approvedAt ||
-      (value.preparedAt as number) < approval.recordedAt ||
-      value.preparedAt !== value.sendArmedAt || value.preparedAt !== value.submittedAt ||
-      value.preparedAt !== value.verifiedAt || (value.preparedAt as number) < record.checkedAt ||
-      (value.preparedAt as number) >= record.expiresAt ||
-      (value.preparedAt as number) - record.checkedAt > FRESH_PREFLIGHT_TTL_MS) return null;
+      actionInput.preparedAt < approval.recordedAt ||
+      actionInput.preparedAt !== actionInput.sendArmedAt ||
+      actionInput.preparedAt !== actionInput.submittedAt ||
+      actionInput.preparedAt !== actionInput.verifiedAt || actionInput.preparedAt < record.checkedAt ||
+      actionInput.preparedAt >= record.expiresAt ||
+      actionInput.preparedAt - record.checkedAt > FRESH_PREFLIGHT_TTL_MS) return null;
     return deepFreeze({
       name: expectedName,
       phase,
       record,
       locator: { attestationSha256: record.attestationSha256 },
-      preparedAt: value.preparedAt as number,
-      sendArmedAt: value.sendArmedAt as number,
-      submittedAt: value.submittedAt as number,
-      verifiedAt: value.verifiedAt as number,
+      preparedAt: actionInput.preparedAt,
+      sendArmedAt: actionInput.sendArmedAt,
+      submittedAt: actionInput.submittedAt,
+      verifiedAt: actionInput.verifiedAt,
     });
   }
-  const record = await parseActionRecord(expectedName, value.record, partial);
-  if (!record || !actionPhaseShape(record, phase)) return null;
+  const record = await parseActionRecord(expectedName, actionInput.record, partial);
+  if (!record || !actionPhaseMatchesRecord(record, phase)) return null;
   if (expectedName === 'cleanup_worker_version_create' && phase !== 'prepared') {
     const preflight = partial.actions[0]?.record;
     if (!preflight || !('checkedAt' in preflight) || !('expiresAt' in preflight) ||
-      (value.sendArmedAt as number) < preflight.checkedAt ||
-      (value.sendArmedAt as number) >= preflight.expiresAt ||
-      (value.sendArmedAt as number) - preflight.checkedAt > FRESH_PREFLIGHT_TTL_MS) return null;
+      actionInput.sendArmedAt === null || actionInput.sendArmedAt < preflight.checkedAt ||
+      actionInput.sendArmedAt >= preflight.expiresAt ||
+      actionInput.sendArmedAt - preflight.checkedAt > FRESH_PREFLIGHT_TTL_MS) return null;
   }
   if ('kind' in record && record.kind === 'uninstall_management_delete') {
     const expected = managementDeleteActionSummary(record);
     return canonicalEqual({
-      phase: value.phase,
-      locator: value.locator,
-      preparedAt: value.preparedAt,
-      sendArmedAt: value.sendArmedAt,
-      submittedAt: value.submittedAt,
-      verifiedAt: value.verifiedAt,
+      phase: actionInput.phase,
+      locator: actionInput.locator,
+      preparedAt: actionInput.preparedAt,
+      sendArmedAt: actionInput.sendArmedAt,
+      submittedAt: actionInput.submittedAt,
+      verifiedAt: actionInput.verifiedAt,
     }, expected) ? deepFreeze({ name: expectedName, record, ...expected }) : null;
   }
   if ('kind' in record && record.kind === 'management_no_managed_residue') {
-    const transitions: readonly [unknown, string | null][] = [
-      [value.preparedAt, record.preparedByAttemptId],
-      [value.sendArmedAt, record.armedByAttemptId],
-      [value.submittedAt, record.submittedByAttemptId],
-      [value.verifiedAt, record.verifiedByAttemptId],
+    const transitions: readonly (readonly [number | null, string | null])[] = [
+      [actionInput.preparedAt, record.preparedByAttemptId],
+      [actionInput.sendArmedAt, record.armedByAttemptId],
+      [actionInput.submittedAt, record.submittedByAttemptId],
+      [actionInput.verifiedAt, record.verifiedByAttemptId],
     ];
     let previousApprovalIndex = -1;
     if (transitions.some(([time, attemptId]) => {
       if (time === null && attemptId === null) return false;
-      if (!safeInteger(time) || !attemptId) return true;
+      if (time === null || !attemptId) return true;
       const approval = approvalByAttempt(partial, attemptId);
       const approvalIndex = approvalIndexByAttempt(partial, attemptId);
       if (!approval || approvalIndex < previousApprovalIndex ||
@@ -3040,103 +3206,87 @@ async function parsePersistedAction(
     phase,
     record,
     locator: null,
-    preparedAt: value.preparedAt as number,
-    sendArmedAt: phase === 'prepared' ? null : value.sendArmedAt as number,
-    submittedAt: phase === 'submitted' || phase === 'verified' ? value.submittedAt as number : null,
-    verifiedAt: phase === 'verified' ? value.verifiedAt as number : null,
+    preparedAt: actionInput.preparedAt,
+    sendArmedAt: actionInput.sendArmedAt,
+    submittedAt: actionInput.submittedAt,
+    verifiedAt: actionInput.verifiedAt,
   });
   if (expectedName === 'customer_gateway_remove') {
     if (!('kind' in record) || record.kind !== 'customer_gateway_remove') return null;
     const expected = customerActionSummary(record);
     return canonicalEqual({
       phase,
-      locator: value.locator,
-      preparedAt: value.preparedAt,
-      sendArmedAt: value.sendArmedAt,
-      submittedAt: value.submittedAt,
-      verifiedAt: value.verifiedAt,
+      locator: actionInput.locator,
+      preparedAt: actionInput.preparedAt,
+      sendArmedAt: actionInput.sendArmedAt,
+      submittedAt: actionInput.submittedAt,
+      verifiedAt: actionInput.verifiedAt,
     }, expected) ? deepFreeze({ name: expectedName, record, ...expected }) : null;
   }
-  const locator = await parsePersistedActionLocator(partial, provisional, value.locator);
+  const locator = await parsePersistedActionLocator(partial, provisional, actionInput.locator);
   const mustHaveLocator = phase === 'verified' || (
     phase === 'submitted' && !(
       'kind' in record && record.kind === 'management_worker_delete'
     )
   );
-  if ((mustHaveLocator && !locator) || (!mustHaveLocator && value.locator !== null)) return null;
+  if ((mustHaveLocator && !locator) || (!mustHaveLocator && actionInput.locator !== null)) return null;
   return deepFreeze({ ...provisional, locator });
 }
 
-async function parseUninstallJournal(value: unknown): Promise<UninstallJournal | null> {
+async function parseUninstallJournal<Input>(value: Input): Promise<UninstallJournal | null> {
   try {
     assertDurable(value);
-    if (!isRecord(value) || !exactKeys(value, [
-      'schemaVersion', 'revision', 'createdAt', 'updatedAt', 'recoverUntil', 'installJournal',
-      'uninstallPlan', 'uninstallCycleId', 'bindingHash', 'approvalHistory',
-      'managementPreflightHistory', 'lease', 'leaseAttemptIds', 'actions',
-    ]) || value.schemaVersion !== 1 || !safeInteger(value.revision) || !safeInteger(value.createdAt) ||
-      !safeInteger(value.updatedAt) || value.updatedAt < value.createdAt || !safeInteger(value.recoverUntil) ||
-      value.updatedAt >= value.recoverUntil || typeof value.uninstallCycleId !== 'string' ||
-      !UNINSTALL_CYCLE_ID.test(value.uninstallCycleId) || typeof value.bindingHash !== 'string' ||
-      !PREFIXED_SHA256.test(value.bindingHash) || !Array.isArray(value.approvalHistory) ||
-      value.approvalHistory.length < 1 || value.approvalHistory.length > MAX_APPROVALS ||
-      !Array.isArray(value.managementPreflightHistory) ||
-      value.managementPreflightHistory.length > MAX_MANAGEMENT_PREFLIGHTS ||
-      !Array.isArray(value.leaseAttemptIds) || value.leaseAttemptIds.length > MAX_LEASE_ATTEMPTS ||
-      !Array.isArray(value.actions) || value.actions.length < 1 ||
-      value.actions.length > UNINSTALL_ACTION_ORDER.length) return null;
-    const authority = await requireCompleteInstallAuthority(value.installJournal);
-    if (value.createdAt < authority.journal.updatedAt || value.recoverUntil > authority.journal.recoverUntil) return null;
-    const baseline = await exactReviewedPlan(authority.journal, value.uninstallPlan);
-    if (baseline.createdAt > value.createdAt || baseline.expiresAt <= value.createdAt ||
-      baseline.expiresAt > value.recoverUntil) return null;
+    const candidate = v.safeParse(uninstallJournalSchema, value);
+    if (!candidate.success) return null;
+    const journalInput = candidate.output;
+    if (journalInput.updatedAt < journalInput.createdAt || journalInput.updatedAt >= journalInput.recoverUntil) return null;
+    const authority = await requireCompleteInstallAuthority(journalInput.installJournal);
+    if (journalInput.createdAt < authority.journal.updatedAt ||
+      journalInput.recoverUntil > authority.journal.recoverUntil) return null;
+    const baseline = await exactReviewedPlan(authority.journal, journalInput.uninstallPlan);
+    if (baseline.createdAt > journalInput.createdAt || baseline.expiresAt <= journalInput.createdAt ||
+      baseline.expiresAt > journalInput.recoverUntil) return null;
     const expectedBinding = await computeUninstallJournalBindingHash({
       installJournal: authority.journal,
       uninstallPlan: baseline,
-      uninstallCycleId: value.uninstallCycleId,
+      uninstallCycleId: journalInput.uninstallCycleId,
     });
-    if (value.bindingHash !== expectedBinding) return null;
+    if (journalInput.bindingHash !== expectedBinding) return null;
     const approvals: UninstallJournalApproval[] = [];
-    for (const raw of value.approvalHistory) {
-      const approval = await parseApproval(raw, authority.journal, baseline, value.recoverUntil);
+    for (const raw of journalInput.approvalHistory) {
+      const approval = await parseApproval(raw, authority.journal, baseline, journalInput.recoverUntil);
       const previous = approvals[approvals.length - 1];
       if (!approval || approvals.some((entry) => entry.attemptId === approval.attemptId) ||
-        approval.recordedAt < value.createdAt || approval.recordedAt > value.updatedAt ||
+        approval.recordedAt < journalInput.createdAt || approval.recordedAt > journalInput.updatedAt ||
         (previous && (approval.approvedAt < previous.recordedAt ||
           approval.recordedAt < previous.recordedAt ||
           approval.plan.createdAt < previous.plan.createdAt || approval.plan.expiresAt < previous.plan.expiresAt))) return null;
       approvals.push(approval);
     }
-    if (!canonicalEqual(approvals[0]?.plan, baseline) || approvals[0]?.recordedAt !== value.createdAt) return null;
+    if (!canonicalEqual(approvals[0]?.plan, baseline) ||
+      approvals[0]?.recordedAt !== journalInput.createdAt) return null;
     const leaseAttemptIds: string[] = [];
     let previousLeaseApprovalIndex = -1;
-    for (const attemptId of value.leaseAttemptIds) {
-      const approvalIndex = typeof attemptId === 'string'
-        ? approvals.findIndex((approval) => approval.attemptId === attemptId)
-        : -1;
-      if (typeof attemptId !== 'string' || !ATTEMPT_ID.test(attemptId) ||
-        leaseAttemptIds.includes(attemptId) || approvalIndex < 0 ||
+    for (const attemptId of journalInput.leaseAttemptIds) {
+      const approvalIndex = approvals.findIndex((approval) => approval.attemptId === attemptId);
+      if (leaseAttemptIds.includes(attemptId) || approvalIndex < 0 ||
         approvalIndex <= previousLeaseApprovalIndex) return null;
       leaseAttemptIds.push(attemptId);
       previousLeaseApprovalIndex = approvalIndex;
     }
     let lease: UninstallJournalLease | null = null;
-    if (value.lease !== null) {
-      const leaseValue = value.lease;
-      const leaseApproval = isRecord(leaseValue) && typeof leaseValue.attemptId === 'string'
-        ? approvals.find((entry) => entry.attemptId === leaseValue.attemptId)
-        : undefined;
-      if (!isRecord(leaseValue) || !exactKeys(leaseValue, ['attemptId', 'acquiredAt', 'expiresAt']) ||
-        typeof leaseValue.attemptId !== 'string' || !leaseAttemptIds.includes(leaseValue.attemptId) ||
+    if (journalInput.lease !== null) {
+      const leaseValue = journalInput.lease;
+      const leaseApproval = approvals.find((entry) => entry.attemptId === leaseValue.attemptId);
+      if (!leaseAttemptIds.includes(leaseValue.attemptId) ||
         leaseValue.attemptId !== approvals[approvals.length - 1]?.attemptId ||
         !leaseApproval ||
-        !safeInteger(leaseValue.acquiredAt) || !safeInteger(leaseValue.expiresAt) ||
         leaseValue.acquiredAt < leaseApproval.approvedAt ||
         leaseValue.acquiredAt < leaseApproval.recordedAt ||
-        leaseValue.acquiredAt > value.updatedAt || leaseValue.expiresAt <= leaseValue.acquiredAt ||
+        leaseValue.acquiredAt > journalInput.updatedAt || leaseValue.expiresAt <= leaseValue.acquiredAt ||
         leaseValue.expiresAt > leaseValue.acquiredAt + MAX_UNINSTALL_LEASE_MS ||
-        leaseValue.expiresAt > (leaseApproval as UninstallJournalApproval).plan.expiresAt ||
-        leaseValue.expiresAt > value.recoverUntil) return null;
+        leaseValue.expiresAt > leaseApproval.plan.expiresAt ||
+        leaseValue.expiresAt > journalInput.recoverUntil) return null;
       lease = deepFreeze({
         attemptId: leaseValue.attemptId,
         acquiredAt: leaseValue.acquiredAt,
@@ -3144,9 +3294,10 @@ async function parseUninstallJournal(value: unknown): Promise<UninstallJournal |
       });
     }
     const managementPreflightHistory: HostedUninstallManagementPreflightResult[] = [];
-    for (const raw of value.managementPreflightHistory) {
-      if (!isRecord(raw) || typeof raw.attemptId !== 'string') return null;
-      const approval = approvals.find((entry) => entry.attemptId === raw.attemptId);
+    for (const raw of journalInput.managementPreflightHistory) {
+      const preflightAttemptId = referencedAttemptId(raw);
+      if (!preflightAttemptId) return null;
+      const approval = approvals.find((entry) => entry.attemptId === preflightAttemptId);
       const context = approval ? approvalContext({
         installJournal: authority.journal,
         approvalHistory: approvals,
@@ -3163,7 +3314,7 @@ async function parseUninstallJournal(value: unknown): Promise<UninstallJournal |
         : -1;
       if (
         !approval || !preflight || preflight.checkedAt < approval.approvedAt ||
-        preflight.checkedAt < approval.recordedAt || preflight.checkedAt > value.updatedAt ||
+        preflight.checkedAt < approval.recordedAt || preflight.checkedAt > journalInput.updatedAt ||
         managementPreflightHistory.some(
           (entry) => entry.attestationSha256 === preflight.attestationSha256,
         ) || (previous && preflight.checkedAt < previous.checkedAt) ||
@@ -3174,14 +3325,14 @@ async function parseUninstallJournal(value: unknown): Promise<UninstallJournal |
     }
     let partial: UninstallJournal = deepFreeze({
       schemaVersion: 1,
-      revision: value.revision,
-      createdAt: value.createdAt,
-      updatedAt: value.updatedAt,
-      recoverUntil: value.recoverUntil,
+      revision: journalInput.revision,
+      createdAt: journalInput.createdAt,
+      updatedAt: journalInput.updatedAt,
+      recoverUntil: journalInput.recoverUntil,
       installJournal: authority.journal,
       uninstallPlan: baseline,
-      uninstallCycleId: value.uninstallCycleId,
-      bindingHash: value.bindingHash,
+      uninstallCycleId: journalInput.uninstallCycleId,
+      bindingHash: journalInput.bindingHash,
       approvalHistory: approvals,
       managementPreflightHistory,
       lease,
@@ -3189,11 +3340,16 @@ async function parseUninstallJournal(value: unknown): Promise<UninstallJournal |
       actions: [],
     });
     const actions: UninstallJournalAction[] = [];
-    for (let index = 0; index < value.actions.length; index += 1) {
+    for (let index = 0; index < journalInput.actions.length; index += 1) {
       if (index > 0 && actions.slice(0, index).some((action) => action.phase !== 'verified')) return null;
       partial = deepFreeze({ ...partial, actions: [...actions] });
-      const parsed = await parsePersistedAction(value.actions[index], UNINSTALL_ACTION_ORDER[index], partial);
-      if (!parsed || (index > 0 && parsed.preparedAt < (actions[index - 1].verifiedAt as number))) return null;
+      const actionInput = journalInput.actions.at(index);
+      const expectedAction = UNINSTALL_ACTION_ORDER.at(index);
+      if (actionInput === undefined || expectedAction === undefined) return null;
+      const parsed = await parsePersistedAction(actionInput, expectedAction, partial);
+      const previousAction = actions[index - 1];
+      if (!parsed || (index > 0 && (!previousAction || previousAction.verifiedAt === null ||
+        parsed.preparedAt < previousAction.verifiedAt))) return null;
       actions.push(parsed);
     }
     if (managementPreflightHistory.length > 0) {
@@ -3223,7 +3379,7 @@ async function parseUninstallJournal(value: unknown): Promise<UninstallJournal |
   }
 }
 
-export async function requireUninstallJournal(value: unknown): Promise<UninstallJournal> {
+export async function requireUninstallJournal<Input>(value: Input): Promise<UninstallJournal> {
   const parsed = await parseUninstallJournal(value);
   if (!parsed) invalid();
   return parsed;

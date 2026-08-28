@@ -1,6 +1,25 @@
-import { runCloudflareCanaryPreflight } from './canary-preflight.mjs';
-import { validateCloudflareId, validateHostname } from './canary-command.mjs';
-import { buildGatewayDesiredState } from './plan.mjs';
+import * as v from 'valibot';
+
+import {
+  runCloudflareCanaryPreflight,
+  type CloudflarePreflightClient,
+} from './canary-preflight.ts';
+import { validateCloudflareId, validateHostname } from './canary-command.ts';
+import { validateGatewayConfig } from './config.ts';
+import {
+  boundaryObjectSchema,
+  jsonValueSchema,
+  type BoundaryObject,
+  type BoundaryValue,
+  type JsonObject,
+  type JsonValue,
+} from './json.ts';
+import {
+  buildGatewayDesiredState,
+  type GatewayDesiredState,
+  type PlanChange,
+  type ResourceKind,
+} from './plan.ts';
 import {
   applyGateway,
   getGatewayStatus,
@@ -9,14 +28,21 @@ import {
   planLiveGateway,
   rollbackPendingPortalCreate,
   uninstallGateway,
-} from './reconciler.mjs';
-import { validateInstallationReceipt } from './receipt.mjs';
+} from './reconciler.ts';
+import {
+  validateInstallationReceipt,
+  type InstallationReceipt,
+  type ReceiptAccessPolicy,
+  type ReceiptProviderLocator,
+  type ReceiptResource,
+  type ReceiptTarget,
+} from './receipt.ts';
 
 export const CANARY_TOOL_NAME = 'ankka_canary_status';
 export const CANARY_FIXTURE_ID = 'ankka-synthetic-mcp-canary';
 
 const RELEASE = 'cloudflare-canary-v1';
-const EXPECTED_ORDER = Object.freeze([
+const EXPECTED_ORDER: readonly ResourceKind[] = Object.freeze([
   'mcp_server',
   'source_access_application',
   'source_access_policy',
@@ -25,7 +51,7 @@ const EXPECTED_ORDER = Object.freeze([
   'portal_access_policy',
   'dns_record',
 ]);
-const REVERSE_ORDER = Object.freeze([...EXPECTED_ORDER].reverse());
+const REVERSE_ORDER: readonly ResourceKind[] = Object.freeze([...EXPECTED_ORDER].reverse());
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SAFE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const POLL_ATTEMPTS = 12;
@@ -33,6 +59,324 @@ const POLL_INTERVAL_MS = 2_000;
 const POLL_ATTEMPT_TIMEOUT_MS = 10_000;
 const POLL_OVERALL_TIMEOUT_MS = 60_000;
 const INSPECTION_HOLD_TIMEOUT_MS = 15 * 60_000;
+const stringSchema = v.string();
+const numberSchema = v.number();
+const functionSchema = v.function();
+const codedErrorSchema = v.object({ code: stringSchema });
+const cleanupStatusSchema = v.picklist([
+  'not_started',
+  'blocked',
+  'blocked_pending_apply',
+  'incomplete',
+  'failed',
+  'removed',
+  'rollback_complete',
+]);
+const resourceKindSchema = v.picklist([
+  'mcp_server',
+  'source_access_application',
+  'source_access_policy',
+  'portal',
+  'portal_access_application',
+  'portal_access_policy',
+  'dns_record',
+]);
+
+type ReconcileInput = Parameters<typeof planLiveGateway>[0];
+type GatewayProvider = ReconcileInput['provider'];
+type LiveGatewayPreview = Awaited<ReturnType<typeof planLiveGateway>>;
+type GatewayUninstallPreview = Awaited<ReturnType<typeof planGatewayUninstall>>;
+type UninstallAction = GatewayUninstallPreview['actions'][number];
+type CleanupStatus = v.InferOutput<typeof cleanupStatusSchema>;
+
+interface CanaryLifecycleInput {
+  readonly accountId?: BoundaryValue;
+  readonly allowedEmail?: BoundaryValue;
+  readonly approvalId?: BoundaryValue;
+  readonly hostname?: BoundaryValue;
+  readonly syntheticMcpUrl?: BoundaryValue;
+  readonly targetConfirmationId?: BoundaryValue;
+  readonly zoneId?: BoundaryValue;
+}
+
+type ProgressEvent = {
+  readonly action?: BoundaryValue;
+  readonly kind?: BoundaryValue;
+  readonly stage?: BoundaryValue;
+  readonly status?: BoundaryValue;
+};
+
+export interface CanaryLifecyclePreviewChange {
+  readonly action: string;
+  readonly kind: string;
+}
+
+export interface CanaryLifecyclePreviewReport {
+  readonly approvalId: string;
+  readonly changes: readonly CanaryLifecyclePreviewChange[];
+  readonly cleanup: readonly CanaryLifecyclePreviewChange[];
+  readonly kind: 'cloudflare_canary_lifecycle_preview';
+  readonly operation: string;
+  readonly ready: true;
+  readonly schemaVersion: 1;
+  readonly targetConfirmationId: string;
+  readonly writesPerformed: false;
+}
+
+export interface CanaryLifecycleResultReport {
+  readonly cleanup: {
+    readonly ownedResourceCount?: number;
+    readonly partialInstallRemoved?: boolean;
+    readonly remainingReceiptResourceCount?: number;
+    readonly reverseOrderVerified?: boolean;
+    readonly status: string;
+  };
+  readonly idempotentApplyVerified: boolean;
+  readonly installedStateVerified: boolean;
+  readonly interactiveVerification: string;
+  readonly kind: 'cloudflare_canary_lifecycle_result';
+  readonly operation?: string;
+  readonly portalToolCallVerified: boolean;
+  readonly resourceLifecycle: string;
+  readonly schemaVersion: 1;
+  readonly status: string;
+  readonly writesPerformed: boolean;
+}
+
+interface SanitizedProgressEvent {
+  action?: string;
+  kind?: ResourceKind;
+  stage: string;
+  status: string;
+}
+
+interface ReceiptResourceCopy {
+  desiredHash: string;
+  identityHash?: string;
+  key: string;
+  kind: ResourceKind;
+  marker?: string;
+  provider: ReceiptProviderLocator;
+}
+
+interface UninstallActionCopy {
+  action: UninstallAction['action'];
+  key: string;
+  kind: ResourceKind;
+  reason?: 'already_absent';
+}
+
+interface InspectionInput {
+  readonly hostname: string;
+  readonly signal: AbortSignal;
+}
+
+interface ResidueInspectionInput {
+  readonly config: JsonValue;
+  readonly receipt: InstallationReceipt;
+  readonly signal: AbortSignal;
+  readonly target: JsonObject;
+}
+
+interface SyntheticInspectionInput {
+  readonly endpoint: string;
+  readonly expectedTool: string;
+}
+
+interface InstalledGatewayInspectionInput extends InspectionInput {
+  readonly expectedFixture: string;
+  readonly expectedTool: string;
+}
+
+interface CanaryDependencies {
+  readonly cleanupStore?: CanaryReceiptStore;
+  readonly cloudflare?: CloudflarePreflightClient;
+  readonly holdForInspection?: ((input: InspectionInput) => Promise<BoundaryValue>) | undefined;
+  readonly inspectCanaryResidue?: ((input: ResidueInspectionInput) => Promise<BoundaryValue>) | undefined;
+  readonly inspectSyntheticUpstream?: ((input: SyntheticInspectionInput) => Promise<BoundaryValue>) | undefined;
+  readonly inspectionHoldTimeoutMs?: BoundaryValue;
+  readonly onProgress?: ((event: ProgressEvent) => void) | undefined;
+  readonly pollAttemptTimeoutMs?: BoundaryValue;
+  readonly pollOverallTimeoutMs?: BoundaryValue;
+  readonly provider?: GatewayProvider;
+  readonly receiptStore?: CanaryReceiptStore;
+  readonly sleep?: ((milliseconds: number) => Promise<void>) | undefined;
+  readonly verifyInstalledGateway?: ((
+    input: InstalledGatewayInspectionInput
+  ) => Promise<BoundaryValue>) | undefined;
+}
+
+interface CanaryReceiptStore {
+  read(): Promise<BoundaryValue>;
+  withExclusiveLock?<Result>(
+    operation: () => Promise<Result>,
+    options?: { readonly operationId: string },
+  ): Promise<Result>;
+  writeAtomic(receipt: InstallationReceipt): Promise<void>;
+}
+
+interface NormalizedReceiptStore {
+  read(): Promise<BoundaryValue>;
+  withExclusiveLock<Result>(
+    operation: () => Promise<Result>,
+    options?: { readonly operationId: string },
+  ): Promise<Result>;
+  writeAtomic(receipt: InstallationReceipt): Promise<void>;
+}
+
+interface CanaryContext {
+  readonly accountId: string;
+  readonly allowedEmail: string;
+  readonly cleanupStore: NormalizedReceiptStore;
+  readonly cloudflare: CloudflarePreflightClient;
+  readonly config: JsonValue;
+  readonly holdForInspection: ((input: InspectionInput) => Promise<BoundaryValue>) | undefined;
+  readonly hostname: string;
+  readonly inspectCanaryResidue: (input: ResidueInspectionInput) => Promise<BoundaryValue>;
+  readonly inspectSyntheticUpstream: (input: SyntheticInspectionInput) => Promise<BoundaryValue>;
+  readonly inspectionHoldTimeoutMs: number;
+  readonly onProgress: ((event: ProgressEvent) => void) | null;
+  readonly pollAttemptTimeoutMs: number;
+  readonly pollOverallTimeoutMs: number;
+  readonly provider: GatewayProvider;
+  readonly receiptStore: NormalizedReceiptStore;
+  readonly sleep: (milliseconds: number) => Promise<void>;
+  readonly syntheticMcpUrl: string;
+  readonly verifyInstalledGateway: ((
+    input: InstalledGatewayInspectionInput
+  ) => Promise<BoundaryValue>) | undefined;
+  readonly zoneId: string;
+}
+
+interface CanaryErrorDetails {
+  readonly cleanup?: BoundaryValue;
+}
+
+interface ReconciliationHooks {
+  readonly onApplyMutationSubmitted?: () => void;
+}
+
+interface PollOptions {
+  readonly accept: (value: BoundaryValue) => boolean;
+  readonly attemptTimeoutMs: number;
+  readonly overallTimeoutMs: number;
+  readonly probe: (signal: AbortSignal) => Promise<BoundaryValue>;
+  readonly returnLast?: boolean;
+  readonly sleep: (milliseconds: number) => Promise<void>;
+}
+
+interface SafePlanOptions {
+  readonly pendingPortalCreateRecoveryReceiptChecksum?: string | null;
+}
+
+interface ReverseCleanupOptions {
+  readonly allowEmpty?: boolean;
+}
+
+interface ContextOptions {
+  readonly mutations: boolean;
+}
+
+type LifecycleFailure = CanaryLifecycleError;
+
+type CleanupState = {
+  readonly status: 'not_started';
+};
+
+type CanaryFixtureEvidence = {
+  readonly callVerified: true;
+  readonly fixture: typeof CANARY_FIXTURE_ID;
+  readonly schemaVersion: 1;
+  readonly toolNames: readonly [typeof CANARY_TOOL_NAME];
+};
+
+type SafePlanResult = {
+  readonly pendingPortalCreateRecoveryReceiptChecksum: string | null;
+  readonly pendingUpdateRecovery: boolean;
+  readonly updateRecoveryReceiptChecksum: string | null;
+};
+
+interface PendingUpdatePreview {
+  readonly desiredHash: string;
+  readonly installationId: string;
+  readonly updateRecoveryReceiptChecksum: string | null;
+}
+
+type PreviewReport = CanaryLifecyclePreviewReport;
+
+type CanaryPreview =
+  | {
+    readonly operation: 'apply_verify_uninstall';
+    readonly desiredHash: string;
+    readonly installationId: string;
+    readonly pendingPortalCreateRecoveryReceiptChecksum: string | null;
+    readonly pendingUpdateRecovery: boolean;
+    readonly planId: string;
+    readonly report: PreviewReport;
+    readonly updateRecoveryReceiptChecksum: string | null;
+  }
+  | {
+    readonly operation: 'cleanup_partial_install';
+    readonly cleanupSnapshot: InstallationReceipt;
+    readonly provenanceSnapshotChecksum: string;
+    readonly receiptChecksum: string;
+    readonly report: PreviewReport;
+    readonly uninstallActions: readonly UninstallAction[];
+    readonly uninstallId: string;
+  }
+  | {
+    readonly operation: 'residue_recovery';
+    readonly recoveryReceipt: InstallationReceipt;
+    readonly report: PreviewReport;
+  }
+  | {
+    readonly operation: 'resume_uninstall';
+    readonly report: PreviewReport;
+  }
+  | {
+    readonly operation: 'rollback_pending_portal_create';
+    readonly report: PreviewReport;
+    readonly rollbackId: string;
+    readonly rollbackRecoveryReceipt: InstallationReceipt;
+  };
+
+type ResidueEvidence = { readonly ownedResourceCount: number };
+type RemovedCleanup = {
+  readonly residue: ResidueEvidence;
+  readonly reverseOrderVerified: true;
+  readonly status: 'removed';
+};
+type IncompleteCleanup = {
+  readonly reverseOrderVerified: boolean;
+  readonly status: 'blocked' | 'failed' | 'incomplete';
+};
+type CleanupResult = IncompleteCleanup | RemovedCleanup;
+
+type RecoveryState =
+  | { readonly receipt: InstallationReceipt; readonly type: 'pending_portal_create' }
+  | {
+    readonly bootstrap: boolean;
+    readonly receipt: InstallationReceipt;
+    readonly snapshot: InstallationReceipt;
+    readonly type: 'partial_install_cleanup';
+  }
+  | {
+    readonly removed: InstallationReceipt;
+    readonly snapshot: InstallationReceipt;
+    readonly type: 'removed';
+  }
+  | {
+    readonly receipt: InstallationReceipt;
+    readonly snapshot: InstallationReceipt;
+    readonly type: 'uninstall_exhausted' | 'uninstalling';
+  };
+
+interface ExpectedCleanupApproval {
+  readonly approvedUninstallId: string;
+  readonly expectedProvenanceSnapshotChecksum: string;
+  readonly expectedReceiptChecksum: string;
+  readonly expectedUninstallActions: readonly UninstallAction[];
+}
 
 const MESSAGES = Object.freeze({
   approval_required: 'The exact current canary lifecycle approval is required.',
@@ -61,9 +405,13 @@ const MESSAGES = Object.freeze({
 
 /** Body-free and identifier-free error safe to surface from a canary CLI. */
 export class CanaryLifecycleError extends Error {
-  constructor(code, details = {}) {
-    const safeCode = typeof code === 'string' && SAFE_CODE.test(code) ? code : 'lifecycle_failed';
-    super(MESSAGES[safeCode] ?? MESSAGES.lifecycle_failed);
+  readonly cleanup: CleanupStatus;
+  readonly code: string;
+
+  constructor(code: BoundaryValue, details: CanaryErrorDetails = {}) {
+    const safeCode = v.is(stringSchema, code) && SAFE_CODE.test(code) ? code : 'lifecycle_failed';
+    const message = new Map<string, string>(Object.entries(MESSAGES)).get(safeCode);
+    super(message ?? MESSAGES.lifecycle_failed);
     this.name = 'CanaryLifecycleError';
     this.code = safeCode;
     this.cleanup = safeCleanupState(details.cleanup);
@@ -74,7 +422,10 @@ export class CanaryLifecycleError extends Error {
  * Build a read-only, target-bound approval preview. This function validates
  * the synthetic fixture and Cloudflare read surface but performs no writes.
  */
-export async function previewCloudflareCanaryLifecycle(input = {}, dependencies = {}) {
+export async function previewCloudflareCanaryLifecycle(
+  input: CanaryLifecycleInput = {},
+  dependencies: CanaryDependencies = {},
+): Promise<CanaryLifecyclePreviewReport> {
   const context = requireContext(input, dependencies, { mutations: false });
   return (await buildPreview(context)).report;
 }
@@ -85,7 +436,10 @@ export async function previewCloudflareCanaryLifecycle(input = {}, dependencies 
  * reads immediately before the first write. The receipt remains the recovery
  * authority if the process or provider fails mid-operation.
  */
-export async function runCloudflareCanaryLifecycle(input = {}, dependencies = {}) {
+export async function runCloudflareCanaryLifecycle(
+  input: CanaryLifecycleInput = {},
+  dependencies: CanaryDependencies = {},
+): Promise<CanaryLifecycleResultReport> {
   const context = requireContext(input, dependencies, { mutations: true });
   try {
     return await context.cleanupStore.withExclusiveLock(
@@ -94,12 +448,17 @@ export async function runCloudflareCanaryLifecycle(input = {}, dependencies = {}
     );
   } catch (error) {
     if (error instanceof CanaryLifecycleError) throw error;
-    if (error?.code === 'locked') throw new CanaryLifecycleError('lifecycle_locked');
+    if (v.is(codedErrorSchema, error) && error.code === 'locked') {
+      throw new CanaryLifecycleError('lifecycle_locked');
+    }
     throw new CanaryLifecycleError('lifecycle_lock_failed');
   }
 }
 
-async function runCloudflareCanaryLifecycleLocked(input, context) {
+async function runCloudflareCanaryLifecycleLocked(
+  input: CanaryLifecycleInput,
+  context: CanaryContext,
+): Promise<CanaryLifecycleResultReport> {
   const preview = await buildPreview(context);
   if (input.targetConfirmationId !== preview.report.targetConfirmationId) {
     throw new CanaryLifecycleError('disposable_target_confirmation_required');
@@ -190,12 +549,12 @@ async function runCloudflareCanaryLifecycleLocked(input, context) {
       cleanupAuthorized = true;
     },
   });
-  let lifecycleFailure = null;
+  let lifecycleFailure: LifecycleFailure | null = null;
   let applyAttempted = false;
   let stateVerified = false;
   let portalToolCallVerified = false;
   let idempotent = false;
-  let cleanup = { status: 'not_started' };
+  let cleanup: CleanupResult | CleanupState = { status: 'not_started' };
 
   try {
     applyAttempted = true;
@@ -238,10 +597,11 @@ async function runCloudflareCanaryLifecycleLocked(input, context) {
     idempotent = true;
     emit(context, { stage: 'idempotency', status: 'verified' });
 
-    if (context.holdForInspection) {
+    const holdForInspection = context.holdForInspection;
+    if (holdForInspection) {
       emit(context, { stage: 'inspection', status: 'started' });
       await withDeadline(
-        (signal) => context.holdForInspection({
+        (signal: AbortSignal) => holdForInspection({
           hostname: context.hostname,
           signal,
         }),
@@ -250,9 +610,10 @@ async function runCloudflareCanaryLifecycleLocked(input, context) {
       emit(context, { stage: 'inspection', status: 'verified' });
     }
 
-    if (context.verifyInstalledGateway) {
+    const verifyInstalledGateway = context.verifyInstalledGateway;
+    if (verifyInstalledGateway) {
       await pollBounded({
-        probe: (signal) => context.verifyInstalledGateway({
+        probe: (signal: AbortSignal) => verifyInstalledGateway({
           hostname: context.hostname,
           expectedFixture: CANARY_FIXTURE_ID,
           expectedTool: CANARY_TOOL_NAME,
@@ -267,7 +628,9 @@ async function runCloudflareCanaryLifecycleLocked(input, context) {
       emit(context, { stage: 'synthetic_tool', status: 'verified' });
     }
   } catch (error) {
-    lifecycleFailure = normalizeLifecycleFailure(error);
+    lifecycleFailure = error instanceof CanaryLifecycleError
+      ? error
+      : new CanaryLifecycleError('lifecycle_failed');
     emit(context, { stage: 'lifecycle', status: 'failed' });
   }
 
@@ -317,7 +680,7 @@ async function runCloudflareCanaryLifecycleLocked(input, context) {
   return report;
 }
 
-async function buildPreview(context) {
+async function buildPreview(context: CanaryContext): Promise<CanaryPreview> {
   const preflight = await runCloudflareCanaryPreflight({
     cloudflare: context.cloudflare,
     accountId: context.accountId,
@@ -328,8 +691,10 @@ async function buildPreview(context) {
 
   const recovery = await readCanaryRecovery(context);
   const targetConfirmationId = await buildTargetConfirmationId(context);
-  let pendingPortalCreateRecoveryReceiptChecksum = null;
+  let pendingPortalCreateRecoveryReceiptChecksum: string | null = null;
   if (recovery?.type === 'pending_portal_create') {
+    const pending = recovery.receipt.pending;
+    if (pending === null) throw new CanaryLifecycleError('plan_blocked');
     const ordinary = await planLiveGateway(reconciliationContext(context));
     if (await isExactPendingPortalCreateNoopRecovery(ordinary, recovery.receipt, context)) {
       pendingPortalCreateRecoveryReceiptChecksum = recovery.receipt.checksum;
@@ -346,11 +711,11 @@ async function buildPreview(context) {
         rollbackId: rollback.rollbackId,
         receiptChecksum: recovery.receipt.checksum,
         pending: {
-          operationId: recovery.receipt.pending.operationId,
-          requestHash: recovery.receipt.pending.requestHash,
-          kind: recovery.receipt.pending.kind,
-          key: recovery.receipt.pending.key,
-          expectedDesiredHash: recovery.receipt.pending.expectedDesiredHash,
+          operationId: pending.operationId,
+          requestHash: pending.requestHash,
+          kind: pending.kind,
+          key: pending.key,
+          expectedDesiredHash: pending.expectedDesiredHash,
         },
         portalState: rollback.portalState,
       });
@@ -520,7 +885,7 @@ async function buildPreview(context) {
   };
 }
 
-async function readCanaryRecovery(context) {
+async function readCanaryRecovery(context: CanaryContext): Promise<RecoveryState | null> {
   let raw;
   try {
     raw = await context.receiptStore.read();
@@ -549,7 +914,9 @@ async function readCanaryRecovery(context) {
     }
     return null;
   }
-  if (!['removed', 'uninstalling'].includes(raw.state)) return null;
+  if (!v.is(stringSchema, raw.state) || !['removed', 'uninstalling'].includes(raw.state)) {
+    return null;
+  }
 
   let receipt;
   let rawSnapshot;
@@ -588,7 +955,10 @@ async function readCanaryRecovery(context) {
   throw new CanaryLifecycleError('plan_blocked');
 }
 
-async function readPartialCleanupRecovery(context, receipt) {
+async function readPartialCleanupRecovery(
+  context: CanaryContext,
+  receipt: InstallationReceipt,
+): Promise<RecoveryState | null> {
   if (
     receipt.state !== 'ready' ||
     receipt.pending !== null ||
@@ -643,7 +1013,10 @@ async function readPartialCleanupRecovery(context, receipt) {
   return { type: 'partial_install_cleanup', receipt, snapshot, bootstrap: false };
 }
 
-async function isLegacyPostRollbackReceipt(receipt, context) {
+async function isLegacyPostRollbackReceipt(
+  receipt: InstallationReceipt,
+  context: CanaryContext,
+): Promise<boolean> {
   const portalIndex = EXPECTED_ORDER.indexOf('portal');
   if (!(receipt.state === 'ready' &&
     receipt.revision === (portalIndex * 2) + 2 &&
@@ -665,7 +1038,10 @@ async function isLegacyPostRollbackReceipt(receipt, context) {
     });
 }
 
-async function isExactPendingPortalMarker(receipt, context) {
+async function isExactPendingPortalMarker(
+  receipt: InstallationReceipt,
+  context: CanaryContext,
+): Promise<boolean> {
   let desired;
   try {
     desired = await buildDesiredForReceipt(receipt, context);
@@ -673,13 +1049,16 @@ async function isExactPendingPortalMarker(receipt, context) {
     return false;
   }
   const portal = desired.resources.find(({ kind }) => kind === 'portal');
+  const pending = receipt.pending;
   return desired.installationId === receipt.installationId &&
     sameAccessPolicy(desired.accessPolicy, receipt.accessPolicy) &&
-    portal?.key === receipt.pending?.key &&
-    portal.desiredHash === receipt.pending.expectedDesiredHash;
+    portal !== undefined &&
+    pending !== null &&
+    portal.key === pending.key &&
+    portal.desiredHash === pending.expectedDesiredHash;
 }
 
-async function buildTargetConfirmationId(context) {
+async function buildTargetConfirmationId(context: CanaryContext): Promise<string> {
   return stableId('canary-target', {
     operation: 'confirm_disposable_target',
     accountId: context.accountId,
@@ -688,9 +1067,12 @@ async function buildTargetConfirmationId(context) {
   });
 }
 
-async function verifyRemovedCanaryResidue(context, recoveryReceipt) {
+async function verifyRemovedCanaryResidue(
+  context: CanaryContext,
+  recoveryReceipt: InstallationReceipt,
+) {
   const residue = await pollBounded({
-    probe: (signal) => context.inspectCanaryResidue({
+    probe: (signal: AbortSignal) => context.inspectCanaryResidue({
       config: context.config,
       target: { accountId: context.accountId, zoneId: context.zoneId },
       receipt: recoveryReceipt,
@@ -725,7 +1107,10 @@ async function verifyRemovedCanaryResidue(context, recoveryReceipt) {
   });
 }
 
-async function resumeInterruptedUninstall(context, reconcileContext) {
+async function resumeInterruptedUninstall(
+  context: CanaryContext,
+  reconcileContext: ReconcileInput,
+) {
   const cleanup = await cleanupCanary(context, reconcileContext);
   if (cleanup.status !== 'removed') {
     throw new CanaryLifecycleError('cleanup_failed', { cleanup });
@@ -752,7 +1137,7 @@ async function resumeInterruptedUninstall(context, reconcileContext) {
   });
 }
 
-async function inspectFixture(context) {
+async function inspectFixture(context: CanaryContext): Promise<CanaryFixtureEvidence> {
   let evidence;
   try {
     evidence = await context.inspectSyntheticUpstream({
@@ -773,7 +1158,7 @@ async function inspectFixture(context) {
   };
 }
 
-function validFixtureEvidence(value) {
+function validFixtureEvidence(value: BoundaryValue): value is CanaryFixtureEvidence {
   return isObject(value) &&
     value.fixture === CANARY_FIXTURE_ID &&
     value.schemaVersion === 1 &&
@@ -783,14 +1168,18 @@ function validFixtureEvidence(value) {
     value.toolNames[0] === CANARY_TOOL_NAME;
 }
 
-function validInstalledVerification(value) {
+function validInstalledVerification(value: BoundaryValue): boolean {
   return isObject(value) &&
     value.ready === true &&
     value.fixture === CANARY_FIXTURE_ID &&
     value.toolName === CANARY_TOOL_NAME;
 }
 
-async function cleanupCanary(context, reconcileContext, expectedApproval = null) {
+async function cleanupCanary(
+  context: CanaryContext,
+  reconcileContext: ReconcileInput,
+  expectedApproval: ExpectedCleanupApproval | null = null,
+): Promise<CleanupResult> {
   try {
     emit(context, { stage: 'uninstall', status: 'started' });
     const currentReceipt = await validateInstallationReceipt(
@@ -857,7 +1246,7 @@ async function cleanupCanary(context, reconcileContext, expectedApproval = null)
     }
 
     const residue = await pollBounded({
-      probe: (signal) => context.inspectCanaryResidue({
+      probe: (signal: AbortSignal) => context.inspectCanaryResidue({
         config: context.config,
         target: { accountId: context.accountId, zoneId: context.zoneId },
         receipt: recoveryReceipt,
@@ -869,6 +1258,9 @@ async function cleanupCanary(context, reconcileContext, expectedApproval = null)
       overallTimeoutMs: context.pollOverallTimeoutMs,
       returnLast: true,
     });
+    if (!validResidueEvidence(residue)) {
+      return { status: 'failed', reverseOrderVerified: false };
+    }
     emit(context, { stage: 'uninstall', status: 'verified' });
     return {
       status: 'removed',
@@ -880,12 +1272,12 @@ async function cleanupCanary(context, reconcileContext, expectedApproval = null)
   }
 }
 
-function matchesExpectedCleanupApproval(receipt, preview, expected) {
-  return isObject(expected) &&
-    typeof expected.expectedReceiptChecksum === 'string' &&
-    typeof expected.approvedUninstallId === 'string' &&
-    Array.isArray(expected.expectedUninstallActions) &&
-    receipt.state === 'ready' &&
+function matchesExpectedCleanupApproval(
+  receipt: InstallationReceipt,
+  preview: GatewayUninstallPreview,
+  expected: ExpectedCleanupApproval,
+): boolean {
+  return receipt.state === 'ready' &&
     receipt.pending === null &&
     receipt.checksum === expected.expectedReceiptChecksum &&
     preview.installationId === receipt.installationId &&
@@ -893,8 +1285,10 @@ function matchesExpectedCleanupApproval(receipt, preview, expected) {
     sameUninstallActions(preview.actions, expected.expectedUninstallActions);
 }
 
-async function matchesExpectedCleanupProvenance(context, expected) {
-  if (typeof expected.expectedProvenanceSnapshotChecksum !== 'string') return false;
+async function matchesExpectedCleanupProvenance(
+  context: CanaryContext,
+  expected: ExpectedCleanupApproval,
+): Promise<boolean> {
   let raw;
   try {
     raw = await context.cleanupStore.read();
@@ -912,10 +1306,11 @@ async function matchesExpectedCleanupProvenance(context, expected) {
   }
 }
 
-function sameUninstallActions(left, right) {
-  return Array.isArray(left) &&
-    Array.isArray(right) &&
-    left.length === right.length &&
+function sameUninstallActions(
+  left: readonly UninstallAction[],
+  right: readonly UninstallAction[],
+): boolean {
+  return left.length === right.length &&
     left.every((action, index) =>
       action?.action === right[index]?.action &&
       action?.kind === right[index]?.kind &&
@@ -923,25 +1318,31 @@ function sameUninstallActions(left, right) {
       (action?.reason ?? '') === (right[index]?.reason ?? ''));
 }
 
-function validReverseCleanup(actions, { allowEmpty = false } = {}) {
+function validReverseCleanup(
+  actions: readonly UninstallAction[],
+  { allowEmpty = false }: ReverseCleanupOptions = {},
+): boolean {
   if (
-    !Array.isArray(actions) ||
     (!allowEmpty && actions.length === 0) ||
     actions.length > REVERSE_ORDER.length
   ) {
     return false;
   }
   if (actions.length === 0) return true;
-  const indexes = actions.map((action) => REVERSE_ORDER.indexOf(action?.kind));
-  return actions.every((action, index) =>
-    isObject(action) &&
-    (action.action === 'delete' || action.action === 'noop') &&
-    indexes[index] !== -1 &&
-    (index === 0 || indexes[index - 1] < indexes[index]));
+  const indexes = actions.map((action) => REVERSE_ORDER.indexOf(action.kind));
+  return actions.every((action, index) => {
+    const current = indexes[index];
+    const previous = indexes[index - 1];
+    return (action.action === 'delete' || action.action === 'noop') &&
+      current !== undefined &&
+      current !== -1 &&
+      (index === 0 || (previous !== undefined && previous < current));
+  });
 }
 
-function validResidueEvidence(value) {
+function validResidueEvidence(value: BoundaryValue): value is ResidueEvidence {
   return isObject(value) &&
+    v.is(numberSchema, value.ownedResourceCount) &&
     Number.isSafeInteger(value.ownedResourceCount) &&
     value.ownedResourceCount >= 0;
 }
@@ -953,15 +1354,15 @@ async function pollBounded({
   attemptTimeoutMs,
   overallTimeoutMs,
   returnLast = false,
-}) {
-  let last;
+}: PollOptions): Promise<BoundaryValue> {
+  let last: BoundaryValue;
   const startedAt = Date.now();
   for (let attempt = 1; attempt <= POLL_ATTEMPTS; attempt += 1) {
     const remaining = overallTimeoutMs - (Date.now() - startedAt);
     if (remaining <= 0) break;
     try {
       last = await withDeadline(
-        (signal) => probe(signal),
+        (signal: AbortSignal) => probe(signal),
         Math.min(attemptTimeoutMs, remaining),
       );
       if (accept(last)) {
@@ -975,7 +1376,10 @@ async function pollBounded({
       if (sleepRemaining <= 0) break;
       try {
         await withDeadline(
-          () => sleep(Math.min(POLL_INTERVAL_MS, sleepRemaining)),
+          async () => {
+            await sleep(Math.min(POLL_INTERVAL_MS, sleepRemaining));
+            return undefined;
+          },
           Math.min(attemptTimeoutMs, sleepRemaining),
         );
       } catch {
@@ -987,13 +1391,16 @@ async function pollBounded({
   throw new CanaryLifecycleError('verification_failed');
 }
 
-async function withDeadline(operation, timeoutMs) {
+async function withDeadline(
+  operation: (signal: AbortSignal) => BoundaryValue | Promise<BoundaryValue>,
+  timeoutMs: number,
+): Promise<BoundaryValue> {
   const controller = new AbortController();
-  let timer;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       Promise.resolve().then(() => operation(controller.signal)),
-      new Promise((_, reject) => {
+      new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           controller.abort();
           reject(new CanaryLifecycleError('verification_failed'));
@@ -1005,12 +1412,16 @@ async function withDeadline(operation, timeoutMs) {
   }
 }
 
-function residueIsEmpty(value) {
+function residueIsEmpty(value: BoundaryValue): boolean {
   return validResidueEvidence(value) &&
     value.ownedResourceCount === 0;
 }
 
-function requireContext(input, dependencies, { mutations }) {
+function requireContext(
+  input: CanaryLifecycleInput,
+  dependencies: CanaryDependencies,
+  { mutations }: ContextOptions,
+): CanaryContext {
   requireExactObject(input, [
     'accountId',
     'zoneId',
@@ -1034,55 +1445,72 @@ function requireContext(input, dependencies, { mutations }) {
     'inspectionHoldTimeoutMs',
     'onProgress',
   ]);
+  if (!v.is(stringSchema, input.accountId) || !v.is(stringSchema, input.zoneId)) {
+    throw new CanaryLifecycleError('invalid_input');
+  }
   try {
     validateCloudflareId(input.accountId, 'account');
     validateCloudflareId(input.zoneId, 'zone');
   } catch {
     throw new CanaryLifecycleError('invalid_input');
   }
-  let hostname;
+  if (!v.is(stringSchema, input.hostname)) {
+    throw new CanaryLifecycleError('invalid_input');
+  }
+  let hostname: string;
   try {
     hostname = validateHostname(input.hostname);
   } catch {
     throw new CanaryLifecycleError('invalid_input');
   }
-  if (!/^ankka-canary(?:-[a-z0-9-]+)?$/.test(hostname.split('.')[0])) {
+  const firstLabel = hostname.split('.')[0];
+  if (firstLabel === undefined || !/^ankka-canary(?:-[a-z0-9-]+)?$/.test(firstLabel)) {
     throw new CanaryLifecycleError('invalid_input');
   }
   const syntheticMcpUrl = normalizeSyntheticUrl(input.syntheticMcpUrl);
   const allowedEmail = normalizeEmail(input.allowedEmail);
-  requireCloudflare(dependencies.cloudflare);
-  requireProvider(dependencies.provider, mutations);
-  requireReceiptStore(dependencies.receiptStore, mutations);
-  requireReceiptStore(dependencies.cleanupStore, mutations);
-  if (typeof dependencies.inspectSyntheticUpstream !== 'function') {
+  const cloudflare = dependencies.cloudflare;
+  const provider = dependencies.provider;
+  const receiptStore = normalizeReceiptStore(dependencies.receiptStore, mutations);
+  const cleanupStore = normalizeReceiptStore(dependencies.cleanupStore, mutations);
+  requireCloudflare(cloudflare);
+  requireProvider(provider, mutations);
+  const inspectSyntheticUpstream = dependencies.inspectSyntheticUpstream;
+  if (inspectSyntheticUpstream === undefined || !v.is(functionSchema, inspectSyntheticUpstream)) {
     throw new CanaryLifecycleError('invalid_input');
   }
-  if (mutations && typeof dependencies.inspectCanaryResidue !== 'function') {
+  const inspectCanaryResidue = dependencies.inspectCanaryResidue;
+  if (mutations && (
+    inspectCanaryResidue === undefined ||
+    !v.is(functionSchema, inspectCanaryResidue)
+  )) {
     throw new CanaryLifecycleError('invalid_input');
   }
   if (
     dependencies.verifyInstalledGateway !== undefined &&
-    typeof dependencies.verifyInstalledGateway !== 'function'
+    !v.is(functionSchema, dependencies.verifyInstalledGateway)
   ) {
     throw new CanaryLifecycleError('invalid_input');
   }
   if (
     dependencies.holdForInspection !== undefined &&
-    typeof dependencies.holdForInspection !== 'function'
+    !v.is(functionSchema, dependencies.holdForInspection)
   ) {
     throw new CanaryLifecycleError('invalid_input');
   }
   if (mutations && (
-    typeof input.approvalId !== 'string' ||
-    typeof input.targetConfirmationId !== 'string'
+    !v.is(stringSchema, input.approvalId) ||
+    !v.is(stringSchema, input.targetConfirmationId)
   )) {
     throw new CanaryLifecycleError('invalid_input');
   }
-  const sleep = dependencies.sleep ?? ((milliseconds) =>
+  const sleep = dependencies.sleep ?? ((milliseconds: number) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)));
-  if (typeof sleep !== 'function') throw new CanaryLifecycleError('invalid_input');
-  if (dependencies.onProgress !== undefined && typeof dependencies.onProgress !== 'function') {
+  if (!v.is(functionSchema, sleep)) throw new CanaryLifecycleError('invalid_input');
+  if (
+    dependencies.onProgress !== undefined &&
+    !v.is(functionSchema, dependencies.onProgress)
+  ) {
     throw new CanaryLifecycleError('invalid_input');
   }
   const pollAttemptTimeoutMs = boundedTimeout(
@@ -1105,14 +1533,14 @@ function requireContext(input, dependencies, { mutations }) {
     syntheticMcpUrl,
     allowedEmail,
     config,
-    cloudflare: dependencies.cloudflare,
-    provider: dependencies.provider,
-    receiptStore: dependencies.receiptStore,
-    cleanupStore: dependencies.cleanupStore,
-    inspectSyntheticUpstream: dependencies.inspectSyntheticUpstream,
+    cloudflare,
+    provider,
+    receiptStore,
+    cleanupStore,
+    inspectSyntheticUpstream,
     verifyInstalledGateway: dependencies.verifyInstalledGateway,
     holdForInspection: dependencies.holdForInspection,
-    inspectCanaryResidue: dependencies.inspectCanaryResidue,
+    inspectCanaryResidue: inspectCanaryResidue ?? missingResidueInspector,
     sleep,
     pollAttemptTimeoutMs,
     pollOverallTimeoutMs,
@@ -1121,7 +1549,10 @@ function requireContext(input, dependencies, { mutations }) {
   };
 }
 
-function reconciliationContext(context, hooks = {}) {
+function reconciliationContext(
+  context: CanaryContext,
+  hooks: ReconciliationHooks = {},
+): ReconcileInput {
   return {
     config: context.config,
     target: { accountId: context.accountId, zoneId: context.zoneId },
@@ -1129,11 +1560,11 @@ function reconciliationContext(context, hooks = {}) {
     release: RELEASE,
     provider: context.provider,
     receiptStore: context.receiptStore,
-    onProgress(event) {
+    onProgress(event: ProgressEvent) {
       if (
         event?.stage === 'apply' &&
         event?.status === 'verifying' &&
-        typeof hooks.onApplyMutationSubmitted === 'function'
+        hooks.onApplyMutationSubmitted !== undefined
       ) {
         hooks.onApplyMutationSubmitted();
       }
@@ -1147,8 +1578,8 @@ function reconciliationContext(context, hooks = {}) {
   };
 }
 
-function fixedCanaryConfig(hostname, syntheticMcpUrl) {
-  return {
+function fixedCanaryConfig(hostname: string, syntheticMcpUrl: string): JsonValue {
+  const config: JsonValue = {
     schemaVersion: 1,
     gateway: {
       name: 'Ankka disposable canary',
@@ -1168,9 +1599,14 @@ function fixedCanaryConfig(hostname, syntheticMcpUrl) {
       enabledTools: [CANARY_TOOL_NAME],
     }],
   };
+  validateGatewayConfig(config);
+  return config;
 }
 
-async function persistPartialCleanupMarker(context, previewReceipt) {
+async function persistPartialCleanupMarker(
+  context: CanaryContext,
+  previewReceipt: InstallationReceipt,
+): Promise<void> {
   const receipt = await validateInstallationReceipt(previewReceipt);
   const current = await validateInstallationReceipt(await context.receiptStore.read());
   if (
@@ -1209,25 +1645,24 @@ async function persistPartialCleanupMarker(context, previewReceipt) {
   await context.cleanupStore.writeAtomic(receipt);
 }
 
-async function assertExactPartialCleanupPlan(value, receipt, context) {
-  const plan = value?.plan;
+async function assertExactPartialCleanupPlan(
+  value: LiveGatewayPreview,
+  receipt: InstallationReceipt,
+  context: CanaryContext,
+): Promise<void> {
+  const plan = value.plan;
   if (
-    !isObject(plan) ||
     receipt.state !== 'ready' ||
     receipt.pending !== null ||
     receipt.release !== RELEASE ||
     !sameReceiptTarget(receipt.target, context) ||
     !isExactPostRollbackResourcePrefix(receipt.resources) ||
     !isStrictCanarySnapshot(receipt.resources) ||
-    !Array.isArray(plan.blockers) ||
     plan.blockers.length !== 0 ||
-    !Array.isArray(plan.changes) ||
     plan.changes.length !== EXPECTED_ORDER.length ||
     value.pruneApprovalId !== null ||
-    !isObject(value.pruneSummary) ||
     value.pruneSummary.remoteDeleteCount !== 0 ||
     value.pruneSummary.receiptRetirementCount !== 0 ||
-    !Array.isArray(value.pruneSummary.actions) ||
     value.pruneSummary.actions.length !== 0
   ) {
     throw new CanaryLifecycleError('plan_blocked');
@@ -1255,7 +1690,8 @@ async function assertExactPartialCleanupPlan(value, receipt, context) {
     const change = plan.changes[index];
     if (
       !desiredResource ||
-      change?.kind !== kind ||
+      change === undefined ||
+      change.kind !== kind ||
       change.key !== desiredResource.key ||
       change.desiredHash !== desiredResource.desiredHash
     ) {
@@ -1263,7 +1699,7 @@ async function assertExactPartialCleanupPlan(value, receipt, context) {
     }
     if (index < EXPECTED_ORDER.indexOf('portal')) {
       const owned = receipt.resources[index];
-      if (
+      if (owned === undefined ||
         change.action !== 'noop' ||
         owned.kind !== kind ||
         owned.key !== desiredResource.key ||
@@ -1281,27 +1717,30 @@ async function assertExactPartialCleanupPlan(value, receipt, context) {
   }
 }
 
-function assertExactPartialCleanupUninstall(uninstall, receipt) {
+function assertExactPartialCleanupUninstall(
+  uninstall: GatewayUninstallPreview,
+  receipt: InstallationReceipt,
+): void {
   const expected = [...receipt.resources]
     .sort((left, right) => EXPECTED_ORDER.indexOf(right.kind) - EXPECTED_ORDER.indexOf(left.kind));
   if (
-    !isObject(uninstall) ||
     uninstall.installationId !== receipt.installationId ||
-    !Array.isArray(uninstall.blockers) ||
     uninstall.blockers.length !== 0 ||
-    !Array.isArray(uninstall.actions) ||
     uninstall.actions.length !== expected.length ||
-    uninstall.actions.some((action, index) =>
+    uninstall.actions.some((action: UninstallAction, index: number) =>
       action?.action !== 'delete' ||
-      action.kind !== expected[index].kind ||
-      action.key !== expected[index].key ||
+      action.kind !== expected[index]?.kind ||
+      action.key !== expected[index]?.key ||
       action.reason !== undefined)
   ) {
     throw new CanaryLifecycleError('plan_blocked');
   }
 }
 
-async function buildDesiredForReceipt(receipt, context) {
+async function buildDesiredForReceipt(
+  receipt: InstallationReceipt,
+  context: CanaryContext,
+): Promise<GatewayDesiredState> {
   return buildGatewayDesiredState(context.config, {
     target: {
       accountId: context.accountId,
@@ -1314,44 +1753,41 @@ async function buildDesiredForReceipt(receipt, context) {
   });
 }
 
-function copyReceiptResourceFingerprint(resource) {
-  return {
+function copyReceiptResourceFingerprint(resource: ReceiptResource): ReceiptResource {
+  const copy: ReceiptResourceCopy = {
     kind: resource.kind,
     key: resource.key,
     provider: { ...resource.provider },
     desiredHash: resource.desiredHash,
-    ...(resource.marker !== undefined ? { marker: resource.marker } : {}),
-    ...(resource.identityHash !== undefined ? { identityHash: resource.identityHash } : {}),
   };
+  if (resource.marker !== undefined) copy.marker = resource.marker;
+  if (resource.identityHash !== undefined) copy.identityHash = resource.identityHash;
+  return copy;
 }
 
-function copyUninstallAction(action) {
-  return {
+function copyUninstallAction(action: UninstallAction): UninstallAction {
+  const copy: UninstallActionCopy = {
     action: action.action,
     kind: action.kind,
     key: action.key,
-    ...(action.reason !== undefined ? { reason: action.reason } : {}),
   };
+  if (action.reason !== undefined) copy.reason = action.reason;
+  return copy;
 }
 
-async function assertSafeCanaryPlan(value, context, {
+async function assertSafeCanaryPlan(value: LiveGatewayPreview, context: CanaryContext, {
   pendingPortalCreateRecoveryReceiptChecksum = null,
-} = {}) {
-  const plan = value?.plan;
+}: SafePlanOptions = {}): Promise<SafePlanResult> {
+  const plan = value.plan;
   if (
-    !isObject(plan) ||
-    !Array.isArray(plan.blockers) ||
     plan.blockers.length !== 0 ||
-    !Array.isArray(plan.changes) ||
     plan.changes.length !== EXPECTED_ORDER.length ||
-    plan.changes.some((change, index) =>
+    plan.changes.some((change: PlanChange, index: number) =>
       change?.kind !== EXPECTED_ORDER[index] ||
       !['create', 'update', 'noop'].includes(change.action)) ||
     value.pruneApprovalId !== null ||
-    !isObject(value.pruneSummary) ||
     value.pruneSummary.remoteDeleteCount !== 0 ||
     value.pruneSummary.receiptRetirementCount !== 0 ||
-    !Array.isArray(value.pruneSummary.actions) ||
     value.pruneSummary.actions.length !== 0
   ) {
     throw new CanaryLifecycleError('plan_blocked');
@@ -1377,7 +1813,7 @@ async function assertSafeCanaryPlan(value, context, {
     };
   }
 
-  const updates = plan.changes.filter(({ action }) => action === 'update');
+  const updates = plan.changes.filter(({ action }: PlanChange) => action === 'update');
   if (updates.length === 0) {
     return {
       pendingUpdateRecovery: false,
@@ -1385,7 +1821,7 @@ async function assertSafeCanaryPlan(value, context, {
       pendingPortalCreateRecoveryReceiptChecksum: null,
     };
   }
-  const observedChanges = plan.changes.filter(({ action }) => action !== 'create');
+  const observedChanges = plan.changes.filter(({ action }: PlanChange) => action !== 'create');
 
   let receipt;
   try {
@@ -1399,10 +1835,13 @@ async function assertSafeCanaryPlan(value, context, {
     receipt.pending?.type === 'apply' &&
     receipt.pending.action === 'update' &&
     receipt.pending.planId === plan.planId &&
-    updates.some((change) =>
-      change.kind === receipt.pending.kind &&
-      change.key === receipt.pending.key &&
-      change.desiredHash === receipt.pending.expectedDesiredHash);
+    updates.some((change: PlanChange) => {
+      const pending = receipt.pending;
+      return pending !== null &&
+        change.kind === pending.kind &&
+        change.key === pending.key &&
+        change.desiredHash === pending.expectedDesiredHash;
+    });
   if (
     (!ordinaryOwnedUpdate && !pendingOwnedUpdate) ||
     receipt.installationId !== plan.installationId ||
@@ -1411,7 +1850,7 @@ async function assertSafeCanaryPlan(value, context, {
     receipt.target.accountId !== context.accountId ||
     receipt.target.zoneId !== context.zoneId ||
     receipt.target.hostname !== context.hostname ||
-    observedChanges.some((change) => {
+    observedChanges.some((change: PlanChange) => {
       const owned = receipt.resources.find((resource) =>
         resource.kind === change.kind && resource.key === change.key);
       return !owned ||
@@ -1428,22 +1867,24 @@ async function assertSafeCanaryPlan(value, context, {
   };
 }
 
-async function isExactPendingPortalCreateNoopRecovery(value, receipt, context) {
-  const plan = value?.plan;
-  const pending = receipt?.pending;
+async function isExactPendingPortalCreateNoopRecovery(
+  value: LiveGatewayPreview,
+  receipt: InstallationReceipt,
+  context: CanaryContext,
+): Promise<boolean> {
+  const plan = value.plan;
+  const pending = receipt.pending;
   if (
-    receipt?.state !== 'installing' ||
+    receipt.state !== 'installing' ||
     pending?.type !== 'apply' ||
     pending.action !== 'create' ||
     pending.kind !== 'portal' ||
     receipt.release !== RELEASE ||
-    receipt.installationId !== plan?.installationId ||
+    receipt.installationId !== plan.installationId ||
     receipt.target.accountId !== context.accountId ||
     receipt.target.zoneId !== context.zoneId ||
     receipt.target.hostname !== context.hostname ||
-    !Array.isArray(plan?.blockers) ||
     plan.blockers.length !== 0 ||
-    !Array.isArray(plan.changes) ||
     plan.changes.length !== EXPECTED_ORDER.length
   ) {
     return false;
@@ -1518,15 +1959,19 @@ async function isExactPendingPortalCreateNoopRecovery(value, receipt, context) {
     change.provider === undefined);
 }
 
-function sameAccessPolicy(left, right) {
-  return isObject(left) &&
-    isObject(right) &&
-    left.identityType === right.identityType &&
+function sameAccessPolicy(
+  left: GatewayDesiredState['accessPolicy'] | ReceiptAccessPolicy,
+  right: GatewayDesiredState['accessPolicy'] | ReceiptAccessPolicy,
+): boolean {
+  return left.identityType === right.identityType &&
     left.identityCount === right.identityCount &&
     left.identitiesHash === right.identitiesHash;
 }
 
-async function pendingUpdateRecoveryWasCommitted(context, preview) {
+async function pendingUpdateRecoveryWasCommitted(
+  context: CanaryContext,
+  preview: PendingUpdatePreview,
+): Promise<boolean> {
   let receipt;
   try {
     receipt = await validateInstallationReceipt(await context.receiptStore.read());
@@ -1544,15 +1989,18 @@ async function pendingUpdateRecoveryWasCommitted(context, preview) {
     receipt.target.hostname === context.hostname;
 }
 
-function sameProviderLocator(left, right) {
-  return isObject(left) &&
-    isObject(right) &&
+function sameProviderLocator(
+  left: ReceiptProviderLocator,
+  right: ReceiptProviderLocator | undefined,
+): boolean {
+  return right !== undefined &&
     left.id === right.id &&
     (left.parentId ?? '') === (right.parentId ?? '');
 }
 
-function normalizeSyntheticUrl(value) {
-  let url;
+function normalizeSyntheticUrl(value: BoundaryValue): string {
+  if (!v.is(stringSchema, value)) throw new CanaryLifecycleError('invalid_input');
+  let url: URL;
   try {
     url = new URL(value);
   } catch {
@@ -1574,16 +2022,18 @@ function normalizeSyntheticUrl(value) {
   return url.toString();
 }
 
-function isQuickTunnelHostname(hostname) {
+function isQuickTunnelHostname(hostname: string): boolean {
   const labels = hostname.split('.');
+  const firstLabel = labels[0];
   return labels.length === 3 &&
     labels[1] === 'trycloudflare' &&
     labels[2] === 'com' &&
-    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(labels[0]);
+    firstLabel !== undefined &&
+    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(firstLabel);
 }
 
-function normalizeEmail(value) {
-  if (typeof value !== 'string') throw new CanaryLifecycleError('invalid_input');
+function normalizeEmail(value: BoundaryValue): string {
+  if (!v.is(stringSchema, value)) throw new CanaryLifecycleError('invalid_input');
   const normalized = value.trim().toLowerCase();
   if (normalized.length === 0 || normalized.length > 254 || !EMAIL.test(normalized)) {
     throw new CanaryLifecycleError('invalid_input');
@@ -1591,15 +2041,19 @@ function normalizeEmail(value) {
   return normalized;
 }
 
-function boundedTimeout(value, maximum) {
+function boundedTimeout(value: BoundaryValue, maximum: number): number {
   if (value === undefined) return maximum;
-  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+  if (!v.is(numberSchema, value) || !Number.isSafeInteger(value) || value < 1 || value > maximum) {
     throw new CanaryLifecycleError('invalid_input');
   }
   return value;
 }
 
-function sameCanaryTarget(removed, snapshot, context) {
+function sameCanaryTarget(
+  removed: ReceiptTarget,
+  snapshot: ReceiptTarget,
+  context: CanaryContext,
+): boolean {
   return removed.accountId === context.accountId &&
     removed.zoneId === context.zoneId &&
     removed.hostname === context.hostname &&
@@ -1609,34 +2063,32 @@ function sameCanaryTarget(removed, snapshot, context) {
     removed.zoneName === snapshot.zoneName;
 }
 
-function sameReceiptTarget(target, context) {
-  return isObject(target) &&
-    target.accountId === context.accountId &&
+function sameReceiptTarget(target: ReceiptTarget, context: CanaryContext): boolean {
+  return target.accountId === context.accountId &&
     target.zoneId === context.zoneId &&
     target.hostname === context.hostname;
 }
 
-function sameReceiptResourceSet(left, right) {
-  return Array.isArray(left) &&
-    Array.isArray(right) &&
-    left.length === right.length &&
+function sameReceiptResourceSet(
+  left: readonly ReceiptResource[],
+  right: readonly ReceiptResource[],
+): boolean {
+  return left.length === right.length &&
     receiptResourcesAreExactSubset(left, right) &&
     receiptResourcesAreExactSubset(right, left);
 }
 
-function isExactPostRollbackResourcePrefix(resources) {
+function isExactPostRollbackResourcePrefix(resources: readonly ReceiptResource[]): boolean {
   const prefixLength = EXPECTED_ORDER.indexOf('portal');
-  return Array.isArray(resources) &&
-    resources.length === prefixLength &&
+  return resources.length === prefixLength &&
     resources.every((resource, index) => resource?.kind === EXPECTED_ORDER[index]);
 }
 
-function receiptResourcesAreExactSubset(current, snapshot) {
-  if (
-    !Array.isArray(current) ||
-    !Array.isArray(snapshot) ||
-    current.length > snapshot.length
-  ) {
+function receiptResourcesAreExactSubset(
+  current: readonly ReceiptResource[],
+  snapshot: readonly ReceiptResource[],
+): boolean {
+  if (current.length > snapshot.length) {
     return false;
   }
   return current.every((resource) => snapshot.some((candidate) =>
@@ -1649,9 +2101,8 @@ function receiptResourcesAreExactSubset(current, snapshot) {
     (resource.provider?.parentId ?? '') === (candidate.provider?.parentId ?? '')));
 }
 
-function isStrictCanarySnapshot(resources) {
-  if (!(Array.isArray(resources) &&
-    resources.length > 0 &&
+function isStrictCanarySnapshot(resources: readonly ReceiptResource[]): boolean {
+  if (!(resources.length > 0 &&
     resources.length <= EXPECTED_ORDER.length &&
     resources.every((resource) => EXPECTED_ORDER.includes(resource?.kind)) &&
     new Set(resources.map(({ kind }) => kind)).size === resources.length)) return false;
@@ -1672,7 +2123,7 @@ function isStrictCanarySnapshot(resources) {
   });
 }
 
-function assertNoLegacyGeneratedAppReceipt(value) {
+function assertNoLegacyGeneratedAppReceipt(value: BoundaryValue): void {
   if (
     isObject(value) &&
     value.manager === 'ankka-mcp-gateway' &&
@@ -1686,8 +2137,10 @@ function assertNoLegacyGeneratedAppReceipt(value) {
   }
 }
 
-function requireCloudflare(value) {
-  const methods = [
+function requireCloudflare(
+  value: CloudflarePreflightClient | undefined,
+): asserts value is CloudflarePreflightClient {
+  const methods: readonly (keyof CloudflarePreflightClient)[] = [
     'getZone',
     'listIdentityProviders',
     'listMcpServers',
@@ -1695,36 +2148,71 @@ function requireCloudflare(value) {
     'listAccessApps',
     'listDnsRecords',
   ];
-  if (!isObject(value) || methods.some((method) => typeof value[method] !== 'function')) {
+  if (
+    value === undefined ||
+    !v.is(v.object({}), value) ||
+    methods.some((method) => !v.is(functionSchema, value[method]))
+  ) {
     throw new CanaryLifecycleError('invalid_input');
   }
 }
 
-function requireProvider(value, mutations) {
-  if (!isObject(value) || typeof value.readObservedState !== 'function') {
+function requireProvider(
+  value: GatewayProvider | undefined,
+  mutations: boolean,
+): asserts value is GatewayProvider {
+  if (
+    value === undefined ||
+    !v.is(v.object({}), value) ||
+    !v.is(functionSchema, value.readObservedState)
+  ) {
     throw new CanaryLifecycleError('invalid_input');
   }
-  if (mutations && typeof value.applyChange !== 'function') {
-    throw new CanaryLifecycleError('invalid_input');
-  }
-}
-
-function requireReceiptStore(value, mutations) {
-  if (!isObject(value) || typeof value.read !== 'function' || typeof value.writeAtomic !== 'function') {
-    throw new CanaryLifecycleError('invalid_input');
-  }
-  if (mutations && typeof value.withExclusiveLock !== 'function') {
-    throw new CanaryLifecycleError('invalid_input');
-  }
-}
-
-function requireExactObject(value, allowed) {
-  if (!isObject(value) || Object.keys(value).some((key) => !allowed.includes(key))) {
+  if (mutations && !v.is(functionSchema, value.applyChange)) {
     throw new CanaryLifecycleError('invalid_input');
   }
 }
 
-async function stableId(prefix, value) {
+function normalizeReceiptStore(
+  value: CanaryReceiptStore | undefined,
+  mutations: boolean,
+): NormalizedReceiptStore {
+  if (
+    value === undefined ||
+    !v.is(v.object({}), value) ||
+    !v.is(functionSchema, value.read) ||
+    !v.is(functionSchema, value.writeAtomic)
+  ) {
+    throw new CanaryLifecycleError('invalid_input');
+  }
+  if (mutations && !v.is(functionSchema, value.withExclusiveLock)) {
+    throw new CanaryLifecycleError('invalid_input');
+  }
+  return Object.freeze({
+    read: () => value.read(),
+    writeAtomic: (receipt: InstallationReceipt) => value.writeAtomic(receipt),
+    async withExclusiveLock<Result>(
+      operation: () => Promise<Result>,
+      options?: { readonly operationId: string },
+    ): Promise<Result> {
+      if (value.withExclusiveLock === undefined) {
+        throw new CanaryLifecycleError('invalid_input');
+      }
+      return value.withExclusiveLock(operation, options);
+    },
+  });
+}
+
+function requireExactObject(
+  value: CanaryDependencies | CanaryLifecycleInput,
+  allowed: readonly string[],
+): void {
+  if (!v.is(v.object({}), value) || Object.keys(value).some((key) => !allowed.includes(key))) {
+    throw new CanaryLifecycleError('invalid_input');
+  }
+}
+
+async function stableId(prefix: string, value: JsonValue): Promise<string> {
   if (!globalThis.crypto?.subtle) throw new CanaryLifecycleError('invalid_input');
   const bytes = new TextEncoder().encode(canonicalJson(value));
   const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
@@ -1734,37 +2222,29 @@ async function stableId(prefix, value) {
   return `${prefix}-${hash.slice(0, 24)}`;
 }
 
-function canonicalJson(value) {
-  if (value === null || ['boolean', 'string'].includes(typeof value)) return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
+function canonicalJson(value: JsonValue): string {
+  if (!v.is(jsonValueSchema, value)) throw new CanaryLifecycleError('invalid_input');
+  if (value === null || v.is(v.boolean(), value) || v.is(stringSchema, value)) {
+    return JSON.stringify(value);
+  }
+  if (v.is(numberSchema, value) && Number.isFinite(value)) return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isObject(value)) {
-    return `{${Object.keys(value)
-      .sort(compareText)
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+  if (v.is(v.record(stringSchema, jsonValueSchema), value)) {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => compareText(left, right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
       .join(',')}}`;
   }
   throw new CanaryLifecycleError('invalid_input');
 }
 
-function normalizeLifecycleFailure(error) {
-  return error instanceof CanaryLifecycleError ? error : new CanaryLifecycleError('lifecycle_failed');
+function safeCleanupState(value: BoundaryValue): CleanupStatus {
+  return isObject(value) && v.is(cleanupStatusSchema, value.status)
+    ? value.status
+    : 'not_started';
 }
 
-function safeCleanupState(value) {
-  const allowed = new Set([
-    'not_started',
-    'blocked',
-    'blocked_pending_apply',
-    'incomplete',
-    'failed',
-    'removed',
-    'rollback_complete',
-  ]);
-  return allowed.has(value?.status) ? value.status : 'not_started';
-}
-
-async function hasPendingApply(receiptStore) {
+async function hasPendingApply(receiptStore: NormalizedReceiptStore): Promise<boolean> {
   try {
     const receipt = await receiptStore.read();
     if (receipt === null) return false;
@@ -1776,14 +2256,16 @@ async function hasPendingApply(receiptStore) {
   }
 }
 
-function emit(context, event) {
+function emit(context: CanaryContext, event: ProgressEvent): void {
   if (!context.onProgress) return;
-  const sanitized = {
+  const sanitized: SanitizedProgressEvent = {
     stage: safeStage(event.stage),
     status: safeStatus(event.status),
-    ...(safeAction(event.action) ? { action: safeAction(event.action) } : {}),
-    ...(safeKind(event.kind) ? { kind: safeKind(event.kind) } : {}),
   };
+  const action = safeAction(event.action);
+  const kind = safeKind(event.kind);
+  if (action !== undefined) sanitized.action = action;
+  if (kind !== undefined) sanitized.kind = kind;
   try {
     context.onProgress(Object.freeze(sanitized));
   } catch {
@@ -1791,8 +2273,8 @@ function emit(context, event) {
   }
 }
 
-function safeStage(value) {
-  return [
+function safeStage(value: BoundaryValue): string {
+  return v.is(stringSchema, value) && [
     'apply',
     'idempotency',
     'inspection',
@@ -1805,22 +2287,30 @@ function safeStage(value) {
     : 'lifecycle';
 }
 
-function safeAction(value) {
-  return ['create', 'update', 'delete'].includes(value) ? value : undefined;
+function safeAction(value: BoundaryValue): string | undefined {
+  return v.is(stringSchema, value) && ['create', 'update', 'delete'].includes(value)
+    ? value
+    : undefined;
 }
 
-function safeKind(value) {
-  return EXPECTED_ORDER.includes(value) ? value : undefined;
+function safeKind(value: BoundaryValue): ResourceKind | undefined {
+  return v.is(resourceKindSchema, value) ? value : undefined;
 }
 
-function safeStatus(value) {
-  return ['started', 'verifying', 'verified', 'failed'].includes(value) ? value : 'failed';
+function safeStatus(value: BoundaryValue): string {
+  return v.is(stringSchema, value) && ['started', 'verifying', 'verified', 'failed'].includes(value)
+    ? value
+    : 'failed';
 }
 
-function compareText(left, right) {
+function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function isObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+function isObject(value: BoundaryValue): value is BoundaryObject {
+  return v.is(boundaryObjectSchema, value);
+}
+
+async function missingResidueInspector(): Promise<BoundaryValue> {
+  throw new CanaryLifecycleError('invalid_input');
 }

@@ -1,9 +1,16 @@
+import * as v from 'valibot';
+
+import { boundaryObjectSchema } from './boundary';
 import { OAUTH_CALLBACK_URL, PUBLIC_ORIGIN } from './constants';
 import type { GatewayDeployEnv } from './env';
 import { DeployError, stableError } from './errors';
-import type { ExactReleaseBundleIdentity } from './exact-release-bundle';
+import {
+  parseExactReleaseBundleIdentity,
+  type ExactReleaseBundleIdentity,
+} from './exact-release-bundle';
 import {
   createGatewayDeployWorker,
+  type GatewayDeployExecutionContext,
   type GatewayDeployWorker,
   type GatewayDeployWorkerDependencies,
 } from './index';
@@ -16,14 +23,9 @@ import {
   type PinnedR2Release,
   type R2ExactReleaseBundleProvider,
   type R2ReleaseBundleProvider,
+  type R2ReleaseReadBucket,
 } from './r2-release-provider';
-import {
-  RELEASE_ENVELOPE_SCHEMA_VERSION,
-  RELEASE_SIGNATURE_CONTEXT,
-  type ReleaseBundleProvider,
-  type VerifiedReleaseBundle,
-} from './release';
-import { canonicalJson } from './release-manifest';
+import type { ReleaseBundleProvider, VerifiedReleaseBundle } from './release';
 import type { ReviewedGatewayDeployActivation } from './reviewed-activation';
 import {
   createCloudflareReviewedInstallProviderAdapter,
@@ -46,33 +48,41 @@ import {
   type SignedInstallerAssetIndex,
 } from './signed-installer-assets';
 import { streamingInstallCallbackResponse } from './streaming-callback';
+import { parseVerifiedReleaseBundle } from './verified-release-bundle';
 
 const CALLBACK_PATH = new URL(OAUTH_CALLBACK_URL).pathname;
-const PIN_KEYS = Object.freeze([
-  'artifactSha256',
-  'channel',
-  'keyId',
-  'publicKey',
-  'release',
-  'schemaVersion',
-] as const);
+const releaseBucketSchema = v.object({ get: v.function(), list: v.function() });
+const reviewedActivationSchema = v.union([
+  v.strictObject({ enabled: v.literal(false), pin: v.null() }),
+  v.strictObject({ enabled: v.literal(true), pin: boundaryObjectSchema }),
+]);
 
 export interface ReviewedGatewayDeployEnv extends GatewayDeployEnv {
   /** Private, read-only release bucket. It is absent from the disabled config. */
-  GATEWAY_RELEASE_BUCKET?: R2Bucket;
+  GATEWAY_RELEASE_BUCKET?: R2ReleaseReadBucket;
 }
 
 export interface ReviewedGatewayDeployWorker {
   fetch(
     request: Request,
     env: ReviewedGatewayDeployEnv,
-    context?: ExecutionContext,
+    context?: GatewayDeployExecutionContext,
   ): Promise<Response>;
 }
 
 interface ReviewedReleaseSnapshot {
   readonly bundle: VerifiedReleaseBundle;
   readonly installerAssets: SignedInstallerAssetIndex;
+}
+
+interface LazyReleaseSnapshot {
+  readonly load: (env: ReviewedGatewayDeployEnv) => Promise<ReviewedReleaseSnapshot>;
+}
+
+interface OptionalExecutionControls {
+  now?: () => number;
+  randomBytes?: (length: number) => Uint8Array;
+  timeoutMs?: number;
 }
 
 type ReviewedExecutor = (
@@ -86,8 +96,13 @@ type ReviewedUninstallExecutor = (
 export type ReviewedRuntimeTransport = FetchTransport & ReviewedInstallTransport;
 
 /** A receiver-independent wrapper around the global fetch. */
-export function boundGlobalFetch(): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
-  return (input, init) => fetch(input, init);
+export function boundGlobalFetch(): ReviewedRuntimeTransport {
+  function transport(request: Request): Promise<Response>;
+  function transport(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  function transport(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    return fetch(input, init);
+  }
+  return transport;
 }
 
 export interface ReviewedRuntimeDependencies {
@@ -139,45 +154,20 @@ function unavailable(): never {
   throw new DeployError(503, 'release_unavailable');
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
 function exactPin(pin: PinnedR2Release): Readonly<PinnedR2Release> {
-  // The provider constructor owns the complete format validation. Constructing
-  // it here also validates pins when a test-only provider seam is injected.
-  new PinnedR2ReleaseBundleProvider(pin);
-  if (!isRecord(pin) || !exactKeys(pin, PIN_KEYS)) invalid();
-  return Object.freeze({ ...pin });
+  return parseExactReleaseBundleIdentity(pin);
 }
 
 function assertExactBundlePin(bundle: VerifiedReleaseBundle, pin: PinnedR2Release): void {
+  const parsed = parseVerifiedReleaseBundle(bundle);
   if (
     !Object.isFrozen(bundle) ||
-    bundle.verification !== 'ed25519' ||
-    bundle.channel !== pin.channel ||
-    bundle.keyId !== pin.keyId ||
-    bundle.publicKey !== pin.publicKey ||
-    !isRecord(bundle.envelope) ||
+    parsed.channel !== pin.channel ||
+    parsed.keyId !== pin.keyId ||
+    parsed.publicKey !== pin.publicKey ||
     !Object.isFrozen(bundle.envelope) ||
-    !exactKeys(bundle.envelope as unknown as Record<string, unknown>, [
-      'channel', 'keyId', 'manifest', 'schemaVersion', 'signature', 'signatureContext',
-    ]) ||
-    bundle.envelope.schemaVersion !== RELEASE_ENVELOPE_SCHEMA_VERSION ||
-    bundle.envelope.channel !== pin.channel ||
-    bundle.envelope.keyId !== pin.keyId ||
-    bundle.envelope.manifest !== canonicalJson(bundle.manifest) ||
-    !/^[A-Za-z0-9_-]{86}$/u.test(bundle.envelope.signature) ||
-    bundle.envelope.signatureContext !== RELEASE_SIGNATURE_CONTEXT ||
-    bundle.manifest.release !== pin.release ||
-    bundle.manifest.artifact.treeSha256 !== pin.artifactSha256 ||
-    !Array.isArray(bundle.payload) ||
+    parsed.manifest.release !== pin.release ||
+    parsed.manifest.artifact.treeSha256 !== pin.artifactSha256 ||
     !Object.isFrozen(bundle.payload)
   ) invalid();
 }
@@ -190,9 +180,9 @@ function assertExactAssetPin(index: SignedInstallerAssetIndex, pin: PinnedR2Rele
   ) invalid();
 }
 
-function releaseBucket(env: ReviewedGatewayDeployEnv): R2Bucket {
+function releaseBucket(env: ReviewedGatewayDeployEnv): R2ReleaseReadBucket {
   const bucket = env.GATEWAY_RELEASE_BUCKET;
-  if (!bucket || typeof bucket.get !== 'function' || typeof bucket.list !== 'function') unavailable();
+  if (bucket === undefined || !v.safeParse(releaseBucketSchema, bucket).success) unavailable();
   return bucket;
 }
 
@@ -200,9 +190,7 @@ function createLazyReleaseSnapshot(
   pin: Readonly<PinnedR2Release>,
   provider: R2ReleaseBundleProvider,
   assetFactory: (bundle: VerifiedReleaseBundle) => Promise<SignedInstallerAssetIndex>,
-): {
-  readonly load: (env: ReviewedGatewayDeployEnv) => Promise<ReviewedReleaseSnapshot>;
-} {
+): LazyReleaseSnapshot {
   let successful: ReviewedReleaseSnapshot | null = null;
   let inFlight: Promise<ReviewedReleaseSnapshot> | null = null;
 
@@ -242,8 +230,8 @@ function protectedCorePath(pathname: string): boolean {
     pathname === CALLBACK_PATH;
 }
 
-function runtimeErrorResponse(error: unknown): Response {
-  const stable = stableError(error);
+function runtimeErrorResponse<ErrorValue>(error: ErrorValue): Response {
+  const stable = stableError(error instanceof Error ? error : undefined);
   const headers = new Headers({
     'cache-control': 'no-store',
     'content-security-policy': "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
@@ -282,12 +270,24 @@ function createDisabledReviewedShell(): ReviewedGatewayDeployWorker {
   });
 }
 
-function disabledActivation(activation: ReviewedGatewayDeployActivation): boolean {
-  const value: unknown = activation;
-  if (!isRecord(value) || !exactKeys(value, ['enabled', 'pin'])) invalid();
-  if (value.enabled === false && value.pin === null) return true;
-  if (value.enabled !== true || !isRecord(value.pin)) invalid();
-  return false;
+function parseReviewedActivation<Input>(input: Input): ReviewedGatewayDeployActivation {
+  const result = v.safeParse(reviewedActivationSchema, input);
+  if (!result.success) invalid();
+  if (!result.output.enabled) return Object.freeze({ enabled: false, pin: null });
+  return Object.freeze({
+    enabled: true,
+    pin: parseExactReleaseBundleIdentity(result.output.pin),
+  });
+}
+
+function optionalExecutionControls(
+  dependencies: OptionalExecutionControls,
+): OptionalExecutionControls {
+  const controls: OptionalExecutionControls = {};
+  if (dependencies.timeoutMs !== undefined) controls.timeoutMs = dependencies.timeoutMs;
+  if (dependencies.now !== undefined) controls.now = dependencies.now;
+  if (dependencies.randomBytes !== undefined) controls.randomBytes = dependencies.randomBytes;
+  return controls;
 }
 
 /** Direct, awaited adapter: no queue, waitUntil, alarm, or credential capture. */
@@ -299,9 +299,7 @@ export function createSynchronousReviewedInstallExecutor(
       ...input,
       provider: dependencies.providerAdapter,
       transport: dependencies.transport,
-      ...(dependencies.timeoutMs === undefined ? {} : { timeoutMs: dependencies.timeoutMs }),
-      ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
-      ...(dependencies.randomBytes === undefined ? {} : { randomBytes: dependencies.randomBytes }),
+      ...optionalExecutionControls(dependencies),
     }),
   });
 }
@@ -315,9 +313,7 @@ export function createSynchronousReviewedUninstallExecutor(
       ...input,
       provider: dependencies.providerAdapter,
       transport: dependencies.transport,
-      ...(dependencies.timeoutMs === undefined ? {} : { timeoutMs: dependencies.timeoutMs }),
-      ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
-      ...(dependencies.randomBytes === undefined ? {} : { randomBytes: dependencies.randomBytes }),
+      ...optionalExecutionControls(dependencies),
     }),
   });
 }
@@ -336,7 +332,7 @@ export function createReviewedGatewayDeployRuntime(
   // as a method (`input.transport(...)`), and workerd's `fetch` throws
   // "Illegal invocation" when called with a foreign receiver. Node ignores the
   // receiver, so only a live Worker exposes the difference.
-  const transport = (dependencies.transport ?? boundGlobalFetch()) as ReviewedRuntimeTransport;
+  const transport = dependencies.transport ?? boundGlobalFetch();
   const bundleProvider = dependencies.releaseBundleProvider ?? new PinnedR2ReleaseBundleProvider(pin);
   const exactBundleProvider = dependencies.exactReleaseBundleProvider ?? new ExactR2ReleaseBundleProvider();
   const assetFactory = dependencies.createInstallerAssets ?? createSignedInstallerAssetIndex;
@@ -349,27 +345,23 @@ export function createReviewedGatewayDeployRuntime(
 
   const releaseProvider: ReleaseBundleProvider = Object.freeze({
     async loadVerifiedRelease(env: GatewayDeployEnv): Promise<VerifiedReleaseBundle> {
-      return (await snapshot.load(env as ReviewedGatewayDeployEnv)).bundle;
+      return (await snapshot.load(env)).bundle;
     },
     async loadVerifiedReleaseBundle(env: GatewayDeployEnv): Promise<VerifiedReleaseBundle> {
-      return (await snapshot.load(env as ReviewedGatewayDeployEnv)).bundle;
+      return (await snapshot.load(env)).bundle;
     },
   });
   const installExecutor = createSynchronousReviewedInstallExecutor({
     providerAdapter,
     transport,
     execute,
-    ...(dependencies.timeoutMs === undefined ? {} : { timeoutMs: dependencies.timeoutMs }),
-    ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
-    ...(dependencies.randomBytes === undefined ? {} : { randomBytes: dependencies.randomBytes }),
+    ...optionalExecutionControls(dependencies),
   });
   const uninstallExecutor = createSynchronousReviewedUninstallExecutor({
     providerAdapter: uninstallProviderAdapter,
     transport,
     execute: executeUninstall,
-    ...(dependencies.timeoutMs === undefined ? {} : { timeoutMs: dependencies.timeoutMs }),
-    ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
-    ...(dependencies.randomBytes === undefined ? {} : { randomBytes: dependencies.randomBytes }),
+    ...optionalExecutionControls(dependencies),
   });
   const coreDependencies: GatewayDeployWorkerDependencies = {
     abuseControlPolicy: 'required',
@@ -380,7 +372,7 @@ export function createReviewedGatewayDeployRuntime(
         identity: ExactReleaseBundleIdentity,
       ) => (
         exactBundleProvider.loadVerifiedReleaseBundleForIdentity(
-          releaseBucket(env as ReviewedGatewayDeployEnv),
+          releaseBucket(env),
           identity,
         )
       ),
@@ -391,26 +383,26 @@ export function createReviewedGatewayDeployRuntime(
     transport,
     capabilityPolicy: Object.freeze({ deploy: true, uninstall: true, events: false }),
     installCallbackResponse: async ({ env, context, execute }) => {
-      const loaded = await snapshot.load(env as ReviewedGatewayDeployEnv);
+      const loaded = await snapshot.load(env);
       const shell = buildSignedInstallerAssetResponse(
         loaded.installerAssets,
         new Request(`${PUBLIC_ORIGIN}/result`),
       );
-      return streamingInstallCallbackResponse(shell, execute, {
-        ...(context === undefined ? {} : { context }),
-      });
+      return context === undefined
+        ? streamingInstallCallbackResponse(shell, execute)
+        : streamingInstallCallbackResponse(shell, execute, { context });
     },
     managementCallbackResponse: async ({ env, context, execute }) => {
-      const loaded = await snapshot.load(env as ReviewedGatewayDeployEnv);
+      const loaded = await snapshot.load(env);
       const shell = buildSignedInstallerAssetResponse(
         loaded.installerAssets,
         new Request(`${PUBLIC_ORIGIN}/manage`),
       );
-      return streamingInstallCallbackResponse(shell, execute, {
-        ...(context === undefined ? {} : { context }),
-      });
+      return context === undefined
+        ? streamingInstallCallbackResponse(shell, execute)
+        : streamingInstallCallbackResponse(shell, execute, { context });
     },
-    ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
+    ...optionalExecutionControls(dependencies.now === undefined ? {} : { now: dependencies.now }),
   };
   const core: GatewayDeployWorker = createGatewayDeployWorker(coreDependencies);
 
@@ -418,7 +410,7 @@ export function createReviewedGatewayDeployRuntime(
     async fetch(
       request: Request,
       env: ReviewedGatewayDeployEnv,
-      context?: ExecutionContext,
+      context?: GatewayDeployExecutionContext,
     ): Promise<Response> {
       let pathname: string;
       try {
@@ -442,12 +434,12 @@ export function createReviewedGatewayDeployRuntime(
  * dependencies, instantiate the reviewed adapter, or require an R2 binding.
  */
 export function createReviewedGatewayDeployEntrypoint(
-  activation: ReviewedGatewayDeployActivation,
+  inputActivation: ReviewedGatewayDeployActivation,
   dependencies?: ReviewedRuntimeDependencies,
 ): ReviewedGatewayDeployWorker {
-  if (disabledActivation(activation)) {
+  const activation = parseReviewedActivation(inputActivation);
+  if (!activation.enabled) {
     return createDisabledReviewedShell();
   }
-  if (activation.pin === null) invalid();
   return createReviewedGatewayDeployRuntime(activation.pin, dependencies);
 }

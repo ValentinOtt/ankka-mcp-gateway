@@ -1,3 +1,5 @@
+import * as v from 'valibot';
+
 const JSON_RPC_VERSION = '2.0';
 export const SYNTHETIC_MAX_BODY_BYTES = 64 * 1024;
 const LATEST_LEGACY_PROTOCOL_VERSION = '2025-11-25';
@@ -7,6 +9,12 @@ const LEGACY_PROTOCOL_VERSIONS = new Set([
   '2025-06-18',
   LATEST_LEGACY_PROTOCOL_VERSION,
 ]);
+const rpcIdSchema = v.union([v.null(), v.string(), v.pipe(v.number(), v.finite())]);
+const rpcMessageSchema = v.looseObject({
+  jsonrpc: v.literal(JSON_RPC_VERSION),
+  method: v.string(),
+});
+const initializeParamsSchema = v.looseObject({ protocolVersion: v.string() });
 
 export const SYNTHETIC_TOOL_NAME = 'ankka_canary_status';
 export const SYNTHETIC_FIXTURE_ID = 'ankka-synthetic-mcp-canary';
@@ -158,7 +166,7 @@ function dispatch(method, params, modern) {
 }
 
 function initialize(params) {
-  if (!isObject(params) || typeof params.protocolVersion !== 'string') {
+  if (!v.is(initializeParamsSchema, params)) {
     return failed(-32602, 'Invalid params');
   }
   const requested = params.protocolVersion;
@@ -255,15 +263,13 @@ function validOrigin(request, url) {
 }
 
 function isRpcMessage(value) {
-  if (!isObject(value) || value.jsonrpc !== JSON_RPC_VERSION || typeof value.method !== 'string') {
-    return false;
-  }
+  if (!v.is(rpcMessageSchema, value)) return false;
   if (!Object.hasOwn(value, 'id')) return true;
-  return value.id === null || typeof value.id === 'string' || Number.isFinite(value.id);
+  return v.is(rpcIdSchema, value.id);
 }
 
 function isObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return v.is(v.record(v.string(), v.unknown()), value);
 }
 
 function ok(value) {

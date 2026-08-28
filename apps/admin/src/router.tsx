@@ -37,7 +37,7 @@ const fallbackRoute = createRoute({
   },
 })
 
-const routeTree = rootRoute.addChildren([
+export const routeTree = rootRoute.addChildren([
   overviewRoute,
   sourcesRoute,
   updatesRoute,

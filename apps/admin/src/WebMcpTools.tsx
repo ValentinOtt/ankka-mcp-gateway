@@ -1,13 +1,47 @@
 import { useEffect } from 'react'
+import * as v from 'valibot'
 import { GatewayApiError } from './api'
 import { useGateway } from './GatewayContext'
 
-interface WebMcpTool {
+type WebMcpInputValue = string | readonly string[]
+export interface WebMcpInput {
+  readonly [name: string]: WebMcpInputValue
+}
+
+interface WebMcpPropertySchema {
+  type: 'string' | 'array'
+  format?: 'uri'
+  pattern?: string
+  enum?: readonly string[]
+  minLength?: number
+  maxLength?: number
+  minItems?: number
+  maxItems?: number
+  uniqueItems?: boolean
+  items?: { type: 'string' }
+}
+
+interface WebMcpInputSchema {
+  type: 'object'
+  properties: Readonly<Record<string, WebMcpPropertySchema>>
+  required?: readonly string[]
+  additionalProperties: false
+}
+
+export interface WebMcpAnnotations {
+  readOnlyHint: boolean
+  destructiveHint: boolean
+  idempotentHint: boolean
+  openWorldHint: boolean
+  untrustedContentHint?: boolean
+}
+
+export interface WebMcpTool {
   name: string
   description: string
-  inputSchema: Record<string, unknown>
-  annotations: Record<string, boolean>
-  execute(input: Record<string, unknown>): Promise<string>
+  inputSchema: WebMcpInputSchema
+  annotations: WebMcpAnnotations
+  execute(input: WebMcpInput): Promise<string>
 }
 
 interface WebMcpModelContext {
@@ -20,16 +54,32 @@ declare global {
 
 let registration: Promise<void> | null = null
 
-function response(action: () => Promise<unknown>): Promise<string> {
+const discoverInputSchema = v.strictObject({ url: v.string() })
+const sourceDraftInputSchema = v.strictObject({
+  label: v.string(),
+  url: v.string(),
+  authMode: v.picklist(['none', 'oauth']),
+  enabledTools: v.array(v.string()),
+})
+const sourceActionInputSchema = v.strictObject({ sourceId: v.string() })
+const runtimeActionInputSchema = v.strictObject({ approvedRelease: v.string() })
+
+function response<TResult>(action: () => Promise<TResult>): Promise<string> {
   return action().then(
     (result) => JSON.stringify({ ok: true, result }),
-    (error: unknown) => JSON.stringify({
-      ok: false,
-      error: {
-        code: error instanceof GatewayApiError ? error.code : 'request_failed',
-        message: error instanceof Error ? error.message : 'The management request failed.',
-      },
-    }),
+    (error) => {
+      const apiError = v.safeParse(v.instance(GatewayApiError), error)
+      const ordinaryError = v.safeParse(v.instance(Error), error)
+      return JSON.stringify({
+        ok: false,
+        error: {
+          code: apiError.success ? apiError.output.code : 'request_failed',
+          message: ordinaryError.success
+            ? ordinaryError.output.message
+            : 'The management request failed.',
+        },
+      })
+    },
   )
 }
 
@@ -64,7 +114,10 @@ export function WebMcpTools() {
           properties: { url: { type: 'string', format: 'uri' } }, required: ['url'],
         },
         annotations: { ...readOnly, openWorldHint: true, untrustedContentHint: true },
-        execute: ({ url }) => response(() => discoverSource(String(url))),
+        execute: (input) => response(() => {
+          const { url } = v.parse(discoverInputSchema, input)
+          return discoverSource(url)
+        }),
       })
       await modelContext.registerTool({
         name: 'save_mcp_source_draft',
@@ -80,12 +133,7 @@ export function WebMcpTools() {
           required: ['label', 'url', 'authMode', 'enabledTools'],
         },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true, untrustedContentHint: true },
-        execute: ({ label, url, authMode, enabledTools }) => response(() => saveSourceDraft({
-          label: String(label),
-          url: String(url),
-          authMode: authMode === 'oauth' ? 'oauth' : 'none',
-          enabledTools: Array.isArray(enabledTools) ? enabledTools.map(String) : [],
-        })),
+        execute: (input) => response(() => saveSourceDraft(v.parse(sourceDraftInputSchema, input))),
       })
       await modelContext.registerTool({
         name: 'apply_mcp_source',
@@ -96,8 +144,9 @@ export function WebMcpTools() {
           required: ['sourceId'],
         },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true, untrustedContentHint: false },
-        execute: ({ sourceId }) => response(async () => {
-          const prepared = await prepareSourceApply(String(sourceId))
+        execute: (input) => response(async () => {
+          const { sourceId } = v.parse(sourceActionInputSchema, input)
+          const prepared = await prepareSourceApply(sourceId)
           return {
             status: 'user_authorization_required',
             authorizationUrl: prepared.handoffUrl,
@@ -138,7 +187,8 @@ export function WebMcpTools() {
           required: ['approvedRelease'],
         },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true, untrustedContentHint: false },
-        execute: ({ approvedRelease }) => response(async () => {
+        execute: (input) => response(async () => {
+          const { approvedRelease } = v.parse(runtimeActionInputSchema, input)
           const update = await refreshUpdate()
           if (update.status !== 'available' || update.available?.release !== approvedRelease) {
             throw new GatewayApiError(409, 'runtime_action_conflict')
@@ -156,7 +206,8 @@ export function WebMcpTools() {
           required: ['approvedRelease'],
         },
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true, untrustedContentHint: false },
-        execute: ({ approvedRelease }) => response(async () => {
+        execute: (input) => response(async () => {
+          const { approvedRelease } = v.parse(runtimeActionInputSchema, input)
           const update = await refreshUpdate()
           if (update.rollback.available !== true || update.rollback.release !== approvedRelease) {
             throw new GatewayApiError(409, 'runtime_action_conflict')

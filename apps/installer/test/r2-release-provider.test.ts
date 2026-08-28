@@ -1,9 +1,12 @@
+import * as v from 'valibot';
+
 import { REQUIRED_OAUTH_SCOPES } from '../src/constants';
 import { base64UrlEncode } from '../src/crypto';
 import {
   ExactR2ReleaseBundleProvider,
   PinnedR2ReleaseBundleProvider,
   type PinnedR2Release,
+  type R2ReleaseReadBucket,
 } from '../src/r2-release-provider';
 import {
   RELEASE_ENVELOPE_SCHEMA_VERSION,
@@ -18,12 +21,21 @@ import {
   type ReleaseFileRecord,
   type ReleaseManifest,
 } from '../src/release-manifest';
+import { requiredFixture } from './fixtures';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const RELEASE_BUCKET_ROOT = 'ankka-mcp-gateway/releases';
 const ENVELOPE_FILENAME = 'release-envelope.json';
 const ENVELOPE_CONTENT_TYPE = 'application/json; charset=utf-8';
+const envelopeSchema = v.strictObject({
+  schemaVersion: v.number(),
+  channel: v.string(),
+  keyId: v.string(),
+  manifest: v.string(),
+  signature: v.string(),
+  signatureContext: v.string(),
+});
 
 interface StoredObject {
   bytes: Uint8Array;
@@ -47,13 +59,12 @@ class FakeR2 {
     this.objects.set(key, { bytes: copy, contentType });
   }
 
-  bucket(): R2Bucket {
-    const fake = this;
-    return {
-      async get(key: string): Promise<R2ObjectBody | null> {
-        fake.getKeys.push(key);
-        if (fake.throwOnGet) throw new Error('fake get failure');
-        const stored = fake.objects.get(key);
+  bucket(): R2ReleaseReadBucket {
+    const bucket: R2ReleaseReadBucket = {
+      get: async (key) => {
+        this.getKeys.push(key);
+        if (this.throwOnGet) throw new Error('fake get failure');
+        const stored = this.objects.get(key);
         if (!stored) return null;
         return {
           key: stored.returnedKey ?? key,
@@ -64,41 +75,38 @@ class FakeR2 {
             copy.set(stored.bytes);
             return copy.buffer;
           },
-        } as unknown as R2ObjectBody;
+        };
       },
-      async list(options?: R2ListOptions): Promise<R2Objects> {
-        fake.listPrefixes.push(options?.prefix ?? '');
-        if (fake.throwOnList) throw new Error('fake list failure');
-        const prefix = options?.prefix ?? '';
-        const offset = options?.cursor ? Number(options.cursor) : 0;
-        const limit = Math.min(options?.limit ?? 1_000, fake.listPageSize);
-        const keys = [...fake.objects.keys()].filter((key) => key.startsWith(prefix)).sort();
-        if (fake.duplicateListKey && keys.includes(fake.duplicateListKey)) {
-          keys.splice(keys.indexOf(fake.duplicateListKey) + 1, 0, fake.duplicateListKey);
+      list: async (options) => {
+        this.listPrefixes.push(options.prefix);
+        if (this.throwOnList) throw new Error('fake list failure');
+        const offset = options.cursor ? Number(options.cursor) : 0;
+        const limit = Math.min(options.limit, this.listPageSize);
+        const keys = [...this.objects.keys()].filter((key) => key.startsWith(options.prefix)).sort();
+        if (this.duplicateListKey && keys.includes(this.duplicateListKey)) {
+          keys.splice(keys.indexOf(this.duplicateListKey) + 1, 0, this.duplicateListKey);
         }
         const selected = keys.slice(offset, offset + limit);
         const nextOffset = offset + selected.length;
-        const truncated = nextOffset < keys.length;
-        return {
-          objects: selected.map((key) => {
-            const stored = fake.objects.get(key);
+        const objects = selected.map((key) => {
+            const stored = this.objects.get(key);
             if (!stored) throw new Error('fake list state');
             return {
               key,
               size: stored.reportedSize ?? stored.bytes.byteLength,
-            } as R2Object;
-          }),
-          truncated,
-          ...(truncated ? { cursor: String(nextOffset) } : {}),
-          delimitedPrefixes: [],
-        } as R2Objects;
+            };
+          });
+        return nextOffset < keys.length
+          ? { objects, truncated: true, cursor: String(nextOffset) }
+          : { objects, truncated: false };
       },
-    } as unknown as R2Bucket;
+    };
+    return bucket;
   }
 }
 
 async function sha256Hex(value: string | Uint8Array): Promise<string> {
-  const bytes = typeof value === 'string' ? encoder.encode(value) : value;
+  const bytes = v.is(v.string(), value) ? encoder.encode(value) : value;
   const owned = new Uint8Array(bytes.byteLength);
   owned.set(bytes);
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', owned));
@@ -138,11 +146,11 @@ async function signedFixture(
     path: file.path,
     sha256: await sha256Hex(file.bytes),
   });
-  const adminFiles = [await record(payload[0], 'text/html; charset=utf-8')];
-  const installerFiles = [await record(payload[1], 'text/html; charset=utf-8')];
-  const workerCleanupFiles = [await record(payload[2], 'application/javascript+module')];
-  const workerRetirementFiles = [await record(payload[3], 'application/javascript+module')];
-  const workerFiles = [await record(payload[4], 'application/javascript+module')];
+  const adminFiles = [await record(requiredFixture(payload.at(0), 'admin payload'), 'text/html; charset=utf-8')];
+  const installerFiles = [await record(requiredFixture(payload.at(1), 'installer payload'), 'text/html; charset=utf-8')];
+  const workerCleanupFiles = [await record(requiredFixture(payload.at(2), 'cleanup payload'), 'application/javascript+module')];
+  const workerRetirementFiles = [await record(requiredFixture(payload.at(3), 'retirement payload'), 'application/javascript+module')];
+  const workerFiles = [await record(requiredFixture(payload.at(4), 'worker payload'), 'application/javascript+module')];
   const allFiles = [
     ...adminFiles,
     ...installerFiles,
@@ -245,13 +253,14 @@ describe('pinned R2 rich release bundle provider', () => {
     expect(Object.isFrozen(bundle.payload)).toBe(true);
     expect(bundle.payload.every(Object.isFrozen)).toBe(true);
 
-    const admin = bundle.payload[0];
+    const admin = requiredFixture(bundle.payload.at(0), 'admin payload');
     const firstRead = new Uint8Array(await admin.bytes.arrayBuffer());
-    const expectedFirstByte = firstRead[0];
-    firstRead[0] ^= 0xff;
+    const expectedFirstByte = requiredFixture(firstRead.at(0), 'first admin byte');
+    firstRead[0] = expectedFirstByte ^ 0xff;
     const stored = fixture.bucket.objects.get(`${fixture.prefix}${admin.path}`);
     if (!stored) throw new Error('fixture object');
-    stored.bytes[0] ^= 0xff;
+    const storedFirstByte = requiredFixture(stored.bytes.at(0), 'stored admin byte');
+    stored.bytes[0] = storedFirstByte ^ 0xff;
     const secondRead = new Uint8Array(await admin.bytes.arrayBuffer());
     expect(secondRead[0]).toBe(expectedFirstByte);
   });
@@ -310,22 +319,22 @@ describe('pinned R2 rich release bundle provider', () => {
     const tampered = await signedFixture();
     const tamperedObject = tampered.bucket.objects.get(tampered.envelopeKey);
     if (!tamperedObject) throw new Error('fixture envelope');
-    const parsed = JSON.parse(decoder.decode(tamperedObject.bytes)) as Record<string, unknown>;
-    if (typeof parsed.signature !== 'string') throw new Error('fixture signature');
-    parsed.signature = `${parsed.signature[0] === 'A' ? 'B' : 'A'}${parsed.signature.slice(1)}`;
-    tamperedObject.bytes = encoder.encode(canonicalJson(parsed));
+    const parsed = v.parse(envelopeSchema, JSON.parse(decoder.decode(tamperedObject.bytes)));
+    const signature = `${parsed.signature[0] === 'A' ? 'B' : 'A'}${parsed.signature.slice(1)}`;
+    tamperedObject.bytes = encoder.encode(canonicalJson({ ...parsed, signature }));
     await expect(provider(tampered.pin).loadVerifiedReleaseBundle(tampered.bucket.bucket()))
       .rejects.toMatchObject({ code: 'release_invalid' });
 
     const replay = await signedFixture();
     const stablePrefix = `${RELEASE_BUCKET_ROOT}/stable/${replay.manifest.release}/`;
-    for (const [key, object] of [...replay.bucket.objects]) {
+    const canaryObjects = new Map(replay.bucket.objects);
+    replay.bucket.objects.clear();
+    for (const [key, object] of canaryObjects) {
       replay.bucket.put(
         key.replace(replay.prefix, stablePrefix),
         object.bytes,
         object.contentType,
       );
-      replay.bucket.objects.delete(key);
     }
     await expect(provider({ ...replay.pin, channel: 'stable' }).loadVerifiedReleaseBundle(replay.bucket.bucket()))
       .rejects.toMatchObject({ code: 'release_invalid' });
@@ -337,7 +346,7 @@ describe('pinned R2 rich release bundle provider', () => {
         const object = fixture.bucket.objects.get(`${fixture.prefix}payload/admin/index.html`);
         if (!object) throw new Error('fixture object');
         object.bytes = object.bytes.slice(0, -1);
-        object.reportedSize = fixture.manifest.components.admin.files[0].byteSize;
+        object.reportedSize = requiredFixture(fixture.manifest.components.admin.files.at(0), 'admin file').byteSize;
       },
       (fixture) => {
         const object = fixture.bucket.objects.get(`${fixture.prefix}payload/admin/index.html`);
@@ -352,7 +361,8 @@ describe('pinned R2 rich release bundle provider', () => {
       (fixture) => {
         const object = fixture.bucket.objects.get(`${fixture.prefix}payload/admin/index.html`);
         if (!object) throw new Error('fixture object');
-        object.bytes[0] ^= 0xff;
+        const firstByte = requiredFixture(object.bytes.at(0), 'object byte');
+        object.bytes[0] = firstByte ^ 0xff;
       },
     ];
     for (const mutate of cases) {
@@ -365,7 +375,7 @@ describe('pinned R2 rich release bundle provider', () => {
 
   it('rejects pin drift in channel, release, key ID, public key, or artifact digest', async () => {
     const fixture = await signedFixture();
-    const pins: unknown[] = [
+    const pins = [
       { ...fixture.pin, channel: '../canary' },
       { ...fixture.pin, release: 'gateway-v1.2.4' },
       { ...fixture.pin, keyId: 'another-key' },
@@ -373,7 +383,7 @@ describe('pinned R2 rich release bundle provider', () => {
       { ...fixture.pin, artifactSha256: 'f'.repeat(64) },
     ];
     for (const pin of pins) {
-      await expect(Promise.resolve().then(() => provider(pin as PinnedR2Release)
+      await expect(Promise.resolve().then(() => PinnedR2ReleaseBundleProvider.fromCandidate(pin)
         .loadVerifiedReleaseBundle(fixture.bucket.bucket())))
         .rejects.toMatchObject({ code: expect.stringMatching(/^release_(?:invalid|unavailable)$/u) });
     }
@@ -444,10 +454,9 @@ describe('exact historical R2 release lookup for returning uninstall', () => {
     const exact = new ExactR2ReleaseBundleProvider();
     const envelope = promoted.bucket.objects.get(installed.envelopeKey);
     if (!envelope) throw new Error('historical envelope');
-    const parsed = JSON.parse(decoder.decode(envelope.bytes)) as Record<string, unknown>;
-    if (typeof parsed.signature !== 'string') throw new Error('historical signature');
-    parsed.signature = `${parsed.signature[0] === 'A' ? 'B' : 'A'}${parsed.signature.slice(1)}`;
-    envelope.bytes = encoder.encode(canonicalJson(parsed));
+    const parsed = v.parse(envelopeSchema, JSON.parse(decoder.decode(envelope.bytes)));
+    const signature = `${parsed.signature[0] === 'A' ? 'B' : 'A'}${parsed.signature.slice(1)}`;
+    envelope.bytes = encoder.encode(canonicalJson({ ...parsed, signature }));
     await expect(exact.loadVerifiedReleaseBundleForIdentity(promoted.bucket.bucket(), installed.pin))
       .rejects.toMatchObject({ code: 'release_invalid' });
 

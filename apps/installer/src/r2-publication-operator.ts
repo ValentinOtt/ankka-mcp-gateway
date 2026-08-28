@@ -1,6 +1,10 @@
+import * as v from 'valibot';
+
+import type { JsonObject } from './boundary';
 import {
   R2ReleasePublicationError,
   type PublishR2ReleaseInput,
+  type R2ReleaseBucket,
   type R2ReleasePublicationBlob,
   type R2ReleasePublicationResult,
 } from './r2-release-publisher';
@@ -20,9 +24,40 @@ const JSON_HEADERS = Object.freeze({
   'referrer-policy': 'no-referrer',
   'x-content-type-options': 'nosniff',
 });
+const publicationIdentitySchema = v.strictObject({
+  accountId: v.string(),
+  artifactSha256: v.string(),
+  bucketName: v.string(),
+  channel: v.string(),
+  keyId: v.string(),
+  objectPlanSha256: v.string(),
+  prefix: v.string(),
+  publicKey: v.string(),
+  release: v.string(),
+  releaseEnvelopeSha256: v.string(),
+  schemaVersion: v.literal(1),
+});
+const publicationBlobSchema = v.strictObject({
+  bytes: v.instance(Blob),
+  key: v.string(),
+});
+const publicationOperatorInputSchema = v.strictObject({
+  blobs: v.array(publicationBlobSchema),
+  objectPlan: v.unknown(),
+  objectPlanSha256: v.string(),
+  publicationIdentity: publicationIdentitySchema,
+  publish: v.function(),
+});
+const publicationEnvironmentSchema = v.strictObject({
+  RELEASE_BUCKET: v.object({
+    get: v.function(),
+    list: v.function(),
+    put: v.function(),
+  }),
+});
 
 export interface R2PublicationOperatorEnv {
-  readonly RELEASE_BUCKET: R2Bucket;
+  readonly RELEASE_BUCKET: R2ReleaseBucket;
 }
 
 export type R2PublicationFunction = (
@@ -55,31 +90,12 @@ export interface R2PublicationOperator {
   fetch(request: Request, env: R2PublicationOperatorEnv): Promise<Response>;
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null &&
-    typeof value === 'object' &&
-    !Array.isArray(value) &&
-    Object.getPrototypeOf(value) === Object.prototype;
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
-function fixedJson(status: number, body: Readonly<Record<string, unknown>>): Response {
+function fixedJson(status: number, body: JsonObject): Response {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 }
 
-function hasExactBucket(env: unknown): env is R2PublicationOperatorEnv {
-  if (!isPlainRecord(env) || !exactKeys(env, ['RELEASE_BUCKET'])) return false;
-  const bucket = env.RELEASE_BUCKET;
-  return bucket !== null &&
-    typeof bucket === 'object' &&
-    typeof (bucket as R2Bucket).get === 'function' &&
-    typeof (bucket as R2Bucket).put === 'function' &&
-    typeof (bucket as R2Bucket).list === 'function';
+function hasExactBucket(env: R2PublicationOperatorEnv): boolean {
+  return v.safeParse(publicationEnvironmentSchema, env).success;
 }
 
 function statusForPublicationError(error: R2ReleasePublicationError): number {
@@ -93,36 +109,26 @@ function statusForPublicationError(error: R2ReleasePublicationError): number {
   }
 }
 
-function validPublicationIdentity(
-  input: unknown,
+function parsePublicationIdentity<Input>(
+  input: Input,
   objectPlanSha256: string,
-): input is R2PublicationIdentity {
-  if (!isPlainRecord(input) || !exactKeys(input, [
-    'accountId',
-    'artifactSha256',
-    'bucketName',
-    'channel',
-    'keyId',
-    'objectPlanSha256',
-    'prefix',
-    'publicKey',
-    'release',
-    'releaseEnvelopeSha256',
-    'schemaVersion',
-  ])) return false;
+): R2PublicationIdentity | null {
+  const result = v.safeParse(publicationIdentitySchema, input);
+  if (!result.success) return null;
+  const value = result.output;
   if (
-    input.schemaVersion !== 1 ||
-    typeof input.accountId !== 'string' || !ACCOUNT_ID_PATTERN.test(input.accountId) ||
-    typeof input.artifactSha256 !== 'string' || !SHA256_PATTERN.test(input.artifactSha256) ||
-    typeof input.bucketName !== 'string' || !BUCKET_PATTERN.test(input.bucketName) ||
-    typeof input.channel !== 'string' || !CHANNEL_PATTERN.test(input.channel) ||
-    typeof input.keyId !== 'string' || !KEY_ID_PATTERN.test(input.keyId) ||
-    input.objectPlanSha256 !== objectPlanSha256 ||
-    typeof input.publicKey !== 'string' || !PUBLIC_KEY_PATTERN.test(input.publicKey) ||
-    typeof input.release !== 'string' || !RELEASE_PATTERN.test(input.release) ||
-    typeof input.releaseEnvelopeSha256 !== 'string' || !SHA256_PATTERN.test(input.releaseEnvelopeSha256)
-  ) return false;
-  return input.prefix === `${RELEASE_ROOT}/${input.channel}/${input.release}/`;
+    !ACCOUNT_ID_PATTERN.test(value.accountId) ||
+    !SHA256_PATTERN.test(value.artifactSha256) ||
+    !BUCKET_PATTERN.test(value.bucketName) ||
+    !CHANNEL_PATTERN.test(value.channel) ||
+    !KEY_ID_PATTERN.test(value.keyId) ||
+    value.objectPlanSha256 !== objectPlanSha256 ||
+    !PUBLIC_KEY_PATTERN.test(value.publicKey) ||
+    !RELEASE_PATTERN.test(value.release) ||
+    !SHA256_PATTERN.test(value.releaseEnvelopeSha256) ||
+    value.prefix !== `${RELEASE_ROOT}/${value.channel}/${value.release}/`
+  ) return null;
+  return Object.freeze({ ...value });
 }
 
 /**
@@ -156,14 +162,15 @@ async function requestCarriesBodyBytes(request: Request): Promise<boolean> {
 export function createR2PublicationOperator(
   input: CreateR2PublicationOperatorInput,
 ): R2PublicationOperator {
+  const result = v.safeParse(publicationOperatorInputSchema, input);
+  if (!result.success) throw new TypeError('invalid_r2_publication_operator');
+  const publicationIdentity = parsePublicationIdentity(
+    result.output.publicationIdentity,
+    result.output.objectPlanSha256,
+  );
   if (
-    !isPlainRecord(input) ||
-    !exactKeys(input, ['blobs', 'objectPlan', 'objectPlanSha256', 'publicationIdentity', 'publish']) ||
-    !Array.isArray(input.blobs) ||
-    typeof input.objectPlanSha256 !== 'string' ||
-    !SHA256_PATTERN.test(input.objectPlanSha256) ||
-    !validPublicationIdentity(input.publicationIdentity, input.objectPlanSha256) ||
-    typeof input.publish !== 'function'
+    !SHA256_PATTERN.test(result.output.objectPlanSha256) ||
+    publicationIdentity === null
   ) {
     throw new TypeError('invalid_r2_publication_operator');
   }
@@ -210,14 +217,14 @@ export function createR2PublicationOperator(
         });
         if (
           result.objectPlanSha256 !== input.objectPlanSha256 ||
-          result.channel !== input.publicationIdentity.channel ||
-          result.release !== input.publicationIdentity.release ||
-          result.prefix !== input.publicationIdentity.prefix
+          result.channel !== publicationIdentity.channel ||
+          result.release !== publicationIdentity.release ||
+          result.prefix !== publicationIdentity.prefix
         ) {
           return fixedJson(500, { error: 'publication_result_invalid' });
         }
         return fixedJson(200, {
-          ...input.publicationIdentity,
+          ...publicationIdentity,
           status: 'published',
         });
       } catch (error) {

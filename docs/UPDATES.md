@@ -7,11 +7,8 @@ narrower than a general Cloudflare configuration deployment.
 
 The only persisted changes from an ordinary update are:
 
-- customer Worker code;
-- customer management assets; and
-- the non-secret `ANKKA_GATEWAY_RELEASE` and
-  `ANKKA_GATEWAY_RELEASE_SHA256` text bindings that identify the installed
-  release.
+- customer Worker code; and
+- customer management assets.
 
 It must not change:
 
@@ -19,8 +16,7 @@ It must not change:
 - DNS or MCP Portal configuration;
 - sources or tool allowlists;
 - credentials;
-- resource or secret bindings, other plain-text bindings, or compatibility
-  settings;
+- Cloudflare bindings or compatibility settings;
 - the signing trust root; or
 - Durable Object data or migrations.
 
@@ -68,11 +64,10 @@ instead of success.
 A successful update retains the previous Cloudflare version. Rollback is a new
 customer-approved action with a fresh Cloudflare authorization.
 
-The only persisted rollback changes are Worker code, management assets, and the
-two non-secret release-identity text bindings. It does not roll back Durable
-Object data, sources, Access, DNS, Portal configuration, credentials, resource
-or secret bindings, other plain-text bindings, or compatibility settings.
-Releases must therefore remain compatible with retained customer state.
+The only persisted rollback changes are Worker code and management assets. It
+does not roll back Durable Object data, sources, Access, DNS, Portal
+configuration, or credentials. Releases must therefore remain compatible with
+retained customer state.
 
 The original installation receipt remains the ownership authority for later
 removal, even after updates.

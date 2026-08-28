@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as v from 'valibot';
 
 import {
   managementOwnershipMarker,
@@ -26,7 +27,12 @@ import {
   type InstallActionName,
   type InstallActionRecord,
   type InstallJournal,
+  type WorkerDeploymentCreateRecord,
+  type WorkerDeploymentLocator,
+  type WorkerVersionCreateRecord,
+  type WorkerVersionLocator,
 } from '../src/install-journal';
+import { canonicalJson } from '../src/canonical-json';
 import { buildStaticDeployPlan, parseDeploySelection, type StaticDeployPlan } from '../src/schema';
 import {
   MAX_STATIC_UNINSTALL_PLAN_TTL_MS,
@@ -43,7 +49,7 @@ import {
   parseStaticUninstallPlan,
   type StaticUninstallPlan,
 } from '../src/uninstall-plan';
-import { manifest, NOW, selectionInput, verifiedRelease } from './fixtures';
+import { manifest, NOW, requiredFixture, selectionInput, verifiedRelease } from './fixtures';
 import { readyInstallationReceiptFixture } from './provider-neutral-installation-receipt-fixture';
 
 const SESSION_EXPIRES_AT = NOW + 30 * 60 * 1_000;
@@ -72,23 +78,8 @@ const TARGET: AuthorizedTarget = Object.freeze({
   zone: Object.freeze({ id: ZONE_ID, name: 'example.com', status: 'active' }),
 });
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function canonical(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string' || typeof value === 'number') {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
-  }
-  throw new TypeError('invalid fixture');
-}
-
-async function hash(value: unknown): Promise<string> {
-  return sha256Hex(canonical(value));
+async function hash<Value>(value: Value): Promise<string> {
+  return sha256Hex(canonicalJson(value));
 }
 
 function workerName(plan: StaticDeployPlan): string {
@@ -97,7 +88,7 @@ function workerName(plan: StaticDeployPlan): string {
   return worker.name;
 }
 
-const PLAIN_BINDINGS = Object.freeze([
+const PLAIN_BINDING_NAMES = Object.freeze([
   'ADMIN_EMAILS',
   'ANKKA_GATEWAY_RELEASE',
   'ANKKA_GATEWAY_RELEASE_SHA256',
@@ -113,7 +104,13 @@ const PLAIN_BINDINGS = Object.freeze([
   'CLOUDFLARE_ZONE_ID',
   'CLOUDFLARE_ZONE_NAME',
   'ZERO_TRUST_READY',
-].map((name, index) => Object.freeze({ name, valueSha256: String(index % 10).repeat(64) })));
+] as const);
+const PLAIN_BINDINGS: WorkerVersionCreateRecord['plainTextBindingHashes'] = Object.freeze(
+  PLAIN_BINDING_NAMES.map((name, index) => Object.freeze({
+    name,
+    valueSha256: String(index % 10).repeat(64),
+  })),
+);
 
 async function workerRecord(plan: StaticDeployPlan): Promise<InstallActionRecord> {
   const requestHash = await hash({
@@ -174,7 +171,7 @@ async function policyRecord(plan: StaticDeployPlan): Promise<InstallActionRecord
 async function versionRecord(
   plan: StaticDeployPlan,
   phase: 'provision' | 'bootstrap' | 'clean',
-): Promise<InstallActionRecord> {
+): Promise<WorkerVersionCreateRecord> {
   const releaseContract = {
     assetBinding: 'ASSETS' as const,
     assetConfig: {
@@ -239,7 +236,7 @@ async function versionRecord(
     correlationTag: `ankka-version-${phase}-sha256:${requestHash}`,
     releaseContract,
     assets,
-    plainTextBindingHashes: PLAIN_BINDINGS as never,
+    plainTextBindingHashes: PLAIN_BINDINGS,
     modules,
   };
 }
@@ -247,9 +244,9 @@ async function versionRecord(
 async function versionLocator(
   plan: StaticDeployPlan,
   phase: 'provision' | 'bootstrap' | 'clean',
-): Promise<InstallActionLocator> {
-  const record = await versionRecord(plan, phase) as Extract<InstallActionRecord, { kind: 'worker_version_create' }>;
-  return {
+): Promise<WorkerVersionLocator> {
+  const record = await versionRecord(plan, phase);
+  const locator: WorkerVersionLocator = {
     kind: 'version',
     phase,
     accountId: ACCOUNT_ID,
@@ -258,15 +255,15 @@ async function versionLocator(
     versionId: phase === 'provision' ? PROVISION_VERSION_ID : phase === 'bootstrap' ? BOOTSTRAP_VERSION_ID : CLEAN_VERSION_ID,
     requestHash: record.requestHash,
     correlationTag: record.correlationTag,
-    // The provision version precedes the deployment that creates the namespace.
-    ...(phase === 'provision' ? {} : { namespaceId: NAMESPACE_ID }),
   };
+  // The provision version precedes the deployment that creates the namespace.
+  return phase === 'provision' ? locator : { ...locator, namespaceId: NAMESPACE_ID };
 }
 
 async function deploymentRecord(
   plan: StaticDeployPlan,
   phase: 'provision' | 'bootstrap' | 'clean',
-): Promise<InstallActionRecord> {
+): Promise<WorkerDeploymentCreateRecord> {
   const versionId = phase === 'provision' ? PROVISION_VERSION_ID : phase === 'bootstrap' ? BOOTSTRAP_VERSION_ID : CLEAN_VERSION_ID;
   const requestHash = await hash({
     strategy: 'percentage',
@@ -288,8 +285,8 @@ async function deploymentRecord(
 async function deploymentLocator(
   plan: StaticDeployPlan,
   phase: 'provision' | 'bootstrap' | 'clean',
-): Promise<InstallActionLocator> {
-  const record = await deploymentRecord(plan, phase) as Extract<InstallActionRecord, { kind: 'worker_deployment_create' }>;
+): Promise<WorkerDeploymentLocator> {
+  const record = await deploymentRecord(plan, phase);
   return {
     kind: 'deployment',
     phase,
@@ -363,7 +360,9 @@ async function advance(
   });
 }
 
-async function completedInstallJournal(selectionValue: unknown = selectionInput): Promise<InstallJournal> {
+async function completedInstallJournal<SelectionCandidate>(
+  selectionValue: SelectionCandidate,
+): Promise<InstallJournal> {
   const selection = parseDeploySelection(selectionValue);
   const plan = await buildStaticDeployPlan(selection, manifest, PLAN_EXPIRES_AT);
   const claim = await prepareCustomerBootstrapClaim({
@@ -555,6 +554,10 @@ async function completedInstallJournal(selectionValue: unknown = selectionInput)
     release: { id: manifest.release, artifactSha256: manifest.artifact.treeSha256 },
   });
   const readyReceipt = await readyInstallationReceiptFixture(receiptExpectation, 14);
+  const resourceCount = receiptExpectation.resources.length;
+  if (resourceCount !== 4 && resourceCount !== 7) {
+    throw new TypeError('unexpected receipt resource count');
+  }
   const bootstrapLocator: InstallActionLocator = {
     schemaVersion: 1,
     status: 'ready',
@@ -565,7 +568,7 @@ async function completedInstallJournal(selectionValue: unknown = selectionInput)
     settingsRevision: 1,
     release: { id: manifest.release, artifactSha256: `sha256:${manifest.artifact.treeSha256}` },
     gateway: { hostname: selection.basics.portalHostname, mcpUrl: `https://${selection.basics.portalHostname}/mcp` },
-    receipt: { revision: 14, resourceCount: receiptExpectation.resources.length as 4 | 7, evidence: readyReceipt },
+    receipt: { revision: 14, resourceCount, evidence: readyReceipt },
     applyInvoked: true,
     resumed: false,
   };
@@ -606,8 +609,18 @@ async function completedInstallJournal(selectionValue: unknown = selectionInput)
   return advance(journal, 'final_convergence', final.record, final.locator, clock);
 }
 
-function allFrozen(value: unknown): boolean {
-  if (value === null || typeof value !== 'object') return true;
+const scalarBoundarySchema = v.union([
+  v.boolean(),
+  v.null(),
+  v.number(),
+  v.string(),
+  v.undefined(),
+]);
+const containerSchema = v.union([v.array(v.unknown()), v.object({})]);
+
+function allFrozen<Value>(value: Value): boolean {
+  if (v.is(scalarBoundarySchema, value)) return true;
+  if (!v.is(containerSchema, value)) return false;
   if (!Object.isFrozen(value)) return false;
   return Object.values(value).every(allFrozen);
 }
@@ -621,7 +634,7 @@ async function expectRejected(operation: Promise<unknown>, code?: string): Promi
   }
 }
 
-const completed = await completedInstallJournal();
+const completed = await completedInstallJournal(selectionInput);
 const CREATED_AT = completed.updatedAt;
 
 describe('provider-ID-free reviewed static uninstall plan', () => {
@@ -659,7 +672,7 @@ describe('provider-ID-free reviewed static uninstall plan', () => {
     expect(plan.steps.map((step) => step.summary)).toEqual(
       STATIC_UNINSTALL_STEP_ORDER.map((kind) => STATIC_UNINSTALL_STEP_SUMMARIES[kind]),
     );
-    const cleanupStep = plan.steps[0];
+    const cleanupStep = requiredFixture(plan.steps.at(0), 'cleanup step');
     expect(cleanupStep).toMatchObject({
       kind: 'temporary_cleanup_workers_dev_bridge',
       temporaryWorkerLifecycle: STATIC_UNINSTALL_TEMPORARY_WORKER_LIFECYCLE,
@@ -669,17 +682,17 @@ describe('provider-ID-free reviewed static uninstall plan', () => {
         disabledBeforeManagementRemoval: true,
       },
     });
-    const gatewayStep = plan.steps[1];
+    const gatewayStep = requiredFixture(plan.steps.at(1), 'gateway step');
     expect(gatewayStep.kind).toBe('gateway_resources_remove');
     if (gatewayStep.kind !== 'gateway_resources_remove') throw new TypeError('gateway step');
     expect(gatewayStep.resources).toHaveLength(7);
     expect(gatewayStep.resources.map((resource) => resource.kind)).toEqual(STATIC_UNINSTALL_GATEWAY_RESOURCE_ORDER);
-    const retirementStep = plan.steps[5];
+    const retirementStep = requiredFixture(plan.steps.at(5), 'retirement step');
     expect(retirementStep).toMatchObject({
       kind: 'admin_state_retire',
       retirementLifecycle: STATIC_UNINSTALL_RETIREMENT_LIFECYCLE,
     });
-    const finalStep = plan.steps[7];
+    const finalStep = requiredFixture(plan.steps.at(7), 'final step');
     expect(finalStep).toMatchObject({
       kind: 'no_ankka_managed_residue_verify',
       scope: STATIC_UNINSTALL_RESIDUE_SCOPE,
@@ -821,65 +834,63 @@ describe('provider-ID-free reviewed static uninstall plan', () => {
     })],
   ] as const)('rejects semantic drift in %s even when the old hash is retained', async (_name, mutate) => {
     const plan = await buildStaticUninstallPlan(completed, CREATED_AT, CREATED_AT + 60_000);
-    const drifted = mutate(plan) as unknown;
+    const drifted = mutate(plan);
     await expectRejected(parseStaticUninstallPlan(drifted), 'bad_request');
     expect(await isRecoveryEquivalentUninstallPlan(plan, drifted)).toBe(false);
   });
 
   it('rejects an incomplete or corrupted journal and rebuilds exact final convergence authority', async () => {
-    const incomplete = structuredClone(completed) as unknown as { actions: unknown[] };
-    incomplete.actions.pop();
+    const incomplete = {
+      ...structuredClone(completed),
+      actions: completed.actions.slice(0, -1),
+    };
     await expectRejected(buildStaticUninstallPlan(incomplete, CREATED_AT, CREATED_AT + 60_000), 'session_conflict');
 
-    const corrupt = structuredClone(completed) as unknown as { actions: Array<{
-      locator: Record<string, unknown> | null;
-    }> };
+    const corrupt = structuredClone(completed);
     const final = corrupt.actions.at(-1);
-    if (!final || !final.locator || !('workerId' in final.locator)) throw new TypeError('final fixture');
-    final.locator.workerId = 'f'.repeat(32);
+    if (!final?.locator) throw new TypeError('final fixture');
+    Object.defineProperty(final.locator, 'workerId', { value: 'f'.repeat(32) });
     await expectRejected(buildStaticUninstallPlan(corrupt, CREATED_AT, CREATED_AT + 60_000), 'session_invalid');
 
-    const corruptHash = structuredClone(completed) as unknown as { actions: Array<{
-      record: Record<string, unknown>;
-    }> };
+    const corruptHash = structuredClone(completed);
     const finalHash = corruptHash.actions.at(-1);
     if (!finalHash || finalHash.record.kind !== 'final_convergence') throw new TypeError('final fixture');
-    finalHash.record.convergenceHash = `sha256:${'0'.repeat(64)}`;
+    Object.defineProperty(finalHash.record, 'convergenceHash', {
+      value: `sha256:${'0'.repeat(64)}`,
+    });
     await expectRejected(buildStaticUninstallPlan(corruptHash, CREATED_AT, CREATED_AT + 60_000), 'session_invalid');
   });
 
   it.each([
-    ['install binding', (journal: Record<string, unknown>) => {
-      journal.bindingHash = `sha256:${'0'.repeat(64)}`;
+    ['install binding', (journal: InstallJournal) => {
+      Object.defineProperty(journal, 'bindingHash', { value: `sha256:${'0'.repeat(64)}` });
     }],
-    ['install convergence', (journal: Record<string, unknown>) => {
-      const actions = journal.actions as Array<{ locator: Record<string, unknown> | null }>;
-      const locator = actions.at(-1)?.locator;
+    ['install convergence', (journal: InstallJournal) => {
+      const locator = journal.actions.at(-1)?.locator;
       if (!locator) throw new TypeError('final fixture');
-      locator.convergenceHash = `sha256:${'0'.repeat(64)}`;
+      Object.defineProperty(locator, 'convergenceHash', { value: `sha256:${'0'.repeat(64)}` });
     }],
-    ['ready receipt checksum', (journal: Record<string, unknown>) => {
-      const actions = journal.actions as Array<{ locator: Record<string, unknown> | null }>;
-      const locator = actions.at(-1)?.locator;
-      const evidence = locator?.customerReceiptEvidence as Record<string, unknown> | undefined;
-      if (!evidence) throw new TypeError('receipt fixture');
-      evidence.checksum = `sha256:${'0'.repeat(64)}`;
+    ['ready receipt checksum', (journal: InstallJournal) => {
+      const locator = journal.actions.at(-1)?.locator;
+      if (!locator || !('customerReceiptEvidence' in locator)) throw new TypeError('receipt fixture');
+      Object.defineProperty(locator.customerReceiptEvidence, 'checksum', {
+        value: `sha256:${'0'.repeat(64)}`,
+      });
     }],
-    ['AdminState namespace authority', (journal: Record<string, unknown>) => {
-      const actions = journal.actions as Array<{ locator: Record<string, unknown> | null }>;
-      const locator = actions.at(-1)?.locator;
+    ['AdminState namespace authority', (journal: InstallJournal) => {
+      const locator = journal.actions.at(-1)?.locator;
       if (!locator) throw new TypeError('namespace fixture');
-      locator.adminStateNamespaceId = 'f'.repeat(32);
+      Object.defineProperty(locator, 'adminStateNamespaceId', { value: 'f'.repeat(32) });
     }],
   ] as const)('rejects mutated private %s instead of issuing a misleading review', async (_name, mutate) => {
-    const journal = structuredClone(completed) as unknown as Record<string, unknown>;
+    const journal = structuredClone(completed);
     mutate(journal);
     await expectRejected(buildStaticUninstallPlan(journal, CREATED_AT, CREATED_AT + 60_000));
   });
 
   it('rejects unknown prototypes, getters, cycles, and sparse arrays without invoking accessors', async () => {
     let journalGetterCalls = 0;
-    const getterJournal = {} as Record<string, unknown>;
+    const getterJournal = {};
     Object.defineProperty(getterJournal, 'schemaVersion', {
       enumerable: true,
       get: () => {
@@ -895,7 +906,7 @@ describe('provider-ID-free reviewed static uninstall plan', () => {
     await expectRejected(parseStaticUninstallPlan(prototypePlan), 'bad_request');
 
     let nestedGetterCalls = 0;
-    const getterPlan = structuredClone(plan) as unknown as Record<string, unknown>;
+    const getterPlan = structuredClone(plan);
     Object.defineProperty(getterPlan, 'providerNotice', {
       enumerable: true,
       get: () => {
@@ -906,14 +917,15 @@ describe('provider-ID-free reviewed static uninstall plan', () => {
     await expectRejected(parseStaticUninstallPlan(getterPlan), 'bad_request');
     expect(nestedGetterCalls).toBe(0);
 
-    const cyclic = structuredClone(plan) as unknown as Record<string, unknown>;
-    cyclic.cycle = cyclic;
+    const cyclic = structuredClone(plan);
+    Object.defineProperty(cyclic, 'cycle', { enumerable: true, value: cyclic });
     await expectRejected(parseStaticUninstallPlan(cyclic), 'bad_request');
 
-    const sparse = structuredClone(plan) as unknown as Record<string, unknown>;
-    const sparseSteps = new Array(8);
-    sparseSteps[0] = plan.steps[0];
-    sparse.steps = sparseSteps;
+    const sparse = structuredClone(plan);
+    const sparseSteps: (typeof plan.steps)[number][] = [];
+    sparseSteps.length = 8;
+    sparseSteps[0] = requiredFixture(plan.steps.at(0), 'first uninstall step');
+    Object.defineProperty(sparse, 'steps', { value: sparseSteps });
     await expectRejected(parseStaticUninstallPlan(sparse), 'bad_request');
   });
 

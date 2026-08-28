@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   CloudflareApiError,
   createCloudflareClient,
-} from '../src/cloudflare-client.mjs';
+} from '../src/cloudflare-client.ts';
 
 const TOKEN = 'test-only-sensitive-token';
 const BASE = 'https://api.cloudflare.com/client/v4';
@@ -67,10 +67,11 @@ test('aborts every request at the configured deadline and forwards an external a
         init.signal.addEventListener('abort', () => reject(new Error('private abort detail')), { once: true });
       });
     };
-    const api = client(fetchImpl, {
+    const options = {
       requestTimeoutMs: mode === 'timeout' ? 5 : 1_000,
-      ...(mode === 'external' ? { signal: controller.signal } : {}),
-    });
+    };
+    if (mode === 'external') options.signal = controller.signal;
+    const api = client(fetchImpl, options);
     if (mode === 'external') queueMicrotask(() => controller.abort());
     await assert.rejects(api.getZone(), (error) => {
       assert.ok(error instanceof CloudflareApiError);

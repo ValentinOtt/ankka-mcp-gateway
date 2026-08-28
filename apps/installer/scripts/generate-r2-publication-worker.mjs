@@ -11,13 +11,13 @@ import {
   mkdir,
   open,
   readdir,
-  readFile,
   realpath,
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import * as v from 'valibot';
 
 const PLAN_FILENAME = 'r2-object-plan.json';
 const RELEASE_ROOT = 'ankka-mcp-gateway/releases';
@@ -40,19 +40,37 @@ const CHANNEL_PATTERN = /^(?:canary|stable)$/u;
 const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const BUCKET_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/u;
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/u;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 const CREDENTIAL_NAME = /(?:^|[-_.])(?:api[-_.]?key|client[-_.]?secret|credential|credentials|password|passwd|private[-_.]?key|secret|secrets|token|tokens)(?:[-_.]|$)/iu;
 const MUTABLE_CHANNELS = new Set(['current', 'latest', 'mutable']);
 const RELEASE_ENVELOPE_SCHEMA_VERSION = 2;
 const RELEASE_SIGNATURE_CONTEXT = 'ankka-mcp-gateway-release-envelope-v2';
 const SPKI_PUBLIC_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const GENERATED_SOURCE_FILES = Object.freeze([
+  'boundary.ts',
+  'canonical-json.ts',
   'constants.ts',
   'errors.ts',
   'r2-publication-operator.ts',
   'r2-release-publisher.ts',
   'release-manifest.ts',
 ]);
+
+function hasControlCharacter(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return true;
+  }
+  return false;
+}
+const GENERATED_DEPENDENCY_FILES = Object.freeze([
+  'node_modules/valibot/LICENSE.md',
+  'node_modules/valibot/dist/index.mjs',
+  'node_modules/valibot/package.json',
+]);
+const BOOLEAN_SCHEMA = v.boolean();
+const NUMBER_SCHEMA = v.number();
+const OBJECT_SCHEMA = v.object({});
+const STRING_SCHEMA = v.string();
 
 export class R2PublicationWorkerGenerationError extends Error {
   constructor() {
@@ -67,8 +85,7 @@ function fail() {
 }
 
 function isPlainRecord(value) {
-  return value !== null &&
-    typeof value === 'object' &&
+  return v.is(OBJECT_SCHEMA, value) &&
     !Array.isArray(value) &&
     Object.getPrototypeOf(value) === Object.prototype;
 }
@@ -103,10 +120,10 @@ function releaseSignatureCanonicalJson(channel, keyId, manifest) {
 }
 
 function canonicalValue(value, seen) {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+  if (value === null || v.is(STRING_SCHEMA, value) || v.is(BOOLEAN_SCHEMA, value)) {
     return JSON.stringify(value);
   }
-  if (typeof value === 'number') {
+  if (v.is(NUMBER_SCHEMA, value)) {
     if (!Number.isFinite(value)) fail();
     return JSON.stringify(value);
   }
@@ -135,13 +152,13 @@ function sha256Hex(bytes) {
 
 function safePath(value) {
   if (
-    typeof value !== 'string' ||
+    !v.is(STRING_SCHEMA, value) ||
     value.length === 0 ||
     value.startsWith('/') ||
     value.endsWith('/') ||
     value.includes('\\') ||
     value.includes('%') ||
-    CONTROL_CHARACTER.test(value)
+    hasControlCharacter(value)
   ) return false;
   return value.split('/').every((segment) =>
     SAFE_SEGMENT.test(segment) &&
@@ -154,13 +171,13 @@ function parseObjectEntry(input) {
   if (!exactKeys(input, ['byteSize', 'contentType', 'key', 'sha256', 'sourcePath'])) fail();
   if (
     !safeInteger(input.byteSize, MAX_OPERATOR_RELEASE_BYTES) ||
-    typeof input.contentType !== 'string' ||
+    !v.is(STRING_SCHEMA, input.contentType) ||
     input.contentType.length === 0 ||
     input.contentType.length > 128 ||
-    CONTROL_CHARACTER.test(input.contentType) ||
+    hasControlCharacter(input.contentType) ||
     !safePath(input.key) ||
     Buffer.byteLength(input.key, 'utf8') > MAX_R2_KEY_BYTES ||
-    typeof input.sha256 !== 'string' ||
+    !v.is(STRING_SCHEMA, input.sha256) ||
     !SHA256_PATTERN.test(input.sha256) ||
     !safePath(input.sourcePath) ||
     Buffer.byteLength(input.sourcePath, 'utf8') > MAX_SOURCE_PATH_BYTES
@@ -189,14 +206,14 @@ function parseObjectPlan(input) {
   ])) fail();
   if (
     input.schemaVersion !== 1 ||
-    typeof input.artifactSha256 !== 'string' ||
+    !v.is(STRING_SCHEMA, input.artifactSha256) ||
     !SHA256_PATTERN.test(input.artifactSha256) ||
-    typeof input.channel !== 'string' ||
+    !v.is(STRING_SCHEMA, input.channel) ||
     !CHANNEL_PATTERN.test(input.channel) ||
     MUTABLE_CHANNELS.has(input.channel) ||
-    typeof input.keyId !== 'string' ||
+    !v.is(STRING_SCHEMA, input.keyId) ||
     !KEY_ID_PATTERN.test(input.keyId) ||
-    typeof input.release !== 'string' ||
+    !v.is(STRING_SCHEMA, input.release) ||
     !RELEASE_PATTERN.test(input.release) ||
     !safeInteger(input.objectCount, MAX_OPERATOR_OBJECTS) ||
     input.objectCount < 2 ||
@@ -330,7 +347,7 @@ function equalSets(left, right) {
 }
 
 export async function loadVerifiedR2PublicationDirectory(inputDirectory) {
-  if (typeof inputDirectory !== 'string' || inputDirectory.length === 0 || inputDirectory.includes('\0')) fail();
+  if (!v.is(STRING_SCHEMA, inputDirectory) || inputDirectory.length === 0 || inputDirectory.includes('\0')) fail();
   let root;
   try {
     root = await realpath(path.resolve(inputDirectory));
@@ -379,7 +396,7 @@ export async function loadVerifiedR2PublicationDirectory(inputDirectory) {
 }
 
 function decodeCanonicalBase64Url(value, expectedBytes, pattern) {
-  if (typeof value !== 'string' || !pattern.test(value)) fail();
+  if (!v.is(STRING_SCHEMA, value) || !pattern.test(value)) fail();
   let bytes;
   try {
     bytes = Buffer.from(value, 'base64url');
@@ -412,8 +429,8 @@ function verifyEnvelopeSignature(verified, publicKey) {
     parsed.schemaVersion !== RELEASE_ENVELOPE_SCHEMA_VERSION ||
     parsed.channel !== verified.plan.channel ||
     parsed.keyId !== verified.plan.keyId ||
-    typeof parsed.manifest !== 'string' ||
-    typeof parsed.signature !== 'string' ||
+    !v.is(STRING_SCHEMA, parsed.manifest) ||
+    !v.is(STRING_SCHEMA, parsed.signature) ||
     !SIGNATURE_PATTERN.test(parsed.signature) ||
     parsed.signatureContext !== RELEASE_SIGNATURE_CONTEXT
   ) fail();
@@ -553,13 +570,17 @@ async function writeExclusive(root, relativePath, contents) {
 async function copyReviewedSources(outputRoot) {
   const sourceRoot = fileURLToPath(new URL('../src/', import.meta.url));
   for (const filename of GENERATED_SOURCE_FILES) {
-    let source;
-    try {
-      source = await readFile(path.join(sourceRoot, filename));
-    } catch {
-      fail();
-    }
+    const source = await readRegularFile(sourceRoot, filename, MAX_OPERATOR_RELEASE_BYTES);
     await writeExclusive(outputRoot, `src/${filename}`, source);
+  }
+  const repositoryRoot = fileURLToPath(new URL('../../../', import.meta.url));
+  for (const filename of GENERATED_DEPENDENCY_FILES) {
+    const source = await readRegularFile(
+      repositoryRoot,
+      filename,
+      MAX_OPERATOR_RELEASE_BYTES,
+    );
+    await writeExclusive(outputRoot, filename, source);
   }
 }
 
@@ -583,10 +604,10 @@ function shellQuote(value) {
 export async function generateR2PublicationWorker(input) {
   if (!exactKeys(input, ['accountId', 'bucketName', 'inputDirectory', 'outputDirectory', 'publicKey'])) fail();
   const { accountId, bucketName, inputDirectory, outputDirectory, publicKey } = input;
-  if (typeof accountId !== 'string' || !ACCOUNT_ID_PATTERN.test(accountId)) fail();
-  if (typeof bucketName !== 'string' || !BUCKET_PATTERN.test(bucketName)) fail();
-  if (typeof publicKey !== 'string' || !PUBLIC_KEY_PATTERN.test(publicKey)) fail();
-  if (typeof outputDirectory !== 'string' || outputDirectory.length === 0 || outputDirectory.includes('\0')) fail();
+  if (!v.is(STRING_SCHEMA, accountId) || !ACCOUNT_ID_PATTERN.test(accountId)) fail();
+  if (!v.is(STRING_SCHEMA, bucketName) || !BUCKET_PATTERN.test(bucketName)) fail();
+  if (!v.is(STRING_SCHEMA, publicKey) || !PUBLIC_KEY_PATTERN.test(publicKey)) fail();
+  if (!v.is(STRING_SCHEMA, outputDirectory) || outputDirectory.length === 0 || outputDirectory.includes('\0')) fail();
   const verified = await loadVerifiedR2PublicationDirectory(inputDirectory);
   const resolvedOutput = path.resolve(outputDirectory);
   if (resolvedOutput === verified.root || resolvedOutput.startsWith(`${verified.root}${path.sep}`)) fail();

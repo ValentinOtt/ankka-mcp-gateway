@@ -1,4 +1,6 @@
+import * as v from 'valibot';
 import { describe, expect, it } from 'vitest';
+import { boundaryObjectSchema } from '../src/boundary';
 import type { CloudflareDirectUploadCall } from '../src/cloudflare-worker-direct-upload';
 import {
   CloudflareUninstallWorkerLifecycleError,
@@ -28,11 +30,14 @@ import {
   verifyUninstallWorkerDeploymentSubmission,
   verifyUninstallWorkerVersionSubmission,
   type UninstallCleanupVariables,
+  type CleanupWorkerVersionRecoveryRecord,
+  type RetirementWorkerVersionRecoveryRecord,
   type UninstallWorkerDeploymentMutationIntent,
   type UninstallWorkerVersionMutationPlan,
 } from '../src/cloudflare-uninstall-worker-lifecycle';
 import type { VerifiedGatewayWorkerReleaseSet } from '../src/release-direct-upload-adapter';
 import { APPROVED_CLOUDFLARE_RELEASE_CONTRACT } from '../src/release-manifest';
+import { requiredFixture } from './fixtures';
 
 const ACCOUNT_ID = 'a'.repeat(32);
 const ZONE_ID = 'b'.repeat(32);
@@ -50,18 +55,49 @@ const RELEASE = 'gateway-v1.2.3';
 const ARTIFACT_SHA = '1'.repeat(64);
 const CLEANUP_COMPONENT_SHA = '2'.repeat(64);
 const RETIREMENT_COMPONENT_SHA = '3'.repeat(64);
+const EMPTY_COMPATIBILITY_FLAGS: readonly [] = Object.freeze([]);
+const objectContainerSchema = v.object({});
+const versionBindingSchema = v.object({
+  class_name: v.optional(v.string()),
+  name: v.string(),
+  namespace_id: v.optional(v.string()),
+  text: v.optional(v.string()),
+  type: v.string(),
+});
+const versionModuleSchema = v.object({
+  content_base64: v.string(),
+  content_type: v.string(),
+  name: v.string(),
+});
+const versionBodySchema = v.object({
+  annotations: boundaryObjectSchema,
+  bindings: v.array(versionBindingSchema),
+  compatibility_date: v.string(),
+  compatibility_flags: v.array(v.string()),
+  exports: boundaryObjectSchema,
+  main_module: v.string(),
+  modules: v.array(versionModuleSchema),
+});
+
+interface TestNamespaceItem {
+  readonly id: string;
+  readonly class: string;
+  readonly name: string;
+  readonly script: string;
+  readonly use_sqlite: boolean;
+}
 
 async function sha256(bytes: Uint8Array): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes)));
   return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-function expectDeepFrozen(value: unknown, seen = new Set<object>()): void {
-  if (value === null || typeof value !== 'object' || seen.has(value)) return;
+function expectDeepFrozen<Value>(value: Value, seen = new Set<object>()): void {
+  if (!v.is(objectContainerSchema, value) || seen.has(value)) return;
   seen.add(value);
   expect(Object.isFrozen(value)).toBe(true);
-  for (const key of Reflect.ownKeys(value)) {
-    expectDeepFrozen((value as Record<PropertyKey, unknown>)[key], seen);
+  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    if (Object.hasOwn(descriptor, 'value')) expectDeepFrozen(descriptor.value, seen);
   }
 }
 
@@ -77,7 +113,7 @@ async function releaseSet(): Promise<VerifiedGatewayWorkerReleaseSet> {
       worker: Object.freeze({
         mainModule: 'index.js',
         compatibilityDate: '2026-08-08',
-        compatibilityFlags: Object.freeze([] as []),
+        compatibilityFlags: EMPTY_COMPATIBILITY_FLAGS,
         modules: Object.freeze([Object.freeze({
           name: 'index.js', contentType: 'application/javascript+module',
           sha256: await sha256(primaryBytes), bytes: primaryBytes,
@@ -160,7 +196,7 @@ async function retirementPlan(): Promise<UninstallWorkerVersionMutationPlan> {
   });
 }
 
-function json(result: unknown, status = 200): Response {
+function json<Result>(result: Result, status = 200): Response {
   return Response.json({ success: true, errors: [], messages: [], result }, { status });
 }
 
@@ -189,28 +225,27 @@ function callWith(
   };
 }
 
-function bodyOf(plan: UninstallWorkerVersionMutationPlan): Record<string, unknown> {
-  return plan.ephemeral.body as Record<string, unknown>;
+function bodyOf(plan: UninstallWorkerVersionMutationPlan): v.InferOutput<typeof versionBodySchema> {
+  return v.parse(versionBodySchema, plan.ephemeral.body);
 }
 
 function versionResult(
   plan: UninstallWorkerVersionMutationPlan,
   versionId: string,
   options: { readonly includeModuleBytes?: boolean; readonly badNamespace?: boolean } = {},
-): Record<string, unknown> {
+ ) {
   const body = bodyOf(plan);
-  const bindings = (body.bindings as Record<string, unknown>[]).map((binding) => {
+  const bindings = body.bindings.map((binding) => {
     if (binding.type === 'secret_text') return { name: binding.name, type: binding.type };
     if (binding.name === 'ADMIN_STATE' && options.badNamespace) {
       return { ...binding, namespace_id: 'f'.repeat(32) };
     }
     return { ...binding };
   });
-  const modules = (body.modules as Record<string, unknown>[]).map((module) => ({
-    name: module.name,
-    content_type: module.content_type,
-    ...(options.includeModuleBytes ? { content_base64: module.content_base64 } : {}),
-  }));
+  const modules = body.modules.map((module) => {
+    const identity = { name: module.name, content_type: module.content_type };
+    return options.includeModuleBytes ? { ...identity, content_base64: module.content_base64 } : identity;
+  });
   const retirement = plan.recovery.stage === 'retirement';
   return {
     id: versionId,
@@ -266,7 +301,7 @@ function deploymentResult(intent: UninstallWorkerDeploymentMutationIntent, id = 
   };
 }
 
-function namespacePage(items: readonly unknown[]): Response {
+function namespacePage(items: readonly TestNamespaceItem[]): Response {
   return Response.json({
     success: true,
     errors: [],
@@ -322,7 +357,7 @@ async function retirementAuthority() {
     }),
     workerId: WORKER_ID,
     uninstallCycleId: CYCLE_ID,
-    retirementRecovery: plan.recovery as Extract<typeof plan.recovery, { stage: 'retirement' }>,
+    retirementRecovery: retirementRecovery(plan),
     retirementSubmission: submission,
     retirementDeploymentIntent: deploymentIntent,
     retirementDeploymentSubmission: deploymentSubmission,
@@ -332,8 +367,8 @@ async function retirementAuthority() {
 
 function retirementProofCall(
   authority: Awaited<ReturnType<typeof retirementAuthority>>,
-  firstNamespaces: readonly unknown[] = [],
-  secondNamespaces: readonly unknown[] = firstNamespaces,
+  firstNamespaces: readonly TestNamespaceItem[] = [],
+  secondNamespaces: readonly TestNamespaceItem[] = firstNamespaces,
   deleted: Response | (() => Response) = () => json({ id: WORKER_ID }),
 ) {
   return callWith((_request, index) => {
@@ -341,8 +376,24 @@ function retirementProofCall(
     if (index === 1) return json(versionResult(authority.plan, RETIREMENT_VERSION_ID));
     if (index === 2) return namespacePage(firstNamespaces);
     if (index === 3) return namespacePage(secondNamespaces);
-    return typeof deleted === 'function' ? deleted() : deleted;
+    return v.is(v.function(), deleted) ? deleted() : deleted;
   });
+}
+
+function cleanupRecovery(plan: UninstallWorkerVersionMutationPlan): CleanupWorkerVersionRecoveryRecord {
+  if (plan.recovery.stage !== 'cleanup') throw new TypeError('cleanup recovery fixture');
+  return plan.recovery;
+}
+
+function retirementRecovery(plan: UninstallWorkerVersionMutationPlan): RetirementWorkerVersionRecoveryRecord {
+  if (plan.recovery.stage !== 'retirement') throw new TypeError('retirement recovery fixture');
+  return plan.recovery;
+}
+
+function isSubmittedVersionError<ErrorInput>(error: ErrorInput): boolean {
+  return error instanceof CloudflareUninstallWorkerLifecycleError &&
+    error.outcome === 'submitted' && error.submissions[0]?.kind === 'uninstall_worker_version' &&
+    error.submissions[0].versionId === VERSION_ID;
 }
 
 async function workerDeleteIntent() {
@@ -383,7 +434,7 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
     expect(body).not.toHaveProperty('assets');
     expect(body).not.toHaveProperty('migrations');
     expect(body.exports).toEqual({ AdminState: { type: 'durable-object', storage: 'sqlite' } });
-    const bindings = body.bindings as Record<string, unknown>[];
+    const bindings = body.bindings;
     expect(bindings).toHaveLength(8);
     expect(bindings).toContainEqual({
       name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState',
@@ -394,7 +445,7 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
     });
     expect(JSON.stringify(plan.recovery)).not.toContain(UNINSTALL_NONCE);
     expect(JSON.stringify(plan.recovery)).not.toContain('content_base64');
-    expect(plan.recovery.modules[0].contentSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(requiredFixture(plan.recovery.modules.at(0), 'recovery module').contentSha256).toMatch(/^[a-f0-9]{64}$/u);
     expect(await parseUninstallWorkerVersionRecoveryRecord(plan.recovery)).toEqual(plan.recovery);
     expect(await parseUninstallWorkerVersionRecoveryRecord({ ...plan.recovery, requestHash: '9'.repeat(64) })).toBeNull();
   });
@@ -411,7 +462,9 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
 
   it('rejects release module bytes that no longer match the signed hash', async () => {
     const release = await releaseSet();
-    release.cleanup.worker.modules[0].bytes[0] ^= 1;
+    const module = requiredFixture(release.cleanup.worker.modules.at(0), 'cleanup module');
+    const firstByte = requiredFixture(module.bytes.at(0), 'cleanup module byte');
+    module.bytes[0] = firstByte ^ 1;
     await expect(prepareCleanupWorkerVersionMutation({
       accountId: ACCOUNT_ID,
       workerName: WORKER_NAME,
@@ -428,9 +481,7 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
     const plan = await cleanupPlan();
     const call = callWith(() => Response.json({ result: { id: VERSION_ID } }, { status: 201 }));
     await expect(submitUninstallWorkerVersionMutation(plan.ephemeral, plan.recovery, call)).rejects.toSatisfy(
-      (error: unknown) => error instanceof CloudflareUninstallWorkerLifecycleError &&
-        error.outcome === 'submitted' && error.submissions[0]?.kind === 'uninstall_worker_version' &&
-        error.submissions[0].versionId === VERSION_ID,
+      isSubmittedVersionError,
     );
   });
 
@@ -445,8 +496,12 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
       code: 'provider_mismatch', stage: 'version_verify', outcome: 'submitted',
     });
 
-    const badBytesResult = versionResult(plan, VERSION_ID, { includeModuleBytes: true });
-    (badBytesResult.modules as Record<string, unknown>[])[0].content_base64 = btoa('different');
+    const exactBytesResult = versionResult(plan, VERSION_ID, { includeModuleBytes: true });
+    const badBytesResult = {
+      ...exactBytesResult,
+      modules: exactBytesResult.modules.map((module, index) =>
+        index === 0 ? { ...module, content_base64: btoa('different') } : module),
+    };
     await expect(verifyUninstallWorkerVersionSubmission(
       plan.recovery,
       submission,
@@ -477,7 +532,7 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
       ? json(versionResult(plan, VERSION_ID, { includeModuleBytes: true }))
       : json({ deployments: [deploymentResult(intent)] }));
     await expect(proveActiveCleanupWorkerVersion(
-      plan.recovery as Extract<typeof plan.recovery, { readonly stage: 'cleanup' }>,
+      cleanupRecovery(plan),
       version,
       intent,
       deployment,
@@ -493,7 +548,7 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
       ? json(versionResult(plan, VERSION_ID))
       : json({ deployments: [deploymentResult(intent)] }));
     await expect(proveActiveCleanupWorkerVersion(
-      plan.recovery as Extract<typeof plan.recovery, { readonly stage: 'cleanup' }>,
+      cleanupRecovery(plan),
       version,
       intent,
       deployment,
@@ -507,7 +562,7 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
         index === 2 ? '55555555-5555-4555-8555-555555555555' : DEPLOYMENT_ID,
       )] }));
     await expect(proveActiveCleanupWorkerVersion(
-      plan.recovery as Extract<typeof plan.recovery, { readonly stage: 'cleanup' }>,
+      cleanupRecovery(plan),
       version,
       intent,
       deployment,
@@ -524,8 +579,14 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
       callWith(() => json(versionResult(plan, RETIREMENT_VERSION_ID))),
     )).resolves.toEqual(submission);
 
-    const active = versionResult(plan, RETIREMENT_VERSION_ID);
-    active.exports = { AdminState: { type: 'durable-object', storage: 'sqlite' } };
+    const retired = versionResult(plan, RETIREMENT_VERSION_ID);
+    const active = {
+      ...retired,
+      exports: {
+        ...retired.exports,
+        AdminState: { type: 'durable-object', storage: 'sqlite' },
+      },
+    };
     await expect(verifyUninstallWorkerVersionSubmission(
       plan.recovery,
       submission,
@@ -556,7 +617,7 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
     const call = callWith((_request, index) => {
       if (index === 0) return page(1);
       if (index === 1) return page(2);
-      return json(versionResult(plan, ids[100]));
+      return json(versionResult(plan, requiredFixture(ids.at(100), 'matched version ID')));
     });
     await expect(inspectUninstallWorkerVersionRecovery(plan.recovery, call)).resolves.toMatchObject({
       versionId: ids[100],
@@ -696,9 +757,9 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
     expect(parseAdminStateNamespaceRetirementProof(proof)).toEqual(proof);
     expect(parseAdminStateNamespaceRetirementProof({ ...proof, accessToken: ACCESS_TOKEN })).toBeNull();
     expect(call.requests).toHaveLength(4);
-    expect(new URL(call.requests[0].url).pathname).toContain('/deployments');
-    expect(new URL(call.requests[1].url).pathname).toContain(`/versions/${RETIREMENT_VERSION_ID}`);
-    expect(new URL(call.requests[2].url).pathname).toContain('/durable_objects/namespaces');
+    expect(new URL(requiredFixture(call.requests.at(0), 'deployment request').url).pathname).toContain('/deployments');
+    expect(new URL(requiredFixture(call.requests.at(1), 'version request').url).pathname).toContain(`/versions/${RETIREMENT_VERSION_ID}`);
+    expect(new URL(requiredFixture(call.requests.at(2), 'namespace request').url).pathname).toContain('/durable_objects/namespaces');
 
     const driftCall = callWith((_request, index) => {
       if (index === 0) return json({ deployments: [deploymentResult(deploymentIntent)] });
@@ -735,7 +796,7 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
     expect(deleteCount).toBe(1);
     expect(submitCall.requests).toHaveLength(5);
     expect(submitCall.requests.slice(0, 4).every((request) => request.method === 'GET')).toBe(true);
-    expect(submitCall.requests[4].method).toBe('DELETE');
+    expect(requiredFixture(submitCall.requests.at(4), 'worker delete request').method).toBe('DELETE');
 
     const recoveryCall = callWith((_request, index) => {
       if (index % 3 < 2) return absent();
@@ -750,7 +811,7 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
     });
     expect(recoveryCall.requests).toHaveLength(6);
     expect(recoveryCall.requests.every((request) => request.method === 'GET')).toBe(true);
-    expect(new URL(recoveryCall.requests[2].url).search).toBe('?page=1&per_page=100');
+    expect(new URL(requiredFixture(recoveryCall.requests.at(2), 'script list request').url).search).toBe('?page=1&per_page=100');
   });
 
   it('does not prepare or submit deletion without exact current retirement authority', async () => {
@@ -769,7 +830,7 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
     const wrongCycle = {
       ...prepared.authority.proofInput,
       uninstallCycleId: 'uninstall-' + 'f'.repeat(24),
-    } as typeof prepared.authority.proofInput;
+    };
     const noCall = callWith(() => {
       throw new Error('must not call provider');
     });
@@ -806,7 +867,7 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
         throw new Error('must not call provider');
       });
       await expect(submitWorkerDeleteMutation(
-        fabricated as typeof prepared.intent,
+        fabricated,
         prepared.authority.proofInput,
         call,
       )).rejects.toMatchObject({ code: 'invalid_input', outcome: 'not_sent', submissions: [] });
@@ -863,14 +924,15 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
     const noCall = callWith(() => {
       throw new Error('must not call provider');
     });
-    let boundaryError: unknown;
+    let boundaryError: Error | null = null;
     try {
       await verifyUninstallWorkerVersionSubmission(
         plan.recovery,
-        malicious as Parameters<typeof verifyUninstallWorkerVersionSubmission>[1],
+        malicious,
         noCall,
       );
     } catch (error) {
+      if (!(error instanceof Error)) throw error;
       boundaryError = error;
     }
     expect(boundaryError).toBeInstanceOf(CloudflareUninstallWorkerLifecycleError);
@@ -1054,7 +1116,7 @@ describe('Cloudflare uninstall Worker lifecycle', () => {
     ): Response => {
       let ids = page === 1 ? scriptIds.slice(0, 100) : scriptIds.slice(100);
       if (options.partial && page === 1) ids = ids.slice(0, 1);
-      if (options.duplicate && page === 2) ids = [scriptIds[0]];
+      if (options.duplicate && page === 2) ids = [requiredFixture(scriptIds.at(0), 'first script ID')];
       const totalCount = options.drift && page === 2 ? 102 : 101;
       return Response.json({
         success: true,

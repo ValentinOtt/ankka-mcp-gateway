@@ -21,6 +21,7 @@
  *   CLOUDFLARE_API_TOKEN=… node scripts/edge-gate/verify-access.mjs
  */
 import process from 'node:process';
+import * as v from 'valibot';
 
 import {
   ACCESS_BYPASS_APPLICATIONS,
@@ -35,12 +36,15 @@ import {
 
 const API = 'https://api.cloudflare.com/client/v4';
 const ZONE = 'ankka.ai';
+const NUMBER_SCHEMA = v.number();
+const STRING_SCHEMA = v.string();
+
 const results = [];
 function record(item, verdict, detail) { results.push({ item, verdict, detail }); }
 
 function requireToken() {
   const token = process.env.CLOUDFLARE_API_TOKEN;
-  if (typeof token !== 'string' || token.length < 20) throw new Error('CLOUDFLARE_API_TOKEN must be set');
+  if (!v.is(STRING_SCHEMA, token) || token.length < 20) throw new Error('CLOUDFLARE_API_TOKEN must be set');
   return token;
 }
 
@@ -72,13 +76,13 @@ function policiesOf(app) {
 }
 
 function isAccessRedirect(observation) {
-  return typeof observation.status === 'number' &&
+  return v.is(NUMBER_SCHEMA, observation.status) &&
     observation.status >= 300 && observation.status < 400 &&
     isCloudflareAccessLoginUrl(observation.location);
 }
 
 function applicationDomainMatches(domain, target) {
-  if (typeof domain !== 'string') return false;
+  if (!v.is(STRING_SCHEMA, domain)) return false;
   if (domain === target || target.startsWith(`${domain}/`)) return true;
   if (!domain.includes('*')) return false;
   const expression = domain

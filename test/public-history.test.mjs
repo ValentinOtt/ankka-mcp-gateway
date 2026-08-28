@@ -199,8 +199,64 @@ test('public-history check rejects generated shapes, output directories, symlink
   }
 });
 
-function run(directory) {
-  return spawnSync(process.execPath, [checker, '--repo', directory], {
+test('public-history check grandfathers only retired naming in an exact public baseline', async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), 'ankka-public-history-baseline-'));
+  const gitEnv = fixtureGitEnv();
+  const retiredName = ['Company', 'Gateway'].join(' ');
+
+  try {
+    git(fixture, ['init', '--quiet'], gitEnv);
+    await writeFile(path.join(fixture, 'README.md'), `# ${retiredName}\n`);
+    git(fixture, ['add', 'README.md'], gitEnv);
+    git(fixture, ['commit', '--quiet', '-m', `publish ${retiredName}`], gitEnv);
+    const baseline = gitOutput(fixture, ['rev-parse', 'HEAD'], gitEnv).trim();
+
+    await writeFile(path.join(fixture, 'README.md'), '# Safe current name\n');
+    git(fixture, ['add', 'README.md'], gitEnv);
+    git(fixture, ['commit', '--quiet', '-m', 'retire old name'], gitEnv);
+    const allowed = run(fixture, baseline);
+    assert.equal(allowed.status, 0, allowed.stderr);
+
+    await writeFile(path.join(fixture, 'regression.md'), `# ${retiredName}\n`);
+    git(fixture, ['add', 'regression.md'], gitEnv);
+    git(fixture, ['commit', '--quiet', '-m', 'reintroduce old name'], gitEnv);
+    const rejected = run(fixture, baseline);
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, /contains retired gateway product name/u);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test('public-history baseline does not grandfather credentials', async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), 'ankka-public-history-baseline-secret-'));
+  const gitEnv = fixtureGitEnv();
+  const token = `gh${'p'}_${'e'.repeat(36)}`;
+
+  try {
+    git(fixture, ['init', '--quiet'], gitEnv);
+    await writeFile(path.join(fixture, 'removed.txt'), `${token}\n`);
+    git(fixture, ['add', 'removed.txt'], gitEnv);
+    git(fixture, ['commit', '--quiet', '-m', 'published fixture'], gitEnv);
+    const baseline = gitOutput(fixture, ['rev-parse', 'HEAD'], gitEnv).trim();
+    await rm(path.join(fixture, 'removed.txt'));
+    git(fixture, ['add', '--all'], gitEnv);
+    git(fixture, ['commit', '--quiet', '-m', 'remove fixture'], gitEnv);
+
+    const rejected = run(fixture, baseline);
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, /removed\.txt contains GitHub token/u);
+    assert.equal(rejected.stderr.includes(token), false);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+function run(directory, baseline) {
+  const baselineArgs = baseline === undefined
+    ? []
+    : ['--allow-retired-product-name-through', baseline];
+  return spawnSync(process.execPath, [checker, '--repo', directory, ...baselineArgs], {
     encoding: 'utf8',
   });
 }

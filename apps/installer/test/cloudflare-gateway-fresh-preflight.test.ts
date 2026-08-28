@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import type { BoundaryObject } from '../src/boundary';
 import {
   CustomerGatewayFreshPreflightError,
   parseExistingAnkkaGatewaySummary,
@@ -11,7 +12,7 @@ import {
 import { prepareCustomerGatewayDesiredProjection } from '../src/customer-bootstrap-request';
 import type { AuthorizedTarget } from '../src/cloudflare-target';
 import { buildStaticDeployPlan, parseDeploySelection } from '../src/schema';
-import { manifest, NOW, selectionInput, verifiedRelease } from './fixtures';
+import { manifest, NOW, requiredFixture, selectionInput, verifiedRelease } from './fixtures';
 
 const ACCOUNT_ID = '1'.repeat(32);
 const ZONE_ID = '2'.repeat(32);
@@ -30,20 +31,31 @@ const projection = await prepareCustomerGatewayDesiredProjection({
   plan,
   nowMs: NOW,
 });
+const mcpServerCandidate = requiredFixture(projection.candidates.mcpServer ?? undefined, 'MCP server candidate');
+const sourceApplicationCandidate = requiredFixture(
+  projection.candidates.sourceAccessApplication ?? undefined,
+  'source access application candidate',
+);
+const initialSource = requiredFixture(selection.firstSource ?? undefined, 'initial source');
 
 type ResponseFactory = (request: Request, index: number) => Response | Promise<Response>;
 type PreflightRequest = Parameters<CustomerGatewayFreshPreflightTransport>[0];
+type RecordedPreflightRequest = ReturnType<PreflightRequest['clone']>;
+
+interface ResultInfoOverrides {
+  readonly total_pages?: number;
+}
 
 interface RecordedTransport {
   readonly transport: CustomerGatewayFreshPreflightTransport;
-  readonly requests: PreflightRequest[];
+  readonly requests: RecordedPreflightRequest[];
 }
 
-function successPage(
-  result: readonly unknown[],
+function successPage<Result>(
+  result: readonly Result[],
   page = 1,
   totalCount = result.length,
-  extraInfo: Record<string, unknown> = {},
+  extraInfo: ResultInfoOverrides = {},
 ): Response {
   return Response.json({
     errors: [],
@@ -61,18 +73,20 @@ function successPage(
 }
 
 function recorded(factory: Response | ResponseFactory): RecordedTransport {
-  const requests: PreflightRequest[] = [];
+  const requests: RecordedPreflightRequest[] = [];
   return {
     requests,
     transport: async (request) => {
       const index = requests.length;
-      requests.push(request.clone() as PreflightRequest);
+      requests.push(request.clone());
       return factory instanceof Response ? factory.clone() : await factory(request, index);
     },
   };
 }
 
-function emptyProvider(overrides: Partial<Record<string, readonly unknown[]>> = {}): RecordedTransport {
+function emptyProvider(
+  overrides: Readonly<Record<string, readonly BoundaryObject[]>> = {},
+): RecordedTransport {
   return recorded((request) => {
     const url = new URL(request.url);
     const result = overrides[url.pathname] ?? [];
@@ -97,14 +111,15 @@ function input(
   };
 }
 
-function expectPreflightError(
-  error: unknown,
+function expectPreflightError<ErrorInput>(
+  error: ErrorInput,
   code: CustomerGatewayFreshPreflightError['code'],
   stage: CustomerGatewayFreshPreflightError['stage'],
 ): boolean {
   expect(error).toBeInstanceOf(CustomerGatewayFreshPreflightError);
   expect(error).toMatchObject({ code, stage, canRetry: false });
-  expect((error as Error).message).toBe(code);
+  if (!(error instanceof CustomerGatewayFreshPreflightError)) return false;
+  expect(error.message).toBe(code);
   expect(JSON.stringify(error)).not.toContain(ACCESS_TOKEN);
   return true;
 }
@@ -115,10 +130,10 @@ const PORTALS_PATH = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/p
 const DNS_PATH = `/client/v4/zones/${ZONE_ID}/dns_records`;
 
 interface ExistingGatewayResourceOverrides {
-  readonly portalApplication?: Readonly<Record<string, unknown>>;
-  readonly managementApplication?: Readonly<Record<string, unknown>>;
-  readonly portal?: Readonly<Record<string, unknown>>;
-  readonly dnsRecord?: Readonly<Record<string, unknown>>;
+  readonly portalApplication?: BoundaryObject;
+  readonly managementApplication?: BoundaryObject;
+  readonly portal?: BoundaryObject;
+  readonly dnsRecord?: BoundaryObject;
 }
 
 function existingGatewayProvider(
@@ -172,7 +187,8 @@ describe('private customer-gateway fresh preflight', () => {
     try {
       await preflightFreshCustomerGateway(input(provider.transport));
     } catch (error) {
-      detected = error as CustomerGatewayFreshPreflightError;
+      if (!(error instanceof CustomerGatewayFreshPreflightError)) throw error;
+      detected = error;
     }
     expect(detected).toBeInstanceOf(CustomerGatewayFreshPreflightError);
     expect(detected).toMatchObject({
@@ -234,7 +250,7 @@ describe('private customer-gateway fresh preflight', () => {
     async (_label, overrides) => {
       const provider = existingGatewayProvider(overrides);
       await expect(preflightFreshCustomerGateway(input(provider.transport))).rejects.toSatisfy(
-        (error: unknown) => expectPreflightError(error, 'fresh_collision', 'access_application_list'),
+        (error) => expectPreflightError(error, 'fresh_collision', 'access_application_list'),
       );
       expect(provider.requests).toHaveLength(4);
     },
@@ -249,7 +265,7 @@ describe('private customer-gateway fresh preflight', () => {
     });
 
     await expect(preflightFreshCustomerGateway(input(provider.transport))).rejects.toSatisfy(
-      (error: unknown) => {
+      (error) => {
         expect(error).toBeInstanceOf(CustomerGatewayFreshPreflightError);
         expect(error).toMatchObject({
           code: 'existing_gateway_detected',
@@ -286,7 +302,7 @@ describe('private customer-gateway fresh preflight', () => {
       expect(request.redirect).toBe('manual');
       expect(request.body).toBeNull();
     }
-    const dnsUrl = new URL(provider.requests[3].url);
+    const dnsUrl = new URL(requiredFixture(provider.requests.at(3), 'DNS request').url);
     expect(dnsUrl.searchParams.get('name.exact')).toBe(selection.basics.portalHostname);
     expect(dnsUrl.searchParams.get('match')).toBe('all');
     expect(dnsUrl.searchParams.get('page')).toBe('1');
@@ -359,20 +375,20 @@ describe('private customer-gateway fresh preflight', () => {
 
   it.each([
     ['deterministic MCP server ID', SERVER_PATH, {
-      id: projection.candidates.mcpServer!.id,
+      id: mcpServerCandidate.id,
       hostname: 'https://foreign.example.net/mcp',
       name: 'Foreign',
     }, 'mcp_server_list'],
     ['same MCP endpoint', SERVER_PATH, {
       id: 'foreign-server',
-      hostname: projection.candidates.mcpServer!.endpoint,
+      hostname: mcpServerCandidate.endpoint,
       name: 'Foreign',
     }, 'mcp_server_list'],
     ['MCP ownership marker', SERVER_PATH, {
       id: 'foreign-server',
       hostname: 'https://foreign.example.net/mcp',
       name: 'Foreign',
-      description: projection.candidates.mcpServer!.ownershipMarker,
+      description: mcpServerCandidate.ownershipMarker,
     }, 'mcp_server_list'],
     ['source app server relation', APPS_PATH, {
       id: 'a'.repeat(32),
@@ -380,13 +396,13 @@ describe('private customer-gateway fresh preflight', () => {
       name: 'Foreign',
       destinations: [{
         type: 'via_mcp_server_portal',
-        mcp_server_id: projection.candidates.sourceAccessApplication!.serverId,
+        mcp_server_id: sourceApplicationCandidate.serverId,
       }],
     }, 'access_application_list'],
     ['source app ownership marker', APPS_PATH, {
       id: 'a'.repeat(32),
       type: 'self_hosted',
-      name: projection.candidates.sourceAccessApplication!.ownershipMarker,
+      name: sourceApplicationCandidate.ownershipMarker,
     }, 'access_application_list'],
     ['deterministic portal ID', PORTALS_PATH, {
       id: projection.candidates.portal.id,
@@ -442,7 +458,7 @@ describe('private customer-gateway fresh preflight', () => {
     async (_label, path, candidate, stage) => {
       const provider = emptyProvider({ [path]: [candidate] });
       await expect(preflightFreshCustomerGateway(input(provider.transport))).rejects.toSatisfy(
-        (error: unknown) => expectPreflightError(error, 'fresh_collision', stage),
+        (error) => expectPreflightError(error, 'fresh_collision', stage),
       );
       expect(provider.requests.some((request) =>
         new URL(request.url).pathname.includes('/policies'))).toBe(false);
@@ -473,14 +489,14 @@ describe('private customer-gateway fresh preflight', () => {
       result_info: { count: 0, page: 1, per_page: 100, total_count: 0 }, success: true,
     }));
     await expect(preflightFreshCustomerGateway(input(populatedErrors.transport))).rejects.toSatisfy(
-      (error: unknown) => expectPreflightError(error, 'provider_mismatch', 'mcp_server_list'),
+      (error) => expectPreflightError(error, 'provider_mismatch', 'mcp_server_list'),
     );
   });
 
   it('rejects a redirecting provider response as a read failure instead of following it', async () => {
     const redirecting = recorded(new Response(null, { status: 302, headers: { location: 'https://example.invalid/' } }));
     await expect(preflightFreshCustomerGateway(input(redirecting.transport))).rejects.toSatisfy(
-      (error: unknown) => expectPreflightError(error, 'provider_unknown', 'mcp_server_list'),
+      (error) => expectPreflightError(error, 'provider_unknown', 'mcp_server_list'),
     );
   });
 
@@ -489,15 +505,15 @@ describe('private customer-gateway fresh preflight', () => {
       const path = new URL(request.url).pathname;
       if (index === 4 && path === SERVER_PATH) {
         return successPage([{
-          id: projection.candidates.mcpServer!.id,
-          hostname: projection.candidates.mcpServer!.endpoint,
-          name: selection.firstSource!.name,
+          id: mcpServerCandidate.id,
+          hostname: mcpServerCandidate.endpoint,
+          name: initialSource.name,
         }]);
       }
       return successPage([], 1, path === DNS_PATH ? 2_000 : 0);
     });
     await expect(preflightFreshCustomerGateway(input(provider.transport))).rejects.toSatisfy(
-      (error: unknown) => expectPreflightError(error, 'fresh_collision', 'mcp_server_list'),
+      (error) => expectPreflightError(error, 'fresh_collision', 'mcp_server_list'),
     );
     expect(provider.requests).toHaveLength(5);
   });
@@ -519,7 +535,7 @@ describe('private customer-gateway fresh preflight', () => {
       return successPage([], 1, url.pathname === DNS_PATH ? 2_000 : 0);
     });
     await expect(preflightFreshCustomerGateway(input(provider.transport))).rejects.toSatisfy(
-      (error: unknown) => expectPreflightError(error, 'provider_ambiguous', 'mcp_server_list'),
+      (error) => expectPreflightError(error, 'provider_ambiguous', 'mcp_server_list'),
     );
     expect(provider.requests).toHaveLength(2);
   });
@@ -544,7 +560,7 @@ describe('private customer-gateway fresh preflight', () => {
   ])('rejects %s instead of accepting a partial or unknown list', async (_label, body) => {
     const provider = recorded(Response.json(body));
     await expect(preflightFreshCustomerGateway(input(provider.transport))).rejects.toSatisfy(
-      (error: unknown) => expectPreflightError(error, 'provider_mismatch', 'mcp_server_list'),
+      (error) => expectPreflightError(error, 'provider_mismatch', 'mcp_server_list'),
     );
   });
 
@@ -562,14 +578,14 @@ describe('private customer-gateway fresh preflight', () => {
       headers: { 'content-type': 'application/json' },
     }));
     await expect(preflightFreshCustomerGateway(input(provider.transport))).rejects.toSatisfy(
-      (error: unknown) => expectPreflightError(error, 'provider_unknown', 'mcp_server_list'),
+      (error) => expectPreflightError(error, 'provider_unknown', 'mcp_server_list'),
     );
     expect(cancelled).toBe(true);
 
     const never = recorded(async () => new Promise<Response>(() => undefined));
     await expect(preflightFreshCustomerGateway(input(never.transport, { timeoutMs: 1 })))
       .rejects.toSatisfy(
-        (error: unknown) => expectPreflightError(error, 'provider_unknown', 'mcp_server_list'),
+        (error) => expectPreflightError(error, 'provider_unknown', 'mcp_server_list'),
       );
   });
 
@@ -581,7 +597,7 @@ describe('private customer-gateway fresh preflight', () => {
         zone: { ...target.zone, name: 'foreign.example' },
       },
     }))).rejects.toSatisfy(
-      (error: unknown) => expectPreflightError(error, 'invalid_input', 'validate'),
+      (error) => expectPreflightError(error, 'invalid_input', 'validate'),
     );
     expect(transport).not.toHaveBeenCalled();
   });
