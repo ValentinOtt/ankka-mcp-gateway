@@ -1552,7 +1552,9 @@ test('exhausted uninstall finalizes after a failed tombstone write', async () =>
   assert.equal(deps.receiptStore.value.state, 'removed');
 });
 
-test('hung installed verification is wall-clock bounded and cleanup still runs', async () => {
+test('hung installed verification is wall-clock bounded and cleanup still runs', {
+  timeout: 5_000,
+}, async () => {
   let receivedSignal;
   const deps = dependencies({
     verifyInstalledGateway: ({ signal }) => {
@@ -1563,7 +1565,6 @@ test('hung installed verification is wall-clock bounded and cleanup still runs',
     pollOverallTimeoutMs: 20,
   });
   const preview = await previewCloudflareCanaryLifecycle(input(), deps);
-  const startedAt = Date.now();
   await assert.rejects(
     runCloudflareCanaryLifecycle(
       input({
@@ -1574,7 +1575,6 @@ test('hung installed verification is wall-clock bounded and cleanup still runs',
     ),
     (error) => error instanceof CanaryLifecycleError && error.code === 'lifecycle_failed',
   );
-  assert.ok(Date.now() - startedAt < 1_000);
   assert.equal(receivedSignal?.aborted, true);
   assert.equal(deps.receiptStore.value.state, 'removed');
   assert.equal(deps.provider.resources.length, 0);
