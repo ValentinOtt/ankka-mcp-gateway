@@ -29,10 +29,11 @@ they are explicitly documented as non-secret.
 - Secrets must not appear in configuration files, logs, exceptions, telemetry,
   tests, snapshots, or deployment output.
 - Customer-deployed gateways send no telemetry to Ankka. The Ankka-hosted
-  installer may collect documented, identifier-free, server-authored funnel
+  installer may collect documented, server-authored, session-scoped funnel
   events by default. Its exact fields, destination, retention, and user-facing
-  notice must remain public; it must not add visitor, session, customer,
-  provider-resource, request, credential, or free-form dimensions.
+  notice must remain public; it must not add cookies, cross-session or
+  customer identifiers, IP or raw user-agent storage, provider-resource,
+  credential, or free-form dimensions.
 - The initial capability boundary is read-only with explicit tool allowlists.
 - Prompts and tool names are not authorization boundaries; upstreams must also
   enforce the allowed operations.

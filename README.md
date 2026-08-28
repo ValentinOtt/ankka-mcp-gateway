@@ -131,9 +131,10 @@ belongs in TypeScript unless it must be part of an exact signed payload.
 
 - MCP source-provider credentials never transit or persist at Ankka.
 - Customer-deployed gateways send no telemetry to Ankka.
-- The Ankka-hosted installer may record only the fixed funnel without user,
-  session, request, or customer identifiers documented in
-  [Hosted installer analytics](docs/HOSTED_INSTALLER_ANALYTICS.md).
+- The Ankka-hosted installer may record only the fixed, session-scoped funnel
+  documented in [Hosted installer analytics](docs/HOSTED_INSTALLER_ANALYTICS.md):
+  no cookies, no IP or raw user-agent storage, and no identifier that outlives
+  the session. Deploying from this repository sends no analytics.
 - Every Cloudflare resource mutation requires fresh provider state, an exact
   customer-approved target and plan, and a durable intent record. Adoption and
   deletion additionally require receipt-bound ownership.

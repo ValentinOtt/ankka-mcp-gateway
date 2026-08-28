@@ -224,7 +224,11 @@ function completionAnalyticsOutcome(
   return 'failed';
 }
 
-function hostedInstallerAnalyticsSink(env: GatewayDeployEnv): HostedInstallerAnalyticsSink {
+function hostedInstallerAnalyticsSink(
+  env: GatewayDeployEnv,
+  request?: Request,
+  sessionId?: string | null,
+): HostedInstallerAnalyticsSink {
   const sink: HostedInstallerAnalyticsSink = {};
   if (env.HOSTED_INSTALLER_ANALYTICS !== undefined) {
     sink.dataset = env.HOSTED_INSTALLER_ANALYTICS;
@@ -235,7 +239,57 @@ function hostedInstallerAnalyticsSink(env: GatewayDeployEnv): HostedInstallerAna
   if (env.HOSTED_INSTALLER_ANALYTICS_RELEASE !== undefined) {
     sink.release = env.HOSTED_INSTALLER_ANALYTICS_RELEASE;
   }
+  if (request !== undefined) {
+    sink.session = analyticsSessionKey(sessionId ?? readSessionId(request));
+    sink.country = analyticsCountry(request);
+    sink.browser = analyticsBrowserFamily(request.headers.get('user-agent'));
+    sink.referrer = analyticsReferrerHost(request);
+  }
   return sink;
+}
+
+/**
+ * Opaque per-session grouping key: a non-cryptographic digest of the session
+ * identifier, so funnel rows group by session without carrying the session
+ * credential itself.
+ */
+function analyticsSessionKey(sessionId: string | null): string {
+  if (sessionId === null || sessionId === '') return 'none';
+  let digest = 0xcbf29ce484222325n;
+  for (let index = 0; index < sessionId.length; index += 1) {
+    digest ^= BigInt(sessionId.charCodeAt(index));
+    digest = (digest * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return digest.toString(16).padStart(16, '0');
+}
+
+function analyticsCountry(request: Request): string {
+  const country = request.cf?.country;
+  return v.is(v.string(), country) && /^[A-Z]{2}$/u.test(country) ? country : 'ZZ';
+}
+
+function analyticsBrowserFamily(userAgent: string | null): string {
+  if (userAgent === null || userAgent === '') return 'none';
+  if (/(?:firefox|fxios)\//iu.test(userAgent)) return 'firefox';
+  if (/(?:chrome|chromium|crios|edg|opr)\//iu.test(userAgent)) return 'chromium';
+  if (/safari\//iu.test(userAgent)) return 'safari';
+  return 'other';
+}
+
+/**
+ * External referrer hostname only: 'direct' without a Referer header, 'none'
+ * for a same-host or unparseable value. Paths and queries are never read.
+ */
+function analyticsReferrerHost(request: Request): string {
+  const referrer = request.headers.get('referer');
+  if (referrer === null || referrer === '') return 'direct';
+  try {
+    const referrerHost = new URL(referrer).hostname.toLowerCase();
+    if (referrerHost === new URL(request.url).hostname.toLowerCase()) return 'none';
+    return /^[a-z0-9](?:[a-z0-9.-]{0,62})$/u.test(referrerHost) ? referrerHost : 'none';
+  } catch {
+    return 'none';
+  }
 }
 
 async function internalCall<T>(stub: GatewayDeploySessionStub, path: string, init?: RequestInit): Promise<T> {
@@ -608,7 +662,7 @@ async function saveSelection(
   });
   if (firstConfiguration) {
     recordHostedInstallerAnalytics(
-      hostedInstallerAnalyticsSink(env),
+      hostedInstallerAnalyticsSink(env, request),
       'configuration_saved',
       'none',
       'fresh_install',
@@ -658,7 +712,7 @@ async function startCloudflareDiscovery(
     scopes: DISCOVERY_OAUTH_SCOPES,
   });
   recordHostedInstallerAnalytics(
-    hostedInstallerAnalyticsSink(env),
+    hostedInstallerAnalyticsSink(env, request),
     'discovery_authorization_created',
     'none',
     'none',
@@ -699,7 +753,7 @@ async function previewPlan(
   );
   if (firstPlan) {
     recordHostedInstallerAnalytics(
-      hostedInstallerAnalyticsSink(env),
+      hostedInstallerAnalyticsSink(env, request),
       'install_plan_created',
       'none',
       'fresh_install',
@@ -1027,7 +1081,7 @@ async function authorizeManagementAction(
     });
     if (firstReturningRemovalPlan) {
       recordHostedInstallerAnalytics(
-        hostedInstallerAnalyticsSink(env),
+        hostedInstallerAnalyticsSink(env, request),
         'removal_plan_created',
         'none',
         'returning_removal',
@@ -1152,7 +1206,7 @@ async function previewUninstallPlan(
   if (!uninstall) throw new DeployError(500, 'session_invalid');
   if (firstRemovalPlan) {
     recordHostedInstallerAnalytics(
-      hostedInstallerAnalyticsSink(env),
+      hostedInstallerAnalyticsSink(env, request),
       'removal_plan_created',
       'none',
       'same_session_removal',
@@ -1221,7 +1275,7 @@ async function startUninstall(
     challenge: await pkceChallenge(verifier),
   });
   recordHostedInstallerAnalytics(
-    hostedInstallerAnalyticsSink(env),
+    hostedInstallerAnalyticsSink(env, request),
     'removal_authorization_created',
     'none',
     'same_session_removal',
@@ -1294,7 +1348,7 @@ async function startReturningUninstall(
     challenge: await pkceChallenge(verifier),
   });
   recordHostedInstallerAnalytics(
-    hostedInstallerAnalyticsSink(env),
+    hostedInstallerAnalyticsSink(env, request),
     'removal_authorization_created',
     'none',
     'returning_removal',
@@ -1411,7 +1465,7 @@ async function startReturningUninstallRecovery(
     challenge: await pkceChallenge(verifier),
   });
   recordHostedInstallerAnalytics(
-    hostedInstallerAnalyticsSink(env),
+    hostedInstallerAnalyticsSink(env, request),
     'removal_authorization_created',
     'none',
     'returning_removal',
@@ -1484,7 +1538,7 @@ async function startDeploy(
     challenge: await pkceChallenge(verifier),
   });
   recordHostedInstallerAnalytics(
-    hostedInstallerAnalyticsSink(env),
+    hostedInstallerAnalyticsSink(env, request),
     'install_authorization_created',
     'none',
     'fresh_install',
@@ -2068,7 +2122,7 @@ async function oauthCallback(
   if (callback.denied) {
     await completeAttempt(session.stub, sealed.attemptId, 'oauth_denied', null, null, now);
     recordHostedInstallerAnalytics(
-      hostedInstallerAnalyticsSink(env),
+      hostedInstallerAnalyticsSink(env, request),
       'install_completed',
       'denied',
       'fresh_install',
@@ -2168,7 +2222,7 @@ async function oauthCallback(
       existingGateway,
     );
     recordHostedInstallerAnalytics(
-      hostedInstallerAnalyticsSink(env),
+      hostedInstallerAnalyticsSink(env, request),
       'install_completed',
       completionAnalyticsOutcome(resultCode, 'install_complete'),
       'fresh_install',
@@ -2223,7 +2277,7 @@ async function discoveryOauthCallback(
   if (callback.denied) {
     await completeDiscoveryAttempt(session.stub, sealed.attemptId, 'oauth_denied', null, null, now);
     recordHostedInstallerAnalytics(
-      hostedInstallerAnalyticsSink(env),
+      hostedInstallerAnalyticsSink(env, request),
       'discovery_completed',
       'denied',
       'none',
@@ -2277,7 +2331,7 @@ async function discoveryOauthCallback(
     now,
   );
   recordHostedInstallerAnalytics(
-    hostedInstallerAnalyticsSink(env),
+    hostedInstallerAnalyticsSink(env, request),
     'discovery_completed',
     completionAnalyticsOutcome(resultCode, 'discovery_complete'),
     'none',
@@ -2326,7 +2380,7 @@ async function uninstallOauthCallback(
   if (callback.denied) {
     await completeUninstallAttempt(session.stub, sealed.attemptId, 'oauth_denied', null, null, now);
     recordHostedInstallerAnalytics(
-      hostedInstallerAnalyticsSink(env),
+      hostedInstallerAnalyticsSink(env, request),
       'removal_completed',
       'denied',
       'same_session_removal',
@@ -2437,7 +2491,7 @@ async function uninstallOauthCallback(
     resultCode === 'uninstall_complete' ? null : resultReason,
   );
   recordHostedInstallerAnalytics(
-    hostedInstallerAnalyticsSink(env),
+    hostedInstallerAnalyticsSink(env, request),
     'removal_completed',
     completionAnalyticsOutcome(resultCode, 'uninstall_complete'),
     'same_session_removal',
@@ -2512,7 +2566,7 @@ async function returningUninstallRecoveryOauthCallback(
       session.stub, sealed.attemptId, 'oauth_denied', null, null, now,
     );
     recordHostedInstallerAnalytics(
-      hostedInstallerAnalyticsSink(env),
+      hostedInstallerAnalyticsSink(env, request),
       'removal_completed',
       'denied',
       'returning_removal',
@@ -2593,7 +2647,7 @@ async function returningUninstallRecoveryOauthCallback(
     resultCode === 'returning_uninstall_complete' ? null : resultReason,
   );
   recordHostedInstallerAnalytics(
-    hostedInstallerAnalyticsSink(env),
+    hostedInstallerAnalyticsSink(env, request),
     'removal_completed',
     completionAnalyticsOutcome(resultCode, 'returning_uninstall_complete'),
     'returning_removal',
@@ -2662,7 +2716,7 @@ async function returningUninstallOauthCallback(
       session.stub, sealed.attemptId, 'oauth_denied', null, null, now,
     );
     recordHostedInstallerAnalytics(
-      hostedInstallerAnalyticsSink(env),
+      hostedInstallerAnalyticsSink(env, request),
       'removal_completed',
       'denied',
       'returning_removal',
@@ -2755,7 +2809,7 @@ async function returningUninstallOauthCallback(
     resultCode === 'returning_uninstall_complete' ? null : resultReason,
   );
   recordHostedInstallerAnalytics(
-    hostedInstallerAnalyticsSink(env),
+    hostedInstallerAnalyticsSink(env, request),
     'removal_completed',
     completionAnalyticsOutcome(resultCode, 'returning_uninstall_complete'),
     'returning_removal',
@@ -2860,6 +2914,12 @@ export function createGatewayDeployWorker(
           ) throw new DeployError(401, 'session_invalid');
         }
         if (request.method === 'GET' && url.pathname === '/') {
+          recordHostedInstallerAnalytics(
+            hostedInstallerAnalyticsSink(env, request),
+            'installer_page_viewed',
+            'none',
+            'none',
+          );
           return new Response(HOME_HTML, { headers: responseHeaders('text/html; charset=utf-8') });
         }
         if (request.method === 'GET' && url.pathname === '/result') {
@@ -2879,7 +2939,7 @@ export function createGatewayDeployWorker(
           );
           if (context.created) {
             recordHostedInstallerAnalytics(
-              hostedInstallerAnalyticsSink(env),
+              hostedInstallerAnalyticsSink(env, request, context.sessionId),
               'installer_session_created',
               'none',
               'none',
@@ -2918,7 +2978,7 @@ export function createGatewayDeployWorker(
           );
           if (context.created) {
             recordHostedInstallerAnalytics(
-              hostedInstallerAnalyticsSink(env),
+              hostedInstallerAnalyticsSink(env, request, context.sessionId),
               'installer_session_created',
               'none',
               'none',

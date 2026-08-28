@@ -16,7 +16,7 @@ const COMPONENTS = Object.freeze({
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: '1fcb3b3a68e868fdd767f751a7fb1e0d97e71a50e9ba060e737b754398027628',
+  installer: '911fdb02b431c8001df3a44591d81abf120bec0654c4a04bfb0efa7a04655440',
   worker: '1594cc4278bfd8ea2bc460066082bb09758aea64e074a4b55e145a73a8473a9d',
   'worker-cleanup': 'bcdd1a3cabec127e21070611fb8549a6159576069d9055022c1796a3ac013f92',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
