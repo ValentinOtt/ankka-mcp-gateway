@@ -26,6 +26,7 @@ import { runReviewedIsolatedCanaryGeneratorCli } from
 
 const execFileAsync = promisify(execFile);
 const APP_ROOT = fileURLToPath(new URL('../', import.meta.url));
+const REPOSITORY_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const ACCOUNT_ID = '1'.repeat(32);
 const GENERATED_FILES = Object.freeze([
   'reviewed-canary-record.json',
@@ -213,7 +214,7 @@ describe('offline reviewed canary artifact generator', () => {
           toolchain: {
             schemaVersion: 1,
             bundler: { name: 'esbuild', version: '0.28.1' },
-            wrangler: { name: 'wrangler', version: '4.123.0' },
+            wrangler: { name: 'wrangler', version: '4.125.0' },
           },
         },
       });
@@ -352,7 +353,7 @@ describe('offline reviewed canary artifact generator', () => {
   it('dry-runs exact no-bundle module bytes despite a hostile ambient account', async () => {
     const fixture = await generated();
     try {
-      const wrangler = path.join(APP_ROOT, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
+      const wrangler = path.join(REPOSITORY_ROOT, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
       for (const [configName, moduleName] of [
         ['wrangler.rollback.toml', 'reviewed-rollback-worker.mjs'],
         ['wrangler.canary.toml', 'reviewed-canary-worker.mjs'],

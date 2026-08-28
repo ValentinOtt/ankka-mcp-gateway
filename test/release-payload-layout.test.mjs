@@ -261,7 +261,7 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
   assert.match(adminCss, /max-width:65ch/u);
   assert.match(adminCss, /text-wrap:balance/u);
   assert.match(adminCss, /:focus-visible/u);
-  assert.match(adminCss, /@media\(prefers-reduced-motion:reduce\)/u);
+  assert.match(adminCss, /@media\s*\(prefers-reduced-motion:\s*reduce\)/u);
   assert.doesNotMatch(adminCss, /@font-face|\.ttf|\.otf/iu);
   assert.match(adminCss, /--color-canvas:#fbfaf6/u);
   assert.match(adminCss, /--color-brand:#3d132c/u);
@@ -291,7 +291,7 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
 test('admin and installer carry the reviewed Ankka wordmark and navigation treatment', async () => {
   const admin = await componentText('admin', '.js');
   const installer = await readFile(new URL('installer/index.html', ROOT), 'utf8');
-  assert.match(admin, /viewBox:"0 0 175 19"/u);
+  assert.match(admin, /viewBox:["'`]0 0 175 19["'`]/u);
   assert.match(installer, /class="wordmark" viewBox="0 0 175 19"/u);
   assert.match(admin, /M0 18\.2697V5\.97501/u);
   assert.match(installer, /M0 18\.2697V5\.97501/u);

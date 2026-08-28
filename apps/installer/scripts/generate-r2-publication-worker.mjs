@@ -585,16 +585,23 @@ async function copyReviewedSources(outputRoot) {
 }
 
 async function reviewedWranglerExecutable() {
-  let executable;
-  try {
-    executable = await realpath(fileURLToPath(new URL('../node_modules/.bin/wrangler', import.meta.url)));
-    const metadata = await lstat(executable);
-    if (!metadata.isFile()) fail();
-  } catch (error) {
-    if (error instanceof R2PublicationWorkerGenerationError) throw error;
-    fail();
+  // npm places the workspace's wrangler bin beside the workspace or hoisted at
+  // the repository root depending on the dependency graph; both directories
+  // are written only by the lockfile-driven install.
+  const candidates = [
+    '../node_modules/.bin/wrangler',
+    '../../../node_modules/.bin/wrangler',
+  ];
+  for (const candidate of candidates) {
+    try {
+      const executable = await realpath(fileURLToPath(new URL(candidate, import.meta.url)));
+      const metadata = await lstat(executable);
+      if (metadata.isFile()) return executable;
+    } catch {
+      // Try the next lockfile-managed location.
+    }
   }
-  return executable;
+  fail();
 }
 
 function shellQuote(value) {
