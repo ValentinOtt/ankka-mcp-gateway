@@ -122,6 +122,7 @@ const disabledWorkerObservabilitySchema = v.strictObject({
 const workerReferenceSchema = v.strictObject({
   dispatch_namespace_outbounds: emptyBoundaryArraySchema,
   domains: v.pipe(v.array(v.strictObject({
+    certificate_id: v.optional(providerIdentifierSchema),
     hostname: v.string(),
     id: workerCustomDomainIdSchema,
     zone_id: v.string(),
@@ -136,6 +137,8 @@ const workerReferenceSchema = v.strictObject({
   queues: emptyBoundaryArraySchema,
   workers: emptyBoundaryArraySchema,
 });
+const workerSubdomainUrlSchema = v.pipe(v.string(), v.minLength(1), v.maxLength(512), v.url());
+const workerPreviewUrlSuffixSchema = v.pipe(v.string(), v.minLength(1), v.maxLength(254));
 const workerObservationSchema = v.strictObject({
   created_on: rfc3339Schema,
   deployed_on: rfc3339Schema,
@@ -144,7 +147,12 @@ const workerObservationSchema = v.strictObject({
   name: v.string(),
   observability: disabledWorkerObservabilitySchema,
   references: workerReferenceSchema,
-  subdomain: v.strictObject({ enabled: v.literal(false), previews_enabled: v.literal(false) }),
+  subdomain: v.strictObject({
+    enabled: v.literal(false),
+    preview_url_suffix: v.optional(workerPreviewUrlSuffixSchema),
+    previews_enabled: v.literal(false),
+    url: v.optional(workerSubdomainUrlSchema),
+  }),
   tags: v.array(v.string()),
   tail_consumers: emptyBoundaryArraySchema,
   updated_on: rfc3339Schema,
@@ -1353,9 +1361,8 @@ function exactDomain(
 /**
  * The installed gateway Worker references exactly its management custom domain
  * and its own AdminState Durable Object namespace, and nothing else. Live
- * (2026-08-23): the domain reference carries no certificate_id, and the
- * durable_objects list is populated once the namespace exists — the same shape
- * the install-side converged expectation asserts.
+ * The provider may include the Custom Domain certificate ID as computed
+ * metadata. When present, it must match the separately verified domain.
  */
 function exactWorkerReferences(
   value: BoundaryValue,
@@ -1369,11 +1376,38 @@ function exactWorkerReferences(
   if (reference === undefined || namespace === undefined) return false;
   if (
     reference.id !== domain.id || reference.hostname !== domain.hostname ||
-    reference.zone_id !== domain.zoneId || reference.zone_name !== domain.zoneName) return false;
+    reference.zone_id !== domain.zoneId || reference.zone_name !== domain.zoneName ||
+    (reference.certificate_id !== undefined && reference.certificate_id !== domain.certificateId)
+  ) return false;
   return namespace.worker_id === expected.workerId &&
     namespace.worker_name === expected.workerName &&
     namespace.namespace_id === expected.namespaceId &&
     namespace.namespace_name === `${expected.workerName}_AdminState`;
+}
+
+function exactWorkerSubdomain(
+  value: v.InferOutput<typeof workerObservationSchema>['subdomain'],
+  expectedName: string,
+): boolean {
+  const { preview_url_suffix: previewUrlSuffix, url } = value;
+  if (url === undefined || previewUrlSuffix === undefined) {
+    return url === undefined && previewUrlSuffix === undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const hostnamePrefix = `${expectedName}.`;
+  const hostnameSuffix = '.workers.dev';
+  if (
+    parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' ||
+    parsed.port !== '' || parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '' ||
+    !parsed.hostname.startsWith(hostnamePrefix) || !parsed.hostname.endsWith(hostnameSuffix)
+  ) return false;
+  const accountSubdomain = parsed.hostname.slice(hostnamePrefix.length, -hostnameSuffix.length);
+  return DNS_LABEL.test(accountSubdomain) && previewUrlSuffix === `-${parsed.hostname}`;
 }
 
 function exactWorker(
@@ -1384,6 +1418,7 @@ function exactWorker(
   const observation = v.safeParse(workerObservationSchema, value);
   return observation.success && observation.output.id === expected.workerId &&
     observation.output.name === expected.workerName &&
+    exactWorkerSubdomain(observation.output.subdomain, expected.workerName) &&
     canonicalEqual(observation.output.tags, [MANAGED_WORKER_TAG, expected.correlationTag]) &&
     exactWorkerReferences(observation.output.references, expected, domain);
 }

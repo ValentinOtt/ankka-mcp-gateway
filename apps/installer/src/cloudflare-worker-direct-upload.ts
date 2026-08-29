@@ -188,6 +188,10 @@ const emptyWorkerReferencesSchema = v.strictObject({
 const convergedWorkerReferencesSchema = v.strictObject({
   dispatch_namespace_outbounds: emptyBoundaryArraySchema,
   domains: v.pipe(v.array(v.strictObject({
+    certificate_id: v.optional(v.union([
+      v.pipe(v.string(), v.regex(WORKER_ID_PATTERN)),
+      v.pipe(v.string(), v.regex(UUID_PATTERN)),
+    ])),
     id: v.string(),
     hostname: v.string(),
     zone_id: v.string(),
@@ -202,6 +206,8 @@ const convergedWorkerReferencesSchema = v.strictObject({
   queues: emptyBoundaryArraySchema,
   workers: emptyBoundaryArraySchema,
 });
+const workerSubdomainUrlSchema = v.pipe(v.string(), v.minLength(1), v.maxLength(512), v.url());
+const workerPreviewUrlSuffixSchema = v.pipe(v.string(), v.minLength(1), v.maxLength(254));
 const workerStateSchema = v.strictObject({
   created_on: v.string(),
   deployed_on: v.optional(v.nullable(v.string())),
@@ -210,7 +216,12 @@ const workerStateSchema = v.strictObject({
   name: v.string(),
   observability: disabledObservabilitySchema,
   references: boundaryValueSchema,
-  subdomain: v.strictObject({ enabled: v.literal(false), previews_enabled: v.literal(false) }),
+  subdomain: v.strictObject({
+    enabled: v.literal(false),
+    preview_url_suffix: v.optional(workerPreviewUrlSuffixSchema),
+    previews_enabled: v.literal(false),
+    url: v.optional(workerSubdomainUrlSchema),
+  }),
   tags: v.array(v.string()),
   tail_consumers: emptyBoundaryArraySchema,
   updated_on: v.string(),
@@ -1256,6 +1267,31 @@ function exactConvergedReferences(
     namespace.namespace_name === `${expectedName}_AdminState`;
 }
 
+function exactWorkerSubdomain(
+  value: v.InferOutput<typeof workerStateSchema>['subdomain'],
+  expectedName: string,
+): boolean {
+  const { preview_url_suffix: previewUrlSuffix, url } = value;
+  if (url === undefined || previewUrlSuffix === undefined) {
+    return url === undefined && previewUrlSuffix === undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const hostnamePrefix = `${expectedName}.`;
+  const hostnameSuffix = '.workers.dev';
+  if (
+    parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' ||
+    parsed.port !== '' || parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '' ||
+    !parsed.hostname.startsWith(hostnamePrefix) || !parsed.hostname.endsWith(hostnameSuffix)
+  ) return false;
+  const accountSubdomain = parsed.hostname.slice(hostnamePrefix.length, -hostnameSuffix.length);
+  return DNS_LABEL_PATTERN.test(accountSubdomain) && previewUrlSuffix === `-${parsed.hostname}`;
+}
+
 function exactWorkerState(
   value: BoundaryValue,
   expectedName: string,
@@ -1270,6 +1306,7 @@ function exactWorkerState(
     (expectedId !== undefined && observation.id !== expectedId) ||
     observation.name !== expectedName ||
     !disabledObservability(observation.observability) ||
+    !exactWorkerSubdomain(observation.subdomain, expectedName) ||
     observation.tags.length !== expectedTags.length ||
     !observation.tags.every((tag, index) => tag === expectedTags[index]) ||
     !safeIsoDate(observation.created_on) ||
