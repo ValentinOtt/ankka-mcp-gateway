@@ -12,6 +12,10 @@ Notable public product and repository changes are recorded here.
 - Add signed release, update, rollback, recovery, and receipt-owned removal
   contracts.
 - Add exact read-only source allowlists and synthetic end-to-end fixtures.
+- Keep the Portal as the single employee authentication layer: newly added
+  OAuth-protected sources are connected once by a customer operator and mapped
+  with `on_behalf: false`, while legacy source records remain readable for safe
+  lifecycle handling.
 - Raise repository-local contracts to a 500-tool bound and add a reproducible
   228-tool OpenAPI fixture, supplemental 224-tool workload and hostile-name
   coverage, simulated management lifecycle coverage, and searchable dashboard

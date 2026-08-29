@@ -35,7 +35,7 @@ The customer owns and operates:
 - Cloudflare Access applications and policies;
 - the customer management Worker and Durable Object;
 - DNS, request logs, installation state, and removal authority; and
-- all upstream credentials and per-user OAuth grants.
+- all upstream credentials and Cloudflare-managed source connections.
 
 Ankka's optional hosted installer coordinates a customer-approved deployment
 with a short-lived, operation-scoped Cloudflare OAuth grant. It must not persist

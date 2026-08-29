@@ -35,11 +35,14 @@ credential, because Portal authentication and upstream authentication are
 separate layers.
 
 The current dashboard source workflow supports public MCP endpoints and
-standard per-user OAuth. It does not accept a bearer token or custom headers.
-For a source Worker that calls a private origin with a shared credential, keep
-that credential in the source Worker's customer-owned secret binding and make
-the source independently enforce its read-only operation boundary. Never put
-the origin credential in gateway configuration, a URL, a tool result, or an
+standard OAuth-protected endpoints. It fixes **Require user auth** off: one
+customer operator connects the source and Cloudflare Portal stores that source
+credential; team members still authenticate individually to the Portal. The
+dashboard does not accept a bearer token or custom headers. For a source Worker
+that calls a private origin with a separate shared credential, keep that
+credential in the source Worker's customer-owned secret binding and make the
+source independently enforce its read-only operation boundary. Never put the
+origin credential in gateway configuration, a URL, a tool result, or an
 Ankka-hosted request.
 
 ## Minimal source-Worker record without Portal Logpush

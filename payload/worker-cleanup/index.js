@@ -416,18 +416,25 @@ function parseManagementSources(value) {
       !Array.isArray(value.sources) || value.sources.length > 32) return null;
   const sources = [];
   for (const source of value.sources) {
-    const legacy = exactKeys(source, ['id', 'label', 'url', 'enabledTools', 'status']);
-    const current = exactKeys(source, ['id', 'label', 'url', 'authMode', 'enabledTools', 'status']);
-    if ((!legacy && !current) || !SOURCE_ID.test(source.id) ||
+    const legacyPublic = exactKeys(source, ['id', 'label', 'url', 'enabledTools', 'status']);
+    const legacyAuth = exactKeys(source, ['id', 'label', 'url', 'authMode', 'enabledTools', 'status']);
+    const current = exactKeys(source, [
+      'id', 'label', 'url', 'authMode', 'onBehalfOfUser', 'enabledTools', 'status',
+    ]);
+    if ((!legacyPublic && !legacyAuth && !current) || !SOURCE_ID.test(source.id) ||
         !isText(source.label) || !Array.isArray(source.enabledTools) ||
         source.enabledTools.length < 1 ||
         source.enabledTools.length > MAX_ENABLED_TOOLS_PER_SOURCE ||
         (source.status !== 'installed' && source.status !== 'draft')) return null;
-    const authMode = legacy ? 'none' : source.authMode;
+    const authMode = legacyPublic ? 'none' : source.authMode;
     if (authMode !== 'none' && authMode !== 'oauth') return null;
+    const onBehalfOfUser = current ? source.onBehalfOfUser : authMode === 'oauth';
+    if (!isBoolean(onBehalfOfUser) || (authMode === 'none' && onBehalfOfUser !== false)) return null;
     const tools = source.enabledTools.filter((tool) => isText(tool) && /^[A-Za-z0-9_.:/-]{1,128}$/u.test(tool));
     if (tools.length !== source.enabledTools.length || new Set(tools).size !== tools.length) return null;
-    sources.push(Object.freeze({ ...source, authMode, enabledTools: Object.freeze([...tools]) }));
+    sources.push(Object.freeze({
+      ...source, authMode, onBehalfOfUser, enabledTools: Object.freeze([...tools]),
+    }));
   }
   const record = Object.freeze({ ...value, sources: Object.freeze(sources) });
   return new TextEncoder().encode(canonicalJson(record)).byteLength <= MANAGEMENT_SOURCES_LIMIT_BYTES

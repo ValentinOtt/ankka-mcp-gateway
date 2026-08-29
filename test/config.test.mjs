@@ -18,6 +18,18 @@ test('accepts the checked-in secret-free example', async () => {
   assert.deepEqual(validateGatewayConfig(config), config);
 });
 
+test('requires public sources to disable per-user upstream authentication', async () => {
+  const config = await example();
+  config.sources[0].authentication = { mode: 'none', onBehalfOfUser: true };
+  assert.throws(
+    () => validateGatewayConfig(config),
+    (error) => error instanceof GatewayConfigError
+      && error.errors.includes(
+        'sources[0].authentication.onBehalfOfUser must be false when mode is none',
+      ),
+  );
+});
+
 test('accepts an optional exact logical Access group name', async () => {
   const config = await example();
   config.sources[0].accessGroup = 'ERP Readers';

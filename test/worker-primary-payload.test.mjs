@@ -64,6 +64,7 @@ function aggregateManagedSource(index, enabledTools) {
     label: `Source ${index}`,
     url: `https://source-${index}.example.com/mcp`,
     authMode: 'none',
+    onBehalfOfUser: false,
     enabledTools,
     status: 'draft',
   };
@@ -328,6 +329,55 @@ test('primary provider reads cancel a 4 MiB+1 response before any provider mutat
   assert.equal(provider.requests.some(({ method }) => method === 'DELETE'), false);
 });
 
+test('management source state preserves legacy OAuth intent and explicit shared connections', async () => {
+  const storage = platformBoundedStorage([[MANAGEMENT_SOURCES_KEY, {
+    schemaVersion: 1,
+    revision: 3,
+    applyMode: 'oauth_per_action',
+    sources: [{
+      id: 'source-1111111111111111',
+      label: 'Legacy protected source',
+      url: 'https://legacy-protected.example.com/mcp',
+      authMode: 'oauth',
+      enabledTools: ['legacy_read'],
+      status: 'installed',
+    }, {
+      id: 'source-2222222222222222',
+      label: 'Operator-connected source',
+      url: 'https://operator-connected.example.com/mcp',
+      authMode: 'oauth',
+      onBehalfOfUser: false,
+      enabledTools: ['shared_read'],
+      status: 'installed',
+    }, {
+      id: 'source-3333333333333333',
+      label: 'Legacy public source',
+      url: 'https://public.example.com/mcp',
+      enabledTools: ['public_read'],
+      status: 'installed',
+    }],
+  }]]);
+  const state = new AdminState({ storage }, {});
+  const response = await state.fetch(new Request('https://admin-state.invalid/sources'));
+  assert.equal(response.status, 200);
+  const record = await response.json();
+  assert.deepEqual(
+    record.sources.map(({ authMode, onBehalfOfUser }) => ({ authMode, onBehalfOfUser })),
+    [
+      { authMode: 'oauth', onBehalfOfUser: true },
+      { authMode: 'oauth', onBehalfOfUser: false },
+      { authMode: 'none', onBehalfOfUser: false },
+    ],
+  );
+
+  await storage.put(MANAGEMENT_SOURCES_KEY, {
+    ...record,
+    sources: [{ ...record.sources[2], onBehalfOfUser: true }],
+  });
+  const invalid = await state.fetch(new Request('https://admin-state.invalid/sources'));
+  assert.equal(invalid.status, 503);
+});
+
 test('management source state enforces the canonical 1 MiB aggregate before the Durable Object entry limit', async () => {
   const maximumTools = aggregateToolNames();
   const retainedSources = Array.from(
@@ -335,9 +385,9 @@ test('management source state enforces the canonical 1 MiB aggregate before the 
     (_value, index) => aggregateManagedSource(index, maximumTools),
   );
   const retained = aggregateManagementSources(retainedSources, 15);
-  const exactTools = aggregateToolNames(124, 90);
-  const overTools = aggregateToolNames(124, 91);
-  const storedOverTools = aggregateToolNames(124, 169);
+  const exactTools = aggregateToolNames(123, 222);
+  const overTools = aggregateToolNames(123, 223);
+  const storedOverTools = aggregateToolNames(123, 301);
   const exactRecord = aggregateManagementSources([
     ...retainedSources,
     aggregateManagedSource(15, exactTools),
@@ -457,6 +507,7 @@ test('management source state enforces the canonical 1 MiB aggregate before the 
         label: source.label,
         url: source.url,
         authMode: source.authMode,
+        onBehalfOfUser: source.onBehalfOfUser,
         enabledTools: source.enabledTools,
       }),
     }),
@@ -492,6 +543,7 @@ test('management source state enforces the canonical 1 MiB aggregate before the 
           label: unsafeSource.label,
           url: unsafeSource.url,
           authMode: unsafeSource.authMode,
+          onBehalfOfUser: unsafeSource.onBehalfOfUser,
           enabledTools: unsafeSource.enabledTools,
         }),
       }),
@@ -525,6 +577,7 @@ test('management source state enforces the canonical 1 MiB aggregate before the 
           label: unsafeSource.label,
           url: unsafeSource.url,
           authMode: unsafeSource.authMode,
+          onBehalfOfUser: unsafeSource.onBehalfOfUser,
           enabledTools: unsafeSource.enabledTools,
         }),
       }),
@@ -1430,7 +1483,7 @@ test('management API discovers and applies a customer-owned MCP source through o
         },
       }),
     }), env);
-    assert.equal(saved.status, 200);
+    assert.equal(saved.status, 200, await saved.clone().text());
     const updated = await saved.json();
     assert.equal(updated.revision, 2);
     assert.equal(updated.applyMode, 'oauth_per_action');
@@ -1771,6 +1824,30 @@ test('management API discovers and applies a customer-owned MCP source through o
     assert.equal(oversizedCatalogueRequest.signal.aborted, true);
     assert.equal(oversizedCatalogueBodyCancelled, true);
 
+    const sourceStateBeforeUserAuthOptIn = env.ADMIN_STATE.objects
+      .get('v1:management').storage.writes.length;
+    const userAuthOptIn = await worker.fetch(new Request('https://manage.example.com/api/sources', {
+      method: 'PUT',
+      headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        revision: maximumSavedSources.revision,
+        source: {
+          label: 'Private company files',
+          url: 'https://oauth-source.example.net/mcp',
+          authMode: 'oauth',
+          onBehalfOfUser: true,
+          enabledTools: ['company_files_search'],
+        },
+      }),
+    }), env);
+    assert.equal(userAuthOptIn.status, 400);
+    assert.deepEqual(await userAuthOptIn.json(), { schemaVersion: 1, error: 'source_invalid' });
+    assert.equal(
+      env.ADMIN_STATE.objects.get('v1:management').storage.writes.length,
+      sourceStateBeforeUserAuthOptIn,
+    );
+
     const oauthSaved = await worker.fetch(new Request('https://manage.example.com/api/sources', {
       method: 'PUT',
       headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
@@ -1793,6 +1870,7 @@ test('management API discovers and applies a customer-owned MCP source through o
       label: 'Private company files',
       url: 'https://oauth-source.example.net/mcp',
       authMode: 'oauth',
+      onBehalfOfUser: false,
       enabledTools: ['company_files_search'],
       status: 'draft',
     });
@@ -1846,7 +1924,7 @@ test('management API discovers and applies a customer-owned MCP source through o
     const oauthMapping = cloudflare.state.portal.servers.find(
       (mapping) => mapping.server_id === oauthServer.id,
     );
-    assert.equal(oauthMapping.on_behalf, true);
+    assert.equal(oauthMapping.on_behalf, false);
     assert.deepEqual(oauthMapping.updated_tools, [{ name: 'company_files_search', enabled: true }]);
     assert.doesNotMatch(JSON.stringify(env.ADMIN_STATE.objects.get('v1:management').storage.writes),
       /ephemeral-oauth-source-action-grant/u);

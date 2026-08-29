@@ -189,6 +189,8 @@ function validateAuthentication(
   }
   if (!v.is(v.boolean(), authentication.onBehalfOfUser)) {
     errors.push(`${path}.onBehalfOfUser must be a boolean`);
+  } else if (authentication.mode === 'none' && authentication.onBehalfOfUser !== false) {
+    errors.push(`${path}.onBehalfOfUser must be false when mode is none`);
   }
 }
 

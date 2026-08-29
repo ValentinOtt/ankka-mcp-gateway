@@ -17,12 +17,12 @@ const COMPONENTS = Object.freeze({
 });
 const TREE_SHA256 = Object.freeze({
   installer: 'c2f5d405422f88611d4a335e56e249b1749c75c0cb86aceb34d73cd1ef2cbdac',
-  worker: '65048df95d1c928dfca6adb031b5f4330abaffc0d2fdf9ae657e1e000feb5116',
-  'worker-cleanup': '513047344170b4dcdbb1eaa55d2ab17931b6ba95015890b992d916df57c76fef',
+  worker: 'f03ad1c13b7e8eb4d9d37a143bc3f7209e71249b6a31e12403287d7a740504b4',
+  'worker-cleanup': '294518970598816944bae9e5e6f6411d3aa7ce00238e81e6b5abebb6b449e46f',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
 const FROZEN_LIFECYCLE_SHA256 = Object.freeze({
-  'worker-cleanup/index.js': 'b898b8f71f96db99622f1a33f05c9e80adf1806436b774d956bde21d1752ff37',
+  'worker-cleanup/index.js': '53f8c1785c4b7ff2638a372f8da9cf93393cc9e2f89c4f7be81b5879b744d75b',
   'worker-retirement/index.js': '506e91323d6f6c89398a15799bfcde6cb4d271a5d6bf28a4fbbd422331751bda',
 });
 const CONTENT_TYPES = Object.freeze({

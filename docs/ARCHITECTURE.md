@@ -29,7 +29,7 @@ The customer deployment contains:
 - a management Worker and static dashboard;
 - a SQLite Durable Object for secret-free desired state, action journals, and
   runtime state; and
-- Cloudflare-managed upstream credentials and per-user OAuth grants.
+- Cloudflare-managed upstream source credentials and connections.
 
 The initial installation creates an empty Portal. Administrators add sources
 later from the customer dashboard. Each added source has an exact tool
@@ -91,7 +91,7 @@ and resolve the pending operation.
 ## Source management
 
 The customer dashboard accepts public HTTPS MCP endpoints and
-standards-compliant per-user OAuth MCP endpoints.
+standards-compliant OAuth-protected MCP endpoints.
 
 For public endpoints, the customer Worker performs bounded discovery without an
 authorization header. For protected endpoints, it accepts only the standard MCP
@@ -100,8 +100,11 @@ credential headers, embedded credentials, private-network endpoints, wildcard
 tools, and manually supplied bearer tokens are rejected.
 
 Saving a source changes customer Durable Object state only. Applying it requires
-a new, short-lived Cloudflare authorization. Upstream OAuth remains between the
-user, Cloudflare Portal, and upstream provider.
+a new, short-lived Cloudflare authorization. A protected source defaults to
+`onBehalfOfUser: false`: a customer operator connects it once, Cloudflare stores
+the source credential, and employees authenticate only to the Portal. The
+current dashboard does not expose per-user upstream authentication. Upstream
+OAuth remains between the customer, Cloudflare Portal, and upstream provider.
 
 ## Ownership and removal
 

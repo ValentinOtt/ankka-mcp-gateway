@@ -44,6 +44,7 @@ const installedSources: ManagedSources = {
       label: 'Company knowledge',
       url: 'https://knowledge.example.com/mcp',
       authMode: 'oauth',
+      onBehalfOfUser: false,
       enabledTools: ['fetch_document', 'search'],
       status: 'installed',
     },
@@ -52,6 +53,7 @@ const installedSources: ManagedSources = {
       label: 'Product catalogue',
       url: 'https://catalogue.example.com/mcp',
       authMode: 'none',
+      onBehalfOfUser: false,
       enabledTools: ['get_product', 'list_products'],
       status: 'draft',
     },
@@ -137,6 +139,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       sources: [...this.#sources.sources, {
         id: `source-${(this.#sources.sources.length + 1).toString(16).padStart(16, '0')}`,
         ...structuredClone(source),
+        onBehalfOfUser: false,
         status: 'draft',
       }],
     }

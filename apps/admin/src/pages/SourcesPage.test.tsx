@@ -64,6 +64,7 @@ describe('SourcesPage', () => {
         label: 'Large read API',
         url: 'https://catalogue-read.example.com/mcp',
         authMode: 'none',
+        onBehalfOfUser: false,
         enabledTools: toolNames,
         status: 'draft',
       }],
@@ -126,4 +127,44 @@ describe('SourcesPage', () => {
     const installedSummary = await screen.findByText(`${toolCount} exact tools`)
     expect(installedSummary.closest('details')).not.toHaveAttribute('open')
   }, 15_000)
+
+  it('presents an OAuth-protected source as one operator connection', async () => {
+    const user = userEvent.setup()
+    const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 5 }))
+    const api: GatewayAdminApi = {
+      getStatus: vi.fn(async () => status),
+      getSources: vi.fn(async () => sources),
+      getUpdate: vi.fn(async () => update),
+      discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
+        schemaVersion: 1,
+        status: 'authorization_required',
+        endpoint: url,
+        protocolVersion: '2026-07-28',
+        authentication: 'oauth',
+        tools: [],
+      })),
+      saveSourceDraft,
+      prepareSourceAction: vi.fn(), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
+      prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    }
+
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await screen.findByText('No sources yet')
+    await user.click(screen.getByRole('button', { name: 'Add source' }))
+    await user.type(screen.getByLabelText('Source name'), 'Protected read API')
+    await user.type(screen.getByLabelText('MCP URL'), 'https://protected.example.com/mcp')
+    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+    expect(await screen.findByText('One Gateway login')).toBeInTheDocument()
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+    await user.type(screen.getByLabelText('Exact tool names'), 'company_read')
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+
+    expect(saveSourceDraft).toHaveBeenCalledWith(4, {
+      label: 'Protected read API',
+      url: 'https://protected.example.com/mcp',
+      authMode: 'oauth',
+      enabledTools: ['company_read'],
+    })
+  })
 })

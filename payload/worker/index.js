@@ -2111,14 +2111,19 @@ function toolName(value) {
 }
 
 function safeManagedSource(value) {
-  const legacy = exactKeys(value, ['id', 'label', 'url', 'enabledTools', 'status']);
-  const current = exactKeys(value, ['id', 'label', 'url', 'authMode', 'enabledTools', 'status']);
-  if ((!legacy && !current) ||
+  const legacyPublic = exactKeys(value, ['id', 'label', 'url', 'enabledTools', 'status']);
+  const legacyAuth = exactKeys(value, ['id', 'label', 'url', 'authMode', 'enabledTools', 'status']);
+  const current = exactKeys(value, [
+    'id', 'label', 'url', 'authMode', 'onBehalfOfUser', 'enabledTools', 'status',
+  ]);
+  if ((!legacyPublic && !legacyAuth && !current) ||
       !isText(value.id) || !SOURCE_ID.test(value.id) ||
       !validSourceLabel(value.label) || !publicMcpUrl(value.url) ||
       (value.status !== 'installed' && value.status !== 'draft')) return null;
-  const authMode = legacy ? 'none' : value.authMode;
+  const authMode = legacyPublic ? 'none' : value.authMode;
   if (authMode !== 'none' && authMode !== 'oauth') return null;
+  const onBehalfOfUser = current ? value.onBehalfOfUser : authMode === 'oauth';
+  if (!isBoolean(onBehalfOfUser) || (authMode === 'none' && onBehalfOfUser !== false)) return null;
   const enabledTools = exactSortedUniqueStrings(
     value.enabledTools,
     toolName,
@@ -2131,6 +2136,7 @@ function safeManagedSource(value) {
     label: value.label,
     url: publicMcpUrl(value.url),
     authMode,
+    onBehalfOfUser,
     enabledTools,
     status: value.status,
   });
@@ -2188,6 +2194,7 @@ async function initialManagementSources(status) {
       label: status.source.label,
       url,
       authMode: 'none',
+      onBehalfOfUser: false,
       enabledTools: [...status.source.enabledTools].sort(compareText),
       status: 'installed',
     }],
@@ -2196,9 +2203,12 @@ async function initialManagementSources(status) {
 }
 
 function parseSourceSave(value) {
+  const validSource = isRecord(value?.source) && exactKeys(
+    value.source, ['label', 'url', 'authMode', 'enabledTools'],
+  );
   if (!exactKeys(value, ['schemaVersion', 'revision', 'source']) || value.schemaVersion !== 1 ||
       !Number.isSafeInteger(value.revision) || value.revision < 1 ||
-      !exactKeys(value.source, ['label', 'url', 'authMode', 'enabledTools']) ||
+      !validSource ||
       !validSourceLabel(value.source.label)) return null;
   const url = publicMcpUrl(value.source.url);
   const authMode = value.source.authMode;
@@ -2211,7 +2221,9 @@ function parseSourceSave(value) {
   if (!url || !enabledTools || (authMode !== 'none' && authMode !== 'oauth')) return null;
   return Object.freeze({
     revision: value.revision,
-    source: Object.freeze({ label: value.source.label, url, authMode, enabledTools }),
+    source: Object.freeze({
+      label: value.source.label, url, authMode, enabledTools,
+    }),
   });
 }
 
@@ -2225,6 +2237,7 @@ async function saveDraftSource(current, input) {
     label: input.source.label,
     url: input.source.url,
     authMode: input.source.authMode,
+    onBehalfOfUser: false,
     enabledTools: [...input.source.enabledTools],
     status: 'draft',
   };
@@ -2388,6 +2401,7 @@ async function managedSourceHash(source) {
     label: source.label,
     url: source.url,
     authMode: source.authMode,
+    onBehalfOfUser: source.onBehalfOfUser,
     enabledTools: source.enabledTools,
   });
 }
@@ -2449,7 +2463,7 @@ async function actionDesiredState(control, sources, action) {
       url: source.url,
       authentication: {
         mode: source.authMode,
-        onBehalfOfUser: source.authMode === 'oauth',
+        onBehalfOfUser: source.onBehalfOfUser,
       },
       enabledTools: [...source.enabledTools],
     }],
@@ -2528,7 +2542,7 @@ function portalServerMappings(control, sources, action) {
     mappings.push(Object.freeze({
       server_id: serverId,
       default_disabled: true,
-      on_behalf: source.authMode === 'oauth',
+      on_behalf: source.onBehalfOfUser,
       updated_tools: source.enabledTools.map((name) => Object.freeze({ name, enabled: true })),
     }));
   }
@@ -3161,7 +3175,7 @@ function teardownSettings(control, source, sourceId) {
       url: source.url,
       authentication: Object.freeze({
         mode: source.authMode,
-        onBehalfOfUser: source.authMode === 'oauth',
+        onBehalfOfUser: source.onBehalfOfUser,
       }),
       enabledTools: source.enabledTools,
     })]),

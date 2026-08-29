@@ -18,7 +18,7 @@
       "url": "https://context.example.com/mcp",
       "authentication": {
         "mode": "oauth",
-        "onBehalfOfUser": true
+        "onBehalfOfUser": false
       },
       "enabledTools": [
         "company_prepare"

@@ -180,41 +180,56 @@ Portal allowlists and upstream read-only enforcement remain required.
 Before calling the scale supported end to end, use a synthetic or independently
 approved read-only source and record at least:
 
-1. The live source's complete, paginated `tools/list` name set equals the exact
-   reviewed config set before first install. The content-free verifier accepts
-   public sources directly and standards-compliant OAuth tokens only on bounded
-   standard input:
+1. In Cloudflare AI Controls, the authenticated source reports **Ready** and
+   its synchronized `tools/list` names and count equal the exact reviewed
+   config set. A mismatch or duplicate is a stop condition.
+2. Provider create/update/read-back succeeds with exactly the expected 228 or
+   224 enabled tools.
+3. Source discovery, dashboard search/review, draft save, apply, and recovery
+   all preserve the same sorted names.
+4. A Portal session with `?codemode=off` exposes the expected direct-tool
+   surface. Its exact names and count match the reviewed config, one allowed
+   read succeeds, and an unlisted operation is absent.
+5. In that direct-tool session, the synthetic health tool separately returns
+   its reviewed small fixed value.
+6. A session without `?codemode=off` passes the Code Mode search/execute canary
+   against that same health tool. It advertises the documented Code Mode tools
+   rather than all upstream definitions.
+7. Search finds tools at the beginning, middle, and end of the catalogue and
+   returns their effective descriptions and input schemas.
+8. Execute successfully calls those synthetic read-only tools, including
+   parallel calls where the client supports them.
+9. Sanitization and cross-source name-collision cases behave as expected.
+10. Client-reported input tokens and end-to-end latency are captured for an
+   empty/baseline Portal and each qualified large Portal over repeated fresh
+   sessions.
+
+For a public source, the content-free raw-source verifier may additionally
+prove the complete paginated `tools/list` before install:
 
    ```sh
    node tools/verify-live-source-catalogue.mjs \
      --config <outside-repository-dir>/gateway.config.json \
      --source <source-id>
-
-   <approved-oauth-token-source> | \
-     node tools/verify-live-source-catalogue.mjs \
-       --config <outside-repository-dir>/gateway.config.json \
-       --source <oauth-source-id> \
-       --oauth-token-stdin
    ```
 
-   A mismatch, duplicate, pagination loop, oversized response, redirect, or
-   unsupported credential mode is a stop condition. Success prints only exact
-   counts and SHA-256 digests, never a URL, token, or tool name.
-2. Provider create/update/read-back succeeds with exactly the expected 228 or
-   224 enabled tools.
-3. Source discovery, dashboard search/review, draft save, apply, and recovery
-   all preserve the same sorted names.
-4. A Code Mode session advertises the documented Code Mode tools rather than
-   all upstream definitions, and an opted-out session exposes the expected
-   direct surface.
-5. Search finds tools at the beginning, middle, and end of the catalogue and
-   returns their effective descriptions and input schemas.
-6. Execute successfully calls those synthetic read-only tools, including
-   parallel calls where the client supports them.
-7. Sanitization and cross-source name-collision cases behave as expected.
-8. Client-reported input tokens and end-to-end latency are captured for an
-   empty/baseline Portal and each qualified large Portal over repeated fresh
-   sessions.
+For an OAuth source, the verifier's raw-token path is optional and may be used
+only when an approved customer-owned client already supplies a bounded operator
+OAuth access token:
+
+```sh
+<approved-customer-oauth-token-source> | \
+  node tools/verify-live-source-catalogue.mjs \
+    --config <outside-repository-dir>/gateway.config.json \
+    --source <oauth-source-id> \
+    --oauth-token-stdin
+```
+
+Do not loosen dynamic client registration, extract or reuse Portal-stored
+credentials, or imply that the repository provides a standard token-minting
+path. The verifier rejects pagination loops, oversized responses, redirects,
+and catalogue mismatches. Success prints only exact counts and SHA-256 digests,
+never a URL, token, or tool name.
 
 As of 2026-08-29, Cloudflare publicly documents a limit of 40 MCP servers per
 Portal but does not document a tools-per-server or enabled-tools-per-mapping

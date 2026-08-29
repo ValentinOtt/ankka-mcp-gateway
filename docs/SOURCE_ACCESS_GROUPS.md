@@ -10,11 +10,14 @@ Each source may optionally name one customer-chosen Cloudflare Access group:
   "id": "erp",
   "label": "ERP",
   "url": "https://erp.example.com/mcp",
-  "authentication": { "mode": "oauth", "onBehalfOfUser": true },
+  "authentication": { "mode": "oauth", "onBehalfOfUser": false },
   "accessGroup": "ERP Readers",
   "enabledTools": ["erp_search"]
 }
 ```
+
+The example uses one operator-connected source credential. Source visibility
+groups do not require per-user upstream OAuth.
 
 `accessGroup` is a logical, exact, case-sensitive name. It is public
 configuration, not a provider resource ID and not an authorization claim. A

@@ -38,11 +38,13 @@ authority.
 - Never put an upstream MCP credential in gateway configuration or send it to
   the installer. A shared BLS bearer belongs only in the customer-owned
   `bls-read` source Worker's secret binding. Because that workload handles
-  personal data, its MCP ingress must use standards-compliant per-user OAuth.
-  `authentication.mode: none` is not acceptable for it: the Portal would send
-  unauthenticated HTTP, and the current management path cannot attach a
-  separate Cloudflare Access service-token header pair. Generic bearer and
-  custom-header source credentials are deliberately outside the dashboard.
+  personal data, its MCP ingress must remain private behind standards-compliant
+  OAuth. Configure the Portal mapping with **Require user auth** off
+  (`onBehalfOfUser: false`): one customer operator connects the source during
+  setup, while team members authenticate only to the Gateway Portal.
+  `authentication.mode: none` is not acceptable for this protected endpoint.
+  Generic bearer and custom-header source credentials are deliberately outside
+  the dashboard.
 - The gateway remains read-only with exact tool allowlists. A source Worker
   must independently reject write operations; tool names and prompts are not
   authorization.
@@ -295,46 +297,58 @@ management URLs privately. Confirm the management status reports the same
 
 From the customer dashboard:
 
-1. Before the first source install, make the live source catalogue an exact
-   gate. Place
-   the reviewed config outside this repository, acquire a least-privilege
-   standards-compliant OAuth access token through an approved customer-owned
-   client, and pipe it directly to the verifier:
-
-   ```sh
-   <approved-oauth-token-source> | \
-     node tools/verify-live-source-catalogue.mjs \
-       --config <outside-repository-dir>/gateway.config.json \
-       --source bls-read \
-       --oauth-token-stdin
-   ```
-
-   Continue only when it reports `status: "verified"`, equal exact counts, and
-   equal digests. Any live `tools/list` addition, omission, duplicate,
-   pagination failure, redirect, or mismatch blocks installation. The tool
-   never prints the endpoint, token, or names and accepts OAuth authority only
-   from bounded standard input.
-2. Discover each source and inspect its catalogue. The dashboard's discovery
+1. Discover each source and inspect its catalogue. The dashboard's discovery
    challenge must identify standards-compliant OAuth for `bls-read`; a public
    or generic bearer/custom-header workaround is a stop condition.
-3. Save an exact read-only allowlist and apply it with a fresh operation-scoped
-   Cloudflare grant.
-4. For a large generated source, use the deterministic OpenAPI workflow in
+2. Save an exact read-only allowlist and apply it with a fresh operation-scoped
+   Cloudflare grant. The dashboard fixes **Require user auth** off; verify the
+   resulting Portal mapping has `on_behalf: false`.
+3. For a large generated source, use the deterministic OpenAPI workflow in
    [Spec-driven OpenAPI allowlists](../../docs/OPENAPI_ALLOWLISTS.md) and the
    limits in [Large sources and Code Mode](../../docs/LARGE_SOURCES_AND_CODE_MODE.md).
-5. Only if testing optional multi-group source visibility, freshly enumerate
+4. Only if testing optional multi-group source visibility, freshly enumerate
    Access groups and follow
    [Per-source Cloudflare Access groups](../../docs/SOURCE_ACCESS_GROUPS.md).
-6. Connect a test identity to the Portal and prove an allowed read succeeds,
-   an unlisted operation is absent, and the upstream independently rejects
-   writes.
+5. In Cloudflare Zero Trust **AI Controls**, open the created MCP server, choose
+   **Authenticate**, complete the source OAuth flow as the customer operator,
+   and confirm the server reports **Ready**. Treat the synchronized catalogue
+   shown by AI Controls as an exact gate: its tool names and count must equal
+   the reviewed configuration. Any addition, omission, or duplicate blocks
+   acceptance.
+6. Connect a team test identity to the Gateway Portal with `?codemode=off`.
+   Confirm it is not prompted for a second `bls-read` login, the direct-tool
+   catalogue is the exact reviewed allowlist, one allowed read succeeds, an
+   unlisted operation is absent, and the upstream independently rejects writes.
+7. In that direct-tool session, invoke the synthetic health tool separately and
+   compare its small fixed result with the reviewed expected value. Do not use a
+   business response as the health fixture.
+8. Connect without `?codemode=off` and run the Code Mode search/execute canary
+   against that same health tool as described in
+   [Live provider acceptance](../../docs/GOVERNANCE_ROADMAP.md#live-provider-acceptance).
+
+The raw-token catalogue verifier is optional. Use it only when an approved
+customer-owned client already supplies a bounded operator OAuth access token:
+
+```sh
+<approved-customer-oauth-token-source> | \
+  node tools/verify-live-source-catalogue.mjs \
+    --config <outside-repository-dir>/gateway.config.json \
+    --source bls-read \
+    --oauth-token-stdin
+```
+
+Do not loosen dynamic client registration, extract or reuse credentials stored
+by Portal, or treat this optional verifier as a standard way to mint a token.
+When used, continue only if it reports `status: "verified"`, equal exact counts,
+and equal digests. It never prints the endpoint, token, or names and accepts
+OAuth authority only from bounded standard input.
 
 For `bls-read`, keep the service token only in that source Worker's secret
-binding for its private origin hop. That is separate from the required
-standards-compliant per-user OAuth at MCP ingress. Do not select gateway
-`bearer`, `headers`, or `none` configuration merely because the offline schema
-can describe it: the current dashboard runtime accepts standards-compliant
-per-user OAuth for this protected source and must not receive either credential.
+binding for its private origin hop. That credential is distinct from both the
+team member's Gateway identity and the operator-connected OAuth credential that
+Cloudflare Portal stores for the source. Do not select gateway `bearer`,
+`headers`, or `none` configuration merely because the offline schema can
+describe it: the dashboard must not receive either source credential.
 
 ## 6. Publish release B and drill update and rollback
 

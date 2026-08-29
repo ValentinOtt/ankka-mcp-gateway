@@ -53,6 +53,7 @@ const managedSourceSchema = v.strictObject({
   label: v.string(),
   url: v.string(),
   authMode: sourceAuthModeSchema,
+  onBehalfOfUser: v.boolean(),
   enabledTools: v.array(v.string()),
   status: sourceStatusSchema,
 })

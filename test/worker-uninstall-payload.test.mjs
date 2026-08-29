@@ -86,6 +86,7 @@ async function installedWithAdditionalSource(options = {}) {
   const sources = await addedResponse.json();
   const source = sources.sources.find((candidate) => candidate.url === 'https://catalog.example.net/mcp');
   assert.equal(source.status, 'draft');
+  assert.equal(source.onBehalfOfUser, false);
 
   const actionKey = BOOTSTRAP_NONCE;
   const actionId = `action_${'B'.repeat(32)}`;
@@ -108,6 +109,7 @@ async function installedWithAdditionalSource(options = {}) {
         label: source.label,
         url: source.url,
         authMode: source.authMode,
+        onBehalfOfUser: source.onBehalfOfUser,
         enabledTools: source.enabledTools,
       }),
     }),
@@ -155,6 +157,13 @@ async function installedWithAdditionalSource(options = {}) {
   ), gateway.env));
   assert.equal(applied.status, 200, `${await applied.clone().text()}\n${JSON.stringify(gateway.provider.requests.slice(-8))}`);
   assert.equal((await applied.json()).status, 'succeeded');
+  const sourceServer = [...gateway.provider.state.servers.values()].find(
+    (server) => server.hostname === source.url,
+  );
+  const sourceMapping = gateway.provider.state.portal.servers.find(
+    (mapping) => mapping.server_id === sourceServer?.id,
+  );
+  assert.equal(sourceMapping?.on_behalf, false);
   return gateway;
 }
 
@@ -373,6 +382,7 @@ test('cleanup rejects a source journal above the 1 MiB contract before provider 
       label: `Source ${index}`,
       url: `https://source-${index}.example.com/mcp`,
       authMode: 'none',
+      onBehalfOfUser: false,
       enabledTools: tools,
       status: 'draft',
     })),

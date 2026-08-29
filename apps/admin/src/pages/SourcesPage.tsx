@@ -150,15 +150,19 @@ export function SourcesPage() {
                     <h3 id="catalogue-title" className="text-sm font-semibold text-kumo-strong">Tool allowlist</h3>
                     <p className="mt-1 text-xs leading-5 text-kumo-subtle">
                       {discovery.authentication === 'oauth'
-                        ? 'Standard per-user OAuth detected. Enter independently verified exact tool names.'
+                        ? 'Standard OAuth protection detected. Enter independently verified exact tool names.'
                         : `${discovery.tools.length} tools discovered with MCP ${discovery.protocolVersion ?? 'compatible protocol'}.`}
                     </p>
                   </div>
-                  <StatusPill tone="waiting">{discovery.authentication === 'oauth' ? 'Per-user OAuth' : 'Public endpoint'}</StatusPill>
+                  <StatusPill tone="waiting">{discovery.authentication === 'oauth' ? 'OAuth protected' : 'Public endpoint'}</StatusPill>
                 </div>
 
                 {discovery.authentication === 'oauth' ? (
                   <div className="mt-5">
+                    <p className="mb-5 rounded-xl border border-kumo-line bg-kumo-tint/55 p-4 text-xs leading-5 text-kumo-subtle">
+                      <strong className="block text-sm text-kumo-strong">One Gateway login</strong>
+                      A customer operator connects this source once in Cloudflare. Team members are not asked for a second source login.
+                    </p>
                     <label htmlFor="manual-tools" className="mb-1.5 block text-sm font-medium text-kumo-default">Exact tool names</label>
                     <textarea id="manual-tools" className="text-input min-h-32 w-full font-mono" placeholder={'search\nfetch_document'} value={manual} onChange={(event) => setManual(event.target.value)} />
                     <p className="mt-1.5 text-xs leading-5 text-kumo-subtle">One exact tool per line. Wildcards are never accepted.</p>
@@ -253,7 +257,9 @@ export function SourcesPage() {
                     <div className="flex flex-wrap items-center gap-2.5">
                       <h2 className="text-sm font-semibold text-kumo-strong">{source.label}</h2>
                       <StatusPill tone={source.status === 'installed' ? 'ready' : 'attention'}>{source.status === 'installed' ? 'Installed' : 'Saved draft'}</StatusPill>
-                      <StatusPill tone="waiting">{source.authMode === 'oauth' ? 'Per-user OAuth' : 'Public'}</StatusPill>
+                      <StatusPill tone="waiting">{source.authMode === 'oauth'
+                        ? source.onBehalfOfUser ? 'Legacy user-bound OAuth' : 'Operator-connected OAuth'
+                        : 'Public'}</StatusPill>
                     </div>
                     <p className="mt-1.5 truncate font-mono text-xs text-kumo-subtle">{source.url}</p>
                   </div>
@@ -277,7 +283,7 @@ export function SourcesPage() {
 
       <aside className="mt-5 grid gap-3 rounded-xl border border-kumo-line bg-kumo-tint/55 p-4 sm:grid-cols-2">
         <div className="flex gap-3"><ShieldCheck size={18} className="mt-0.5 shrink-0 text-success-strong" weight="fill" /><p className="text-xs leading-5 text-kumo-subtle"><strong className="text-kumo-strong">Deny by default</strong><br />Only the frozen exact names are mapped.</p></div>
-        <div className="flex gap-3"><LockKey size={18} className="mt-0.5 shrink-0 text-kumo-subtle" /><p className="text-xs leading-5 text-kumo-subtle"><strong className="text-kumo-strong">No credential forwarding</strong><br />Per-user OAuth remains inside Cloudflare.</p></div>
+        <div className="flex gap-3"><LockKey size={18} className="mt-0.5 shrink-0 text-kumo-subtle" /><p className="text-xs leading-5 text-kumo-subtle"><strong className="text-kumo-strong">No credential forwarding</strong><br />Source OAuth credentials remain inside Cloudflare.</p></div>
       </aside>
     </div>
   )

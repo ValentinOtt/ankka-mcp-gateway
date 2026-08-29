@@ -18,7 +18,7 @@
       "url": "https://erp.example.com/mcp",
       "authentication": {
         "mode": "oauth",
-        "onBehalfOfUser": true
+        "onBehalfOfUser": false
       },
       "accessGroup": "ERP Readers",
       "enabledTools": ["erp_search"]
