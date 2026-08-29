@@ -1673,12 +1673,14 @@ async function installFailureReason<ErrorInput>(stub: GatewayDeploySessionStub, 
     } else if (Array.isArray(actions)) {
       stage = 'journal_empty';
     } else {
-      // A readable journal of an unrecognised shape is not "before the
-      // journal"; saying so would repeat the defect this replaced.
-      stage = 'journal_shape_unknown';
+      // A readable response without the reviewed journal shape is malformed,
+      // not absent and not an unreadable provider response.
+      stage = 'journal_malformed';
     }
-  } catch {
-    stage = 'journal_unreadable';
+  } catch (journalError) {
+    stage = journalError instanceof DeployError && journalError.status === 404
+      ? 'journal_absent'
+      : 'journal_unreadable';
   }
   const reason = sanitizeReason(`${errorClass}_at_${stage}`);
   return reason.length > 0 ? reason : null;

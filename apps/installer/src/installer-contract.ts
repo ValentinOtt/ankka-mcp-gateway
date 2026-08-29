@@ -23,6 +23,13 @@ export type RepairTarget = 'account-home' | 'zero-trust' | 'domain-setup' | 'wor
 
 export const UNCONFIRMED_GRANT_REVOCATION_DETAIL =
   'Automatic Cloudflare OAuth revocation could not be confirmed. Manually revoke Ankka MCP Gateway in Cloudflare Connected Applications.';
+export const FRESH_DNS_COLLISION_DETAIL =
+  'No Gateway resources were created, and the existing DNS record was left untouched. Start a new static plan with an unused hostname, or intentionally retire the old hostname outside the installer before retrying.';
+export const JOURNALED_INSTALL_RECOVERY_DETAIL =
+  'Exact journaled resources may remain for reviewed resume or reconciliation and are not blindly auto-deleted. Use the reviewed recovery flow and its receipt-bound uninstall path for full cleanup.';
+
+const FRESH_DNS_COLLISION_REASON =
+  'fresh_collision_dns_record_list_customergatewayfreshpreflighterror_at_journal_absent';
 
 export interface InstallerPlan {
   schemaVersion: 1;
@@ -149,6 +156,15 @@ function withDiagnostic(detail: string, result: DiagnosticResult | null | undefi
   const candidate = result?.reason ?? null;
   const reason = isFailureReason(candidate) ? candidate : null;
   return reason ? `${detail} Diagnostic: ${reason}.` : detail;
+}
+
+function isFreshDnsCollision(result: DiagnosticResult | null | undefined): boolean {
+  return result?.code === 'internal_error' && result.reason === FRESH_DNS_COLLISION_REASON;
+}
+
+function installWritesMayRemain(progress: PublicInstallProgress | null): boolean {
+  return progress?.actions.some((action) =>
+    action.name !== 'gateway_fresh_preflight' && action.phase !== 'prepared') ?? false;
 }
 
 function publicPlan(plan: StaticDeployPlan | null): InstallerPlan | null {
@@ -317,7 +333,10 @@ function installOperations(
 ): InstallerDeployment['operations'] {
   const byName = new Map(progress?.actions.map((action) => [action.name, action]) ?? []);
   let failedAction: InstallActionName | null = null;
-  if (session.status === 'failed' && progress) {
+  const freshDnsCollision = session.status === 'failed' && isFreshDnsCollision(session.result);
+  if (freshDnsCollision) {
+    failedAction = 'gateway_fresh_preflight';
+  } else if (session.status === 'failed' && progress) {
     const incomplete = progress.actions.find((action) => action.phase !== 'verified');
     failedAction = incomplete?.name ?? INSTALL_ACTION_ORDER[progress.actions.length] ?? null;
   }
@@ -334,7 +353,9 @@ function installOperations(
     return {
       id: name,
       label: copy.label,
-      detail: action ? phaseDetail(action.phase, copy.detail) : copy.detail,
+      detail: freshDnsCollision && name === 'gateway_fresh_preflight'
+        ? FRESH_DNS_COLLISION_DETAIL
+        : action ? phaseDetail(action.phase, copy.detail) : copy.detail,
       status,
     };
   });
@@ -358,13 +379,26 @@ function deployment(
   const failed = status === 'failed';
   const succeeded = status === 'succeeded';
   const resultCode = session.result?.code;
+  const freshDnsCollision = failed && isFreshDnsCollision(session.result);
   const grantRevocationUnconfirmed = succeeded &&
     session.result?.code === 'install_complete' &&
     session.result.grantRevocation === 'unconfirmed';
+  const grantRevocationFailed = failed && resultCode === 'oauth_revoke_failed';
+  const grantRevocationSettled = session.result !== null &&
+    !grantRevocationUnconfirmed && !grantRevocationFailed;
   const failureCode = failed && resultCode && resultCode !== 'install_complete'
     ? resultCode
     : null;
-  const failureCopy = failureCode ? FAILURE_COPY[failureCode] : null;
+  const failureCopy = freshDnsCollision
+    ? {
+        title: 'Portal hostname is already in use',
+        detail: FRESH_DNS_COLLISION_DETAIL,
+        repairTarget: 'domain-setup' as const,
+      }
+    : failureCode ? FAILURE_COPY[failureCode] : null;
+  const failureDetail = failureCopy
+    ? `${failureCopy.detail}${installWritesMayRemain(progress) ? ` ${JOURNALED_INSTALL_RECOVERY_DETAIL}` : ''}`
+    : null;
   return {
     deploymentId: `deploy-${plan.planId.slice('plan-'.length)}`,
     status,
@@ -381,9 +415,9 @@ function deployment(
         detail: null,
         status: session.status === 'authorizing'
           ? 'pending'
-          : failed && progress === null
+          : failed && progress === null && !freshDnsCollision
             ? 'failed'
-            : succeeded || progress !== null
+            : succeeded || progress !== null || freshDnsCollision
               ? 'succeeded'
               : 'running',
       },
@@ -391,14 +425,20 @@ function deployment(
       {
         id: 'revoke',
         label: 'Revoking the short-lived Cloudflare grant',
-        detail: grantRevocationUnconfirmed ? UNCONFIRMED_GRANT_REVOCATION_DETAIL : null,
-        status: succeeded
-          ? grantRevocationUnconfirmed ? 'blocked' : 'succeeded'
-          : failed ? 'failed' : 'pending',
+        detail: grantRevocationUnconfirmed || grantRevocationFailed
+          ? UNCONFIRMED_GRANT_REVOCATION_DETAIL
+          : null,
+        status: grantRevocationUnconfirmed
+          ? 'blocked'
+          : grantRevocationFailed
+            ? 'failed'
+            : grantRevocationSettled
+              ? 'succeeded'
+              : 'pending',
       },
     ],
     failure: failureCode && failureCopy
-      ? { code: failureCode, ...failureCopy, detail: withDiagnostic(failureCopy.detail, session.result) }
+      ? { code: failureCode, ...failureCopy, detail: withDiagnostic(failureDetail ?? failureCopy.detail, session.result) }
       : null,
     canRetry: failed && resultCode !== 'existing_gateway_detected',
     existingGateway: failed && session.result?.code === 'existing_gateway_detected'
