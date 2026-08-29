@@ -1,6 +1,6 @@
 # Non-secret OAuth client identifier. The deployed value also lives in
 # wrangler.toml so local and hosted callbacks use the same reviewed client.
-CLOUDFLARE_OAUTH_CLIENT_ID=97ef364689fbda8582a55237066a67a0
+CLOUDFLARE_OAUTH_CLIENT_ID=6ace98c3cfe05f58a7fbe18f88390bfc
 
 # Add these with `wrangler secret put` in the hosted Worker. Never commit them.
 CLOUDFLARE_OAUTH_CLIENT_SECRET=<cloudflare-oauth-client-secret>

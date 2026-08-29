@@ -185,7 +185,7 @@ describe('offline reviewed canary artifact generator', () => {
       expect(canary).toMatch(/^main = "reviewed-canary-worker\.mjs"$/mu);
       expect(canary).toContain('binding = "GATEWAY_RELEASE_BUCKET"');
       expect(canary).toContain(`bucket_name = "${PUBLICATION.bucketName}"`);
-      expect(canary).toContain('CLOUDFLARE_OAUTH_CLIENT_ID = "97ef364689fbda8582a55237066a67a0"');
+      expect(canary).toContain('CLOUDFLARE_OAUTH_CLIENT_ID = "6ace98c3cfe05f58a7fbe18f88390bfc"');
       expect(canary).toContain('HOSTED_INSTALLER_ANALYTICS_CHANNEL = "canary"');
       expect(canary).toContain(`HOSTED_INSTALLER_ANALYTICS_RELEASE = "${PIN.release}"`);
       expect(canary.match(/^\[\[analytics_engine_datasets\]\]$/gmu)).toHaveLength(1);
@@ -298,7 +298,7 @@ describe('offline reviewed canary artifact generator', () => {
         `https://${ISOLATED_TARGET.hostname}`,
       ]);
       expect(canary).toContain(`CLOUDFLARE_OAUTH_CLIENT_ID = "${ISOLATED_TARGET.oauthClientId}"`);
-      expect(canary).not.toContain('97ef364689fbda8582a55237066a67a0');
+      expect(canary).not.toContain('6ace98c3cfe05f58a7fbe18f88390bfc');
       for (const module of [activeModule, rollbackModule]) {
         expect(module).toContain(`https://${ISOLATED_TARGET.hostname}`);
         expect(module).not.toContain('https://deploy.ankka.ai');
@@ -340,7 +340,7 @@ describe('offline reviewed canary artifact generator', () => {
       { ...ISOLATED_TARGET, hostname: 'deploy.ankka.ai' },
       { ...ISOLATED_TARGET, workerName: 'ankka-gateway-deploy' },
       { ...ISOLATED_TARGET, accountId: '2'.repeat(32) },
-      { ...ISOLATED_TARGET, oauthClientId: '97ef364689fbda8582a55237066a67a0' },
+      { ...ISOLATED_TARGET, oauthClientId: '6ace98c3cfe05f58a7fbe18f88390bfc' },
       { ...ISOLATED_TARGET, hostname: '*.canary.example.net' },
       { ...ISOLATED_TARGET, hostname: 'installer-proof.workers.dev' },
       { ...ISOLATED_TARGET, extra: true },

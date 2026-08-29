@@ -5,7 +5,7 @@ workers_dev = false
 preview_urls = false
 
 [vars]
-CLOUDFLARE_OAUTH_CLIENT_ID = "97ef364689fbda8582a55237066a67a0"
+CLOUDFLARE_OAUTH_CLIENT_ID = "6ace98c3cfe05f58a7fbe18f88390bfc"
 
 # This service handles a short-lived OAuth authorization grant. Provider
 # request/response bodies must never enter Cloudflare logs or traces.
