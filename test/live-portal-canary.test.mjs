@@ -119,6 +119,8 @@ test('validates an exact secret-free no-argument canary configuration', () => {
     config({ portalUrl: 'http://portal.example.com/mcp' }),
     config({ portalUrl: 'https://portal.example.com/' }),
     config({ healthToolIdentifier: 'bls-read-health' }),
+    config({ healthToolIdentifier: 'bls_read_health</script>' }),
+    config({ healthToolIdentifier: `bls_read_health${String.fromCodePoint(0x2028)}next` }),
     config({ healthToolIdentifier: 'portal_codemode_execute' }),
     config({ arguments: { recordId: 'forbidden' } }),
     config({ expectedCanonicalResultSha256: '0'.repeat(64) }),

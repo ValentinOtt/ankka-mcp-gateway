@@ -56,6 +56,19 @@ const BLOCKED_HOSTNAME_SUFFIXES = Object.freeze([
   '.test',
 ]);
 const BLOCKED_IDENTIFIERS = new Set(['__proto__', 'constructor', 'prototype']);
+const CODE_LITERAL_ESCAPES = Object.freeze({
+  '<': '\\u003C',
+  '>': '\\u003E',
+  '/': '\\u002F',
+  '\b': '\\b',
+  '\f': '\\f',
+  '\n': '\\n',
+  '\r': '\\r',
+  '\t': '\\t',
+  '\0': '\\0',
+  '\u2028': '\\u2028',
+  '\u2029': '\\u2029',
+});
 
 export const SEARCH_RESULT_MARKER = '__ankka_live_portal_canary_search_v1';
 export const EXECUTE_RESULT_MARKER = '__ankka_live_portal_canary_result_v1';
@@ -559,13 +572,20 @@ function extractMarkedCallResult(result, marker, failureCode) {
   return matches[0];
 }
 
+function codeStringLiteral(value) {
+  return JSON.stringify(value).replace(
+    /[<>/\b\f\n\r\t\0\u2028\u2029]/gu,
+    (character) => CODE_LITERAL_ESCAPES[character],
+  );
+}
+
 function searchCode(identifier) {
-  const encoded = JSON.stringify(identifier);
-  return `async () => {\n  const tools = await codemode.tools();\n  return {${JSON.stringify(SEARCH_RESULT_MARKER)}: tools.filter((tool) => tool && tool.name === ${encoded}).map((tool) => tool.name)};\n}`;
+  const encoded = codeStringLiteral(identifier);
+  return `async () => {\n  const tools = await codemode.tools();\n  return {${codeStringLiteral(SEARCH_RESULT_MARKER)}: tools.filter((tool) => tool && tool.name === ${encoded}).map((tool) => tool.name)};\n}`;
 }
 
 function executeCode(identifier) {
-  return `async () => ({${JSON.stringify(EXECUTE_RESULT_MARKER)}: await codemode[${JSON.stringify(identifier)}]({})})`;
+  return `async () => ({${codeStringLiteral(EXECUTE_RESULT_MARKER)}: await codemode[${codeStringLiteral(identifier)}]({})})`;
 }
 
 function createDeadline(durationMs) {
