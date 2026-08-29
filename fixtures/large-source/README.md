@@ -12,7 +12,7 @@ generated allowlist change remains an ordinary, reviewable source diff. It is
 used by `test/large-source-scale.test.mjs` to cover validation, deterministic
 OpenAPI extraction, planning, and bounded human plan output at this scale.
 
-The same test derives a second, secret-free 247-tool workload in memory. That
+The same test derives a second, secret-free 224-tool workload in memory. That
 supplemental profile mirrors the current dogfood cardinality without replacing
 or relabelling the brief's reproducible 228-operation fixture. The checked-in
 `sanitization-hostile.config.json` fixture also proves that the gateway keeps

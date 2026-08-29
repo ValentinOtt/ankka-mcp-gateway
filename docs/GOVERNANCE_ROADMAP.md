@@ -1,20 +1,29 @@
-# Source visibility, guarded writes, and live canaries
+# Source visibility and live canaries
 
-This document records the boundary for three post-preview capabilities. The
-customer-operated live Portal runner described below is implemented, but no
-customer deployment or live result is part of this repository. The only
+This document records the boundary for two optional post-preview capabilities.
+The customer-operated live Portal runner described below is implemented, but
+no customer deployment or live result is part of this repository. The only
 implemented gateway capability mode remains `read_only`, with exact tool
 allowlists and independent upstream enforcement.
+
+For the current founding-team dogfood deployment, one Access group and manual
+health/catalogue checks are sufficient. Multiple visibility partitions,
+scheduled machine identities, exact actor correlation, and every form of write
+execution are deferred until a present product need justifies them.
 
 ## Readiness summary
 
 | Capability | Current state | Remaining gate |
 | --- | --- | --- |
-| Per-source Access groups | Implemented in the public schema, offline planner, Cloudflare provider, receipt binding, and exact drift readback | Caller-side fresh Cloudflare group enumeration and live multi-group/member/non-member qualification in a customer account |
-| Guarded write tools | Deliberately rejected by the schema-level capability boundary | A versioned capability contract, operation risk registry, upstream authorization, idempotency, approval, and customer-owned audit evidence |
-| Scheduled live-source canary | Standalone bounded runner implemented; synthetic transport tests pass | Customer-owned health tool, service-token policies, schedule and result sink, followed by live qualification in the customer's account |
+| Per-source Access groups | Implemented and optional; one group is enough for current dogfood | Live qualification only when a deployment actually needs more than one visibility audience |
+| Write tools | Parked; rejected by the schema-level capability boundary | A future user need and a new threat-model review; no current implementation plan |
+| Scheduled live-source canary | Optional standalone bounded runner implemented; synthetic transport tests pass | Customer-owned scheduling and sink only if manual qualification stops being sufficient |
 
 ## Per-source Access groups
+
+The founding-team deployment uses one group. The machinery below remains a
+generic optional capability; it is not a reason to create sensitivity
+partitions or additional groups for the current BLS source.
 
 Cloudflare enforces Access selectors, including Groups, on MCP server
 applications reached through a Portal. The implemented contract is documented
@@ -46,45 +55,17 @@ and any hosted UI that constructs the snapshot remain external integrations.
 Group names, tool names, and prompts are not authorization. The upstream source
 must still reject operations outside the caller's actual authority.
 
-## Guarded write capability
+## Writes are parked
 
-Do not turn the current `capabilityMode` constant into an unrestricted boolean.
-A write-capable source should be a separate, group-gated surface with its own
-exact allowlist and upstream policy, even when read and write operations came
-from one OpenAPI document.
+The current product is read-only. A possible future `bls-admin` source remains
+physically separate from `bls-read`, but it is not part of this roadmap or a
+current implementation target. Existing write-risk notes are historical
+research only and must not drive approval workflows, idempotency machinery,
+policy engines, or generalized IAM into the founding-team deployment.
 
-Before implementation, publish a machine-readable risk registry for every
-candidate operation. A useful initial taxonomy is:
-
-| Tier | Shape | Minimum control |
-| --- | --- | --- |
-| 0 | Read-only, no material side effect | Current exact allowlist plus upstream read enforcement |
-| 1 | Idempotent, reversible low-impact write | Write-specific group, required idempotency key, bounded input, complete audit |
-| 2 | Material but reversible business action | Tier 1 plus an exact human approval bound to actor, arguments, target, and expiry |
-| 3 | Destructive, financial, privacy-sensitive, or hard to reverse | Separate commit workflow, stronger upstream authorization, explicit recovery plan; direct execution may remain prohibited |
-
-Source-authored annotations may inform review but cannot assign a tier or grant
-authority. HTTP method alone is also insufficient.
-
-For tiers that permit execution:
-
-- the upstream MCP schema must require an idempotency key and the upstream
-  system must enforce its scope and replay behavior;
-- an approval must bind an immutable intent hash, exact normalized arguments,
-  actor, source, tool, expiry, and one allowed execution;
-- approval and execution must be distinct states, with unknown outcomes
-  recovered by reading upstream state rather than replaying blindly;
-- provider credentials remain in the customer's Cloudflare account or source
-  Worker and never transit Ankka;
-- Portal and upstream logs must prove the actor and outcome without recording
-  secrets, arguments containing personal data, or raw results; and
-- a prompt, Code Mode program, tool alias, or `destructiveHint` can never bypass
-  the upstream authorization and approval checks.
-
-The preferred design for high-risk actions is a source-owned prepare/commit
-protocol: `prepare` returns a content-minimized intent for human review, and a
-separately authorized `commit` consumes that exact intent once. The Portal may
-transport these tools, but it is not itself the business authorization system.
+If a real write use case arrives, start a new design from that operation, its
+current users, and its demonstrated failure modes. Never widen the `bls-read`
+credential or catalogue as a shortcut.
 
 ## Customer-owned live canary
 
@@ -185,8 +166,8 @@ results, tokens, cookies, raw provider errors, user emails, customer data, or
 source credentials in the dashboard canary record. A failure should alert the
 customer; it must not send telemetry to Ankka.
 
-Canary execution must stay read-only even after guarded writes exist. Update and
-rollback drills remain separate, explicitly approved lifecycle operations.
+Canary execution stays read-only. Update and rollback drills remain separate,
+explicitly approved lifecycle operations.
 
 ## Cloudflare reference
 

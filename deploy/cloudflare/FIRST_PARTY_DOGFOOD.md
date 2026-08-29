@@ -46,6 +46,11 @@ authority.
 - The gateway remains read-only with exact tool allowlists. A source Worker
   must independently reject write operations; tool names and prompts are not
   authorization.
+- The founding-team BLS deployment uses one Access group and one shared
+  `readonly` BLS origin credential. MCP identity terminates at Access and is
+  never forwarded or mapped to a per-user BLS identity. Multi-group
+  partitioning, exact actor correlation, and write infrastructure are not
+  prerequisites.
 
 Stop if any invariant cannot be met.
 
@@ -317,7 +322,8 @@ From the customer dashboard:
 4. For a large generated source, use the deterministic OpenAPI workflow in
    [Spec-driven OpenAPI allowlists](../../docs/OPENAPI_ALLOWLISTS.md) and the
    limits in [Large sources and Code Mode](../../docs/LARGE_SOURCES_AND_CODE_MODE.md).
-5. If testing source visibility, freshly enumerate Access groups and follow
+5. Only if testing optional multi-group source visibility, freshly enumerate
+   Access groups and follow
    [Per-source Cloudflare Access groups](../../docs/SOURCE_ACCESS_GROUPS.md).
 6. Connect a test identity to the Portal and prove an allowed read succeeds,
    an unlisted operation is absent, and the upstream independently rejects

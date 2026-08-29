@@ -50,7 +50,7 @@ describe('SourcesPage', () => {
     })
   })
 
-  it.each([228, 251])('keeps a %i-tool catalogue filterable and supports bulk exact selection', async (toolCount) => {
+  it.each([228, 224])('keeps a %i-tool catalogue filterable and supports bulk exact selection', async (toolCount) => {
     const user = userEvent.setup()
     const toolNames = Array.from(
       { length: toolCount },

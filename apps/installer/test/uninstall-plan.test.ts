@@ -717,7 +717,7 @@ describe('provider-ID-free reviewed static uninstall plan', () => {
     await expect(parseStaticUninstallPlan(plan)).resolves.toEqual(plan);
   });
 
-  it.each([228, 247])('preserves the exact %i-tool source through install authority and uninstall review', async (toolCount) => {
+  it.each([228, 224])('preserves the exact %i-tool source through install authority and uninstall review', async (toolCount) => {
     const largeToolNames = Array.from(
       { length: toolCount },
       (_value, index) => `synthetic_read_${String(index + 1).padStart(3, '0')}`,

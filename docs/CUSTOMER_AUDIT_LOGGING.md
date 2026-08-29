@@ -1,5 +1,10 @@
 # Customer-owned portal audit logging
 
+This is optional reference material, not a founding-team deployment gate. The
+initial BLS deployment relies on Cloudflare Access, a shared `readonly` origin
+credential, and content-free source logs. It does not require Enterprise
+Logpush, exact Portal-user-to-BLS correlation, or new audit infrastructure.
+
 Cloudflare's account-scoped `mcp_portal_logs` Logpush dataset is the current
 source of per-user MCP Portal audit events. It is configured and retained by
 the customer. Ankka MCP Gateway does not receive a copy and the customer

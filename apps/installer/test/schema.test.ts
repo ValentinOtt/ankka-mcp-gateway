@@ -44,8 +44,8 @@ describe('strict deployment contracts', () => {
     }));
   });
 
-  it('preserves 228- and 247-tool sources and rejects input above the 500-tool bound', () => {
-    for (const toolCount of [228, 247]) {
+  it('preserves 228- and 224-tool sources and rejects input above the 500-tool bound', () => {
+    for (const toolCount of [228, 224]) {
       const largeToolNames = Array.from(
         { length: toolCount },
         (_value, index) => `synthetic_read_${String(index + 1).padStart(3, '0')}`,

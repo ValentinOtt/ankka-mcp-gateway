@@ -1,5 +1,8 @@
 # Per-source Cloudflare Access groups
 
+This is an optional generic capability. The founding-team BLS deployment uses
+one reviewed Access group and does not need multiple sensitivity partitions.
+
 Each source may optionally name one customer-chosen Cloudflare Access group:
 
 ```json
