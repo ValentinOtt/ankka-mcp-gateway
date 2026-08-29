@@ -39,6 +39,15 @@ they are explicitly documented as non-secret.
   enforce the allowed operations.
 - Do not introduce arbitrary credential forwarding or open-proxy behavior.
 
+## Stage-appropriate engineering
+
+- Keep implementation proportional to current users, requirements, and threat
+  model. Preserve the security invariants above, but prefer a few simple,
+  auditable boundaries over speculative enterprise machinery.
+- Do not add generalized IAM, fine-grained RBAC, policy engines, approval
+  workflows, or elaborate audit infrastructure without a current product need
+  or demonstrated risk. Record a follow-up or narrow extension point instead.
+
 ## Development
 
 - Keep the dependency graph small.

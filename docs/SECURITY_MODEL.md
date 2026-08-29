@@ -86,9 +86,11 @@ The repository contains no private signing key, production deployment
 credential, generated signed release, or release-publication authority.
 
 Release tooling requires a clean public source commit, deterministic payload
-inputs, a complete manifest, and an external Ed25519 signature. The installer
-verifies the signed channel, key identity, manifest, deployment contract, and
-every payload digest before use.
+inputs, a complete manifest, one exact HTTPS control-plane origin, and an
+external Ed25519 signature. The origin is compiled into the customer Worker
+before hashing. The installer verifies the signed channel, key identity,
+origin, manifest, deployment contract, and every payload digest before use;
+requests and gateway configuration cannot redirect that authority.
 
 See [Release integrity](RELEASING.md) for publication and signing-key lifecycle
 requirements.

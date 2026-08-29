@@ -9,6 +9,7 @@ import { DeployError } from './errors';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const RELEASE_PATTERN = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
+const MAX_CONTROL_PLANE_ORIGIN_LENGTH = 2_048;
 
 export const MAX_RELEASE_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_RELEASE_PAYLOAD_BYTES = 32 * 1024 * 1024;
@@ -172,6 +173,8 @@ export interface ReleaseManifest {
     readonly treeSha256: string;
   };
   readonly cloudflare: typeof APPROVED_CLOUDFLARE_RELEASE_CONTRACT;
+  /** Exact HTTPS origin compiled into the signed customer Worker payload. */
+  readonly controlPlaneOrigin: string;
   readonly components: Readonly<Record<ReleaseComponentName, ReleaseComponent>>;
   readonly oauthScopeIds: typeof REQUIRED_OAUTH_SCOPES;
   readonly release: string;
@@ -203,6 +206,7 @@ const releaseManifestSchema = v.strictObject({
     treeSha256: v.string(),
   }),
   cloudflare: boundaryObjectSchema,
+  controlPlaneOrigin: v.string(),
   components: v.strictObject({
     admin: releaseComponentSchema,
     installer: releaseComponentSchema,
@@ -217,6 +221,37 @@ const releaseManifestSchema = v.strictObject({
 });
 function invalid(): never {
   throw new DeployError(503, 'release_invalid');
+}
+
+/**
+ * Accepts one canonical HTTPS origin, never a URL path or mutable destination.
+ * Equality with `URL.origin` rejects credentials, explicit/default ports,
+ * paths, query strings, fragments, alternate casing, and trailing slashes.
+ */
+export function parseControlPlaneOrigin<Input>(input: Input): string {
+  const result = v.safeParse(
+    v.pipe(v.string(), v.minLength(1), v.maxLength(MAX_CONTROL_PLANE_ORIGIN_LENGTH)),
+    input,
+  );
+  if (!result.success) invalid();
+  const origin = result.output;
+  try {
+    const parsed = new URL(origin);
+    if (
+      parsed.protocol !== 'https:' ||
+      parsed.username !== '' ||
+      parsed.password !== '' ||
+      parsed.port !== '' ||
+      parsed.pathname !== '/' ||
+      parsed.search !== '' ||
+      parsed.hash !== '' ||
+      parsed.origin !== origin ||
+      origin.includes("'")
+    ) invalid();
+  } catch {
+    invalid();
+  }
+  return origin;
 }
 
 function extension(path: string): string {
@@ -318,6 +353,7 @@ export function parseReleaseManifest<Input>(input: Input): ReleaseManifest {
   const result = v.safeParse(releaseManifestSchema, input);
   if (!result.success) invalid();
   const value = result.output;
+  const controlPlaneOrigin = parseControlPlaneOrigin(value.controlPlaneOrigin);
   if (
     !RELEASE_PATTERN.test(value.release) ||
     !COMMIT_PATTERN.test(value.sourceCommit) ||
@@ -360,6 +396,7 @@ export function parseReleaseManifest<Input>(input: Input): ReleaseManifest {
       treeSha256: value.artifact.treeSha256,
     }),
     cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+    controlPlaneOrigin,
     components,
     oauthScopeIds: REQUIRED_OAUTH_SCOPES,
     release: value.release,

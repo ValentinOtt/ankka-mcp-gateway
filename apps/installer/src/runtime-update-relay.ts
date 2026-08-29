@@ -7,7 +7,7 @@ import {
   type BoundaryValue,
   type JsonObject,
 } from './boundary';
-import { CLOUDFLARE_API_ORIGIN } from './constants';
+import { CLOUDFLARE_API_ORIGIN, PUBLIC_ORIGIN } from './constants';
 import { base64UrlDecode, base64UrlEncode } from './crypto';
 import { DeployError } from './errors';
 import {
@@ -535,6 +535,9 @@ async function createCandidate(
 export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promise<RuntimeUpdateRelayResult> {
   const now = input.now?.() ?? Date.now();
   const management = validate(input, now);
+  if (input.releaseBundle.manifest.controlPlaneOrigin !== PUBLIC_ORIGIN) {
+    invalid('session_conflict');
+  }
   let routeMayBeEnabled = false;
   let oldVersionId: string | null = null;
   let targetVersionId: string | null = null;

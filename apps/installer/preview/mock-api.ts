@@ -3,6 +3,7 @@ import type { Connect } from 'vite'
 type InstallerScenario =
   | 'start'
   | 'connected'
+  | 'no-zones'
   | 'configured'
   | 'planned'
   | 'running'
@@ -89,6 +90,7 @@ function scenarioFromRequest(request: Connect.IncomingMessage): InstallerScenari
   if (
     requested === 'start' ||
     requested === 'connected' ||
+    requested === 'no-zones' ||
     requested === 'configured' ||
     requested === 'planned' ||
     requested === 'running' ||
@@ -105,7 +107,7 @@ function scenarioFromRequest(request: Connect.IncomingMessage): InstallerScenari
 }
 
 function hasSelection(scenario: InstallerScenario): boolean {
-  return !['start', 'connected'].includes(scenario)
+  return !['start', 'connected', 'no-zones'].includes(scenario)
 }
 
 function hasPlan(scenario: InstallerScenario): boolean {
@@ -204,16 +206,17 @@ function session(scenario: InstallerScenario) {
 
 function discovery(scenario: InstallerScenario, forcedReady: boolean) {
   const ready = forcedReady || scenario !== 'start'
+  const withTargets = ready && scenario !== 'no-zones'
   return {
     schemaVersion: 1,
     status: ready ? 'ready' : 'not_started',
     actorEmail: ready ? 'owner@example.com' : null,
-    targets: ready ? [{
+    targets: withTargets ? [{
       targetIdHash,
       accountName: 'Example Company',
       zoneName: 'example.com',
     }] : [],
-    selectedTargetIdHash: ready ? targetIdHash : null,
+    selectedTargetIdHash: withTargets ? targetIdHash : null,
     failureCode: null,
     grantRevocation: ready ? 'confirmed' : null,
     updatedAt: ready ? '2026-08-27T12:00:00.000Z' : null,

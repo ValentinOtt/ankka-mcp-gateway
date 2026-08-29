@@ -7,7 +7,7 @@ import {
   RELEASE_SIGNATURE_CONTEXT,
   type VerifiedReleaseBundle,
 } from './release';
-import { canonicalJson } from './release-manifest';
+import { canonicalJson, parseControlPlaneOrigin } from './release-manifest';
 
 const RELEASE = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const KEY_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
@@ -17,6 +17,7 @@ const SIGNATURE = /^[A-Za-z0-9_-]{86}$/u;
 export const exactReleaseBundleIdentitySchema = v.strictObject({
   artifactSha256: v.pipe(v.string(), v.regex(SHA256)),
   channel: v.picklist(['canary', 'stable']),
+  controlPlaneOrigin: v.pipe(v.string(), v.url()),
   keyId: v.pipe(v.string(), v.regex(KEY_ID)),
   publicKey: v.pipe(v.string(), v.regex(PUBLIC_KEY)),
   release: v.pipe(v.string(), v.regex(RELEASE)),
@@ -31,6 +32,7 @@ export const exactReleaseBundleIdentitySchema = v.strictObject({
 export interface ExactReleaseBundleIdentity {
   readonly schemaVersion: 1;
   readonly channel: 'canary' | 'stable';
+  readonly controlPlaneOrigin: string;
   readonly release: string;
   readonly keyId: string;
   /** Raw Ed25519 public key encoded as unpadded base64url. */
@@ -51,7 +53,10 @@ export function parseExactReleaseBundleIdentity<Input>(
 ): Readonly<ExactReleaseBundleIdentity> {
   const parsed = v.safeParse(exactReleaseBundleIdentitySchema, value);
   if (!parsed.success) throw new DeployError(503, 'release_invalid');
-  return Object.freeze(parsed.output);
+  return Object.freeze({
+    ...parsed.output,
+    controlPlaneOrigin: parseControlPlaneOrigin(parsed.output.controlPlaneOrigin),
+  });
 }
 
 /** Re-checks the exact identity even when a test or runtime adapter is injected. */
@@ -66,6 +71,7 @@ export function assertExactReleaseBundleIdentity(
       !Object.isFrozen(bundle) || bundle.verification !== 'ed25519' ||
       bundle.channel !== identity.channel || bundle.keyId !== identity.keyId ||
       bundle.publicKey !== identity.publicKey ||
+      bundle.manifest.controlPlaneOrigin !== identity.controlPlaneOrigin ||
       bundle.manifest.release !== identity.release ||
       bundle.manifest.artifact.treeSha256 !== identity.artifactSha256 ||
       !Object.isFrozen(bundle.envelope) ||

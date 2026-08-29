@@ -751,7 +751,8 @@ function renderWelcome() {
   const button = byId('discover-cloudflare');
   if (!button) return;
   const ready = state.discovery?.status === 'ready';
-  button.textContent = ready ? 'Continue with discovered account' : 'Connect Cloudflare';
+  const hasTargets = (state.discovery?.targets ?? []).length > 0;
+  button.textContent = ready && hasTargets ? 'Continue with discovered account' : 'Connect Cloudflare';
   button.disabled = state.busy;
   if (ready) {
     const target = selectedDiscoveryTarget() ?? state.discovery.targets?.[0];
@@ -760,11 +761,21 @@ function renderWelcome() {
     } else {
       showNotice(target
         ? `Connected to ${target.accountName} · ${target.zoneName}. The discovery grant was revoked.`
-        : 'Cloudflare connected, but no active zones were found.', target ? 'success' : 'error');
+        : 'Cloudflare connected, but this account has no active zones. Add a domain to Cloudflare first, then connect again.', target ? 'success' : 'error');
     }
   } else if (state.discovery?.status === 'failed') {
     showNotice(discoveryFailureMessage(state.discovery.failureCode), 'error');
   }
+}
+
+function renderGateway() {
+  const noZones = byId('no-zones-notice');
+  const form = byId('gateway-form');
+  if (!noZones || !form) return;
+  const connectedWithoutZones = state.discovery?.status === 'ready' &&
+    (state.discovery.targets ?? []).length === 0;
+  noZones.hidden = !connectedWithoutZones;
+  form.hidden = connectedWithoutZones && !state.session?.selection;
 }
 
 function render() {
@@ -774,6 +785,7 @@ function render() {
   fillForms();
   updateProgress();
   if (state.route === '/') renderWelcome();
+  if (state.route === '/gateway') renderGateway();
   if (state.route === '/review') renderPlan();
   if (state.route === '/deploy') renderDeploy();
   if (state.route === '/result') renderResult();
@@ -794,7 +806,7 @@ function validAuthorizationUrl(value) {
 function validHandoffUrl(value) {
   try {
     const url = new URL(value);
-    return url.origin === 'https://deploy.ankka.ai' && !url.username && !url.password && !url.port &&
+    return url.origin === window.location.origin && !url.username && !url.password && !url.port &&
       url.pathname === OAUTH_HANDOFF_PATH && url.search === '' &&
       /^#[A-Za-z0-9_-]{40,4096}$/u.test(url.hash)
       ? url.href
@@ -822,6 +834,14 @@ function revealAuthorizationLink(id, handoff) {
   link.href = handoff;
   link.hidden = false;
   if (id === 'authorization-link') byId('authorization-handoff').hidden = false;
+}
+
+function continueToCloudflare(handoff) {
+  if (document.documentElement.dataset.oauthPreview === 'inert') {
+    showNotice('OAuth navigation is inert in the local UI preview.');
+    return;
+  }
+  window.location.assign(handoff);
 }
 
 async function completeOauthHandoff() {
@@ -1119,40 +1139,24 @@ byId('cloudflare-target').addEventListener('change', (event) => {
 
 byId('discover-cloudflare').addEventListener('click', async () => {
   if (state.busy) return;
-  if (state.discovery?.status === 'ready') {
-    if (!state.selectedTargetIdHash && state.discovery.targets?.[0]) {
+  // A ready discovery with zero active zones falls through to a fresh
+  // discovery, so the same button rediscovers after the user adds a domain.
+  if (state.discovery?.status === 'ready' && state.discovery.targets?.[0]) {
+    if (!state.selectedTargetIdHash) {
       state.selectedTargetIdHash = state.discovery.targets[0].targetIdHash;
     }
     applyDiscoveryDefaults();
     route('/gateway');
     return;
   }
-  const cloudflareWindow = window.open('about:blank', '_blank');
-  if (cloudflareWindow) cloudflareWindow.opener = null;
   setBusy(true);
   showNotice('Opening Cloudflare…');
   try {
     const prepared = await prepareDiscovery();
     revealAuthorizationLink('discovery-link', prepared.handoff);
-    let opened = false;
-    if (cloudflareWindow && !cloudflareWindow.closed) {
-      try {
-        cloudflareWindow.location.replace(prepared.handoff);
-        opened = true;
-      } catch {
-        try { cloudflareWindow.close(); } catch { /* The visible fallback remains usable. */ }
-      }
-    }
-    if (opened) {
-      byId('discovery-handoff').hidden = true;
-      showNotice('Finish connecting Cloudflare in the new tab.');
-    } else {
-      byId('discovery-handoff').hidden = false;
-      showNotice('Your browser blocked the Cloudflare tab. Use the link below.', 'error');
-    }
-    schedulePoll();
+    byId('discovery-handoff').hidden = false;
+    continueToCloudflare(prepared.handoff);
   } catch (error) {
-    try { cloudflareWindow?.close(); } catch { /* The fixed local error is sufficient. */ }
     showNotice(apiErrorMessage(error, 'Cloudflare discovery could not start. Try again.'), 'error');
   } finally {
     setBusy(false);
@@ -1190,8 +1194,8 @@ byId('authorize').addEventListener('click', async () => {
   try {
     const prepared = await prepareAuthorization('/api/deploy', state.session?.plan);
     revealAuthorizationLink('authorization-link', prepared.handoff);
-    showNotice('Cloudflare sign-in link ready. This page will keep watching the installation.', 'success');
-    schedulePoll();
+    showNotice('Opening Cloudflare…');
+    continueToCloudflare(prepared.handoff);
   } catch (error) {
     showNotice(apiErrorMessage(
       error,
@@ -1231,8 +1235,8 @@ byId('confirm-removal').addEventListener('click', async () => {
       : '/api/uninstall';
     const prepared = await prepareAuthorization(path, plan);
     revealAuthorizationLink('removal-authorization-link', prepared.handoff);
-    showNotice('Cloudflare removal sign-in link ready. This page will keep watching removal.', 'success');
-    schedulePoll();
+    showNotice('Opening Cloudflare…');
+    continueToCloudflare(prepared.handoff);
   } catch (error) {
     showNotice(apiErrorMessage(
       error,

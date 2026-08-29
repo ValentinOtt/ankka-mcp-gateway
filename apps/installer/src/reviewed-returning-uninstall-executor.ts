@@ -1710,6 +1710,7 @@ function installedReleaseIdentity(
   return parseExactReleaseBundleIdentity({
     schemaVersion: 1,
     channel: authority.runtime.updateChannel,
+    controlPlaneOrigin: authority.runtime.controlPlaneOrigin,
     release: authority.runtime.release,
     keyId: authority.runtime.updateKeyId,
     publicKey: authority.runtime.updatePublicKey,

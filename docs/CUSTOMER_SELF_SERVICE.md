@@ -81,18 +81,24 @@ Open the management URL and authenticate through your Cloudflare Access policy.
 
 - **Overview** shows gateway status, the MCP URL, current release, audience,
   source state, and the removal entry point.
-- **Sources** discovers a public MCP catalogue or records a
-  standards-compliant per-user OAuth source, saves an exact tool allowlist, and
-  prepares an exact apply action for customer review.
+- **Sources** discovers a public MCP catalogue or records a standards-compliant
+  OAuth-protected source, saves an exact tool allowlist, and prepares an exact
+  apply action for customer review.
 - **Updates** checks the installed signed release channel and prepares an
   update or rollback.
 
 Saving a source draft changes only customer-owned Durable Object state. Applying
 a source, updating, rolling back, or removing the gateway requires a new
-short-lived Cloudflare authorization.
+short-lived Cloudflare authorization. The complete secret-free source-state
+record is bounded to 1 MiB of canonical UTF-8 JSON; a save that would cross the
+bound in its worst-case installed projection is rejected before Durable Object
+storage is changed.
 
-Upstream per-user OAuth is handled by Cloudflare Portal. Ankka does not receive
-those tokens.
+For a protected source, the Portal mapping sets **Require user auth** off. A
+customer operator connects the source once, the credential stays in the
+customer's Cloudflare account, and team members authenticate only to the
+Gateway Portal. The current dashboard does not offer per-user upstream
+authentication. Ankka does not receive the upstream token.
 
 ## Supported MCP sources
 

@@ -22,6 +22,8 @@ const SOURCE_ID = /^source-[a-f0-9]{16}$/u;
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const TOOL = /^[A-Za-z0-9_.:/-]{1,128}$/u;
+const MAX_ENABLED_TOOLS_PER_SOURCE = 500;
+const MANAGEMENT_SOURCES_LIMIT_BYTES = 1024 * 1024;
 const EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u;
 const UPDATE_KEY_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const UPDATE_PUBLIC_KEY = /^[A-Za-z0-9_-]{43}$/u;
@@ -37,11 +39,14 @@ function validHostname(value: string): boolean {
 }
 
 function validPublicSourceUrl(value: string): boolean {
+  if (value.length > 2048) return false;
   try {
     const url = new URL(value);
+    const blockedSuffixes = ['.internal', '.invalid', '.local', '.localhost', '.onion', '.test'];
     return url.protocol === 'https:' && !url.username && !url.password && !url.port &&
-      (url.pathname === '/' || url.pathname === '/mcp') && !url.search && !url.hash &&
-      validHostname(url.hostname);
+      url.pathname !== '/' && !url.search && !url.hash && validHostname(url.hostname) &&
+      url.hostname !== 'localhost' &&
+      !blockedSuffixes.some((suffix) => url.hostname.endsWith(suffix)) && url.href === value;
   } catch {
     return false;
   }
@@ -57,11 +62,29 @@ function managementHostname(value: string): string | null {
   }
 }
 
+function validControlPlaneOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.origin === value && !url.username && !url.password &&
+      !url.port && url.pathname === '/' && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
 function validSafeName(value: string): boolean {
   return ![...value].some((character) => {
     const codePoint = character.codePointAt(0) ?? 0;
     return codePoint <= 31 || codePoint === 127 || '<>{}\\'.includes(character);
   });
+}
+
+function validSourceLabel(value: string): boolean {
+  return value.length >= 2 && value.length <= 80 && value.trim() === value &&
+    ![...value].some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 31 || codePoint === 127;
+    });
 }
 
 function normalizedEmailList(value: string[]): boolean {
@@ -88,6 +111,7 @@ const safeNameSchema = v.pipe(
   v.maxLength(128),
   v.check(validSafeName),
 );
+const sourceLabelSchema = v.pipe(v.string(), v.check(validSourceLabel));
 const emailSchema = v.pipe(
   v.string(),
   v.regex(EMAIL),
@@ -104,7 +128,7 @@ const toolSchema = v.pipe(v.string(), v.regex(TOOL));
 const enabledToolsSchema = v.pipe(
   v.array(toolSchema),
   v.minLength(1),
-  v.maxLength(64),
+  v.maxLength(MAX_ENABLED_TOOLS_PER_SOURCE),
   v.check((tools) => new Set(tools).size === tools.length),
 );
 const providerSchema = v.strictObject({ id: providerIdSchema });
@@ -154,7 +178,7 @@ const controlSchema = v.strictObject({
 });
 const sourceBaseSchema = {
   id: sourceIdSchema,
-  label: safeNameSchema,
+  label: sourceLabelSchema,
   url: publicSourceUrlSchema,
   enabledTools: enabledToolsSchema,
   status: v.picklist(['installed', 'draft']),
@@ -173,6 +197,7 @@ const sourcesSchema = v.strictObject({
 const runtimeSchema = v.strictObject({
   release: releaseSchema,
   artifactSha256: hashSchema,
+  controlPlaneOrigin: v.string(),
   updateChannel: v.picklist(['canary', 'stable']),
   updateKeyId: v.pipe(v.string(), v.regex(UPDATE_KEY_ID)),
   updatePublicKey: v.pipe(v.string(), v.regex(UPDATE_PUBLIC_KEY)),
@@ -268,6 +293,7 @@ export interface ReturningUninstallManagementSources {
 export interface ReturningUninstallRuntimeAuthority {
   readonly release: string;
   readonly artifactSha256: string;
+  readonly controlPlaneOrigin: string;
   readonly updateChannel: 'canary' | 'stable';
   readonly updateKeyId: string;
   /** Raw Ed25519 verification key encoded as unpadded base64url. */
@@ -354,12 +380,16 @@ function parseSources(input: ParsedSources): ReturningUninstallManagementSources
   }));
   if (new Set(sources.map((source) => source.id)).size !== sources.length ||
       new Set(sources.map((source) => source.url)).size !== sources.length) return null;
-  return deepFreezePlainData({
+  const record = {
     schemaVersion: 1,
     revision: input.revision,
     applyMode: 'oauth_per_action',
     sources,
-  });
+  } as const;
+  if (new TextEncoder().encode(canonicalJson(record)).byteLength > MANAGEMENT_SOURCES_LIMIT_BYTES) {
+    return null;
+  }
+  return deepFreezePlainData(record);
 }
 
 function parseRuntime(
@@ -369,7 +399,8 @@ function parseRuntime(
 ): ReturningUninstallRuntimeAuthority | null {
   if (runtime.accountId !== expectation.accountId || runtime.workerName !== expectation.workerName ||
       runtime.workersSubdomain !== expectation.workersSubdomain ||
-      runtime.managementHostname !== expectedManagementHostname) return null;
+      runtime.managementHostname !== expectedManagementHostname ||
+      !validControlPlaneOrigin(runtime.controlPlaneOrigin)) return null;
   return deepFreezePlainData(runtime);
 }
 

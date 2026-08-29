@@ -320,6 +320,23 @@ describe('source action relay', () => {
     expect(providerCalls).toBe(0);
   });
 
+  it('rejects release authority for another control-plane origin before provider access', async () => {
+    let providerCalls = 0;
+    const transport = async () => {
+      providerCalls += 1;
+      throw new Error('provider access must not be reached');
+    };
+    const base = input(transport);
+    await expect(relaySourceAction({
+      ...base,
+      releaseIdentity: Object.freeze({
+        ...signedRuntime.identity,
+        controlPlaneOrigin: 'https://foreign-control.example',
+      }),
+    })).rejects.toMatchObject({ code: 'session_conflict' });
+    expect(providerCalls).toBe(0);
+  });
+
   it('rejects copied tags and bindings when the active module bytes are not the signed release', async () => {
     let providerWrites = 0;
     let tokenBearingPosts = 0;

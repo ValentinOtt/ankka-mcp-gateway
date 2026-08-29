@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GatewayConfigError } from '../src/config.ts';
@@ -255,6 +256,214 @@ test('desired-state helper consumes Access emails without returning them', async
   });
   assert.equal(desired.resources[2].desired.allow.identitiesRef, 'access.allowedEmails');
   assert.equal(desired.resources[5].desired.allow.identitiesRef, 'access.allowedEmails');
+});
+
+test('binds one exact source group while keeping the Portal email policy', async () => {
+  const groupConfig = config();
+  groupConfig.sources[0].accessGroup = 'ERP Readers';
+  const desired = await buildGatewayDesiredState(groupConfig, {
+    target: target(),
+    access: access({
+      groups: [
+        { id: 'group-unrelated', name: 'Unrelated Readers' },
+        { id: 'group-erp-readers', name: 'ERP Readers' },
+      ],
+    }),
+  });
+  const sourcePolicy = desired.resources.find((resource) =>
+    resource.kind === 'source_access_policy');
+  const portalPolicy = desired.resources.find((resource) =>
+    resource.kind === 'portal_access_policy');
+  assert.deepEqual(desired.blockers, []);
+  assert.deepEqual(
+    {
+      identitiesRef: sourcePolicy.desired.allow.identitiesRef,
+      identityType: sourcePolicy.desired.allow.identityType,
+      identityCount: sourcePolicy.desired.allow.identityCount,
+    },
+    { identitiesRef: 'access.groups', identityType: 'group', identityCount: 1 },
+  );
+  assert.match(sourcePolicy.desired.allow.identitiesHash, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(portalPolicy.desired.allow.identitiesRef, 'access.allowedEmails');
+  assert.equal(portalPolicy.desired.allow.identityType, 'email');
+  const output = JSON.stringify(desired);
+  assert.equal(output.includes('group-erp-readers'), false);
+  assert.equal(output.includes('group-unrelated'), false);
+  assert.equal(output.includes('ERP Readers'), false);
+  assert.equal(output.includes('Unrelated Readers'), false);
+
+  const plan = await buildGatewayPlan(
+    groupConfig,
+    { target: target(), resources: [] },
+    {
+      release: 'test',
+      access: access({
+        groups: [
+          { id: 'group-unrelated', name: 'Unrelated Readers' },
+          { id: 'group-erp-readers', name: 'ERP Readers' },
+        ],
+      }),
+    },
+  );
+  const planOutput = JSON.stringify(plan);
+  assert.equal(planOutput.includes('group-erp-readers'), false);
+  assert.equal(planOutput.includes('group-unrelated'), false);
+  assert.equal(planOutput.includes('ERP Readers'), false);
+  assert.equal(planOutput.includes('Unrelated Readers'), false);
+});
+
+test('binds mixed source audiences independently without exposing group observations', async () => {
+  const mixedConfig = config();
+  mixedConfig.sources[0].accessGroup = 'Context Readers';
+  mixedConfig.sources.push({
+    id: 'analytics',
+    label: 'Analytics',
+    url: 'https://analytics.example.com/mcp',
+    authentication: { mode: 'oauth', onBehalfOfUser: true },
+    accessGroup: 'Analytics Readers',
+    enabledTools: ['analytics_report'],
+  }, {
+    id: 'handbook',
+    label: 'Handbook',
+    url: 'https://handbook.example.com/mcp',
+    authentication: { mode: 'none', onBehalfOfUser: false },
+    enabledTools: ['handbook_search'],
+  });
+  const observations = [
+    { id: 'group-context-sentinel', name: 'Context Readers' },
+    { id: 'group-analytics-sentinel', name: 'Analytics Readers' },
+  ];
+  const desired = await buildGatewayDesiredState(mixedConfig, {
+    target: target(),
+    access: access({ groups: observations }),
+  });
+  const policiesBySource = new Map();
+  for (const policy of desired.resources.filter(({ kind }) => kind === 'source_access_policy')) {
+    const application = desired.resources.find(({ kind, key }) =>
+      kind === 'source_access_application'
+        && key === policy.desired.sourceApplicationResourceKey);
+    const server = desired.resources.find(({ kind, key }) =>
+      kind === 'mcp_server' && key === application.desired.sourceResourceKey);
+    policiesBySource.set(server.desired.sourceId, policy.desired.allow);
+  }
+
+  assert.deepEqual(desired.blockers, []);
+  assert.equal(policiesBySource.get('company-context').identityType, 'group');
+  assert.equal(policiesBySource.get('analytics').identityType, 'group');
+  assert.notEqual(
+    policiesBySource.get('company-context').identitiesHash,
+    policiesBySource.get('analytics').identitiesHash,
+  );
+  assert.equal(policiesBySource.get('handbook').identityType, 'email');
+  assert.equal(policiesBySource.get('handbook').identitiesRef, 'access.allowedEmails');
+  const output = JSON.stringify(desired);
+  for (const { id, name } of observations) {
+    assert.equal(output.includes(id), false);
+    assert.equal(output.includes(name), false);
+  }
+});
+
+test('fails closed when a source group observation is missing, ambiguous, or malformed', async () => {
+  const groupConfig = config();
+  groupConfig.sources[0].accessGroup = 'ERP Readers';
+  const missing = await buildGatewayDesiredState(groupConfig, {
+    target: target(),
+    access: access(),
+  });
+  assert.ok(missing.blockers.some((blocker) =>
+    blocker.code === 'source_access_group_missing'));
+
+  const ambiguous = await buildGatewayDesiredState(groupConfig, {
+    target: target(),
+    access: access({
+      groups: [
+        { id: 'group-erp-a', name: 'ERP Readers' },
+        { id: 'group-erp-b', name: 'ERP Readers' },
+      ],
+    }),
+  });
+  assert.ok(ambiguous.blockers.some((blocker) =>
+    blocker.code === 'source_access_group_ambiguous'));
+  assert.equal(JSON.stringify(ambiguous).includes('group-erp-a'), false);
+  assert.equal(JSON.stringify(ambiguous).includes('group-erp-b'), false);
+
+  const malformed = await buildGatewayDesiredState(groupConfig, {
+    target: target(),
+    access: access({ groups: [{ id: 'group-erp', name: 'ERP Readers', members: 4 }] }),
+  });
+  assert.deepEqual(
+    malformed.blockers.map((blocker) => blocker.code).slice(-2),
+    ['invalid_access_groups', 'source_access_group_missing'],
+  );
+});
+
+test('rejects duplicate provider IDs globally while preserving distinct-ID name ambiguity', async () => {
+  const groupConfig = config();
+  groupConfig.sources[0].accessGroup = 'ERP Readers';
+  const cases = [
+    {
+      forbidden: ['shared-provider-id', 'Finance Readers'],
+      groups: [
+        { id: 'shared-provider-id', name: 'ERP Readers' },
+        { id: 'shared-provider-id', name: 'Finance Readers' },
+      ],
+    },
+    {
+      forbidden: ['unrelated-duplicate-id', 'Unrelated Readers'],
+      groups: [
+        { id: 'group-erp', name: 'ERP Readers' },
+        { id: 'unrelated-duplicate-id', name: 'Unrelated Readers' },
+        { id: 'unrelated-duplicate-id', name: 'Unrelated Readers' },
+      ],
+    },
+  ];
+  for (const { forbidden, groups } of cases) {
+    const desired = await buildGatewayDesiredState(groupConfig, {
+      target: target(),
+      access: access({ groups }),
+    });
+    assert.ok(desired.blockers.some(({ code }) => code === 'invalid_access_groups'));
+    const output = JSON.stringify(desired);
+    for (const value of forbidden) assert.equal(output.includes(value), false);
+  }
+
+  const ambiguous = await buildGatewayDesiredState(groupConfig, {
+    target: target(),
+    access: access({
+      groups: [
+        { id: 'distinct-provider-a', name: 'ERP Readers' },
+        { id: 'distinct-provider-b', name: 'ERP Readers' },
+      ],
+    }),
+  });
+  assert.equal(
+    ambiguous.blockers.some(({ code }) => code === 'invalid_access_groups'),
+    false,
+  );
+  assert.ok(ambiguous.blockers.some(({ code }) => code === 'source_access_group_ambiguous'));
+});
+
+test('keeps the checked-in Access-group fixture synthetic and runnable', async () => {
+  const [gatewayConfig, accessInput] = await Promise.all([
+    readFile(new URL('../fixtures/access-groups/gateway.config.json', import.meta.url), 'utf8')
+      .then(JSON.parse),
+    readFile(
+      new URL('../fixtures/access-groups/access-input.synthetic.json', import.meta.url),
+      'utf8',
+    ).then(JSON.parse),
+  ]);
+  const plan = await buildGatewayPlan(
+    gatewayConfig,
+    { target: target(), resources: [] },
+    { release: 'test', access: accessInput },
+  );
+  const sourcePolicy = plan.changes.find((change) =>
+    change.kind === 'source_access_policy');
+  assert.deepEqual(plan.blockers, []);
+  assert.equal(sourcePolicy.desired.allow.identityType, 'group');
+  assert.equal(sourcePolicy.desired.allow.identityCount, 1);
+  assert.equal(JSON.stringify(plan).includes('synthetic-access-group'), false);
+  assert.equal(JSON.stringify(plan).includes('ERP Readers'), false);
 });
 
 test('reports noops, owned drift, and foreign collisions without ambiguity', async () => {

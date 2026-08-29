@@ -30,7 +30,9 @@ import {
 
 const BASE_RELEASE = 'gateway-v1.2.3';
 const FAULT_RELEASE = 'gateway-v1.2.4';
+const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';
 const PROBE_WORKER = `
+const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';
 function fixedJson(status, value) {
   return new Response(JSON.stringify(value), { status });
 }
@@ -81,6 +83,7 @@ async function fixture() {
     baseRelease: BASE_RELEASE,
     release: FAULT_RELEASE,
     channel: 'canary',
+    controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
     fault: REVIEWED_FAULT_INJECTION,
   };
   return { checkout: { ...checkout, commit: sourceCommit }, input };
@@ -102,6 +105,7 @@ describe('build-reviewed-fault-injection-candidate', () => {
     const { checkout, input } = await fixture();
     try {
       const ordinary = await buildReleaseCandidate({
+        controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
         sourceDirectory: checkout.source,
         sourceCommit: checkout.commit,
         release: BASE_RELEASE,
@@ -229,6 +233,7 @@ describe('build-reviewed-fault-injection-candidate', () => {
       const args = [
         '--source', input.sourceDirectory,
         '--source-commit', input.sourceCommit,
+        '--control-plane-origin', input.controlPlaneOrigin,
         '--base-release', input.baseRelease,
         '--release', input.release,
         '--channel', input.channel,

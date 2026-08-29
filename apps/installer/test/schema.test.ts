@@ -21,6 +21,56 @@ describe('strict deployment contracts', () => {
       'owner@example.com',
     ]);
     expect(firstSource.enabledTools).toEqual(['company_prepare', 'company_search']);
+
+    expect(() => parseDeploySelection({
+      ...selectionInput,
+      basics: {
+        ...selectionInput.basics,
+        additionalAdminEmails: Array.from(
+          { length: 19 },
+          (_value, index) => `admin-${String(index).padStart(2, '0')}@example.com`,
+        ),
+      },
+      firstSource: {
+        ...selectionInput.firstSource,
+        portalUserEmails: Array.from(
+          { length: 50 },
+          (_value, index) => `member-${String(index).padStart(2, '0')}@example.com`,
+        ),
+      },
+    })).toThrow(expect.objectContaining({
+      code: 'bad_request',
+      reason: 'portal_user_emails_invalid',
+    }));
+  });
+
+  it('preserves 228- and 224-tool sources and rejects input above the 500-tool bound', () => {
+    for (const toolCount of [228, 224]) {
+      const largeToolNames = Array.from(
+        { length: toolCount },
+        (_value, index) => `synthetic_read_${String(index + 1).padStart(3, '0')}`,
+      );
+      const parsed = parseDeploySelection({
+        ...selectionInput,
+        firstSource: { ...selectionInput.firstSource, enabledTools: largeToolNames },
+      });
+
+      expect(requiredFixture(parsed.firstSource ?? undefined, 'first source').enabledTools)
+        .toEqual(largeToolNames);
+    }
+    expect(() => parseDeploySelection({
+      ...selectionInput,
+      firstSource: {
+        ...selectionInput.firstSource,
+        enabledTools: Array.from(
+          { length: 501 },
+          (_value, index) => `synthetic_read_${String(index + 1).padStart(3, '0')}`,
+        ),
+      },
+    })).toThrow(expect.objectContaining({
+      code: 'bad_request',
+      reason: 'enabled_tools_invalid',
+    }));
   });
 
   it('rejects unknown fields, out-of-zone hostnames, and credential-like source URLs', () => {

@@ -8,7 +8,7 @@ export const FIXTURE_PAYLOAD = Object.freeze({
   'payload/installer/index.html': '<main>installer</main>',
   'payload/worker-cleanup/index.js': 'export class AdminState {}\nexport default {};\n',
   'payload/worker-retirement/index.js': 'export default {};\n',
-  'payload/worker/index.js': 'export class AdminState {}\nexport default {};\n',
+  'payload/worker/index.js': "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport class AdminState {}\nexport default {};\n",
 });
 
 export const FIXTURE_ADMIN_OUTPUT = Object.freeze({

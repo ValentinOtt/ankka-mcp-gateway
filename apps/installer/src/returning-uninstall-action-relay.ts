@@ -11,7 +11,7 @@ import {
   parseGatewayWorkerSubdomainState,
 } from './cloudflare-gateway-runtime-state';
 import type { GatewayWorkerPlainTextBindings } from './cloudflare-worker-direct-upload';
-import { CLOUDFLARE_API_ORIGIN } from './constants';
+import { CLOUDFLARE_API_ORIGIN, PUBLIC_ORIGIN } from './constants';
 import { base64UrlDecode } from './crypto';
 import { DeployError } from './errors';
 import { readBoundedText, withDeadline } from './http';
@@ -35,7 +35,9 @@ const INSTALLATION_ID = /^acg-[a-f0-9]{24}$/u;
 const RELEASE = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[a-z0-9.-]+)?$/u;
 const REQUEST_ID = /^[A-Za-z0-9_-]{22}$/u;
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
-const MAX_RESPONSE_BYTES = 256 * 1024;
+const MAX_PROVIDER_RESPONSE_BYTES = 256 * 1024;
+const MAX_CUSTOMER_AUTHORITY_RESPONSE_BYTES = 4 * 1024 * 1024;
+const MAX_CUSTOMER_RESULT_RESPONSE_BYTES = 64 * 1024;
 const READY_ATTEMPTS = 20;
 const providerEnvelopeSchema = v.looseObject({
   result: boundaryValueSchema,
@@ -117,7 +119,7 @@ async function providerResult(
       await response.body?.cancel().catch(() => undefined);
       throw new DeployError(502, 'oauth_grant_invalid');
     }
-    const body = await readBoundedText(response, 'oauth_grant_invalid', MAX_RESPONSE_BYTES);
+    const body = await readBoundedText(response, 'oauth_grant_invalid', MAX_PROVIDER_RESPONSE_BYTES);
     if (!response.ok) throw new DeployError(502, 'oauth_grant_invalid');
     try {
       const envelope = v.safeParse(providerEnvelopeSchema, JSON.parse(body));
@@ -230,6 +232,7 @@ function bindAuthorityToCurrentRuntime(
     bindings.ADMIN_EMAILS !== authority.control.audienceEmails.join(',') ||
     bindings.ANKKA_GATEWAY_RELEASE !== runtime.release ||
     bindings.ANKKA_GATEWAY_RELEASE_SHA256 !== runtime.artifactSha256 ||
+    runtime.controlPlaneOrigin !== PUBLIC_ORIGIN ||
     bindings.ANKKA_UPDATE_CHANNEL !== runtime.updateChannel ||
     bindings.ANKKA_UPDATE_KEY_ID !== runtime.updateKeyId ||
     bindings.ANKKA_UPDATE_PUBLIC_KEY !== runtime.updatePublicKey ||
@@ -281,18 +284,43 @@ function actionUrl(input: ReturningUninstallActionRelayInput): URL {
   return new URL(`https://${input.workerName}.${input.workersSubdomain}.workers.dev/__ankka/teardown-action`);
 }
 
+function authorityExpectation(
+  input: ReturningUninstallActionRelayInput,
+): ReturningUninstallAuthorityExpectation {
+  return Object.freeze({
+    actionId: input.actionId,
+    actorEmail: input.actorEmail,
+    installationId: input.installationId,
+    accountId: input.accountId,
+    workerName: input.workerName,
+    workersSubdomain: input.workersSubdomain,
+    managementOrigin: input.managementOrigin,
+    portalHostname: input.portalHostname,
+    gatewayName: input.gatewayName,
+  });
+}
+
 async function awaitRoute(input: ReturningUninstallActionRelayInput): Promise<void> {
-  for (let attempt = 0; attempt < READY_ATTEMPTS; attempt += 1) {
-    try {
-      const response = await input.transport(actionUrl(input), { method: 'HEAD', redirect: 'manual' });
-      const accepted = !response.redirected && response.status === 204 &&
-        response.headers.get('x-ankka-teardown-action') === 'ready';
-      await response.body?.cancel().catch(() => undefined);
-      if (accepted) return;
-    } catch { /* bounded retry below */ }
-    await new Promise<void>((resolve) => setTimeout(resolve, 250));
-  }
-  throw new DeployError(504, 'oauth_exchange_failed', 'customer_action_route_timeout');
+  return withDeadline(async (signal) => {
+    for (let attempt = 0; attempt < READY_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await input.transport(actionUrl(input), {
+          method: 'HEAD',
+          redirect: 'manual',
+          signal,
+        });
+        const accepted = !response.redirected && response.status === 204 &&
+          response.headers.get('x-ankka-teardown-action') === 'ready';
+        await response.body?.cancel().catch(() => undefined);
+        if (accepted) return;
+      } catch { /* bounded retry below */ }
+      if (signal.aborted) {
+        throw new DeployError(504, 'oauth_exchange_failed', 'customer_action_route_timeout');
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    }
+    throw new DeployError(504, 'oauth_exchange_failed', 'customer_action_route_timeout');
+  }, 'oauth_exchange_failed');
 }
 
 async function prove(input: ReturningUninstallActionRelayInput, now: number): Promise<ReturningUninstallImportedAuthority> {
@@ -307,29 +335,37 @@ async function prove(input: ReturningUninstallActionRelayInput, now: number): Pr
     issuedAt: now,
     expiresAt: input.expiresAt,
   });
-  const response = await input.transport(actionUrl(input), {
-    method: 'POST',
-    headers: {
-      accept: 'application/json',
-      'content-type': 'application/json',
-      'x-ankka-teardown-action-signature': await hmac(input.actionKey, body),
-    },
-    body,
-    redirect: 'manual',
-    credentials: 'omit',
-  });
-  if (response.redirected || response.status !== 200) {
-    await response.body?.cancel().catch(() => undefined);
-    throw new DeployError(409, 'session_conflict');
-  }
-  const serialized = await readBoundedText(response, 'session_conflict', MAX_RESPONSE_BYTES);
-  try {
-    const parsed = v.parse(boundaryValueSchema, JSON.parse(serialized));
-    return parseReturningUninstallImportedAuthority(parsed, input);
-  } catch (error) {
-    if (error instanceof DeployError) throw error;
-    throw new DeployError(409, 'session_conflict');
-  }
+  const signature = await hmac(input.actionKey, body);
+  return withDeadline(async (signal) => {
+    const response = await input.transport(actionUrl(input), {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'x-ankka-teardown-action-signature': signature,
+      },
+      body,
+      redirect: 'manual',
+      credentials: 'omit',
+      signal,
+    });
+    if (response.redirected || response.status !== 200) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new DeployError(409, 'session_conflict');
+    }
+    const serialized = await readBoundedText(
+      response,
+      'session_conflict',
+      MAX_CUSTOMER_AUTHORITY_RESPONSE_BYTES,
+    );
+    try {
+      const parsed = v.parse(boundaryValueSchema, JSON.parse(serialized));
+      return parseReturningUninstallImportedAuthority(parsed, authorityExpectation(input));
+    } catch (error) {
+      if (error instanceof DeployError) throw error;
+      throw new DeployError(409, 'session_conflict');
+    }
+  }, 'session_conflict');
 }
 
 export interface ReturningUninstallApplyResult {
@@ -358,31 +394,39 @@ async function apply(
     issuedAt: now,
     expiresAt: input.expiresAt,
   });
-  const response = await input.transport(actionUrl(input), {
-    method: 'POST',
-    headers: {
-      accept: 'application/json',
-      'content-type': 'application/json',
-      'x-ankka-teardown-action-signature': await hmac(input.actionKey, body),
-    },
-    body,
-    redirect: 'manual',
-    credentials: 'omit',
-  });
-  if (response.redirected || response.status !== 200) {
-    await response.body?.cancel().catch(() => undefined);
-    throw new DeployError(409, 'session_conflict');
-  }
-  const serialized = await readBoundedText(response, 'session_conflict', MAX_RESPONSE_BYTES);
-  let result: v.SafeParseResult<typeof applyResultSchema>;
-  try {
-    result = v.safeParse(applyResultSchema, JSON.parse(serialized));
-  } catch {
-    throw new DeployError(409, 'session_conflict');
-  }
-  if (!result.success || result.output.actionId !== input.actionId ||
-      result.output.installationId !== input.installationId) throw new DeployError(409, 'session_conflict');
-  return Object.freeze(result.output);
+  const signature = await hmac(input.actionKey, body);
+  return withDeadline(async (signal) => {
+    const response = await input.transport(actionUrl(input), {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'x-ankka-teardown-action-signature': signature,
+      },
+      body,
+      redirect: 'manual',
+      credentials: 'omit',
+      signal,
+    });
+    if (response.redirected || response.status !== 200) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new DeployError(409, 'session_conflict');
+    }
+    const serialized = await readBoundedText(
+      response,
+      'session_conflict',
+      MAX_CUSTOMER_RESULT_RESPONSE_BYTES,
+    );
+    let result: v.SafeParseResult<typeof applyResultSchema>;
+    try {
+      result = v.safeParse(applyResultSchema, JSON.parse(serialized));
+    } catch {
+      throw new DeployError(409, 'session_conflict');
+    }
+    if (!result.success || result.output.actionId !== input.actionId ||
+        result.output.installationId !== input.installationId) throw new DeployError(409, 'session_conflict');
+    return Object.freeze(result.output);
+  }, 'session_conflict');
 }
 
 function operationFailure<Value>(error: Value): Error {

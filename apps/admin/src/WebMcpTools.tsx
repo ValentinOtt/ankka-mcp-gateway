@@ -121,14 +121,14 @@ export function WebMcpTools() {
       })
       await modelContext.registerTool({
         name: 'save_mcp_source_draft',
-        description: 'Recheck an MCP endpoint and save its exact tool allowlist in customer-owned state. This does not change the live Cloudflare Portal.',
+        description: 'Recheck an MCP endpoint and save its exact tool allowlist in customer-owned state. OAuth-protected sources use one operator connection; this does not change the live Cloudflare Portal.',
         inputSchema: {
           type: 'object', additionalProperties: false,
           properties: {
             label: { type: 'string', minLength: 2, maxLength: 80 },
             url: { type: 'string', format: 'uri' },
             authMode: { type: 'string', enum: ['none', 'oauth'] },
-            enabledTools: { type: 'array', minItems: 1, maxItems: 64, uniqueItems: true, items: { type: 'string' } },
+            enabledTools: { type: 'array', minItems: 1, maxItems: 500, uniqueItems: true, items: { type: 'string' } },
           },
           required: ['label', 'url', 'authMode', 'enabledTools'],
         },

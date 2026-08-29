@@ -27,6 +27,7 @@ const RELEASE = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[a-
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const OWNERSHIP_MARKER = /^acg-[a-f0-9]{24}$/u;
 const TOOL_NAME = /^[A-Za-z0-9_.:/-]{1,128}$/u;
+const MAX_ENABLED_TOOLS_PER_SOURCE = 500;
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const EMAIL_LIKE = /(?:^|[^A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:$|[^A-Za-z0-9.-])/u;
 
@@ -244,7 +245,7 @@ const sourceSchema = v.strictObject({
   enabledTools: v.pipe(
     v.array(v.pipe(v.string(), v.regex(TOOL_NAME))),
     v.minLength(1),
-    v.maxLength(64),
+    v.maxLength(MAX_ENABLED_TOOLS_PER_SOURCE),
   ),
 });
 const gatewaySchema = v.strictObject({

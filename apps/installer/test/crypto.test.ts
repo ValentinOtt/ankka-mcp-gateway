@@ -12,6 +12,7 @@ import {
   parseCookies,
   sessionCookie,
 } from '../src/cookies';
+import { PUBLIC_ORIGIN } from '../src/constants';
 import { ENCRYPTION_KEY, NOW } from './fixtures';
 
 describe('opaque and sealed cookies', () => {
@@ -73,6 +74,7 @@ describe('opaque and sealed cookies', () => {
       releaseIdentity: {
         schemaVersion: 1 as const,
         channel: 'canary' as const,
+        controlPlaneOrigin: PUBLIC_ORIGIN,
         release: 'gateway-v1.0.0',
         keyId: 'release-key-1',
         publicKey: 'B'.repeat(43),

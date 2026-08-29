@@ -33,10 +33,12 @@
     }
   },
   "scripts": {
+    "allowlist:openapi": "node tools/openapi-enabled-tools.mjs",
     "build": "npm run build:admin && npm run build --workspace @ankka/gateway-installer",
     "build:admin": "npm run build --workspace @ankka/gateway-admin",
     "canary:fixture:serve": "node fixtures/synthetic-mcp/server.mjs --host 127.0.0.1 --port 9610",
     "canary:fixture:test": "node --test test/synthetic-mcp.test.mjs",
+    "canary:live": "node tools/live-portal-canary.mjs",
     "check": "npm run check:toolchain && npm run lint && npm run typecheck && npm run build && npm run test:core && npm run test:apps && npm run check:boundary && npm run check:history",
     "check:boundary": "node scripts/check-public-boundary.mjs",
     "check:fast": "npm run lint && npm run typecheck && npm run typecheck --workspace @ankka/gateway-installer && npm run check:boundary && npm run build:admin && npm run test --workspace @ankka/gateway-admin && npm run test:core",

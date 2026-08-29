@@ -1,5 +1,9 @@
 import * as v from 'valibot';
 
+import {
+  isAccessGroupName,
+  MAX_ACCESS_GROUP_NAME_LENGTH,
+} from './access-groups.ts';
 import { jsonObjectSchema, type JsonObject, type JsonValue } from './json.ts';
 
 const CODE_MODES = new Set(['off', 'opt_in', 'default_on', 'enforced']);
@@ -9,6 +13,8 @@ const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const SECRET_KEY = /(?:api[_-]?key|credential|password|private[_-]?key|secret|token)/iu;
 const SECRET_METADATA_KEYS = new Set(['credentialCustody']);
 const SENSITIVE_QUERY_KEY = /(?:api[_-]?key|auth|credential|password|secret|signature|token)/iu;
+
+export const MAX_ENABLED_TOOLS_PER_SOURCE = 500;
 
 const gatewayConfigSchema = v.strictObject({
   $schema: v.optional(v.string()),
@@ -31,6 +37,7 @@ const gatewayConfigSchema = v.strictObject({
       mode: v.picklist(['none', 'bearer', 'oauth', 'headers']),
       onBehalfOfUser: v.boolean(),
     }),
+    accessGroup: v.optional(v.string()),
     enabledTools: v.array(v.string()),
   })),
 });
@@ -119,7 +126,7 @@ function validateSources(sources: JsonValue | undefined, errors: string[]): void
     rejectUnknownKeys(
       source,
       path,
-      ['id', 'label', 'url', 'authentication', 'enabledTools'],
+      ['id', 'label', 'url', 'authentication', 'accessGroup', 'enabledTools'],
       errors,
     );
     if (!isString(source.id) || !SOURCE_ID.test(source.id)) {
@@ -130,6 +137,12 @@ function validateSources(sources: JsonValue | undefined, errors: string[]): void
       ids.add(source.id);
     }
     requireText(source.label, `${path}.label`, 80, errors);
+    if (source.accessGroup !== undefined && !isAccessGroupName(source.accessGroup)) {
+      errors.push(
+        `${path}.accessGroup must be an exact non-empty group name of at most `
+          + `${MAX_ACCESS_GROUP_NAME_LENGTH} characters`,
+      );
+    }
     validateSourceUrl(source.url, `${path}.url`, errors);
     validateAuthentication(source.authentication, `${path}.authentication`, errors);
     validateTools(source.enabledTools, `${path}.enabledTools`, errors);
@@ -176,6 +189,8 @@ function validateAuthentication(
   }
   if (!v.is(v.boolean(), authentication.onBehalfOfUser)) {
     errors.push(`${path}.onBehalfOfUser must be a boolean`);
+  } else if (authentication.mode === 'none' && authentication.onBehalfOfUser !== false) {
+    errors.push(`${path}.onBehalfOfUser must be false when mode is none`);
   }
 }
 
@@ -183,6 +198,11 @@ function validateTools(tools: JsonValue | undefined, path: string, errors: strin
   if (!Array.isArray(tools) || tools.length === 0) {
     errors.push(`${path} must contain at least one exact tool name`);
     return;
+  }
+  if (tools.length > MAX_ENABLED_TOOLS_PER_SOURCE) {
+    errors.push(
+      `${path} cannot contain more than ${MAX_ENABLED_TOOLS_PER_SOURCE} entries`,
+    );
   }
   const seen = new Set<string>();
   tools.forEach((tool, index) => {

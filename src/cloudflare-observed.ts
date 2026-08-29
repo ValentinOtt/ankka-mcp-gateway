@@ -1,5 +1,6 @@
 import * as v from 'valibot';
 
+import { resolveAccessGroupByDigest } from './access-groups.ts';
 import type { CloudflareQuery } from './cloudflare-client.ts';
 import { validateGatewayConfig } from './config.ts';
 import {
@@ -407,8 +408,6 @@ export async function readCloudflareObservedState({
     }));
   }
 
-  const allowedEmails = normalizeAllowedEmails(access);
-
   for (const desired of desiredState.resources.filter((resource) => POLICY_KINDS.has(resource.kind))) {
     const parentKey = desired.kind === 'source_access_policy'
       ? desired.desired.sourceApplicationResourceKey
@@ -494,7 +493,7 @@ export async function readCloudflareObservedState({
         key: desired.key,
         locator: { id, parentId: app.id },
         marker: policy.name,
-        liveMatchesDesired: policyMatches(policy, allowedEmails),
+        liveMatchesDesired: await policyMatches(policy, desired.desired, access),
         desired,
         receipt: trustedReceipt,
       }));
@@ -816,19 +815,43 @@ function dnsMatches(live: BoundaryObject, desired: DesiredResource): boolean {
     && live.comment === ownershipMarker(metadata.installationId, desired.key);
 }
 
-function policyMatches(policy: BoundaryValue, allowedEmails: readonly string[]): boolean {
+async function policyMatches(
+  policy: BoundaryValue,
+  desired: JsonObject,
+  access: BoundaryValue,
+): Promise<boolean> {
   if (!isObject(policy)) return false;
   if (policy.decision !== 'allow') return false;
   if (!emptyRules(policy.exclude) || !emptyRules(policy.require)) return false;
-  if (!Array.isArray(policy.include) || policy.include.length !== allowedEmails.length) return false;
-  const liveEmails = [];
-  for (const rule of policy.include) {
-    const emailRule = isObject(rule) && isObject(rule.email) ? rule.email : null;
-    const email = emailRule?.email;
-    if (!isString(email)) return false;
-    liveEmails.push(email.trim().toLowerCase());
+  if (!Array.isArray(policy.include) || !isObject(desired.allow)) return false;
+  const allow = desired.allow;
+  if (!isString(allow.identitiesHash)
+    || !v.is(v.number(), allow.identityCount)) return false;
+
+  if (allow.identitiesRef === 'access.allowedEmails' && allow.identityType === 'email') {
+    const allowedEmails = normalizeAllowedEmails(access);
+    if (allowedEmails === null
+      || allow.identityCount !== allowedEmails.length
+      || policy.include.length !== allowedEmails.length) return false;
+    const liveEmails: string[] = [];
+    for (const rule of policy.include) {
+      const email = exactPolicyEmail(rule);
+      if (email === null) return false;
+      liveEmails.push(email.trim().toLowerCase());
+    }
+    return sameTextSet(liveEmails, allowedEmails);
   }
-  return sameTextSet(liveEmails, allowedEmails);
+  if (allow.identitiesRef === 'access.groups' && allow.identityType === 'group') {
+    const group = await resolveAccessGroupByDigest(
+      access,
+      allow.identityCount,
+      allow.identitiesHash,
+    );
+    return group !== null
+      && policy.include.length === 1
+      && exactPolicyGroup(policy.include[0]) === group.id;
+  }
+  return false;
 }
 
 function managedOauthMatches(app: BoundaryObject, expected: BoundaryValue): boolean {
@@ -999,15 +1022,40 @@ function requireObservedApp(app: BoundaryValue): ObservedApp {
   return { ...app, id };
 }
 
-function normalizeAllowedEmails(access: BoundaryValue): string[] {
-  const raw = isObject(access) && Array.isArray(access.allowedEmails)
-    ? access.allowedEmails
-    : [];
-  return [...new Set(raw
-    .filter(isString)
-    .map((email) => email.trim().toLowerCase())
-    .filter((email) => email.length > 0 && email.length <= 254 && EMAIL.test(email)))]
-    .sort(compareText);
+function normalizeAllowedEmails(access: BoundaryValue): string[] | null {
+  if (!isObject(access) || !Array.isArray(access.allowedEmails)) return null;
+  const emails: string[] = [];
+  for (const rawEmail of access.allowedEmails) {
+    if (!isString(rawEmail)) return null;
+    const email = rawEmail.trim().toLowerCase();
+    if (email.length === 0 || email.length > 254 || !EMAIL.test(email)) return null;
+    emails.push(email);
+  }
+  return [...new Set(emails)].sort(compareText);
+}
+
+function exactPolicyEmail(rule: BoundaryValue): string | null {
+  if (!isObject(rule)
+    || !hasExactKeys(rule, ['email'])
+    || !isObject(rule.email)
+    || !hasExactKeys(rule.email, ['email'])
+    || !isString(rule.email.email)) return null;
+  return rule.email.email;
+}
+
+function exactPolicyGroup(rule: BoundaryValue): string | null {
+  if (!isObject(rule)
+    || !hasExactKeys(rule, ['group'])
+    || !isObject(rule.group)
+    || !hasExactKeys(rule.group, ['id'])) return null;
+  return safeId(rule.group.id);
+}
+
+function hasExactKeys(value: BoundaryObject, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort(compareText);
+  const sortedExpected = [...expected].sort(compareText);
+  return actual.length === sortedExpected.length
+    && actual.every((key, index) => key === sortedExpected[index]);
 }
 
 function sameEnabledTools(tools: BoundaryValue, expected: readonly string[]): boolean {

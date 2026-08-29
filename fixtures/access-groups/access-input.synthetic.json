@@ -1,0 +1,9 @@
+{
+  "allowedEmails": ["owner@example.com"],
+  "groups": [
+    {
+      "id": "synthetic-access-group",
+      "name": "ERP Readers"
+    }
+  ]
+}

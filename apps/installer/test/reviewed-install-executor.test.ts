@@ -160,7 +160,7 @@ async function releaseBundle(): Promise<VerifiedReleaseBundle> {
     await releaseFile(
       'payload/worker/index.js',
       'application/javascript+module',
-      'export class AdminState {}; export default { fetch() { return new Response("ok") } };',
+      "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport class AdminState {}; export default { fetch() { return new Response(\"ok\") } };",
     ),
   ] as const;
   const records = values.map((entry) => entry.record);
@@ -170,6 +170,7 @@ async function releaseBundle(): Promise<VerifiedReleaseBundle> {
     sourceCommit: '0'.repeat(40),
     oauthScopeIds: REQUIRED_OAUTH_SCOPES,
     cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+    controlPlaneOrigin: 'https://deploy.ankka.ai',
     components: {
       admin: await component([requiredFixture(records.at(0), 'admin release record')]),
       installer: await component([requiredFixture(records.at(1), 'installer release record')]),

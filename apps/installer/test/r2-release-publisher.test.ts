@@ -168,7 +168,7 @@ async function fixture(): Promise<{
       'application/javascript+module',
       'export default {}',
     ),
-    await record('payload/worker/index.js', 'application/javascript+module', 'export default {}'),
+    await record('payload/worker/index.js', 'application/javascript+module', "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default {}"),
   ];
   const component = async (selected: readonly typeof files[number][]) => {
     const records = selected.map((entry) => entry.record);
@@ -188,6 +188,7 @@ async function fixture(): Promise<{
   const manifest = canonicalJson({
     artifact,
     cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+    controlPlaneOrigin: 'https://deploy.ankka.ai',
     components: {
       admin: await component(files.slice(0, 1)),
       installer: await component(files.slice(1, 2)),
@@ -232,6 +233,7 @@ async function fixture(): Promise<{
   const plan = {
     artifactSha256: artifact.treeSha256,
     channel: CHANNEL,
+    controlPlaneOrigin: 'https://deploy.ankka.ai',
     immutability: {
       externalAtomicCreateOnlyRequired: true,
       overwriteAllowed: false,

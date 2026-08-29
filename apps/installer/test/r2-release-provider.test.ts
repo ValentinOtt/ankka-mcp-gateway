@@ -135,7 +135,7 @@ async function signedFixture(
       path: 'payload/worker-retirement/index.js',
       bytes: encoder.encode('export default { fetch() {} };'),
     }),
-    Object.freeze({ path: 'payload/worker/index.js', bytes: encoder.encode('export default { fetch() {} };') }),
+    Object.freeze({ path: 'payload/worker/index.js', bytes: encoder.encode("const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default { fetch() {} };") }),
   ]);
   const record = async (
     file: ReleasePayloadFile,
@@ -171,6 +171,7 @@ async function signedFixture(
       treeSha256: await sha256Hex(canonicalJson(allFiles)),
     },
     cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+    controlPlaneOrigin: 'https://deploy.ankka.ai',
     components: {
       admin: await component(adminFiles),
       installer: await component(installerFiles),
@@ -219,6 +220,7 @@ async function signedFixture(
     pin: Object.freeze({
       schemaVersion: 1,
       channel,
+      controlPlaneOrigin: manifest.controlPlaneOrigin,
       release: manifest.release,
       keyId: 'test-key',
       publicKey,
@@ -373,10 +375,11 @@ describe('pinned R2 rich release bundle provider', () => {
     }
   });
 
-  it('rejects pin drift in channel, release, key ID, public key, or artifact digest', async () => {
+  it('rejects pin drift in channel, origin, release, key ID, public key, or artifact digest', async () => {
     const fixture = await signedFixture();
     const pins = [
       { ...fixture.pin, channel: '../canary' },
+      { ...fixture.pin, controlPlaneOrigin: 'https://foreign-control.example' },
       { ...fixture.pin, release: 'gateway-v1.2.4' },
       { ...fixture.pin, keyId: 'another-key' },
       { ...fixture.pin, publicKey: 'A'.repeat(43) },

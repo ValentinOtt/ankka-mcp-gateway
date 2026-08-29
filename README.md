@@ -35,7 +35,7 @@ The customer owns and operates:
 - Cloudflare Access applications and policies;
 - the customer management Worker and Durable Object;
 - DNS, request logs, installation state, and removal authority; and
-- all upstream credentials and per-user OAuth grants.
+- all upstream credentials and Cloudflare-managed source connections.
 
 Ankka's optional hosted installer coordinates a customer-approved deployment
 with a short-lived, operation-scoped Cloudflare OAuth grant. It must not persist
@@ -146,6 +146,12 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 ## Documentation
 
 - [Customer self-service](docs/CUSTOMER_SELF_SERVICE.md)
+- [First-party Cloudflare dogfood runbook](deploy/cloudflare/FIRST_PARTY_DOGFOOD.md)
+- [Customer-owned portal audit logging](docs/CUSTOMER_AUDIT_LOGGING.md)
+- [Large sources and Code Mode](docs/LARGE_SOURCES_AND_CODE_MODE.md)
+- [Spec-driven OpenAPI allowlists](docs/OPENAPI_ALLOWLISTS.md)
+- [Per-source Cloudflare Access groups](docs/SOURCE_ACCESS_GROUPS.md)
+- [Governance roadmap](docs/GOVERNANCE_ROADMAP.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Security model](docs/SECURITY_MODEL.md)
 - [Gateway updates and rollback](docs/UPDATES.md)

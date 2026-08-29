@@ -3,11 +3,11 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="light">
-    <meta name="theme-color" content="#d3cfb6">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#14130f">
     <meta name="robots" content="noindex, nofollow">
     <title>Deploy Ankka MCP Gateway</title>
-    <link rel="stylesheet" href="/assets/installer-2f74774a.css">
+    <link rel="stylesheet" href="/assets/installer-b89856ad.css">
   </head>
   <body>
     <header class="site-header">
@@ -42,12 +42,13 @@
           </div>
           <div class="callout" role="note"><strong>Hosted analytics</strong><p>Ankka keeps setup funnel events—page view and setup steps with public release/channel, coarse outcome and flow, a per-session key, country, browser family, and, for page views, the referring site—for three months in Cloudflare Analytics Engine. Analytics set no cookies and store no IP address, raw user agent, or identifier that outlives the session. Cloudflare separately processes hosted-zone reliability data. Customer gateways do not report usage to Ankka. Prefer no analytics? Deploy from the public source repository instead.</p></div>
           <div class="button-row"><button id="discover-cloudflare" class="primary-button" type="button">Connect Cloudflare</button></div>
-          <div id="discovery-handoff" class="callout" hidden><strong>Continue in your browser</strong><p>Open or copy this short-lived read-only discovery link. Return here after Cloudflare finishes.</p><a id="discovery-link" class="primary-button" target="_blank" rel="noopener noreferrer" hidden>Open Cloudflare sign-in</a></div>
+          <div id="discovery-handoff" class="callout" hidden><strong>Continue to Cloudflare</strong><p>If Cloudflare does not open automatically, use this short-lived read-only discovery link.</p><a id="discovery-link" class="primary-button" hidden>Continue to Cloudflare</a></div>
         </section>
 
         <section class="panel" data-route="/gateway" aria-labelledby="gateway-title" hidden>
           <h1 id="gateway-title">Name your gateway</h1>
           <p class="lede">Choose two unused hostnames beneath one active Cloudflare zone. The management hostname is for administrators; the portal hostname is the MCP connection.</p>
+          <div id="no-zones-notice" class="callout" role="note" hidden><strong>This account has no active zones</strong><p>The management and MCP portal hostnames live beneath a domain you host on Cloudflare, so the installer needs one active zone. Add a domain to Cloudflare first, then connect again to rediscover zones.</p><div class="button-row"><button class="secondary-button" type="button" data-go="/">Back to Cloudflare connect</button></div></div>
           <form id="gateway-form" novalidate>
             <div class="field-grid">
               <label class="wide-field"><span>Cloudflare account and zone</span><select id="cloudflare-target" required></select><small>Discovered with a short-lived read-only grant.</small></label>
@@ -77,7 +78,7 @@
           <div id="deploy-summary" class="summary-card"></div>
           <div class="callout"><strong>Before you continue</strong><p>Sign in as the same Cloudflare user. The write grant is checked against the exact account and zone discovered above.</p></div>
           <div class="button-row split"><button class="secondary-button" type="button" data-go="/review">Back</button><button id="authorize" class="primary-button" type="button">Create Cloudflare sign-in link</button></div>
-          <div id="authorization-handoff" class="callout" hidden><strong>Continue in your browser</strong><p>Open or copy this short-lived link. This installer page will keep watching for the result.</p><a id="authorization-link" class="primary-button" target="_blank" rel="noopener noreferrer" hidden>Open Cloudflare sign-in</a></div>
+          <div id="authorization-handoff" class="callout" hidden><strong>Continue to Cloudflare</strong><p>If Cloudflare does not open automatically, use this short-lived authorization link.</p><a id="authorization-link" class="primary-button" hidden>Continue to Cloudflare</a></div>
         </section>
 
         <section class="panel" data-route="/result" aria-labelledby="result-title" hidden>
@@ -111,7 +112,7 @@
             <h2 id="removal-title">Remove this gateway</h2>
             <p>Removal is available only during the retained recovery window. It removes the exact receipt-owned gateway resources; your Cloudflare zone and unrelated resources remain.</p>
             <div id="removal-plan" hidden></div>
-            <div class="button-row"><button id="preview-removal" class="danger-button" type="button">Review removal plan</button><button id="confirm-removal" class="danger-button" type="button" hidden>Create removal sign-in link</button><a id="removal-authorization-link" class="danger-button" target="_blank" rel="noopener noreferrer" hidden>Open Cloudflare removal sign-in</a></div>
+            <div class="button-row"><button id="preview-removal" class="danger-button" type="button">Review removal plan</button><button id="confirm-removal" class="danger-button" type="button" hidden>Create removal sign-in link</button><a id="removal-authorization-link" class="danger-button" hidden>Continue to Cloudflare</a></div>
           </section>
         </section>
 
@@ -136,6 +137,6 @@
       data expires automatically.</p></footer>
     <!-- Classic and parser-blocking by design: it starts progress polling while
          the OAuth callback keeps streaming heartbeats after this HTML shell. -->
-    <script src="/assets/installer-3e59f085.js"></script>
+    <script src="/assets/installer-315f9095.js"></script>
   </body>
 </html>

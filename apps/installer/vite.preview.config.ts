@@ -22,14 +22,7 @@ function installerPreviewPlugin(): Plugin {
           tag: 'script',
           injectTo: 'head-prepend',
           children: `
-            window.open = function () { return null; };
-            window.addEventListener('click', function (event) {
-              var link = event.target.closest('a[target="_blank"]');
-              if (!link) return;
-              event.preventDefault();
-              var notice = document.getElementById('live-notice');
-              if (notice) notice.textContent = 'OAuth links are inert in the local UI preview.';
-            }, true);
+            document.documentElement.dataset.oauthPreview = 'inert';
           `,
         }]
       },

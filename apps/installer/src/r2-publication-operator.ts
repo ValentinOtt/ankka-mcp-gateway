@@ -1,6 +1,7 @@
 import * as v from 'valibot';
 
 import type { JsonObject } from './boundary';
+import { parseControlPlaneOrigin } from './release-manifest';
 import {
   R2ReleasePublicationError,
   type PublishR2ReleaseInput,
@@ -29,6 +30,7 @@ const publicationIdentitySchema = v.strictObject({
   artifactSha256: v.string(),
   bucketName: v.string(),
   channel: v.string(),
+  controlPlaneOrigin: v.string(),
   keyId: v.string(),
   objectPlanSha256: v.string(),
   prefix: v.string(),
@@ -77,6 +79,7 @@ export interface R2PublicationIdentity {
   readonly artifactSha256: string;
   readonly bucketName: string;
   readonly channel: string;
+  readonly controlPlaneOrigin: string;
   readonly keyId: string;
   readonly objectPlanSha256: string;
   readonly prefix: string;
@@ -116,11 +119,18 @@ function parsePublicationIdentity<Input>(
   const result = v.safeParse(publicationIdentitySchema, input);
   if (!result.success) return null;
   const value = result.output;
+  let controlPlaneOrigin: string;
+  try {
+    controlPlaneOrigin = parseControlPlaneOrigin(value.controlPlaneOrigin);
+  } catch {
+    return null;
+  }
   if (
     !ACCOUNT_ID_PATTERN.test(value.accountId) ||
     !SHA256_PATTERN.test(value.artifactSha256) ||
     !BUCKET_PATTERN.test(value.bucketName) ||
     !CHANNEL_PATTERN.test(value.channel) ||
+    controlPlaneOrigin !== value.controlPlaneOrigin ||
     !KEY_ID_PATTERN.test(value.keyId) ||
     value.objectPlanSha256 !== objectPlanSha256 ||
     !PUBLIC_KEY_PATTERN.test(value.publicKey) ||

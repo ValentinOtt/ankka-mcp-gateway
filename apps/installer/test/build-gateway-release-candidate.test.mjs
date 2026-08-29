@@ -23,12 +23,14 @@ import {
   parseCanonicalReleaseManifest,
 } from '../src/release-manifest';
 import {
+  FIXTURE_PAYLOAD,
   FIXTURE_RELEASE_FILES as RELEASE_FILES,
   fixtureGit as git,
   releaseCandidateCheckout as publicCheckout,
 } from './release-candidate-fixture.mjs';
 
 const RELEASE = 'gateway-v1.2.3';
+const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -49,6 +51,7 @@ describe('build-gateway-release-candidate', () => {
     const checkout = await publicCheckout();
     try {
       const candidate = await buildReleaseCandidate({
+        controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
         sourceDirectory: checkout.source,
         sourceCommit: checkout.commit,
         release: RELEASE,
@@ -102,14 +105,76 @@ describe('build-gateway-release-candidate', () => {
     }
   });
 
+  it('compiles one isolated control-plane origin into the Worker before hashing', async () => {
+    const checkout = await publicCheckout();
+    const isolatedOrigin = 'https://installer.canary.example';
+    try {
+      const candidate = await buildReleaseCandidate({
+        controlPlaneOrigin: isolatedOrigin,
+        sourceDirectory: checkout.source,
+        sourceCommit: checkout.commit,
+        release: RELEASE,
+      });
+      const worker = candidate.files.find(({ record }) => record.path === 'payload/worker/index.js');
+      expect(worker).toBeDefined();
+      expect(worker.bytes.toString('utf8')).toContain(
+        `const CONTROL_PLANE_ORIGIN = '${isolatedOrigin}';`,
+      );
+      expect(worker.bytes.toString('utf8')).not.toContain(
+        "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';",
+      );
+      expect(candidate.manifest.controlPlaneOrigin).toBe(isolatedOrigin);
+      expect(worker.record.sha256).toBe(sha256(worker.bytes));
+      const workerComponent = candidate.manifest.components.worker;
+      expect(workerComponent.files).toEqual([worker.record]);
+      expect(workerComponent.treeSha256).toBe(
+        sha256(Buffer.from(canonicalJson(workerComponent.files))),
+      );
+      const records = Object.values(candidate.manifest.components)
+        .flatMap((component) => component.files)
+        .sort((left, right) => (left.path < right.path ? -1 : 1));
+      expect(candidate.manifest.artifact.treeSha256).toBe(
+        sha256(Buffer.from(canonicalJson(records))),
+      );
+      const outputRoot = await writeReleaseCandidate(candidate, checkout.output);
+      expect((await readFile(path.join(outputRoot, 'payload/worker/index.js'), 'utf8')))
+        .toBe(worker.bytes.toString('utf8'));
+    } finally {
+      await checkout.cleanup();
+    }
+  }, 15_000);
+
+  it('requires exactly one committed Worker control-plane compile anchor', async () => {
+    const anchor = "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';";
+    for (const workerSource of [
+      'export class AdminState {}\nexport default {};\n',
+      `${anchor}\n${anchor}\nexport class AdminState {}\nexport default {};\n`,
+    ]) {
+      const checkout = await publicCheckout({
+        ...FIXTURE_PAYLOAD,
+        'payload/worker/index.js': workerSource,
+      });
+      try {
+        await expectFailure(buildReleaseCandidate({
+          controlPlaneOrigin: 'https://installer.canary.example',
+          sourceDirectory: checkout.source,
+          sourceCommit: checkout.commit,
+          release: RELEASE,
+        }), 'worker_control_plane_origin_anchor_invalid');
+      } finally {
+        await checkout.cleanup();
+      }
+    }
+  }, 20_000);
+
   it('is deterministic across builds and materialises a directory the signer accepts', async () => {
     const checkout = await publicCheckout();
     try {
       const first = await buildReleaseCandidate({
-        sourceDirectory: checkout.source, sourceCommit: checkout.commit, release: RELEASE,
+        controlPlaneOrigin: CONTROL_PLANE_ORIGIN, sourceDirectory: checkout.source, sourceCommit: checkout.commit, release: RELEASE,
       });
       const second = await buildReleaseCandidate({
-        sourceDirectory: checkout.source, sourceCommit: checkout.commit, release: RELEASE,
+        controlPlaneOrigin: CONTROL_PLANE_ORIGIN, sourceDirectory: checkout.source, sourceCommit: checkout.commit, release: RELEASE,
       });
       expect(second.manifestBytes.equals(first.manifestBytes)).toBe(true);
 
@@ -149,7 +214,21 @@ describe('build-gateway-release-candidate', () => {
   it('refuses anything that is not the exact committed payload of the stated commit', async () => {
     const checkout = await publicCheckout();
     try {
-      const base = { sourceDirectory: checkout.source, sourceCommit: checkout.commit, release: RELEASE };
+      const base = { controlPlaneOrigin: CONTROL_PLANE_ORIGIN, sourceDirectory: checkout.source, sourceCommit: checkout.commit, release: RELEASE };
+      for (const controlPlaneOrigin of [
+        undefined,
+        'http://deploy.ankka.ai',
+        'https://deploy.ankka.ai/',
+        'https://deploy.ankka.ai/path',
+        'https://deploy.ankka.ai:443',
+        'https://owner@deploy.ankka.ai',
+        "https://deploy'.ankka.ai",
+      ]) {
+        await expectFailure(
+          buildReleaseCandidate({ ...base, controlPlaneOrigin }),
+          'invalid_control_plane_origin',
+        );
+      }
       await expectFailure(buildReleaseCandidate({ ...base, sourceCommit: '0'.repeat(40) }), 'source_commit_mismatch');
       await expectFailure(buildReleaseCandidate({ ...base, sourceCommit: 'abc' }), 'invalid_source_commit');
       await expectFailure(buildReleaseCandidate({ ...base, release: 'gateway-v1.2.3-rc1' }), 'invalid_release');
@@ -169,10 +248,11 @@ describe('build-gateway-release-candidate', () => {
 
       // Even committed textual inputs must be canonical LF UTF-8 before their
       // raw bytes can enter a release digest.
-      await writeFile(workerPath, 'export default { fetch() { return new Response("ok"); } };\r\n');
+      await writeFile(workerPath, "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\r\nexport default { fetch() { return new Response(\"ok\"); } };\r\n");
       git(checkout.source, 'add', workerPath);
       git(checkout.source, 'commit', '-q', '-m', 'crlf payload');
       await expectFailure(buildReleaseCandidate({
+        controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
         ...base,
         sourceCommit: git(checkout.source, 'rev-parse', 'HEAD'),
       }), 'payload_text_not_lf');
@@ -213,6 +293,7 @@ describe('build-gateway-release-candidate', () => {
       git(checkout.source, 'add', builder);
       git(checkout.source, 'commit', '-q', '-m', 'change release builder');
       await expectFailure(buildReleaseCandidate({
+        controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
         sourceDirectory: checkout.source,
         sourceCommit: git(checkout.source, 'rev-parse', 'HEAD'),
         release: RELEASE,
@@ -232,7 +313,7 @@ describe('build-gateway-release-candidate', () => {
     };
     try {
       const dryRun = await runReleaseCandidateCli({
-        argv: ['--source', checkout.source, '--source-commit', checkout.commit, '--release', RELEASE],
+        argv: ['--source', checkout.source, '--source-commit', checkout.commit, '--control-plane-origin', CONTROL_PLANE_ORIGIN, '--release', RELEASE],
         ...io,
       });
       expect(dryRun).toBe(0);
@@ -242,7 +323,7 @@ describe('build-gateway-release-candidate', () => {
 
       stdout.length = 0;
       const written = await runReleaseCandidateCli({
-        argv: ['--source', checkout.source, '--source-commit', checkout.commit, '--release', RELEASE, '--out', checkout.output],
+        argv: ['--source', checkout.source, '--source-commit', checkout.commit, '--control-plane-origin', CONTROL_PLANE_ORIGIN, '--release', RELEASE, '--out', checkout.output],
         ...io,
       });
       expect(written).toBe(0);
@@ -250,7 +331,7 @@ describe('build-gateway-release-candidate', () => {
 
       stdout.length = 0;
       const again = await runReleaseCandidateCli({
-        argv: ['--source', checkout.source, '--source-commit', checkout.commit, '--release', RELEASE, '--out', checkout.output],
+        argv: ['--source', checkout.source, '--source-commit', checkout.commit, '--control-plane-origin', CONTROL_PLANE_ORIGIN, '--release', RELEASE, '--out', checkout.output],
         ...io,
       });
       expect(again).toBe(1);

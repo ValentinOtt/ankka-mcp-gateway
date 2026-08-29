@@ -51,6 +51,7 @@ export const manifest: ReleaseManifest = {
     treeSha256: '9'.repeat(64),
   },
   cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+  controlPlaneOrigin: 'https://deploy.ankka.ai',
   components: {
     admin: {
       byteSize: 1,

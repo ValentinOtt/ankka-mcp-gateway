@@ -4,6 +4,23 @@ import { GatewayApiError, HttpGatewayAdminApi, validHandoffUrl } from './api'
 describe('HttpGatewayAdminApi', () => {
   afterEach(() => { vi.unstubAllGlobals() })
 
+  const readyStatus = {
+    schemaVersion: 1,
+    status: 'ready',
+    controlPlaneOrigin: 'https://deploy.ankka.ai',
+    release: 'gateway-v1.0.0',
+    gateway: {
+      name: 'Example Gateway',
+      hostname: 'mcp.example.com',
+      mcpUrl: 'https://mcp.example.com/mcp',
+      capabilityMode: 'read_only',
+      codeMode: 'default_on',
+    },
+    source: null,
+    access: { administratorCount: 1, memberCount: 2 },
+    updatedAt: '2026-08-29T00:00:00.000Z',
+  } as const
+
   it('saves an exact sorted source draft through the production API', async () => {
     let capturedInit: RequestInit | undefined
     const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -58,9 +75,30 @@ describe('HttpGatewayAdminApi', () => {
   })
 
   it('accepts only the short-lived hosted management handoff shape', () => {
-    expect(validHandoffUrl(`https://deploy.ankka.ai/manage#${'a'.repeat(40)}`)).toContain('/manage#')
-    expect(validHandoffUrl(`https://evil.example/manage#${'a'.repeat(40)}`)).toBeNull()
-    expect(validHandoffUrl(`https://user:password@deploy.ankka.ai/manage#${'a'.repeat(40)}`)).toBeNull()
-    expect(validHandoffUrl('https://deploy.ankka.ai/manage?token=secret')).toBeNull()
+    const expected = 'https://canary-deploy.example.com'
+    expect(validHandoffUrl(`${expected}/manage#${'a'.repeat(40)}`, expected)).toContain('/manage#')
+    expect(validHandoffUrl(`https://evil.example/manage#${'a'.repeat(40)}`, expected)).toBeNull()
+    expect(validHandoffUrl(`https://user:password@canary-deploy.example.com/manage#${'a'.repeat(40)}`, expected)).toBeNull()
+    expect(validHandoffUrl(`${expected}/manage?token=secret`, expected)).toBeNull()
+    expect(validHandoffUrl(`${expected}/manage#${'a'.repeat(40)}`, `${expected}/path`)).toBeNull()
+  })
+
+  it('rejects a non-canonical control-plane origin in management status', async () => {
+    for (const controlPlaneOrigin of [
+      'http://deploy.ankka.ai',
+      'https://deploy.ankka.ai/',
+      'https://deploy.ankka.ai/path',
+      'https://deploy.ankka.ai?view=status',
+      'https://deploy.ankka.ai#status',
+      'https://deploy.ankka.ai:443',
+      'https://owner@deploy.ankka.ai',
+    ]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+        ...readyStatus,
+        controlPlaneOrigin,
+      })))
+      await expect(new HttpGatewayAdminApi().getStatus()).rejects.toThrow()
+      vi.unstubAllGlobals()
+    }
   })
 })

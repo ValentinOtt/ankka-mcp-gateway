@@ -31,9 +31,11 @@ The release contains five components:
 - the inert retirement Worker.
 
 The canonical manifest records the release identifier, public source commit,
-release channel, required OAuth scopes, Cloudflare deployment contract, every
-file's path, media type, size and SHA-256 digest, component digests, and the
-aggregate artifact digest.
+release channel, one canonical HTTPS control-plane origin, required OAuth
+scopes, Cloudflare deployment contract, every file's path, media type, size and
+SHA-256 digest, component digests, and the aggregate artifact digest. Candidate
+generation compiles that origin into the customer Worker before computing any
+file, component, or aggregate hash.
 
 The release builder also produces the project license, exact production
 third-party license texts, and a source-bound CycloneDX SBOM.
@@ -51,7 +53,9 @@ binds:
 
 The installer and updater reject unknown keys, malformed manifests, digest
 mismatches, legacy envelope formats, and a valid envelope copied to a different
-channel.
+channel. They also reject any disagreement between the embedded Worker origin,
+manifest, release pin, publication receipt, installer origin, or current
+installed origin.
 
 The private signing seed is never committed, placed in CI, stored in
 Cloudflare, or given to the publisher. Source availability does not confer

@@ -6,6 +6,7 @@ import {
   type JsonObject,
 } from '../src/boundary';
 import { sha256 } from '../src/crypto';
+import { PUBLIC_ORIGIN } from '../src/constants';
 import { deriveCustomerGatewayInstallationReceiptExpectation } from '../src/customer-bootstrap-request';
 import { GatewayDeploySession } from '../src/durable/gateway-deploy-session';
 import { parseReturningUninstallImportedAuthority } from '../src/returning-uninstall-authority';
@@ -274,6 +275,7 @@ async function importedAuthority(input: Awaited<ReturnType<typeof returningReady
         release: manifest.release,
         artifactSha256: `sha256:${manifest.artifact.treeSha256}`,
         updateChannel: 'stable',
+        controlPlaneOrigin: 'https://deploy.ankka.ai',
         updateKeyId: 'test-key',
         updatePublicKey: 'A'.repeat(43),
         accountId: ACCOUNT_ID,
@@ -326,6 +328,7 @@ describe('GatewayDeploySession returning-customer uninstall lifecycle', () => {
     expect(requested).toEqual({
       schemaVersion: 1,
       channel: 'stable',
+      controlPlaneOrigin: PUBLIC_ORIGIN,
       release: manifest.release,
       keyId: 'test-key',
       publicKey: 'A'.repeat(43),

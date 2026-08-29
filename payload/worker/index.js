@@ -3,7 +3,7 @@ const BOOTSTRAP_PATH = '/__ankka/bootstrap';
 const SOURCE_ACTION_PATH = '/__ankka/source-action';
 const RUNTIME_ACTION_PATH = '/__ankka/runtime-action';
 const TEARDOWN_ACTION_PATH = '/__ankka/teardown-action';
-const UPDATE_CHANNEL_ORIGIN = 'https://deploy.ankka.ai';
+const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';
 const RELEASE_ENVELOPE_SCHEMA_VERSION = 2;
 const RELEASE_SIGNATURE_CONTEXT = 'ankka-mcp-gateway-release-envelope-v2';
 const INTERNAL_BOOTSTRAP_PATH = '/bootstrap';
@@ -25,11 +25,18 @@ const TEARDOWNS_KEY = 'ankka-mcp-gateway/teardown-actions/v1';
 const MANAGER = 'ankka-mcp-gateway';
 const PORTAL_CNAME_TARGET = 'gateway.agents.cloudflare.com';
 const REQUEST_LIMIT_BYTES = 96 * 1024;
-const PROVIDER_RESPONSE_LIMIT_BYTES = 64 * 1024;
-const MCP_RESPONSE_LIMIT_BYTES = 256 * 1024;
+const BOOTSTRAP_REQUEST_LIMIT_BYTES = 128 * 1024;
+const PROVIDER_RESPONSE_LIMIT_BYTES = 4 * 1024 * 1024;
+const MCP_RESPONSE_LIMIT_BYTES = 4 * 1024 * 1024;
+const MCP_DISCOVERY_LIMIT_BYTES = 8 * 1024 * 1024;
 const MCP_REQUEST_LIMIT_BYTES = 32 * 1024;
-const MCP_MAX_PAGES = 8;
-const MCP_MAX_TOOLS = 128;
+const SOURCE_SAVE_REQUEST_LIMIT_BYTES = 96 * 1024;
+const MANAGEMENT_SOURCES_LIMIT_BYTES = 1024 * 1024;
+const MCP_REQUEST_TIMEOUT_MS = 8_000;
+const MCP_DISCOVERY_TIMEOUT_MS = 30_000;
+const MCP_MAX_PAGES = 20;
+const MCP_MAX_TOOLS = 500;
+const MAX_ENABLED_TOOLS_PER_SOURCE = 500;
 const REQUEST_LIFETIME_SECONDS = 5 * 60;
 const MAX_CLOCK_SKEW_SECONDS = 30;
 const MAX_PROVIDER_PAGES = 20;
@@ -374,11 +381,14 @@ async function verifyHmac(rawBody, encodedNonce, signatureHeader) {
   }
 }
 
-async function readBoundedText(request, limit) {
+async function readBoundedTextRecord(request, limit) {
   const declared = request.headers.get('content-length');
   if (declared !== null) {
     const size = Number(declared);
-    if (!Number.isSafeInteger(size) || size < 0 || size > limit) return null;
+    if (!Number.isSafeInteger(size) || size < 0 || size > limit) {
+      try { await request.body?.cancel(); } catch { /* The declared bound remains authoritative. */ }
+      return null;
+    }
   }
   if (!request.body) return null;
   const reader = request.body.getReader();
@@ -405,7 +415,10 @@ async function readBoundedText(request, limit) {
       offset += chunk.byteLength;
     }
     try {
-      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      return Object.freeze({
+        text: new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+        byteLength: total,
+      });
     } catch {
       return null;
     } finally {
@@ -418,6 +431,10 @@ async function readBoundedText(request, limit) {
     for (const chunk of chunks) chunk.fill(0);
     try { reader.releaseLock(); } catch { /* The fixed rejection remains authoritative. */ }
   }
+}
+
+async function readBoundedText(request, limit) {
+  return (await readBoundedTextRecord(request, limit))?.text ?? null;
 }
 
 class SourceDiscoveryError extends Error {
@@ -446,7 +463,7 @@ function publicMcpUrl(value) {
   try { url = new URL(value); } catch { return null; }
   const blockedSuffixes = ['.internal', '.invalid', '.local', '.localhost', '.onion', '.test'];
   if (url.protocol !== 'https:' || url.username || url.password || url.port || url.search || url.hash ||
-      url.pathname === '/' || url.pathname.length > 1024 || !hostname(url.hostname) ||
+      url.pathname === '/' || !hostname(url.hostname) ||
       url.hostname === 'localhost' || blockedSuffixes.some((suffix) => url.hostname.endsWith(suffix))) return null;
   return url.href;
 }
@@ -485,85 +502,126 @@ function parseJsonRpcMessage(serialized, contentType, requestId) {
     candidate.id === requestId) ?? null;
 }
 
-async function mcpPost(endpoint, message, headers = {}) {
+function createMcpDiscoveryBudget() {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8_000);
-  let response;
-  try {
-    response = await fetch(new Request(endpoint, {
-      method: 'POST',
-      headers: {
-        accept: 'application/json, text/event-stream',
-        'content-type': 'application/json',
-        ...headers,
-      },
-      body: canonicalJson(message),
-      redirect: 'manual',
-      signal: controller.signal,
-    }));
-  } catch {
-    throw new SourceDiscoveryError(502, 'source_unreachable');
-  } finally {
-    clearTimeout(timer);
-  }
-  if (!(response instanceof Response) || response.redirected || response.status >= 300 && response.status < 400) {
-    if (response instanceof Response) await discardBody(response);
-    throw new SourceDiscoveryError(502, 'source_protocol_invalid');
-  }
-  if (response.status === 401 || response.status === 403) {
-    const standardOauth = response.status === 401 && hasStandardOauthChallenge(response);
-    await discardBody(response);
-    throw new SourceDiscoveryError(
-      401,
-      standardOauth ? 'source_authentication_required' : 'source_authentication_unsupported',
-    );
-  }
-  if (!response.ok) {
-    await discardBody(response);
-    throw new SourceDiscoveryError(
-      [400, 405, 415, 422, 501].includes(response.status) ? 409 : 502,
-      [400, 405, 415, 422, 501].includes(response.status)
-        ? 'source_protocol_unsupported'
-        : 'source_unreachable',
-    );
-  }
-  const serialized = await readBoundedText(response, MCP_RESPONSE_LIMIT_BYTES);
-  if (serialized === null) throw new SourceDiscoveryError(502, 'source_response_invalid');
-  const parsed = parseJsonRpcMessage(
-    serialized,
-    (response.headers.get('content-type') ?? '').toLowerCase(),
-    message.id,
-  );
-  if (!parsed) throw new SourceDiscoveryError(502, 'source_response_invalid');
-  return Object.freeze({ parsed, sessionId: response.headers.get('mcp-session-id') });
+  let remainingBytes = MCP_DISCOVERY_LIMIT_BYTES;
+  const timer = setTimeout(() => controller.abort(), MCP_DISCOVERY_TIMEOUT_MS);
+  return {
+    signal: controller.signal,
+    responseLimit() {
+      return Math.min(MCP_RESPONSE_LIMIT_BYTES, remainingBytes);
+    },
+    consume(byteLength) {
+      if (!Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > remainingBytes) return false;
+      remainingBytes -= byteLength;
+      return true;
+    },
+    close() {
+      clearTimeout(timer);
+      controller.abort();
+    },
+  };
 }
 
-async function mcpNotification(endpoint, message, headers = {}) {
+function createMcpRequestAbort(budget) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8_000);
-  let response;
+  const abort = () => controller.abort();
+  const timer = setTimeout(abort, MCP_REQUEST_TIMEOUT_MS);
+  if (budget.signal.aborted) abort();
+  else budget.signal.addEventListener('abort', abort, { once: true });
+  return {
+    signal: controller.signal,
+    close() {
+      clearTimeout(timer);
+      budget.signal.removeEventListener('abort', abort);
+      controller.abort();
+    },
+  };
+}
+
+async function mcpPost(endpoint, message, headers, budget) {
+  const requestAbort = createMcpRequestAbort(budget);
   try {
-    response = await fetch(new Request(endpoint, {
-      method: 'POST',
-      headers: {
-        accept: 'application/json, text/event-stream',
-        'content-type': 'application/json',
-        ...headers,
-      },
-      body: canonicalJson(message),
-      redirect: 'manual',
-      signal: controller.signal,
-    }));
-  } catch {
-    throw new SourceDiscoveryError(502, 'source_unreachable');
+    let response;
+    try {
+      response = await fetch(new Request(endpoint, {
+        method: 'POST',
+        headers: {
+          accept: 'application/json, text/event-stream',
+          'content-type': 'application/json',
+          ...headers,
+        },
+        body: canonicalJson(message),
+        redirect: 'manual',
+        signal: requestAbort.signal,
+      }));
+    } catch {
+      throw new SourceDiscoveryError(502, 'source_unreachable');
+    }
+    if (!(response instanceof Response) || response.redirected || response.status >= 300 && response.status < 400) {
+      if (response instanceof Response) await discardBody(response);
+      throw new SourceDiscoveryError(502, 'source_protocol_invalid');
+    }
+    if (response.status === 401 || response.status === 403) {
+      const standardOauth = response.status === 401 && hasStandardOauthChallenge(response);
+      await discardBody(response);
+      throw new SourceDiscoveryError(
+        401,
+        standardOauth ? 'source_authentication_required' : 'source_authentication_unsupported',
+      );
+    }
+    if (!response.ok) {
+      await discardBody(response);
+      throw new SourceDiscoveryError(
+        [400, 405, 415, 422, 501].includes(response.status) ? 409 : 502,
+        [400, 405, 415, 422, 501].includes(response.status)
+          ? 'source_protocol_unsupported'
+          : 'source_unreachable',
+      );
+    }
+    const serialized = await readBoundedTextRecord(response, budget.responseLimit());
+    if (!serialized || !budget.consume(serialized.byteLength)) {
+      throw new SourceDiscoveryError(502, 'source_response_invalid');
+    }
+    const parsed = parseJsonRpcMessage(
+      serialized.text,
+      (response.headers.get('content-type') ?? '').toLowerCase(),
+      message.id,
+    );
+    if (!parsed) throw new SourceDiscoveryError(502, 'source_response_invalid');
+    return Object.freeze({ parsed, sessionId: response.headers.get('mcp-session-id') });
   } finally {
-    clearTimeout(timer);
+    requestAbort.close();
   }
-  if (!(response instanceof Response) || response.redirected || ![200, 202, 204].includes(response.status)) {
-    if (response instanceof Response) await discardBody(response);
-    throw new SourceDiscoveryError(502, 'source_response_invalid');
+}
+
+async function mcpNotification(endpoint, message, headers, budget) {
+  const requestAbort = createMcpRequestAbort(budget);
+  try {
+    let response;
+    try {
+      response = await fetch(new Request(endpoint, {
+        method: 'POST',
+        headers: {
+          accept: 'application/json, text/event-stream',
+          'content-type': 'application/json',
+          ...headers,
+        },
+        body: canonicalJson(message),
+        redirect: 'manual',
+        signal: requestAbort.signal,
+      }));
+    } catch {
+      throw new SourceDiscoveryError(502, 'source_unreachable');
+    }
+    if (!(response instanceof Response) || response.redirected || ![200, 202, 204].includes(response.status)) {
+      if (response instanceof Response) await discardBody(response);
+      throw new SourceDiscoveryError(502, 'source_response_invalid');
+    }
+    await discardBody(response);
+  } finally {
+    requestAbort.close();
   }
-  await discardBody(response);
 }
 
 function requireMcpResult(message, allowUnsupported = false) {
@@ -628,7 +686,7 @@ function modernRequestMeta() {
   };
 }
 
-async function discoverModernMcpTools(endpoint) {
+async function discoverModernMcpTools(endpoint, budget) {
   const tools = [];
   const names = new Set();
   let cursor;
@@ -641,7 +699,7 @@ async function discoverModernMcpTools(endpoint) {
     }, {
       'mcp-protocol-version': '2026-07-28',
       'mcp-method': 'tools/list',
-    });
+    }, budget);
     cursor = collectToolPage(requireMcpResult(response.parsed, true), tools, names);
     if (cursor === undefined) return Object.freeze({ protocolVersion: '2026-07-28', tools: Object.freeze(tools) });
   }
@@ -652,7 +710,7 @@ function safeSessionId(value) {
   return isText(value) && /^[\x21-\x7e]{1,256}$/u.test(value) ? value : null;
 }
 
-async function discoverLegacyMcpTools(endpoint) {
+async function discoverLegacyMcpTools(endpoint, budget) {
   const initialized = await mcpPost(endpoint, {
     jsonrpc: '2.0',
     id: 1,
@@ -662,7 +720,7 @@ async function discoverLegacyMcpTools(endpoint) {
       capabilities: {},
       clientInfo: { name: 'ankka-mcp-gateway', version: '1.0.0' },
     },
-  }, { 'mcp-method': 'initialize' });
+  }, { 'mcp-method': 'initialize' }, budget);
   const result = requireMcpResult(initialized.parsed);
   if (!isText(result.protocolVersion) ||
       !/^2025-(?:03-26|06-18|11-25)$/u.test(result.protocolVersion)) {
@@ -678,7 +736,7 @@ async function discoverLegacyMcpTools(endpoint) {
   if (sessionId) baseHeaders['mcp-session-id'] = sessionId;
   await mcpNotification(endpoint, {
     jsonrpc: '2.0', method: 'notifications/initialized',
-  }, { ...baseHeaders, 'mcp-method': 'notifications/initialized' });
+  }, { ...baseHeaders, 'mcp-method': 'notifications/initialized' }, budget);
   const tools = [];
   const names = new Set();
   let cursor;
@@ -687,7 +745,7 @@ async function discoverLegacyMcpTools(endpoint) {
     const params = cursor === undefined ? {} : { cursor };
     const response = await mcpPost(endpoint, {
       jsonrpc: '2.0', id, method: 'tools/list', params,
-    }, { ...baseHeaders, 'mcp-method': 'tools/list' });
+    }, { ...baseHeaders, 'mcp-method': 'tools/list' }, budget);
     cursor = collectToolPage(requireMcpResult(response.parsed), tools, names);
     if (cursor === undefined) return Object.freeze({
       protocolVersion: result.protocolVersion,
@@ -700,22 +758,27 @@ async function discoverLegacyMcpTools(endpoint) {
 async function discoverMcpTools(value) {
   const endpoint = publicMcpUrl(value);
   if (!endpoint) throw new SourceDiscoveryError(400, 'source_url_invalid');
+  const budget = createMcpDiscoveryBudget();
   try {
-    const discovered = await discoverModernMcpTools(endpoint);
-    return Object.freeze({ endpoint, ...discovered });
-  } catch (error) {
-    const stable = sourceFailure(error);
-    if (stable.code !== 'source_protocol_unsupported') throw stable;
-  }
-  try {
-    const discovered = await discoverLegacyMcpTools(endpoint);
-    return Object.freeze({ endpoint, ...discovered });
-  } catch (error) {
-    const stable = sourceFailure(error);
-    if (stable.code === 'source_protocol_unsupported') {
-      throw new SourceDiscoveryError(502, 'source_response_invalid');
+    try {
+      const discovered = await discoverModernMcpTools(endpoint, budget);
+      return Object.freeze({ endpoint, ...discovered });
+    } catch (error) {
+      const stable = sourceFailure(error);
+      if (stable.code !== 'source_protocol_unsupported') throw stable;
     }
-    throw stable;
+    try {
+      const discovered = await discoverLegacyMcpTools(endpoint, budget);
+      return Object.freeze({ endpoint, ...discovered });
+    } catch (error) {
+      const stable = sourceFailure(error);
+      if (stable.code === 'source_protocol_unsupported') {
+        throw new SourceDiscoveryError(502, 'source_response_invalid');
+      }
+      throw stable;
+    }
+  } finally {
+    budget.close();
   }
 }
 
@@ -795,6 +858,7 @@ function exactReleaseIdentity(environment) {
   return Object.freeze({
     schemaVersion: 1,
     channel: environment.updateChannel,
+    controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
     release: environment.release,
     keyId: environment.updateKeyId,
     publicKey: environment.updatePublicKey,
@@ -845,8 +909,9 @@ async function parseSignedUpdateManifest(serialized) {
   let value;
   try { value = JSON.parse(serialized); } catch { return null; }
   if (!isPlainData(value) || canonicalJson(value) !== serialized || !exactKeys(value, [
-    'artifact', 'cloudflare', 'components', 'oauthScopeIds', 'release', 'schemaVersion', 'sourceCommit',
+    'artifact', 'cloudflare', 'components', 'controlPlaneOrigin', 'oauthScopeIds', 'release', 'schemaVersion', 'sourceCommit',
   ]) || value.schemaVersion !== 1 || !updateSemver(value.release) ||
+      value.controlPlaneOrigin !== CONTROL_PLANE_ORIGIN ||
       !isText(value.sourceCommit) || !/^[a-f0-9]{40}$/u.test(value.sourceCommit) ||
       canonicalJson(value.cloudflare) !== canonicalJson(APPROVED_UPDATE_CLOUDFLARE_CONTRACT) ||
       canonicalJson(value.oauthScopeIds) !== canonicalJson(UPDATE_OAUTH_SCOPES) ||
@@ -939,7 +1004,7 @@ async function discoverRuntimeUpdate(env) {
   if (!environment) return null;
   let response;
   try {
-    response = await fetch(`${UPDATE_CHANNEL_ORIGIN}/api/releases/${environment.updateChannel}`, {
+    response = await fetch(`${CONTROL_PLANE_ORIGIN}/api/releases/${environment.updateChannel}`, {
       method: 'GET', headers: { accept: 'application/json' }, redirect: 'manual',
     });
   } catch { return null; }
@@ -989,7 +1054,7 @@ function parseSettings(value) {
   const enabledTools = exactSortedUniqueStrings(
     source.enabledTools,
     (entry) => isText(entry) && TOOL.test(entry) ? entry : null,
-    64,
+    MAX_ENABLED_TOOLS_PER_SOURCE,
     1,
   );
   if (!enabledTools) return null;
@@ -1173,7 +1238,7 @@ async function verifyBootstrapRequest(request, env, nowMs) {
   const environment = parseEnvironment(env, true);
   if (!environment) return null;
   const signature = request.headers.get('x-ankka-bootstrap-signature');
-  const rawBody = await readBoundedText(request, REQUEST_LIMIT_BYTES);
+  const rawBody = await readBoundedText(request, BOOTSTRAP_REQUEST_LIMIT_BYTES);
   if (!rawBody || !await verifyHmac(rawBody, environment.bootstrapNonce, signature)) return null;
   let parsed;
   try { parsed = JSON.parse(rawBody); } catch { return null; }
@@ -1191,10 +1256,17 @@ async function readBoundedProviderJson(response) {
   const declared = response.headers.get('content-length');
   if (declared !== null) {
     const size = Number(declared);
-    if (!Number.isSafeInteger(size) || size < 0 || size > PROVIDER_RESPONSE_LIMIT_BYTES) return null;
+    if (!Number.isSafeInteger(size) || size < 0 || size > PROVIDER_RESPONSE_LIMIT_BYTES) {
+      try { await response.body?.cancel(); } catch { /* The declared bound remains authoritative. */ }
+      return null;
+    }
   }
   const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
-  if (contentType !== 'application/json' || !response.body) return null;
+  if (contentType !== 'application/json') {
+    try { await response.body?.cancel(); } catch { /* The content-type rejection remains authoritative. */ }
+    return null;
+  }
+  if (!response.body) return null;
   const reader = response.body.getReader();
   const chunks = [];
   let total = 0;
@@ -2039,21 +2111,32 @@ function toolName(value) {
 }
 
 function safeManagedSource(value) {
-  const legacy = exactKeys(value, ['id', 'label', 'url', 'enabledTools', 'status']);
-  const current = exactKeys(value, ['id', 'label', 'url', 'authMode', 'enabledTools', 'status']);
-  if ((!legacy && !current) ||
+  const legacyPublic = exactKeys(value, ['id', 'label', 'url', 'enabledTools', 'status']);
+  const legacyAuth = exactKeys(value, ['id', 'label', 'url', 'authMode', 'enabledTools', 'status']);
+  const current = exactKeys(value, [
+    'id', 'label', 'url', 'authMode', 'onBehalfOfUser', 'enabledTools', 'status',
+  ]);
+  if ((!legacyPublic && !legacyAuth && !current) ||
       !isText(value.id) || !SOURCE_ID.test(value.id) ||
       !validSourceLabel(value.label) || !publicMcpUrl(value.url) ||
       (value.status !== 'installed' && value.status !== 'draft')) return null;
-  const authMode = legacy ? 'none' : value.authMode;
+  const authMode = legacyPublic ? 'none' : value.authMode;
   if (authMode !== 'none' && authMode !== 'oauth') return null;
-  const enabledTools = exactSortedUniqueStrings(value.enabledTools, toolName, 64, 1);
+  const onBehalfOfUser = current ? value.onBehalfOfUser : authMode === 'oauth';
+  if (!isBoolean(onBehalfOfUser) || (authMode === 'none' && onBehalfOfUser !== false)) return null;
+  const enabledTools = exactSortedUniqueStrings(
+    value.enabledTools,
+    toolName,
+    MAX_ENABLED_TOOLS_PER_SOURCE,
+    1,
+  );
   if (!enabledTools) return null;
   return Object.freeze({
     id: value.id,
     label: value.label,
     url: publicMcpUrl(value.url),
     authMode,
+    onBehalfOfUser,
     enabledTools,
     status: value.status,
   });
@@ -2069,12 +2152,26 @@ function safeManagementSources(value) {
   const ids = new Set(sources.map((source) => source.id));
   const urls = new Set(sources.map((source) => source.url));
   if (ids.size !== sources.length || urls.size !== sources.length) return null;
-  return Object.freeze({
+  const record = Object.freeze({
     schemaVersion: 1,
     revision: value.revision,
     applyMode: 'oauth_per_action',
     sources: Object.freeze(sources),
   });
+  if (new TextEncoder().encode(canonicalJson(record)).byteLength > MANAGEMENT_SOURCES_LIMIT_BYTES) {
+    return null;
+  }
+  return record;
+}
+
+function managementSourcesInstallProjectionFits(record) {
+  if (record.revision >= Number.MAX_SAFE_INTEGER) return false;
+  const projected = {
+    ...record,
+    revision: Number.MAX_SAFE_INTEGER,
+    sources: record.sources.map((source) => ({ ...source, status: 'installed' })),
+  };
+  return new TextEncoder().encode(canonicalJson(projected)).byteLength <= MANAGEMENT_SOURCES_LIMIT_BYTES;
 }
 
 async function initialManagementSources(status) {
@@ -2097,6 +2194,7 @@ async function initialManagementSources(status) {
       label: status.source.label,
       url,
       authMode: 'none',
+      onBehalfOfUser: false,
       enabledTools: [...status.source.enabledTools].sort(compareText),
       status: 'installed',
     }],
@@ -2105,17 +2203,27 @@ async function initialManagementSources(status) {
 }
 
 function parseSourceSave(value) {
+  const validSource = isRecord(value?.source) && exactKeys(
+    value.source, ['label', 'url', 'authMode', 'enabledTools'],
+  );
   if (!exactKeys(value, ['schemaVersion', 'revision', 'source']) || value.schemaVersion !== 1 ||
       !Number.isSafeInteger(value.revision) || value.revision < 1 ||
-      !exactKeys(value.source, ['label', 'url', 'authMode', 'enabledTools']) ||
+      !validSource ||
       !validSourceLabel(value.source.label)) return null;
   const url = publicMcpUrl(value.source.url);
   const authMode = value.source.authMode;
-  const enabledTools = exactSortedUniqueStrings(value.source.enabledTools, toolName, 64, 1);
+  const enabledTools = exactSortedUniqueStrings(
+    value.source.enabledTools,
+    toolName,
+    MAX_ENABLED_TOOLS_PER_SOURCE,
+    1,
+  );
   if (!url || !enabledTools || (authMode !== 'none' && authMode !== 'oauth')) return null;
   return Object.freeze({
     revision: value.revision,
-    source: Object.freeze({ label: value.source.label, url, authMode, enabledTools }),
+    source: Object.freeze({
+      label: value.source.label, url, authMode, enabledTools,
+    }),
   });
 }
 
@@ -2129,6 +2237,7 @@ async function saveDraftSource(current, input) {
     label: input.source.label,
     url: input.source.url,
     authMode: input.source.authMode,
+    onBehalfOfUser: false,
     enabledTools: [...input.source.enabledTools],
     status: 'draft',
   };
@@ -2137,12 +2246,13 @@ async function saveDraftSource(current, input) {
     : [...current.sources, source];
   if (sources.length > 32) return null;
   sources.sort((left, right) => compareText(left.id, right.id));
-  return safeManagementSources({
+  const updated = safeManagementSources({
     schemaVersion: 1,
     revision: current.revision + 1,
     applyMode: 'oauth_per_action',
     sources,
   });
+  return updated && managementSourcesInstallProjectionFits(updated) ? updated : null;
 }
 
 const SOURCE_ACTION_RESOURCE_ORDER = Object.freeze([
@@ -2252,7 +2362,8 @@ async function prepareSourceAction(storage, input) {
   const parsed = parseSourceActionPrepare(input);
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
-  if (!parsed || !sources || !control || parsed.sourceRevision !== sources.revision) return null;
+  if (!parsed || !sources || !control || !managementSourcesInstallProjectionFits(sources) ||
+      parsed.sourceRevision !== sources.revision) return null;
   const source = sources.sources.find((candidate) => candidate.id === parsed.sourceId);
   if (!source || source.status !== 'draft') return null;
   const current = safeSourceActions(await storage.get(ACTIONS_KEY)) ?? Object.freeze({
@@ -2290,6 +2401,7 @@ async function managedSourceHash(source) {
     label: source.label,
     url: source.url,
     authMode: source.authMode,
+    onBehalfOfUser: source.onBehalfOfUser,
     enabledTools: source.enabledTools,
   });
 }
@@ -2299,7 +2411,9 @@ async function storedSourceActionContext(storage, actionId) {
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
   const action = actions?.actions.find((candidate) => candidate.actionId === actionId) ?? null;
-  return actions && sources && control && action ? Object.freeze({ actions, sources, control, action }) : null;
+  return actions && sources && managementSourcesInstallProjectionFits(sources) && control && action
+    ? Object.freeze({ actions, sources, control, action })
+    : null;
 }
 
 async function persistSourceAction(storage, action) {
@@ -2349,7 +2463,7 @@ async function actionDesiredState(control, sources, action) {
       url: source.url,
       authentication: {
         mode: source.authMode,
-        onBehalfOfUser: source.authMode === 'oauth',
+        onBehalfOfUser: source.onBehalfOfUser,
       },
       enabledTools: [...source.enabledTools],
     }],
@@ -2428,7 +2542,7 @@ function portalServerMappings(control, sources, action) {
     mappings.push(Object.freeze({
       server_id: serverId,
       default_disabled: true,
-      on_behalf: source.authMode === 'oauth',
+      on_behalf: source.onBehalfOfUser,
       updated_tools: source.enabledTools.map((name) => Object.freeze({ name, enabled: true })),
     }));
   }
@@ -3061,7 +3175,7 @@ function teardownSettings(control, source, sourceId) {
       url: source.url,
       authentication: Object.freeze({
         mode: source.authMode,
-        onBehalfOfUser: source.authMode === 'oauth',
+        onBehalfOfUser: source.onBehalfOfUser,
       }),
       enabledTools: source.enabledTools,
     })]),
@@ -3404,6 +3518,7 @@ async function rootTeardownAuthority(storage, environment, installationId, env) 
       updateChannel: environment.updateChannel,
       updateKeyId: environment.updateKeyId,
       updatePublicKey: environment.updatePublicKey,
+      controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
       accountId: environment.accountId,
       zoneId: environment.zoneId,
       zoneName: environment.zoneName,
@@ -3725,16 +3840,24 @@ export class AdminState {
           : fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
       }
       if (url.pathname === INTERNAL_SOURCES_PATH && request.method === 'PUT') {
-        const raw = await readBoundedText(request, MCP_REQUEST_LIMIT_BYTES);
+        const raw = await readBoundedText(request, SOURCE_SAVE_REQUEST_LIMIT_BYTES);
         let parsed;
         try { parsed = raw === null ? null : JSON.parse(raw); } catch { parsed = null; }
         const input = parseSourceSave(parsed);
         const current = safeManagementSources(await this.state.storage.get(SOURCES_KEY));
         if (!input || !current) return fixedJson(400, { schemaVersion: 1, error: 'source_invalid' });
-        const updated = await saveDraftSource(current, input);
-        if (!updated) return fixedJson(409, {
+        const installedConflict = current.sources.some((source) => (
+          source.url === input.source.url && source.status === 'installed'
+        ));
+        if (input.revision !== current.revision || installedConflict) return fixedJson(409, {
           schemaVersion: 1,
           error: 'source_conflict',
+          revision: current.revision,
+        });
+        const updated = await saveDraftSource(current, input);
+        if (!updated) return fixedJson(413, {
+          schemaVersion: 1,
+          error: 'source_capacity_exceeded',
           revision: current.revision,
         });
         await this.state.storage.put(SOURCES_KEY, updated);
@@ -3914,8 +4037,14 @@ async function handleStatus(request, env) {
   if (!stub) return fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
   try {
     const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_STATUS_PATH}`));
-    return response instanceof Response
-      ? response
+    if (!(response instanceof Response)) {
+      return fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
+    }
+    if (response.status !== 200) return response;
+    let status;
+    try { status = await response.json(); } catch { status = null; }
+    return isRecord(status)
+      ? fixedJson(200, { ...status, controlPlaneOrigin: CONTROL_PLANE_ORIGIN })
       : fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
   } catch {
     return fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
@@ -3989,8 +4118,8 @@ function sourceErrorResponse(error) {
   return fixedJson(stable.status, { schemaVersion: 1, error: stable.code });
 }
 
-async function readJsonInput(request) {
-  const raw = await readBoundedText(request, MCP_REQUEST_LIMIT_BYTES);
+async function readJsonInput(request, limit = MCP_REQUEST_LIMIT_BYTES) {
+  const raw = await readBoundedText(request, limit);
   if (raw === null) return null;
   try {
     const parsed = JSON.parse(raw);
@@ -4047,7 +4176,7 @@ async function handleSources(request, env) {
       return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
     }
   }
-  const input = parseSourceSave(await readJsonInput(request));
+  const input = parseSourceSave(await readJsonInput(request, SOURCE_SAVE_REQUEST_LIMIT_BYTES));
   if (!input) return fixedJson(400, { schemaVersion: 1, error: 'source_invalid' });
   try { await verifyManagedSource(input.source); } catch (error) { return sourceErrorResponse(error); }
   try {
@@ -4164,6 +4293,7 @@ async function handleSourceActions(request, env) {
     actionKey,
     actorEmail,
     accountId: environment.accountId,
+    controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
     workerName: environment.workerName,
     workersSubdomain: environment.workersSubdomain,
     managementOrigin,
@@ -4176,7 +4306,7 @@ async function handleSourceActions(request, env) {
     actionId,
     status: 'authorization_required',
     expiresAt: new Date(expiresAt).toISOString(),
-    handoffUrl: `https://deploy.ankka.ai/manage#${fragment}`,
+    handoffUrl: `${CONTROL_PLANE_ORIGIN}/manage#${fragment}`,
   });
 }
 
@@ -4277,6 +4407,7 @@ async function handleRuntimeActions(request, env) {
     actionKey,
     actorEmail,
     accountId: environment.accountId,
+    controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
     workerName: environment.workerName,
     workersSubdomain: environment.workersSubdomain,
     managementOrigin: `https://${environment.managementHostname}`,
@@ -4289,7 +4420,7 @@ async function handleRuntimeActions(request, env) {
   return fixedJson(200, {
     schemaVersion: 1, actionId, operation: input.operation,
     status: 'authorization_required', expiresAt: new Date(expiresAt).toISOString(),
-    handoffUrl: `https://deploy.ankka.ai/manage#${fragment}`,
+    handoffUrl: `${CONTROL_PLANE_ORIGIN}/manage#${fragment}`,
   });
 }
 
@@ -4402,6 +4533,7 @@ async function handleTeardownActions(request, env) {
     actionKey,
     actorEmail,
     accountId: environment.accountId,
+    controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
     installationId: parsedControl.installationId,
     gatewayName: parsedControl.portal.name,
     portalHostname: parsedControl.portal.hostname,
@@ -4416,7 +4548,7 @@ async function handleTeardownActions(request, env) {
     actionId,
     status: 'authorization_required',
     expiresAt: new Date(expiresAt).toISOString(),
-    handoffUrl: `https://deploy.ankka.ai/manage#${fragment}`,
+    handoffUrl: `${CONTROL_PLANE_ORIGIN}/manage#${fragment}`,
   });
 }
 

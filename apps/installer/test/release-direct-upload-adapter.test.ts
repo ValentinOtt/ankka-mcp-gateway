@@ -92,7 +92,7 @@ async function fixture(): Promise<Fixture> {
     await file(
       'payload/worker/index.js',
       'application/javascript+module',
-      encoder.encode('export default { fetch() { return new Response("ok"); } };'),
+      encoder.encode("const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default { fetch() { return new Response(\"ok\"); } };"),
     ),
     await file(
       'payload/worker/support.wasm',
@@ -113,6 +113,7 @@ async function fixture(): Promise<Fixture> {
       treeSha256: await sha256(canonicalJson(records)),
     },
     cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+    controlPlaneOrigin: 'https://deploy.ankka.ai',
     components: { admin, installer, worker, workerCleanup, workerRetirement },
     oauthScopeIds: REQUIRED_OAUTH_SCOPES,
     release: 'gateway-v1.2.3',

@@ -62,6 +62,7 @@ const OUTPUT_FILES = Object.freeze([
   SBOM_FILENAME,
 ]);
 const MAX_INPUT_BYTES = 2 * 1024 * 1024;
+const MAX_CONTROL_PLANE_ORIGIN_LENGTH = 2_048;
 const SPKI_PUBLIC_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const OBJECT_SCHEMA = v.object({});
 const STRING_SCHEMA = v.string();
@@ -95,6 +96,26 @@ function sha256Hex(bytes) {
 
 function safeInteger(value, maximum = Number.MAX_SAFE_INTEGER) {
   return Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+}
+
+function parseControlPlaneOrigin(value) {
+  if (
+    !v.is(STRING_SCHEMA, value) ||
+    value.length === 0 ||
+    value.length > MAX_CONTROL_PLANE_ORIGIN_LENGTH
+  ) fail();
+  try {
+    const parsed = new URL(value);
+    if (
+      parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' ||
+      parsed.port !== '' || parsed.pathname !== '/' || parsed.search !== '' ||
+      parsed.hash !== '' || parsed.origin !== value || value.includes("'")
+    ) fail();
+  } catch (error) {
+    if (error instanceof GitHubReleasePublicationError) throw error;
+    fail();
+  }
+  return value;
 }
 
 async function readRegularBytes(filename, maximum = MAX_INPUT_BYTES) {
@@ -135,6 +156,7 @@ function parsePublicationReceipt(input) {
     'artifactSha256',
     'bucketName',
     'channel',
+    'controlPlaneOrigin',
     'keyId',
     'objectPlanSha256',
     'prefix',
@@ -150,6 +172,7 @@ function parsePublicationReceipt(input) {
     !v.is(STRING_SCHEMA, input.accountId) || !ACCOUNT_ID_PATTERN.test(input.accountId) ||
     !v.is(STRING_SCHEMA, input.bucketName) || !BUCKET_PATTERN.test(input.bucketName) ||
     !v.is(STRING_SCHEMA, input.channel) || !CHANNEL_PATTERN.test(input.channel) ||
+    parseControlPlaneOrigin(input.controlPlaneOrigin) !== input.controlPlaneOrigin ||
     !v.is(STRING_SCHEMA, input.release) || !RELEASE_PATTERN.test(input.release) ||
     !v.is(STRING_SCHEMA, input.keyId) || !KEY_ID_PATTERN.test(input.keyId) ||
     !v.is(STRING_SCHEMA, input.publicKey) || !PUBLIC_KEY_PATTERN.test(input.publicKey) ||
@@ -263,10 +286,12 @@ export async function prepareGitHubReleaseOutput(input) {
     if (
       plan.release !== receipt.release ||
       plan.channel !== receipt.channel ||
+      plan.controlPlaneOrigin !== receipt.controlPlaneOrigin ||
       plan.keyId !== receipt.keyId ||
       plan.artifactSha256 !== receipt.artifactSha256 ||
       signed.objectPlanSha256 !== receipt.objectPlanSha256 ||
       candidate.manifest.artifact.treeSha256 !== receipt.artifactSha256 ||
+      candidate.manifest.controlPlaneOrigin !== receipt.controlPlaneOrigin ||
       !COMMIT_PATTERN.test(candidate.manifest.sourceCommit)
     ) fail();
     const envelopeObject = signed.objects.find((object) => object.key === `${plan.prefix}${ENVELOPE_FILENAME}`);
@@ -296,6 +321,7 @@ export async function prepareGitHubReleaseOutput(input) {
     const verification = Object.freeze({
       artifactSha256: receipt.artifactSha256,
       channel: receipt.channel,
+      controlPlaneOrigin: receipt.controlPlaneOrigin,
       keyId: receipt.keyId,
       manifestSha256: sha256Hex(candidate.manifestBytes),
       objectPlanSha256: receipt.objectPlanSha256,
@@ -465,13 +491,14 @@ export async function loadGitHubReleaseOutput(outputDirectory) {
     if (
       canonicalJson(verification) !== verificationSerialized ||
       !exactKeys(verification, [
-        'artifactSha256', 'channel', 'keyId', 'manifestSha256', 'objectPlanSha256',
+        'artifactSha256', 'channel', 'controlPlaneOrigin', 'keyId', 'manifestSha256', 'objectPlanSha256',
         'publicKey', 'release', 'releaseEnvelopeSha256', 'schemaVersion',
         'signatureAlgorithm', 'sourceCommit',
       ]) ||
       verification.schemaVersion !== 1 ||
       verification.release !== plan.release ||
       verification.channel !== plan.channel ||
+      parseControlPlaneOrigin(verification.controlPlaneOrigin) !== verification.controlPlaneOrigin ||
       verification.sourceCommit !== plan.sourceCommit ||
       verification.artifactSha256 !== plan.artifactSha256 ||
       verification.releaseEnvelopeSha256 !== plan.assets[0].sha256 ||
@@ -498,6 +525,7 @@ export async function loadGitHubReleaseOutput(outputDirectory) {
       sha256Hex(Buffer.from(envelope.manifest, 'utf8')) !== verification.manifestSha256 ||
       manifest.release !== plan.release ||
       manifest.sourceCommit !== plan.sourceCommit ||
+      manifest.controlPlaneOrigin !== verification.controlPlaneOrigin ||
       !isRecord(manifest.artifact) ||
       manifest.artifact.treeSha256 !== plan.artifactSha256
     ) fail();

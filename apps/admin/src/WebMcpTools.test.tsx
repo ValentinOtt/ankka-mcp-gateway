@@ -7,6 +7,7 @@ import { WebMcpTools, type WebMcpTool } from './WebMcpTools'
 const status: GatewayStatus = {
   schemaVersion: 1,
   status: 'ready',
+  controlPlaneOrigin: 'https://deploy.ankka.ai',
   release: 'gateway-v1.0.0',
   gateway: {
     name: 'Example Gateway',

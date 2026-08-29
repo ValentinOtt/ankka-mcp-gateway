@@ -192,7 +192,7 @@ async function fixture() {
       'application/javascript+module',
       'export default {}',
     ),
-    await sourceFile('payload/worker/index.js', 'application/javascript+module', 'export default {}'),
+    await sourceFile('payload/worker/index.js', 'application/javascript+module', "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default {}"),
   ];
   const records = files.map((entry) => entry.record);
   const manifest = canonicalJson({
@@ -202,6 +202,7 @@ async function fixture() {
       treeSha256: sha256(Buffer.from(canonicalJson(records))),
     },
     cloudflare: CLOUDFLARE,
+    controlPlaneOrigin: 'https://deploy.ankka.ai',
     components: {
       admin: component(files.slice(0, 1)),
       installer: component(files.slice(1, 2)),

@@ -197,7 +197,7 @@ async function releaseFixture(overrides = {}) {
       'application/javascript+module',
       'export default {}',
     ),
-    await file('payload/worker/index.js', 'application/javascript+module', 'export default {}'),
+    await file('payload/worker/index.js', 'application/javascript+module', "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default {}"),
   ];
   const components = {
     admin: component(source.slice(0, 2)),
@@ -214,6 +214,7 @@ async function releaseFixture(overrides = {}) {
       treeSha256: sha256(Buffer.from(canonicalJson(records))),
     },
     cloudflare: CLOUDFLARE,
+    controlPlaneOrigin: 'https://deploy.ankka.ai',
     components,
     oauthScopeIds: EXPECTED_CLOUDFLARE_SCOPE_IDS,
     release: RELEASE,
@@ -481,6 +482,31 @@ describe('offline gateway release signing and R2 object plan', () => {
         release: RELEASE,
         releaseDirectory: input.releaseDirectory,
       })).rejects.toMatchObject({ code: 'release_signing_failed' });
+    } finally {
+      await input.cleanup();
+    }
+  });
+
+  it('independently rejects a manifest origin that differs from the embedded Worker origin', async () => {
+    const input = await releaseFixture();
+    try {
+      const manifest = JSON.parse(input.manifest);
+      manifest.controlPlaneOrigin = 'https://foreign-control.example';
+      await writeFile(
+        path.join(input.releaseDirectory, 'manifest.json'),
+        canonicalJson(manifest),
+      );
+      const key = signingKey();
+      const seed = Buffer.from(key.seed);
+      await expect(prepareSignedReleasePublishPlan({
+        channel: CHANNEL,
+        keyId: KEY_ID,
+        privateKeySeed: seed,
+        publicKey: key.publicKey,
+        release: RELEASE,
+        releaseDirectory: input.releaseDirectory,
+      })).rejects.toMatchObject({ code: 'release_signing_failed' });
+      expect([...seed]).toEqual(Array.from({ length: 32 }, () => 0));
     } finally {
       await input.cleanup();
     }

@@ -12,10 +12,25 @@ The hosted installer configuration in `apps/installer` is deliberately
 non-deploying: it has no production route, no signed release pin, and no enabled
 mutation executor. The repository does not provide a general `deploy` script.
 
-Customer releases are generated from a clean public commit, signed outside the
-repository, and deployed only through a separately maintainer-approved
-installer build. Do not treat source files, local digests, or Wrangler dry-run
-output as release or deployment authority.
+Supported customer releases will be generated from a clean public commit,
+signed outside the repository, and deployed only through a separately
+maintainer-approved installer build. Do not treat source files, local digests,
+or Wrangler dry-run output as release or deployment authority.
+
+The repository does contain an isolated installer generator and a bounded,
+development-only self-deploy path for a consenting first party. Release
+generation compiles one exact HTTPS control-plane origin into the customer
+Worker and binds it through the signed manifest, release pin, publication
+receipt, installer, update discovery, and all returning management handoffs.
+It is not request- or configuration-selectable.
+
+That path is unsupported and has not been live-qualified. It requires a clean
+public commit, a local development signature, customer-owned Cloudflare
+resources, two create-only releases, lifecycle drills, receipt-bound removal,
+and exact cleanup. It does not provide a general deploy script or production
+signing authority. Follow the complete
+[first-party Cloudflare dogfood runbook](FIRST_PARTY_DOGFOOD.md); do not deploy
+from partial commands or generated source alone.
 
 ## Local verification
 

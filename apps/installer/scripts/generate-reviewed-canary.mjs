@@ -75,6 +75,7 @@ const GENERATED_FILES = Object.freeze([
 const RECORD_FILENAME = 'reviewed-canary-record.json';
 const EXACT_OUTPUT_FILES = Object.freeze([...GENERATED_FILES, RECORD_FILENAME].sort());
 const PUBLIC_ORIGIN_DECLARATION = "export const PUBLIC_ORIGIN = 'https://deploy.ankka.ai';";
+const MAX_CONTROL_PLANE_ORIGIN_LENGTH = 2_048;
 const LIVE_DEPLOYMENT_TARGET = Object.freeze({
   hostname: PUBLIC_HOSTNAME,
   oauthClientId: OAUTH_CLIENT_ID,
@@ -91,6 +92,22 @@ export class ReviewedCanaryGenerationError extends Error {
 
 function fail() {
   throw new ReviewedCanaryGenerationError();
+}
+
+function parseControlPlaneOrigin(value) {
+  if (!v.is(STRING_SCHEMA, value) || value.length === 0 || value.length > MAX_CONTROL_PLANE_ORIGIN_LENGTH) fail();
+  try {
+    const parsed = new URL(value);
+    if (
+      parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' ||
+      parsed.port !== '' || parsed.pathname !== '/' || parsed.search !== '' ||
+      parsed.hash !== '' || parsed.origin !== value || value.includes("'")
+    ) fail();
+  } catch (error) {
+    if (error instanceof ReviewedCanaryGenerationError) throw error;
+    fail();
+  }
+  return value;
 }
 
 function isPlainRecord(value) {
@@ -158,6 +175,7 @@ function parsePin(input) {
   if (!exactKeys(input, [
     'artifactSha256',
     'channel',
+    'controlPlaneOrigin',
     'keyId',
     'publicKey',
     'release',
@@ -166,6 +184,7 @@ function parsePin(input) {
   if (
     input.schemaVersion !== 1 ||
     !v.is(STRING_SCHEMA, input.channel) || !CHANNEL_PATTERN.test(input.channel) ||
+    parseControlPlaneOrigin(input.controlPlaneOrigin) !== input.controlPlaneOrigin ||
     !v.is(STRING_SCHEMA, input.release) || !RELEASE_PATTERN.test(input.release) ||
     !v.is(STRING_SCHEMA, input.keyId) || !KEY_ID_PATTERN.test(input.keyId) ||
     !v.is(STRING_SCHEMA, input.publicKey) || !PUBLIC_KEY_PATTERN.test(input.publicKey) ||
@@ -181,6 +200,7 @@ function parsePin(input) {
   return Object.freeze({
     schemaVersion: 1,
     channel: input.channel,
+    controlPlaneOrigin: input.controlPlaneOrigin,
     release: input.release,
     keyId: input.keyId,
     publicKey: input.publicKey,
@@ -194,6 +214,7 @@ function parsePublicationResult(input) {
     'artifactSha256',
     'bucketName',
     'channel',
+    'controlPlaneOrigin',
     'keyId',
     'objectPlanSha256',
     'prefix',
@@ -209,6 +230,7 @@ function parsePublicationResult(input) {
     !v.is(STRING_SCHEMA, input.accountId) || !ACCOUNT_ID_PATTERN.test(input.accountId) ||
     !v.is(STRING_SCHEMA, input.bucketName) || !BUCKET_PATTERN.test(input.bucketName) ||
     !v.is(STRING_SCHEMA, input.channel) || !CHANNEL_PATTERN.test(input.channel) ||
+    parseControlPlaneOrigin(input.controlPlaneOrigin) !== input.controlPlaneOrigin ||
     !v.is(STRING_SCHEMA, input.release) || !RELEASE_PATTERN.test(input.release) ||
     !v.is(STRING_SCHEMA, input.keyId) || !KEY_ID_PATTERN.test(input.keyId) ||
     !v.is(STRING_SCHEMA, input.publicKey) || !PUBLIC_KEY_PATTERN.test(input.publicKey) ||
@@ -224,6 +246,7 @@ function parsePublicationResult(input) {
     accountId: input.accountId,
     bucketName: input.bucketName,
     channel: input.channel,
+    controlPlaneOrigin: input.controlPlaneOrigin,
     release: input.release,
     prefix,
     keyId: input.keyId,
@@ -242,6 +265,7 @@ function verifiedInputs(pinInput, publicationInput) {
     pin.release !== publication.release ||
     pin.keyId !== publication.keyId ||
     pin.publicKey !== publication.publicKey ||
+    pin.controlPlaneOrigin !== publication.controlPlaneOrigin ||
     pin.artifactSha256 !== publication.artifactSha256
   ) fail();
   return Object.freeze({ pin, publication });
@@ -296,6 +320,7 @@ function activeEntrypointSource(pin) {
     `const REVIEWED_CANARY_PIN = Object.freeze({\n` +
     `  schemaVersion: 1,\n` +
     `  channel: ${JSON.stringify(pin.channel)},\n` +
+    `  controlPlaneOrigin: ${JSON.stringify(pin.controlPlaneOrigin)},\n` +
     `  release: ${JSON.stringify(pin.release)},\n` +
     `  keyId: ${JSON.stringify(pin.keyId)},\n` +
     `  publicKey: ${JSON.stringify(pin.publicKey)},\n` +
@@ -1110,6 +1135,7 @@ async function parseRecord(input) {
   const deploymentTarget = isolated
     ? verifiedIsolatedTarget(input.deploymentTarget, verified.publication.accountId)
     : LIVE_DEPLOYMENT_TARGET;
+  if (verified.pin.controlPlaneOrigin !== `https://${deploymentTarget.hostname}`) fail();
   const outputFiles = input.outputFiles.map((entry) => {
     const parsed = parseEvidenceFile(entry, { maximumBytes: MAX_GENERATED_FILE_BYTES });
     if (!GENERATED_FILES.includes(parsed.path)) fail();
@@ -1153,6 +1179,7 @@ async function generateArtifacts(input, isolatedTargetInput) {
   const deploymentTarget = isolatedTargetInput === null
     ? LIVE_DEPLOYMENT_TARGET
     : verifiedIsolatedTarget(isolatedTargetInput, publication.accountId);
+  if (pin.controlPlaneOrigin !== `https://${deploymentTarget.hostname}`) fail();
   const { buildProvenance, files } = await materializeGeneratedArtifacts(
     pin,
     publication,

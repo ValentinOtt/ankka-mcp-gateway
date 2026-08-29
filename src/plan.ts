@@ -1,5 +1,11 @@
 import * as v from 'valibot';
 
+import {
+  accessGroupDigest,
+  accessGroupsNamed,
+  normalizeAccessGroups,
+  type AccessGroupObservation,
+} from './access-groups.ts';
 import { validateGatewayConfig, type GatewayConfig } from './config.ts';
 import {
   boundaryObjectSchema,
@@ -83,9 +89,12 @@ interface DeploymentTarget {
 }
 
 interface NormalizedAccess {
+  readonly accessGroups: readonly AccessGroupObservation[];
+  readonly accessGroupsProvided: boolean;
   readonly allowedEmails: readonly string[];
   readonly allowedEmailsProvided: boolean;
   readonly identitiesHash: string;
+  readonly invalidAccessGroupCount: number;
   readonly invalidEmailCount: number;
 }
 
@@ -267,10 +276,12 @@ function normalizeTarget(value: BoundaryValue): DeploymentTarget {
 
 async function normalizeAccess(value: BoundaryValue): Promise<NormalizedAccess> {
   const rawAccess = isObject(value) ? value : {};
-  const unsupportedKeys = Object.keys(rawAccess).filter((key) => key !== 'allowedEmails');
+  const unsupportedKeys = Object.keys(rawAccess)
+    .filter((key) => key !== 'allowedEmails' && key !== 'groups');
   if (unsupportedKeys.length > 0) {
     throw new TypeError('access input contains unsupported fields');
   }
+  const normalizedGroups = normalizeAccessGroups(rawAccess);
 
   const rawEmails = Array.isArray(rawAccess.allowedEmails) ? rawAccess.allowedEmails : [];
   const validEmails: string[] = [];
@@ -291,9 +302,12 @@ async function normalizeAccess(value: BoundaryValue): Promise<NormalizedAccess> 
 
   const allowedEmails = [...new Set(validEmails)].sort(compareText);
   return {
+    accessGroups: normalizedGroups.groups,
+    accessGroupsProvided: normalizedGroups.provided,
     allowedEmails,
     identitiesHash: await hashCanonical({ emails: allowedEmails }),
     allowedEmailsProvided: Array.isArray(rawAccess.allowedEmails),
+    invalidAccessGroupCount: normalizedGroups.invalidCount,
     invalidEmailCount,
   };
 }
@@ -346,6 +360,27 @@ function buildBlockers(
       message: 'Every Access identity must be a valid email address.',
     });
   }
+  if (access.invalidAccessGroupCount > 0) {
+    blockers.push({
+      code: 'invalid_access_groups',
+      message: 'Every Access group observation must contain only one safe ID and exact name.',
+    });
+  }
+  for (const source of config.sources) {
+    if (source.accessGroup === undefined) continue;
+    const matches = accessGroupsNamed(access.accessGroups, source.accessGroup);
+    if (!access.accessGroupsProvided || matches.length === 0) {
+      blockers.push({
+        code: 'source_access_group_missing',
+        message: `Resolve one fresh Access group observation for source ${source.id}.`,
+      });
+    } else if (matches.length > 1) {
+      blockers.push({
+        code: 'source_access_group_ambiguous',
+        message: `Resolve exactly one fresh Access group observation for source ${source.id}.`,
+      });
+    }
+  }
 
   return blockers;
 }
@@ -376,7 +411,7 @@ async function buildDesiredResources(
     .map((source) => ({ ...source, enabledTools: [...source.enabledTools].sort(compareText) }))
     .sort((left, right) => compareText(left.id, right.id));
   const metadata = { manager: MANAGER, installationId };
-  const emailAllowPolicy = {
+  const emailAllowPolicy: JsonObject = {
     identitiesRef: 'access.allowedEmails',
     identityType: 'email',
     identityCount: access.allowedEmails.length,
@@ -389,6 +424,9 @@ async function buildDesiredResources(
     const mcpKey = await stableResourceKey('mcp', installationId, source.id);
     const applicationKey = await stableResourceKey('source-app', installationId, source.id);
     const accessKey = await stableResourceKey('source-access', installationId, source.id);
+    const sourceAllowPolicy = source.accessGroup === undefined
+      ? emailAllowPolicy
+      : await groupAllowPolicy(source.accessGroup, access);
     sourceMappings.push({
       sourceResourceKey: mcpKey,
       defaultDisabled: true,
@@ -433,7 +471,7 @@ async function buildDesiredResources(
         metadata,
         sourceApplicationResourceKey: applicationKey,
         defaultAction: 'deny',
-        allow: emailAllowPolicy,
+        allow: sourceAllowPolicy,
       },
     });
   }
@@ -525,6 +563,19 @@ async function buildDesiredResources(
       }),
     })),
   );
+}
+
+async function groupAllowPolicy(
+  logicalName: string,
+  access: NormalizedAccess,
+): Promise<JsonObject> {
+  const matches = accessGroupsNamed(access.accessGroups, logicalName);
+  return {
+    identitiesRef: 'access.groups',
+    identityType: 'group',
+    identityCount: matches.length,
+    identitiesHash: await accessGroupDigest(matches),
+  };
 }
 
 async function stableResourceKey(

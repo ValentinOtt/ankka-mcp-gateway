@@ -1,0 +1,35 @@
+{
+  "$schema": "../../schema/gateway-config.schema.json",
+  "schemaVersion": 1,
+  "gateway": {
+    "name": "Synthetic hostile-name gateway",
+    "hostname": "hostile-names.example.com",
+    "codeMode": "default_on"
+  },
+  "policy": {
+    "capabilityMode": "read_only",
+    "credentialCustody": "customer",
+    "telemetry": "off"
+  },
+  "sources": [
+    {
+      "id": "synthetic-hostile-names",
+      "label": "Synthetic sanitization-hostile read catalogue",
+      "url": "https://hostile-names.example.com/mcp",
+      "authentication": {
+        "mode": "none",
+        "onBehalfOfUser": false
+      },
+      "enabledTools": [
+        "1st-read",
+        "await",
+        "catalog-item.read",
+        "catalog.item-read",
+        "catalog_item_read",
+        "class",
+        "default",
+        "prototype"
+      ]
+    }
+  ]
+}

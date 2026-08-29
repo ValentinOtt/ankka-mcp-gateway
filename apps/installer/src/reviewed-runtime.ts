@@ -165,6 +165,8 @@ function assertExactBundlePin(bundle: VerifiedReleaseBundle, pin: PinnedR2Releas
     parsed.channel !== pin.channel ||
     parsed.keyId !== pin.keyId ||
     parsed.publicKey !== pin.publicKey ||
+    parsed.manifest.controlPlaneOrigin !== pin.controlPlaneOrigin ||
+    parsed.manifest.controlPlaneOrigin !== PUBLIC_ORIGIN ||
     !Object.isFrozen(bundle.envelope) ||
     parsed.manifest.release !== pin.release ||
     parsed.manifest.artifact.treeSha256 !== pin.artifactSha256 ||

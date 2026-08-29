@@ -40,6 +40,9 @@ const MAX_PAYLOAD_BYTES = 32 * 1024 * 1024;
 const MAX_FILES = 10_000;
 const RELEASE_PATTERN = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
+const MAX_CONTROL_PLANE_ORIGIN_LENGTH = 2_048;
+const CONTROL_PLANE_ORIGIN_DECLARATION =
+  "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';";
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/u;
 const STRING_SCHEMA = v.string();
 const RELEASE_TOOL_PATHS = Object.freeze([
@@ -123,6 +126,51 @@ function isPlainString(value) {
   return v.is(STRING_SCHEMA, value) && value.length > 0 && !value.includes('\0');
 }
 
+export function parseControlPlaneOrigin(value) {
+  if (!v.is(STRING_SCHEMA, value) || value.length === 0 || value.length > MAX_CONTROL_PLANE_ORIGIN_LENGTH) {
+    fail('invalid_control_plane_origin');
+  }
+  try {
+    const parsed = new URL(value);
+    if (
+      parsed.protocol !== 'https:' ||
+      parsed.username !== '' ||
+      parsed.password !== '' ||
+      parsed.port !== '' ||
+      parsed.pathname !== '/' ||
+      parsed.search !== '' ||
+      parsed.hash !== '' ||
+      parsed.origin !== value ||
+      value.includes("'")
+    ) fail('invalid_control_plane_origin');
+  } catch (error) {
+    if (error instanceof ReleaseCandidateError) throw error;
+    fail('invalid_control_plane_origin');
+  }
+  return value;
+}
+
+function compileWorkerControlPlaneOrigin(bytes, controlPlaneOrigin) {
+  let source;
+  try {
+    source = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    fail('worker_control_plane_origin_anchor_invalid');
+  }
+  const first = source.indexOf(CONTROL_PLANE_ORIGIN_DECLARATION);
+  if (
+    first < 0 ||
+    source.indexOf(
+      CONTROL_PLANE_ORIGIN_DECLARATION,
+      first + CONTROL_PLANE_ORIGIN_DECLARATION.length,
+    ) !== -1
+  ) fail('worker_control_plane_origin_anchor_invalid');
+  return Buffer.from(source.replace(
+    CONTROL_PLANE_ORIGIN_DECLARATION,
+    `const CONTROL_PLANE_ORIGIN = '${controlPlaneOrigin}';`,
+  ), 'utf8');
+}
+
 async function git(sourceRoot, args) {
   try {
     const { stdout } = await execFileAsync('git', ['-C', sourceRoot, ...args], {
@@ -193,7 +241,7 @@ async function buildAdminApplication(sourceRoot) {
   }
 }
 
-async function enumerateComponent(sourceRoot, component) {
+async function enumerateComponent(sourceRoot, component, controlPlaneOrigin) {
   const componentRoot = path.join(sourceRoot, ...component.source);
   const rootStat = await lstat(componentRoot).catch(() => null);
   if (!rootStat || rootStat.isSymbolicLink() || !rootStat.isDirectory()) fail('payload_component_missing');
@@ -219,7 +267,10 @@ async function enumerateComponent(sourceRoot, component) {
       const manifestPath = `payload/${component.directory}/${relative}`;
       const contentType = (component.web ? WEB_CONTENT_TYPES : WORKER_CONTENT_TYPES)[extension(manifestPath)];
       if (!contentType) fail('payload_content_type_unknown');
-      const bytes = await readFile(path.join(componentRoot, relative));
+      let bytes = await readFile(path.join(componentRoot, relative));
+      if (component.name === 'worker' && relative === component.required) {
+        bytes = compileWorkerControlPlaneOrigin(bytes, controlPlaneOrigin);
+      }
       if (bytes.byteLength === 0 || bytes.byteLength > MAX_FILE_BYTES) fail('payload_file_size');
       assertNormalizedText(bytes, contentType);
       files.push(Object.freeze({
@@ -270,8 +321,9 @@ async function assertExactPayloadRoot(sourceRoot) {
   }
 }
 
-export async function buildReleaseCandidate({ sourceDirectory, sourceCommit, release }) {
+export async function buildReleaseCandidate({ controlPlaneOrigin, sourceDirectory, sourceCommit, release }) {
   if (!isPlainString(sourceDirectory)) fail('invalid_input');
+  const parsedControlPlaneOrigin = parseControlPlaneOrigin(controlPlaneOrigin);
   if (!v.is(STRING_SCHEMA, release) || !RELEASE_PATTERN.test(release)) fail('invalid_release');
   if (!v.is(STRING_SCHEMA, sourceCommit) || !COMMIT_PATTERN.test(sourceCommit)) fail('invalid_source_commit');
   let sourceRoot;
@@ -291,7 +343,7 @@ export async function buildReleaseCandidate({ sourceDirectory, sourceCommit, rel
 
   const enumerated = {};
   for (const component of COMPONENTS) {
-    enumerated[component.name] = await enumerateComponent(sourceRoot, component);
+    enumerated[component.name] = await enumerateComponent(sourceRoot, component, parsedControlPlaneOrigin);
   }
   await assertExactSourceCommit(sourceRoot, sourceCommit);
   await assertReleaseToolingMatchesSource(sourceRoot);
@@ -315,6 +367,7 @@ export async function buildReleaseCandidate({ sourceDirectory, sourceCommit, rel
       treeSha256: sha256Hex(Buffer.from(canonicalJson(records), 'utf8')),
     }),
     cloudflare: APPROVED_CLOUDFLARE_CONTRACT,
+    controlPlaneOrigin: parsedControlPlaneOrigin,
     components,
     oauthScopeIds: REQUIRED_OAUTH_SCOPES,
     release,
@@ -382,6 +435,7 @@ export function candidateSummary(candidate, outputRoot = null) {
   return {
     schemaVersion: 1,
     release: candidate.manifest.release,
+    controlPlaneOrigin: candidate.manifest.controlPlaneOrigin,
     sourceCommit: candidate.manifest.sourceCommit,
     artifact: candidate.manifest.artifact,
     components: Object.fromEntries(Object.entries(candidate.manifest.components).map(([name, component]) => [
@@ -397,6 +451,7 @@ export function candidateSummary(candidate, outputRoot = null) {
 const HELP = `Usage: node scripts/build-gateway-release-candidate.mjs \\
   --source <public ankka-mcp-gateway checkout> \\
   --source-commit <40-hex commit that checkout and release inputs must match> \\
+  --control-plane-origin <canonical HTTPS installer origin> \\
   --release <gateway-vX.Y.Z> [--out <new directory>]
 
 Builds the React/Kumo admin, then creates the canonical manifest for that
@@ -409,7 +464,7 @@ signed, published, or uploaded.
 
 function parseCliArguments(argv) {
   if (argv.length === 1 && argv[0] === '--help') return { help: true };
-  const valueFlags = new Set(['--source', '--source-commit', '--release', '--out']);
+  const valueFlags = new Set(['--source', '--source-commit', '--control-plane-origin', '--release', '--out']);
   const values = {};
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index];
@@ -419,11 +474,13 @@ function parseCliArguments(argv) {
     values[flag] = argv[index + 1];
   }
   if (!v.is(STRING_SCHEMA, values['--source']) || !v.is(STRING_SCHEMA, values['--source-commit']) ||
+      !v.is(STRING_SCHEMA, values['--control-plane-origin']) ||
       !v.is(STRING_SCHEMA, values['--release'])) fail('invalid_arguments');
   return {
     help: false,
     sourceDirectory: values['--source'],
     sourceCommit: values['--source-commit'],
+    controlPlaneOrigin: values['--control-plane-origin'],
     release: values['--release'],
     outputDirectory: values['--out'],
   };
