@@ -13,7 +13,7 @@ Notable public product and repository changes are recorded here.
   contracts.
 - Add exact read-only source allowlists and synthetic end-to-end fixtures.
 - Raise repository-local contracts to a 500-tool bound and add a reproducible
-  228-tool OpenAPI fixture, supplemental 251-tool workload and hostile-name
+  228-tool OpenAPI fixture, supplemental 247-tool workload and hostile-name
   coverage, simulated management lifecycle coverage, and searchable dashboard
   review.
 - Add deterministic GET-only OpenAPI allowlist generation with check mode and

@@ -6,7 +6,7 @@ configuration and planning scale. The checked-in
 public and reproducible. It is not a claim about an untested Cloudflare account,
 upstream server, MCP client, or model.
 
-The same focused test derives a secret-free 251-tool workload from that fixture
+The same focused test derives a secret-free 247-tool workload from that fixture
 to mirror the current first-party dogfood cardinality. This supplemental case
 does not rename or silently replace the original 228-operation brief baseline.
 Both cardinalities must continue to pass.
@@ -49,7 +49,7 @@ The focused scale test verifies that:
 
 It repeats the validation, CPU guard, deterministic planning, source-policy,
 Portal-mapping, installer-selection, dashboard-review, and removal-authority
-assertions at exactly 251 names. A separate checked-in
+assertions at exactly 247 names. A separate checked-in
 sanitization-hostile configuration includes leading-digit and reserved-word
 names plus three distinct hyphen/dot/underscore spellings that can collapse to
 one JavaScript-shaped identifier. The test proves the gateway never rewrites
@@ -88,7 +88,7 @@ for machines, so it is intentionally larger and should not replace the config
 diff during human review.
 
 The focused root test proves the configuration and planning path at 228 and
-251 tools. Separate synthetic tests exercise the customer Worker discovering
+247 tools. Separate synthetic tests exercise the customer Worker discovering
 the fixture's 228
 read-shaped tools alongside one unselected destructive tool over ten 25-tool
 MCP pages, persisting the exact 228-name draft, recovering an ambiguous
@@ -96,7 +96,7 @@ provider create, applying the same provider mapping, and completing
 receipt-bound teardown. The same test accepts and saves exactly 500
 maximum-length tool names over twenty 25-tool pages. The dashboard test
 exercises filtering, select-shown, clear-shown, bulk selection, and draft save
-at both 228 and 251 tools; installed lists remain collapsed behind an exact-tool
+at both 228 and 247 tools; installed lists remain collapsed behind an exact-tool
 count. A platform-shaped storage test accepts a
 draft whose worst-case installed projection is exactly 1 MiB, rejects a
 one-byte-larger projection before `put`, and proves the unconstrained 32-source
@@ -175,7 +175,7 @@ ignores client overrides. `opt_in` is useful during a staged migration;
 Code Mode changes presentation and orchestration, not authorization. Exact
 Portal allowlists and upstream read-only enforcement remain required.
 
-## Live qualification for 228 and 251 tools
+## Live qualification for 228 and 247 tools
 
 Before calling the scale supported end to end, use a synthetic or independently
 approved read-only source and record at least:
@@ -201,7 +201,7 @@ approved read-only source and record at least:
    unsupported credential mode is a stop condition. Success prints only exact
    counts and SHA-256 digests, never a URL, token, or tool name.
 2. Provider create/update/read-back succeeds with exactly the expected 228 or
-   251 enabled tools.
+   247 enabled tools.
 3. Source discovery, dashboard search/review, draft save, apply, and recovery
    all preserve the same sorted names.
 4. A Code Mode session advertises the documented Code Mode tools rather than
@@ -218,7 +218,7 @@ approved read-only source and record at least:
 
 As of 2026-08-29, Cloudflare publicly documents a limit of 40 MCP servers per
 Portal but does not document a tools-per-server or enabled-tools-per-mapping
-ceiling. Absence of a documented limit is not confirmation that 228 or 251
+ceiling. Absence of a documented limit is not confirmation that 228 or 247
 works; provider read-back and a live canary are the acceptance evidence.
 
 ## External behavior references

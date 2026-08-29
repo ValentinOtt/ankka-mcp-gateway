@@ -21,7 +21,7 @@ const cliPath = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 const observedPath = fileURLToPath(new URL('../examples/observed.empty.json', import.meta.url));
 const accessPath = fileURLToPath(new URL('../examples/access-input.json', import.meta.url));
 const SCALE_TOOL_COUNT = 228;
-const CURRENT_WORKLOAD_TOOL_COUNT = 251;
+const CURRENT_WORKLOAD_TOOL_COUNT = 247;
 const VALIDATION_ITERATIONS = 100;
 const PLAN_ITERATIONS = 5;
 const SCALE_CPU_GUARD_MS = 5_000;
@@ -40,7 +40,7 @@ function workloadAtCurrentCardinality(input) {
     { length: CURRENT_WORKLOAD_TOOL_COUNT - SCALE_TOOL_COUNT },
     (_value, index) => `workload_read_${String(index + 1).padStart(3, '0')}`,
   );
-  output.sources[0].label = 'Synthetic 251-tool read catalogue';
+  output.sources[0].label = 'Synthetic 247-tool read catalogue';
   output.sources[0].enabledTools = [
     ...output.sources[0].enabledTools,
     ...supplementalNames,
@@ -143,7 +143,7 @@ test('validation and planning stay bounded at 228 exact tools', async () => {
   assert.deepEqual(portalToolNames(plans[0]), input.sources[0].enabledTools);
 });
 
-test('validation and planning cover the current 251-tool workload cardinality', async () => {
+test('validation and planning cover the current 247-tool workload cardinality', async () => {
   const input = workloadAtCurrentCardinality(await fixture());
   assert.equal(input.sources[0].enabledTools.length, CURRENT_WORKLOAD_TOOL_COUNT);
   assert.equal(new Set(input.sources[0].enabledTools).size, CURRENT_WORKLOAD_TOOL_COUNT);
