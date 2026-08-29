@@ -21,6 +21,7 @@ import {
   submitWorkerMutation,
   submitWorkerVersionMutation,
   verifyActiveWorkerDeployment,
+  verifyWorkerSubmission,
   verifyWorkerVersionSubmission,
   submitAssetBucketMutation,
   submitAssetUploadSessionMutation,
@@ -50,6 +51,7 @@ const DEPLOYMENT_ID = '282bd5e5-6e1a-4fe4-a799-aa6d9a6ab26e';
 const OTHER_DEPLOYMENT_ID = '482bd5e5-6e1a-4fe4-a799-aa6d9a6ab26e';
 const CREATED_ON = '2026-08-23T01:00:00.000Z';
 const NAMESPACE_ID = 'e'.repeat(32);
+const WORKER_SUBDOMAIN_HOSTNAME = `${WORKER_NAME}.example-account.workers.dev`;
 
 interface ReleaseFixture {
   readonly release: VerifiedWorkerDirectUploadRelease;
@@ -270,7 +272,12 @@ function workerState(tags: readonly string[], workerId = WORKER_ID) {
     references: {
       dispatch_namespace_outbounds: [], domains: [], durable_objects: [], queues: [], workers: [],
     },
-    subdomain: { enabled: false, previews_enabled: false },
+    subdomain: {
+      enabled: false,
+      preview_url_suffix: `-${WORKER_SUBDOMAIN_HOSTNAME}`,
+      previews_enabled: false,
+      url: `https://${WORKER_SUBDOMAIN_HOSTNAME}`,
+    },
     tags,
     tail_consumers: [],
   };
@@ -1009,6 +1016,99 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     })]);
     await expect(inspectWorkerRecovery(intent, call(unsafeObservability.transport)))
       .rejects.toMatchObject({ code: 'worker_name_collision', stage: 'worker_recovery' });
+  });
+
+  it('accepts the documented beta Worker subdomain metadata and rejects unsafe variants', async () => {
+    const fixture = await releaseFixture();
+    const prepared = await prepareVerifiedWorkerRelease(prepareInput(fixture.release));
+    const intent = await prepareWorkerMutation(prepared);
+    const submission: WorkerSubmission = {
+      kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID,
+    };
+    const current = workerState(intent.body.tags);
+    const currentProvider = sequencedTransport([() => success(current)]);
+    await expect(verifyWorkerSubmission(intent, submission, call(currentProvider.transport)))
+      .resolves.toEqual(submission);
+
+    const legacyProvider = sequencedTransport([() => success({
+      ...current,
+      subdomain: { enabled: false, previews_enabled: false },
+    })]);
+    await expect(verifyWorkerSubmission(intent, submission, call(legacyProvider.transport)))
+      .resolves.toEqual(submission);
+
+    const invalidSubdomains: readonly object[] = [
+      { ...current.subdomain, enabled: true },
+      { ...current.subdomain, previews_enabled: true },
+      { enabled: false, previews_enabled: false, url: current.subdomain.url },
+      { ...current.subdomain, url: `http://${WORKER_SUBDOMAIN_HOSTNAME}` },
+      { ...current.subdomain, url: `https://user@${WORKER_SUBDOMAIN_HOSTNAME}` },
+      { ...current.subdomain, url: `https://${WORKER_SUBDOMAIN_HOSTNAME}?next=1` },
+      { ...current.subdomain, preview_url_suffix: '-different-worker.example-account.workers.dev' },
+      { ...current.subdomain, unexpected: true },
+      { ...current.subdomain, url: 42 },
+    ];
+    for (const subdomain of invalidSubdomains) {
+      const provider = sequencedTransport([() => success({ ...current, subdomain })]);
+      await expect(verifyWorkerSubmission(intent, submission, call(provider.transport))).rejects.toMatchObject({
+        code: 'provider_mismatch', stage: 'worker_verify', outcome: 'submitted',
+      });
+    }
+  });
+
+  it('accepts only a provider identifier as optional converged Custom Domain certificate metadata', async () => {
+    const fixture = await releaseFixture();
+    const prepared = await prepareVerifiedWorkerRelease(prepareInput(fixture.release));
+    const intent = await prepareWorkerMutation(prepared);
+    const submission: WorkerSubmission = {
+      kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID,
+    };
+    const converged = {
+      domain: {
+        id: 'd'.repeat(32),
+        hostname: 'gateway.example.com',
+        zoneId: 'c'.repeat(32),
+        zoneName: 'example.com',
+      },
+      namespaceId: NAMESPACE_ID,
+    };
+    const convergedState = (certificateId?: string) => {
+      const baseDomain = {
+        id: converged.domain.id,
+        hostname: converged.domain.hostname,
+        zone_id: converged.domain.zoneId,
+        zone_name: converged.domain.zoneName,
+      };
+      const domain = certificateId === undefined
+        ? baseDomain
+        : { ...baseDomain, certificate_id: certificateId };
+      return {
+        ...workerState(intent.body.tags),
+        deployed_on: CREATED_ON,
+        references: {
+          dispatch_namespace_outbounds: [],
+          domains: [domain],
+          durable_objects: [{
+            worker_id: WORKER_ID,
+            worker_name: WORKER_NAME,
+            namespace_id: NAMESPACE_ID,
+            namespace_name: `${WORKER_NAME}_AdminState`,
+          }],
+          queues: [],
+          workers: [],
+        },
+      };
+    };
+    for (const certificateId of [undefined, 'f'.repeat(32), VERSION_ID]) {
+      const provider = sequencedTransport([() => success(convergedState(certificateId))]);
+      await expect(verifyWorkerSubmission(intent, submission, call(provider.transport), converged))
+        .resolves.toEqual(submission);
+    }
+    for (const certificateId of ['', 'not-a-provider-id', 'f'.repeat(40)]) {
+      const provider = sequencedTransport([() => success(convergedState(certificateId))]);
+      await expect(verifyWorkerSubmission(intent, submission, call(provider.transport), converged))
+        .rejects.toMatchObject({ code: 'provider_mismatch', stage: 'worker_verify' });
+    }
   });
 
   it('fully paginates and binds exactly one complete sqlite AdminState namespace', async () => {

@@ -484,6 +484,7 @@ function installedReferences() {
   return {
     dispatch_namespace_outbounds: [],
     domains: [{
+      certificate_id: CERTIFICATE_ID,
       hostname: selection.basics.managementHostname,
       id: DOMAIN_ID,
       zone_id: ZONE_ID,
@@ -501,6 +502,7 @@ function installedReferences() {
 }
 
 function exactWorker() {
+  const subdomainHostname = `${workerName}.example-account.workers.dev`;
   return {
     created_on: '2026-08-23T00:00:00.000Z',
     deployed_on: '2026-08-23T00:00:30.123456Z',
@@ -515,7 +517,12 @@ function exactWorker() {
       traces: { enabled: false, head_sampling_rate: 1, persist: true, destinations: [] },
     },
     references: installedReferences(),
-    subdomain: { enabled: false, previews_enabled: false },
+    subdomain: {
+      enabled: false,
+      preview_url_suffix: `-${subdomainHostname}`,
+      previews_enabled: false,
+      url: `https://${subdomainHostname}`,
+    },
     tags: ['ankka-mcp-gateway', correlationTag],
     tail_consumers: [],
     updated_on: '2026-08-23T00:01:00.000Z',
@@ -773,6 +780,24 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
     ['Worker drift', 6, success({ ...exactWorker(), unexpected: true }), 'fresh_worker_get'],
     ['unsafe Worker observability', 6, success({
       ...exactWorker(), observability: { enabled: false, redact_query_string: true },
+    }), 'fresh_worker_get'],
+    ['Worker subdomain enabled', 6, success({
+      ...exactWorker(), subdomain: { ...exactWorker().subdomain, enabled: true },
+    }), 'fresh_worker_get'],
+    ['Worker subdomain metadata injection', 6, success({
+      ...exactWorker(), subdomain: {
+        ...exactWorker().subdomain,
+        url: `https://${workerName}.example-account.workers.dev?next=1`,
+      },
+    }), 'fresh_worker_get'],
+    ['Worker subdomain metadata mismatch', 6, success({
+      ...exactWorker(), subdomain: {
+        ...exactWorker().subdomain,
+        preview_url_suffix: '-foreign-worker.example-account.workers.dev',
+      },
+    }), 'fresh_worker_get'],
+    ['Worker subdomain unexpected field', 6, success({
+      ...exactWorker(), subdomain: { ...exactWorker().subdomain, unexpected: true },
     }), 'fresh_worker_get'],
     ['workers.dev enabled', 8, success({ enabled: true, previews_enabled: false }), 'fresh_workers_dev_get'],
   ] as const)('fails closed on %s before any mutation', async (_name, index, response, stage) => {
