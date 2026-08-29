@@ -6,7 +6,7 @@ import * as v from 'valibot';
 
 export const LIVE_INSTALLER_HOSTNAME = 'deploy.ankka.ai';
 export const LIVE_INSTALLER_WORKER_NAME = 'ankka-gateway-deploy';
-export const LIVE_INSTALLER_OAUTH_CLIENT_ID = '97ef364689fbda8582a55237066a67a0';
+export const LIVE_INSTALLER_OAUTH_CLIENT_ID = '6ace98c3cfe05f58a7fbe18f88390bfc';
 
 const MAX_TARGET_BYTES = 4096;
 const REPOSITORY_ROOT = path.resolve(fileURLToPath(new URL('../../../', import.meta.url)));
