@@ -5,6 +5,7 @@ import {
   MAX_RELEASE_FILE_BYTES,
   MAX_RELEASE_PAYLOAD_BYTES,
   canonicalJson,
+  parseControlPlaneOrigin,
   parseCanonicalReleaseManifest,
   type ReleaseFileRecord,
   type ReleaseManifest,
@@ -43,6 +44,7 @@ const planEntrySchema = v.strictObject({
 const objectPlanSchema = v.strictObject({
   artifactSha256: v.string(),
   channel: v.string(),
+  controlPlaneOrigin: v.string(),
   immutability: v.strictObject({
     externalAtomicCreateOnlyRequired: v.literal(true),
     overwriteAllowed: v.literal(false),
@@ -116,6 +118,7 @@ export interface R2ReleaseObjectPlanEntry {
 export interface R2ReleaseObjectPlan {
   readonly artifactSha256: string;
   readonly channel: string;
+  readonly controlPlaneOrigin: string;
   readonly immutability: {
     readonly externalAtomicCreateOnlyRequired: true;
     readonly overwriteAllowed: false;
@@ -300,9 +303,16 @@ function parseObjectPlan<Input>(input: Input): R2ReleaseObjectPlan {
   const result = v.safeParse(objectPlanSchema, input);
   if (!result.success) invalid();
   const value = result.output;
+  let controlPlaneOrigin: string;
+  try {
+    controlPlaneOrigin = parseControlPlaneOrigin(value.controlPlaneOrigin);
+  } catch {
+    invalid();
+  }
   if (
     !SHA256_PATTERN.test(value.artifactSha256) ||
     !CHANNEL_PATTERN.test(value.channel) ||
+    controlPlaneOrigin !== value.controlPlaneOrigin ||
     MUTABLE_CHANNELS.has(value.channel) ||
     !KEY_ID_PATTERN.test(value.keyId) ||
     !RELEASE_PATTERN.test(value.release) ||
@@ -335,6 +345,7 @@ function parseObjectPlan<Input>(input: Input): R2ReleaseObjectPlan {
   return Object.freeze({
     artifactSha256: value.artifactSha256,
     channel: value.channel,
+    controlPlaneOrigin: value.controlPlaneOrigin,
     immutability: Object.freeze({
       externalAtomicCreateOnlyRequired: true,
       overwriteAllowed: false,
@@ -437,6 +448,7 @@ function parseEnvelope(serialized: string, plan: R2ReleaseObjectPlan): ReleaseMa
   }
   if (
     manifest.release !== plan.release ||
+    manifest.controlPlaneOrigin !== plan.controlPlaneOrigin ||
     manifest.artifact.treeSha256 !== plan.artifactSha256
   ) invalid();
   return manifest;

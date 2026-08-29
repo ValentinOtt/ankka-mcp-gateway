@@ -201,6 +201,25 @@ describe('runtime update relay', () => {
     expect(fixture.commands).toEqual([]);
   });
 
+  it('rejects a release candidate signed for another control-plane origin before provider access', async () => {
+    let providerCalls = 0;
+    const base = input(async () => {
+      providerCalls += 1;
+      throw new Error('provider access must not be reached');
+    });
+    await expect(relayRuntimeUpdate({
+      ...base,
+      releaseBundle: Object.freeze({
+        ...verifiedReleaseBundle,
+        manifest: Object.freeze({
+          ...verifiedReleaseBundle.manifest,
+          controlPlaneOrigin: 'https://foreign-control.example',
+        }),
+      }),
+    })).rejects.toMatchObject({ code: 'session_conflict' });
+    expect(providerCalls).toBe(0);
+  });
+
   it('does not expose a Worker when the claimed management domain belongs elsewhere', async () => {
     const fixture = transportFixture({ managementDomainService: 'another-worker' });
     await expect(relayRuntimeUpdate(input(fixture.transport))).rejects.toBeDefined();

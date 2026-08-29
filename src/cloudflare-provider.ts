@@ -1,5 +1,6 @@
 import * as v from 'valibot';
 
+import { resolveAccessGroupByDigest } from './access-groups.ts';
 import {
   createCloudflareClient,
   type CloudflareClient,
@@ -9,7 +10,11 @@ import {
   readCloudflareObservedState,
   type CloudflareObservedStateInput,
 } from './cloudflare-observed.ts';
-import { validateGatewayConfig, type GatewayConfig } from './config.ts';
+import {
+  MAX_ENABLED_TOOLS_PER_SOURCE,
+  validateGatewayConfig,
+  type GatewayConfig,
+} from './config.ts';
 import {
   boundaryObjectSchema,
   jsonObjectSchema,
@@ -226,10 +231,14 @@ type SourceAccessApplicationDesired = {
 type PolicyBody = {
   readonly decision: 'allow';
   readonly exclude: readonly JsonValue[];
-  readonly include: readonly { readonly email: { readonly email: string } }[];
+  readonly include: readonly PolicyIncludeRule[];
   readonly name: string;
   readonly require: readonly JsonValue[];
 };
+
+type PolicyIncludeRule =
+  | { readonly email: { readonly email: string } }
+  | { readonly group: { readonly id: string } };
 /** A value-free error suitable for installer output and receipt recovery. */
 export class CloudflareGatewayProviderError extends Error {
   readonly code: string;
@@ -1134,6 +1143,7 @@ async function mutatePolicy(
   }
 
   const body = await normalizePolicyDesired(change.desired, mutation.access, marker);
+  await assertPolicyDesiredMatchesConfig(mutation);
   const parentId = change.action === 'create'
     ? findPolicyParent(mutation)
     : requireSafeId(change.provider.parentId);
@@ -1169,6 +1179,38 @@ async function mutatePolicy(
     assertInlinePolicySet(parent, confirmedPolicies);
   }
   await cloudflare.updateAppPolicy(parentId, change.provider.id, body);
+}
+
+async function assertPolicyDesiredMatchesConfig(mutation: GatewayMutation): Promise<void> {
+  if (mutation.change.action === 'delete' || !POLICY_KINDS.has(mutation.change.kind)) {
+    fail('invalid_input');
+  }
+  let desiredState: GatewayDesiredState;
+  try {
+    desiredState = await buildGatewayDesiredState(mutation.configInput, {
+      target: mutation.target,
+      access: mutation.access,
+    });
+  } catch {
+    fail('invalid_input');
+  }
+  if (desiredState.blockers.some((blocker) => [
+    'allowed_emails_required',
+    'invalid_allowed_emails',
+    'invalid_access_groups',
+    'source_access_group_missing',
+    'source_access_group_ambiguous',
+  ].includes(blocker.code))) {
+    fail('access_identity_mismatch');
+  }
+  if (desiredState.blockers.length > 0) fail('invalid_input');
+  const expected = desiredState.resources.find((resource) =>
+    resource.kind === mutation.change.kind && resource.key === mutation.change.key);
+  if (expected === undefined
+    || expected.desiredHash !== mutation.change.desiredHash
+    || canonicalJson(expected.desired) !== canonicalJson(mutation.change.desired)) {
+    fail('invalid_input');
+  }
 }
 
 function assertInlinePolicySet(app: BoundaryObject, policies: BoundaryValue): void {
@@ -1349,12 +1391,20 @@ function accessPolicyMatches(live: BoundaryObject, expected: PolicyBody): boolea
     || !Array.isArray(live.include) || live.include.length !== expected.include.length) {
     return false;
   }
+  const expectedGroup = expected.include.length === 1
+    ? extractPolicyGroup(expected.include[0])
+    : null;
+  if (expectedGroup !== null) {
+    return live.include.length === 1
+      && extractPolicyGroup(live.include[0]) === expectedGroup;
+  }
   const liveEmails = live.include.map(extractPolicyEmail);
-  const expectedEmails = expected.include.map((rule) => rule.email.email);
+  const expectedEmails = expected.include.map(extractPolicyEmail);
   return liveEmails.every((email) => email !== null)
+    && expectedEmails.every((email) => email !== null)
     && sameTextSet(
       liveEmails.map((email) => email === null ? '' : email.trim().toLowerCase()),
-      expectedEmails,
+      expectedEmails.map((email) => email === null ? '' : email),
     );
 }
 
@@ -1488,19 +1538,33 @@ async function normalizePolicyDesired(
     fail('invalid_input');
   }
   assertExactKeys(value.allow, ['identitiesRef', 'identityType', 'identityCount', 'identitiesHash']);
-  if (value.allow.identitiesRef !== 'access.allowedEmails' || value.allow.identityType !== 'email') {
+  if (!v.is(numberSchema, value.allow.identityCount)
+    || !v.is(stringSchema, value.allow.identitiesHash)) fail('access_identity_mismatch');
+
+  let include: PolicyIncludeRule[];
+  if (value.allow.identitiesRef === 'access.allowedEmails'
+    && value.allow.identityType === 'email') {
+    const emails = normalizeEmails(access);
+    if (emails.length !== value.allow.identityCount) fail('access_identity_mismatch');
+    const hash = await hashCanonical({ emails });
+    if (hash !== value.allow.identitiesHash) fail('access_identity_mismatch');
+    include = emails.map((email) => ({ email: { email } }));
+  } else if (value.allow.identitiesRef === 'access.groups'
+    && value.allow.identityType === 'group') {
+    const group = await resolveAccessGroupByDigest(
+      access,
+      value.allow.identityCount,
+      value.allow.identitiesHash,
+    );
+    if (group === null) fail('access_identity_mismatch');
+    include = [{ group: { id: group.id } }];
+  } else {
     fail('invalid_input');
   }
-  const emails = normalizeEmails(access);
-  if (!v.is(numberSchema, value.allow.identityCount)
-    || emails.length !== value.allow.identityCount) fail('access_identity_mismatch');
-  const hash = await hashCanonical({ emails });
-  if (!v.is(stringSchema, value.allow.identitiesHash)
-    || hash !== value.allow.identitiesHash) fail('access_identity_mismatch');
   return {
     name: marker,
     decision: 'allow',
-    include: emails.map((email) => ({ email: { email } })),
+    include,
     exclude: [],
     require: [],
   };
@@ -2191,7 +2255,9 @@ function normalizeEmails(access: BoundaryValue): string[] {
 }
 
 function normalizeTools(value: BoundaryValue): string[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 500) fail('invalid_input');
+  if (!Array.isArray(value)
+    || value.length === 0
+    || value.length > MAX_ENABLED_TOOLS_PER_SOURCE) fail('invalid_input');
   const tools: string[] = [];
   for (const tool of value) {
     if (!v.is(stringSchema, tool)
@@ -2283,10 +2349,32 @@ function policyIdentityHash(value: JsonObject): string {
 }
 
 function extractPolicyEmail(rule: BoundaryValue): string | null {
-  if (!isObject(rule) || !isObject(rule.email) || !v.is(stringSchema, rule.email.email)) {
+  if (!isObject(rule)
+    || !hasExactObjectKeys(rule, ['email'])
+    || !isObject(rule.email)
+    || !hasExactObjectKeys(rule.email, ['email'])
+    || !v.is(stringSchema, rule.email.email)) {
     return null;
   }
   return rule.email.email;
+}
+
+function extractPolicyGroup(rule: BoundaryValue): string | null {
+  if (!isObject(rule)
+    || !hasExactObjectKeys(rule, ['group'])
+    || !isObject(rule.group)
+    || !hasExactObjectKeys(rule.group, ['id'])
+    || !safeId(rule.group.id)) {
+    return null;
+  }
+  return rule.group.id;
+}
+
+function hasExactObjectKeys(value: BoundaryObject, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort(compareText);
+  const sortedExpected = [...expected].sort(compareText);
+  return actual.length === sortedExpected.length
+    && actual.every((key, index) => key === sortedExpected[index]);
 }
 
 function hasControlCharacter(value: string): boolean {

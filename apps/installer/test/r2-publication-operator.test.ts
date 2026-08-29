@@ -20,6 +20,7 @@ const identity: R2PublicationIdentity = Object.freeze({
   artifactSha256: ARTIFACT_SHA,
   bucketName: 'ankka-gateway-releases',
   channel: CHANNEL,
+  controlPlaneOrigin: 'https://deploy.ankka.ai',
   keyId: 'gateway-release-canary-1',
   objectPlanSha256: PLAN_SHA,
   prefix: PREFIX,

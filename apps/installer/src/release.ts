@@ -4,10 +4,14 @@ import { base64UrlDecode, base64UrlEncode } from './crypto';
 import { DeployError } from './errors';
 import {
   canonicalJson,
+  parseControlPlaneOrigin,
   parseCanonicalReleaseManifest,
   type ReleaseFileRecord,
   type ReleaseManifest,
 } from './release-manifest';
+
+const WORKER_CONTROL_PLANE_ORIGIN_DECLARATION =
+  /^const CONTROL_PLANE_ORIGIN = '(https:\/\/[^'\r\n]+)';$/gmu;
 
 export interface ReleaseEnvironment {
   GATEWAY_RELEASE_ENVELOPE_JSON?: string;
@@ -214,6 +218,19 @@ export async function verifyReleasePayload(
     supplied.delete(record.path);
   }
   if (supplied.size !== 0 || totalBytes !== manifest.artifact.byteSize) invalid();
+
+  const worker = payload.find((file) => file.path === 'payload/worker/index.js');
+  if (!worker) invalid();
+  let workerSource: string;
+  try {
+    workerSource = new TextDecoder('utf-8', { fatal: true }).decode(worker.bytes);
+  } catch {
+    invalid();
+  }
+  const matches = [...workerSource.matchAll(WORKER_CONTROL_PLANE_ORIGIN_DECLARATION)];
+  if (matches.length !== 1 || parseControlPlaneOrigin(matches[0]?.[1]) !== manifest.controlPlaneOrigin) {
+    invalid();
+  }
 }
 
 export async function verifySignedReleaseEnvelope(

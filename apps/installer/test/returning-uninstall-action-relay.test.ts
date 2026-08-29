@@ -22,6 +22,15 @@ const VERSION_ID = '11111111-1111-4111-8111-111111111111';
 const DEPLOYMENT_ID = '22222222-2222-4222-8222-222222222222';
 const subdomainMutationSchema = v.object({ enabled: v.boolean(), previews_enabled: v.boolean() });
 
+interface AuthoritySourceFixture {
+  readonly id: string;
+  readonly label: string;
+  readonly url: string;
+  readonly authMode: 'none' | 'oauth';
+  readonly enabledTools: readonly string[];
+  readonly status: 'installed' | 'draft';
+}
+
 function envelope<Result>(result: Result, status = 200): Response {
   return new Response(JSON.stringify({ success: status >= 200 && status < 300, result }), {
     status,
@@ -111,8 +120,9 @@ function input(transport: (input: RequestInfo | URL, init?: RequestInit) => Prom
   } as const;
 }
 
-async function authority(
+async function authorityEnvelope(
   runtimeOverrides: Readonly<Record<string, string>> = {},
+  sources: readonly AuthoritySourceFixture[] = [],
 ) {
   const resourceKinds = [
     'portal', 'portal_access_application', 'portal_access_policy', 'dns_record',
@@ -147,7 +157,7 @@ async function authority(
   });
   const portal = receipt.resources[0];
   if (!portal || portal.kind !== 'portal') throw new TypeError('portal authority fixture');
-  return await parseReturningUninstallImportedAuthority({
+  return {
     schemaVersion: 1,
     status: 'authorized',
     authority: {
@@ -167,10 +177,11 @@ async function authority(
         },
         sourceOwnership: [],
       },
-      sources: { schemaVersion: 1, revision: 1, applyMode: 'oauth_per_action', sources: [] },
+      sources: { schemaVersion: 1, revision: 1, applyMode: 'oauth_per_action', sources },
       runtime: {
         release: 'gateway-v1.0.0',
         artifactSha256: `sha256:${'1'.repeat(64)}`,
+        controlPlaneOrigin: 'https://deploy.ankka.ai',
         updateChannel: 'canary',
         updateKeyId: 'release-test-v1',
         updatePublicKey: 'A'.repeat(43),
@@ -184,7 +195,20 @@ async function authority(
       },
     },
     actionId: ACTION_ID,
-  }, {
+  } as const;
+}
+
+async function authority(
+  runtimeOverrides: Readonly<Record<string, string>> = {},
+) {
+  return await parseReturningUninstallImportedAuthority(
+    await authorityEnvelope(runtimeOverrides),
+    authorityExpectation(),
+  );
+}
+
+function authorityExpectation() {
+  return {
     actionId: ACTION_ID,
     actorEmail: 'admin@example.com',
     installationId: INSTALLATION_ID,
@@ -194,7 +218,20 @@ async function authority(
     managementOrigin: 'https://manage.example.com',
     portalHostname: 'mcp.example.com',
     gatewayName: 'Example Gateway',
-  });
+  } as const;
+}
+
+function largeDraftSources(sourceCount = 15) {
+  return Array.from({ length: sourceCount }, (_source, sourceIndex) => ({
+    id: `source-${String(sourceIndex).padStart(16, '0')}`,
+    label: `Synthetic source ${String(sourceIndex).padStart(2, '0')}`,
+    url: `https://source-${String(sourceIndex).padStart(2, '0')}.example.net/mcp`,
+    authMode: 'none' as const,
+    enabledTools: Array.from({ length: 500 }, (_tool, toolIndex) => (
+      `tool_${String(sourceIndex).padStart(2, '0')}_${String(toolIndex).padStart(3, '0')}_`.padEnd(128, 'x')
+    )),
+    status: 'draft' as const,
+  }));
 }
 
 describe('returning uninstall customer-action relay', () => {
@@ -274,6 +311,133 @@ describe('returning uninstall customer-action relay', () => {
     })).rejects.toMatchObject({ code: 'session_conflict' });
     expect(providerWrites).toBe(0);
     expect(customerCalls).toBe(0);
+  });
+
+  it('rejects returning-removal authority for another control-plane origin before route mutation', async () => {
+    let providerWrites = 0;
+    let customerCalls = 0;
+    const transport = async (requestInput: RequestInfo | URL, init: RequestInit = {}) => {
+      const request = new Request(requestInput, init);
+      const url = new URL(request.url);
+      if (url.origin !== 'https://api.cloudflare.com') {
+        customerCalls += 1;
+        throw new Error('customer route must not be reached');
+      }
+      const preflight = runtimePreflightResponse(url);
+      if (preflight) return preflight;
+      if (request.method === 'GET') return envelope({ enabled: false, previews_enabled: false });
+      providerWrites += 1;
+      throw new Error('provider write must not be reached');
+    };
+
+    await expect(applyReturningUninstallAction(
+      input(transport),
+      REQUEST_ID,
+      await authority({ controlPlaneOrigin: 'https://foreign-control.example' }),
+      async () => { throw new Error('post-ready proof must not be reached'); },
+    )).rejects.toMatchObject({ code: 'session_conflict' });
+    expect(providerWrites).toBe(0);
+    expect(customerCalls).toBe(0);
+  });
+
+  it('imports a storage-valid large proof with 500 maximum-length tool names per source', async () => {
+    const sources = largeDraftSources().map((source, index) => index === 0 ? {
+      ...source,
+      label: '<Operational source>',
+      url: 'https://source-00.example.net/v1/mcp',
+    } : source);
+    const serializedAuthority = JSON.stringify(await authorityEnvelope({}, sources));
+    const authorityBytes = new TextEncoder().encode(serializedAuthority).byteLength;
+    expect(authorityBytes).toBeGreaterThan(256 * 1024);
+    expect(authorityBytes).toBeLessThan(4 * 1024 * 1024);
+    expect(new TextEncoder().encode(JSON.stringify({
+      schemaVersion: 1,
+      revision: 1,
+      applyMode: 'oauth_per_action',
+      sources,
+    })).byteLength).toBeLessThanOrEqual(1024 * 1024);
+
+    let enabled = false;
+    const providerWrites: boolean[] = [];
+    const transport = async (requestInput: RequestInfo | URL, init: RequestInit = {}) => {
+      const request = new Request(requestInput, init);
+      const url = new URL(request.url);
+      if (url.origin === 'https://api.cloudflare.com') {
+        const preflight = runtimePreflightResponse(url);
+        if (preflight) return preflight;
+        if (request.method === 'GET') return envelope({ enabled, previews_enabled: false });
+        const body = await requestJson(request, subdomainMutationSchema);
+        enabled = body.enabled;
+        providerWrites.push(enabled);
+        return envelope({ enabled, previews_enabled: false });
+      }
+      expect(url.href).toBe(
+        'https://ankka-gateway-example.customer-workers.workers.dev/__ankka/teardown-action',
+      );
+      if (request.method === 'HEAD') {
+        return new Response(null, { status: 204, headers: { 'x-ankka-teardown-action': 'ready' } });
+      }
+      const body = await requestJson(request, boundaryObjectSchema);
+      expect(body).toMatchObject({ command: 'prove', actionId: ACTION_ID });
+      return new Response(serializedAuthority, { headers: { 'content-type': 'application/json' } });
+    };
+
+    const result = await relayReturningUninstallAction(input(transport));
+    expect(result.sources.sources).toHaveLength(15);
+    expect(result.sources.sources.every((source) => source.enabledTools.length === 500)).toBe(true);
+    expect(result.sources.sources[0]).toMatchObject({
+      label: '<Operational source>',
+      url: 'https://source-00.example.net/v1/mcp',
+    });
+    expect(result.sources.sources.at(-1)?.enabledTools.at(-1)).toHaveLength(128);
+    expect(providerWrites).toEqual([true, false]);
+    expect(enabled).toBe(false);
+  });
+
+  it('rejects an authority whose source journal exceeds the customer storage contract', async () => {
+    const sources = largeDraftSources(32);
+    const record = { schemaVersion: 1, revision: 1, applyMode: 'oauth_per_action', sources } as const;
+    expect(new TextEncoder().encode(JSON.stringify(record)).byteLength).toBeGreaterThan(1024 * 1024);
+    await expect(parseReturningUninstallImportedAuthority(
+      await authorityEnvelope({}, sources),
+      authorityExpectation(),
+    )).rejects.toMatchObject({ code: 'session_conflict' });
+  });
+
+  it('cancels an over-limit authority proof and still closes workers.dev', async () => {
+    let enabled = false;
+    let proofBodyCancelled = false;
+    const providerWrites: boolean[] = [];
+    const transport = async (requestInput: RequestInfo | URL, init: RequestInit = {}) => {
+      const request = new Request(requestInput, init);
+      const url = new URL(request.url);
+      if (url.origin === 'https://api.cloudflare.com') {
+        const preflight = runtimePreflightResponse(url);
+        if (preflight) return preflight;
+        if (request.method === 'GET') return envelope({ enabled, previews_enabled: false });
+        const body = await requestJson(request, subdomainMutationSchema);
+        enabled = body.enabled;
+        providerWrites.push(enabled);
+        return envelope({ enabled, previews_enabled: false });
+      }
+      if (request.method === 'HEAD') {
+        return new Response(null, { status: 204, headers: { 'x-ankka-teardown-action': 'ready' } });
+      }
+      return new Response(new ReadableStream({
+        cancel() { proofBodyCancelled = true; },
+      }), {
+        headers: {
+          'content-type': 'application/json',
+          'content-length': String((4 * 1024 * 1024) + 1),
+        },
+      });
+    };
+
+    await expect(relayReturningUninstallAction(input(transport)))
+      .rejects.toMatchObject({ code: 'session_conflict' });
+    expect(proofBodyCancelled).toBe(true);
+    expect(providerWrites).toEqual([true, false]);
+    expect(enabled).toBe(false);
   });
 
   it('relays the grant once only after the receipt and current runtime match, then closes workers.dev', async () => {

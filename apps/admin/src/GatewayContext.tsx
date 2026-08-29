@@ -248,20 +248,26 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     }),
     prepareSourceApply: (sourceId) => runBusy(async () => {
       const current = sources ?? await refreshSources()
+      const trustedStatus = status ?? await apiRef.current.getStatus()
+      if (status === null) setStatus(trustedStatus)
       const prepared = await apiRef.current.prepareSourceAction(current.revision, sourceId)
-      const handoffUrl = validHandoffUrl(prepared.handoffUrl)
+      const handoffUrl = validHandoffUrl(prepared.handoffUrl, trustedStatus.controlPlaneOrigin)
       if (!handoffUrl) throw new Error('The authorization link could not be verified.')
       return { ...prepared, handoffUrl }
     }),
     prepareRuntimeAction: (operation) => runBusy(async () => {
+      const trustedStatus = status ?? await apiRef.current.getStatus()
+      if (status === null) setStatus(trustedStatus)
       const prepared = await apiRef.current.prepareRuntimeAction(operation)
-      const handoffUrl = validHandoffUrl(prepared.handoffUrl)
+      const handoffUrl = validHandoffUrl(prepared.handoffUrl, trustedStatus.controlPlaneOrigin)
       if (!handoffUrl) throw new Error('The authorization link could not be verified.')
       return { ...prepared, handoffUrl }
     }),
     prepareTeardownAction: () => runBusy(async () => {
+      const trustedStatus = status ?? await apiRef.current.getStatus()
+      if (status === null) setStatus(trustedStatus)
       const prepared = await apiRef.current.prepareTeardownAction()
-      const handoffUrl = validHandoffUrl(prepared.handoffUrl)
+      const handoffUrl = validHandoffUrl(prepared.handoffUrl, trustedStatus.controlPlaneOrigin)
       if (!handoffUrl) throw new Error('The teardown handoff could not be verified.')
       return { ...prepared, handoffUrl }
     }),

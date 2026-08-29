@@ -227,7 +227,7 @@ const FAILURE_COPY: Readonly<Record<DeployErrorCode, {
   oauth_grant_invalid: { title: 'Cloudflare permission grant did not match', detail: 'Approve the exact requested permissions with the primary administrator.', repairTarget: 'account-home' },
   oauth_revoke_failed: { title: 'Cloudflare grant revocation needs attention', detail: 'Revoke Ankka MCP Gateway from Cloudflare connected applications before retrying.', repairTarget: 'account-home' },
   oauth_state_invalid: { title: 'Authorization attempt expired', detail: 'Create and authorize a new static plan.', repairTarget: null },
-  origin_invalid: { title: 'Installer request rejected', detail: 'Reload the installer from deploy.ankka.ai.', repairTarget: null },
+  origin_invalid: { title: 'Installer request rejected', detail: 'Reload this page from the signed installer origin.', repairTarget: null },
   rate_limited: { title: 'Installer request limit reached', detail: 'Wait briefly, then retry the same reviewed action.', repairTarget: null },
   release_invalid: { title: 'Gateway release verification failed', detail: 'Wait for a verified gateway release before retrying.', repairTarget: null },
   release_unavailable: { title: 'Verified gateway release unavailable', detail: 'The zero-write installer cannot deploy until release signing is enabled.', repairTarget: null },

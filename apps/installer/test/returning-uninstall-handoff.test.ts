@@ -63,6 +63,7 @@ interface SeededSession {
     readonly actionKey: string;
     readonly actorEmail: string;
     readonly accountId: string;
+    readonly controlPlaneOrigin: string;
     readonly installationId: string;
     readonly gatewayName: string;
     readonly portalHostname: string;
@@ -134,6 +135,7 @@ async function seedExistingGatewaySession(
       actionKey: ACTION_KEY,
       actorEmail: 'owner@example.com',
       accountId: ACCOUNT_ID,
+      controlPlaneOrigin: PUBLIC_ORIGIN,
       installationId: EXISTING_GATEWAY.installationId,
       gatewayName: EXISTING_GATEWAY.name,
       portalHostname: EXISTING_GATEWAY.portalHostname,
@@ -239,6 +241,7 @@ describe('returning-customer management handoff', () => {
       { ...seeded.claim, accountId: 'not-an-account' },
       { ...seeded.claim, installationId: `acg-${'Z'.repeat(24)}` },
       { ...seeded.claim, portalHostname: 'MCP.example.com' },
+      { ...seeded.claim, controlPlaneOrigin: 'https://foreign-control.example' },
       { ...seeded.claim, managementOrigin: 'https://manage.example.com/path' },
       { ...seeded.claim, expiresAt: NOW + 600_001 },
     ];

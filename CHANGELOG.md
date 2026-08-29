@@ -12,6 +12,21 @@ Notable public product and repository changes are recorded here.
 - Add signed release, update, rollback, recovery, and receipt-owned removal
   contracts.
 - Add exact read-only source allowlists and synthetic end-to-end fixtures.
+- Raise repository-local contracts to a 500-tool bound and add a reproducible
+  228-tool OpenAPI fixture, supplemental 251-tool workload and hostile-name
+  coverage, simulated management lifecycle coverage, and searchable dashboard
+  review.
+- Add deterministic GET-only OpenAPI allowlist generation with check mode and
+  an optional exact reviewed manifest for individually bound non-GET reads and
+  wrapper-local synthetic tools; no method-wide non-GET switch is accepted.
+- Add a signed, exact control-plane-origin contract and an unsupported
+  first-party Cloudflare dogfood runbook covering two create-only releases,
+  install, update, rollback, recovery, receipt-bound removal, and exact cleanup;
+  live qualification remains pending.
+- Document customer-owned audit logging with a minimal source-Worker fallback,
+  large-source Code Mode qualification with an exact live-catalogue gate,
+  per-source Access groups, a bounded live canary, and the post-preview
+  governance roadmap.
 - Document the customer credential boundary, no-telemetry runtime, and
   identifier-free hosted-installer analytics.
 - Add public-source, license, history, and clean-build checks.

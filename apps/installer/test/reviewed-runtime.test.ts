@@ -71,7 +71,7 @@ async function component(files: readonly SourceFile[]): Promise<ReleaseComponent
   });
 }
 
-async function signedSnapshotFixture(): Promise<{
+async function signedSnapshotFixture(controlPlaneOrigin = PUBLIC_ORIGIN): Promise<{
   readonly bundle: VerifiedReleaseBundle;
   readonly pin: PinnedR2Release;
 }> {
@@ -95,7 +95,7 @@ async function signedSnapshotFixture(): Promise<{
   const worker = [await source(
     'payload/worker/index.js',
     'application/javascript+module',
-    'export default {fetch(){return new Response("customer worker")}};',
+    `const CONTROL_PLANE_ORIGIN = '${controlPlaneOrigin}';\nexport default {fetch(){return new Response("customer worker")}};`,
   )];
   const workerCleanup = [await source(
     'payload/worker-cleanup/index.js',
@@ -121,6 +121,7 @@ async function signedSnapshotFixture(): Promise<{
       treeSha256: await sha256(canonicalJson(all.map((file) => file.record))),
     },
     cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+    controlPlaneOrigin,
     components: {
       admin: await component(admin),
       installer: await component(installer),
@@ -159,6 +160,7 @@ async function signedSnapshotFixture(): Promise<{
     pin: {
       schemaVersion: 1,
       channel: 'canary',
+      controlPlaneOrigin: manifest.controlPlaneOrigin,
       release: manifest.release,
       keyId: bundle.keyId,
       publicKey: 'A'.repeat(43),
@@ -387,6 +389,17 @@ describe('reviewed runtime boundary', () => {
     expect(await first.json()).toEqual({ code: 'release_invalid' });
     expect(provider.calls).toBe(2);
     expect(executeCalls).toBe(0);
+  });
+
+  it('refuses an internally consistent signed snapshot for another control-plane origin', async () => {
+    const fixture = await signedSnapshotFixture('https://foreign-control.example');
+    const provider = new SequencedProvider(fixture.bundle);
+    const worker = createReviewedGatewayDeployRuntime(fixture.pin, runtimeDependencies(provider));
+
+    const response = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/`), runtimeEnv());
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ code: 'release_invalid' });
+    expect(provider.calls).toBe(1);
   });
 
   it('serves the signed installer immediately while reviewed execution owns the connected stream', async () => {

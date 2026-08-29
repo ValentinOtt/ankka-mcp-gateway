@@ -1,0 +1,3469 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Synthetic 228-operation read API",
+    "version": "1.0.0",
+    "description": "Public, generated operations for gateway scale testing. Contains no customer or production semantics."
+  },
+  "servers": [
+    {
+      "url": "https://large-source.example.com"
+    }
+  ],
+  "paths": {
+    "/synthetic/analytics/records/001": {
+      "get": {
+        "operationId": "analytics_read_001",
+        "summary": "Read synthetic analytics record 001",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/002": {
+      "get": {
+        "operationId": "analytics_read_002",
+        "summary": "Read synthetic analytics record 002",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/003": {
+      "get": {
+        "operationId": "analytics_read_003",
+        "summary": "Read synthetic analytics record 003",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/004": {
+      "get": {
+        "operationId": "analytics_read_004",
+        "summary": "Read synthetic analytics record 004",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/005": {
+      "get": {
+        "operationId": "analytics_read_005",
+        "summary": "Read synthetic analytics record 005",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/006": {
+      "get": {
+        "operationId": "analytics_read_006",
+        "summary": "Read synthetic analytics record 006",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/007": {
+      "get": {
+        "operationId": "analytics_read_007",
+        "summary": "Read synthetic analytics record 007",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/008": {
+      "get": {
+        "operationId": "analytics_read_008",
+        "summary": "Read synthetic analytics record 008",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/009": {
+      "get": {
+        "operationId": "analytics_read_009",
+        "summary": "Read synthetic analytics record 009",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/010": {
+      "get": {
+        "operationId": "analytics_read_010",
+        "summary": "Read synthetic analytics record 010",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/011": {
+      "get": {
+        "operationId": "analytics_read_011",
+        "summary": "Read synthetic analytics record 011",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/012": {
+      "get": {
+        "operationId": "analytics_read_012",
+        "summary": "Read synthetic analytics record 012",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/013": {
+      "get": {
+        "operationId": "analytics_read_013",
+        "summary": "Read synthetic analytics record 013",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/014": {
+      "get": {
+        "operationId": "analytics_read_014",
+        "summary": "Read synthetic analytics record 014",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/015": {
+      "get": {
+        "operationId": "analytics_read_015",
+        "summary": "Read synthetic analytics record 015",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/016": {
+      "get": {
+        "operationId": "analytics_read_016",
+        "summary": "Read synthetic analytics record 016",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/017": {
+      "get": {
+        "operationId": "analytics_read_017",
+        "summary": "Read synthetic analytics record 017",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/018": {
+      "get": {
+        "operationId": "analytics_read_018",
+        "summary": "Read synthetic analytics record 018",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/analytics/records/019": {
+      "get": {
+        "operationId": "analytics_read_019",
+        "summary": "Read synthetic analytics record 019",
+        "description": "Returns one generated analytics example used only for public scale testing.",
+        "tags": [
+          "Analytics"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/001": {
+      "get": {
+        "operationId": "catalog_read_001",
+        "summary": "Read synthetic catalog record 001",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/002": {
+      "get": {
+        "operationId": "catalog_read_002",
+        "summary": "Read synthetic catalog record 002",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/003": {
+      "get": {
+        "operationId": "catalog_read_003",
+        "summary": "Read synthetic catalog record 003",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/004": {
+      "get": {
+        "operationId": "catalog_read_004",
+        "summary": "Read synthetic catalog record 004",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/005": {
+      "get": {
+        "operationId": "catalog_read_005",
+        "summary": "Read synthetic catalog record 005",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/006": {
+      "get": {
+        "operationId": "catalog_read_006",
+        "summary": "Read synthetic catalog record 006",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/007": {
+      "get": {
+        "operationId": "catalog_read_007",
+        "summary": "Read synthetic catalog record 007",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/008": {
+      "get": {
+        "operationId": "catalog_read_008",
+        "summary": "Read synthetic catalog record 008",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/009": {
+      "get": {
+        "operationId": "catalog_read_009",
+        "summary": "Read synthetic catalog record 009",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/010": {
+      "get": {
+        "operationId": "catalog_read_010",
+        "summary": "Read synthetic catalog record 010",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/011": {
+      "get": {
+        "operationId": "catalog_read_011",
+        "summary": "Read synthetic catalog record 011",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/012": {
+      "get": {
+        "operationId": "catalog_read_012",
+        "summary": "Read synthetic catalog record 012",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/013": {
+      "get": {
+        "operationId": "catalog_read_013",
+        "summary": "Read synthetic catalog record 013",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/014": {
+      "get": {
+        "operationId": "catalog_read_014",
+        "summary": "Read synthetic catalog record 014",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/015": {
+      "get": {
+        "operationId": "catalog_read_015",
+        "summary": "Read synthetic catalog record 015",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/016": {
+      "get": {
+        "operationId": "catalog_read_016",
+        "summary": "Read synthetic catalog record 016",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/017": {
+      "get": {
+        "operationId": "catalog_read_017",
+        "summary": "Read synthetic catalog record 017",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/018": {
+      "get": {
+        "operationId": "catalog_read_018",
+        "summary": "Read synthetic catalog record 018",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/catalog/records/019": {
+      "get": {
+        "operationId": "catalog_read_019",
+        "summary": "Read synthetic catalog record 019",
+        "description": "Returns one generated catalog example used only for public scale testing.",
+        "tags": [
+          "Catalog"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/001": {
+      "get": {
+        "operationId": "customers_read_001",
+        "summary": "Read synthetic customers record 001",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/002": {
+      "get": {
+        "operationId": "customers_read_002",
+        "summary": "Read synthetic customers record 002",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/003": {
+      "get": {
+        "operationId": "customers_read_003",
+        "summary": "Read synthetic customers record 003",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/004": {
+      "get": {
+        "operationId": "customers_read_004",
+        "summary": "Read synthetic customers record 004",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/005": {
+      "get": {
+        "operationId": "customers_read_005",
+        "summary": "Read synthetic customers record 005",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/006": {
+      "get": {
+        "operationId": "customers_read_006",
+        "summary": "Read synthetic customers record 006",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/007": {
+      "get": {
+        "operationId": "customers_read_007",
+        "summary": "Read synthetic customers record 007",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/008": {
+      "get": {
+        "operationId": "customers_read_008",
+        "summary": "Read synthetic customers record 008",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/009": {
+      "get": {
+        "operationId": "customers_read_009",
+        "summary": "Read synthetic customers record 009",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/010": {
+      "get": {
+        "operationId": "customers_read_010",
+        "summary": "Read synthetic customers record 010",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/011": {
+      "get": {
+        "operationId": "customers_read_011",
+        "summary": "Read synthetic customers record 011",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/012": {
+      "get": {
+        "operationId": "customers_read_012",
+        "summary": "Read synthetic customers record 012",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/013": {
+      "get": {
+        "operationId": "customers_read_013",
+        "summary": "Read synthetic customers record 013",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/014": {
+      "get": {
+        "operationId": "customers_read_014",
+        "summary": "Read synthetic customers record 014",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/015": {
+      "get": {
+        "operationId": "customers_read_015",
+        "summary": "Read synthetic customers record 015",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/016": {
+      "get": {
+        "operationId": "customers_read_016",
+        "summary": "Read synthetic customers record 016",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/017": {
+      "get": {
+        "operationId": "customers_read_017",
+        "summary": "Read synthetic customers record 017",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/018": {
+      "get": {
+        "operationId": "customers_read_018",
+        "summary": "Read synthetic customers record 018",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/customers/records/019": {
+      "get": {
+        "operationId": "customers_read_019",
+        "summary": "Read synthetic customers record 019",
+        "description": "Returns one generated customers example used only for public scale testing.",
+        "tags": [
+          "Customers"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/001": {
+      "get": {
+        "operationId": "documents_read_001",
+        "summary": "Read synthetic documents record 001",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/002": {
+      "get": {
+        "operationId": "documents_read_002",
+        "summary": "Read synthetic documents record 002",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/003": {
+      "get": {
+        "operationId": "documents_read_003",
+        "summary": "Read synthetic documents record 003",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/004": {
+      "get": {
+        "operationId": "documents_read_004",
+        "summary": "Read synthetic documents record 004",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/005": {
+      "get": {
+        "operationId": "documents_read_005",
+        "summary": "Read synthetic documents record 005",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/006": {
+      "get": {
+        "operationId": "documents_read_006",
+        "summary": "Read synthetic documents record 006",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/007": {
+      "get": {
+        "operationId": "documents_read_007",
+        "summary": "Read synthetic documents record 007",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/008": {
+      "get": {
+        "operationId": "documents_read_008",
+        "summary": "Read synthetic documents record 008",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/009": {
+      "get": {
+        "operationId": "documents_read_009",
+        "summary": "Read synthetic documents record 009",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/010": {
+      "get": {
+        "operationId": "documents_read_010",
+        "summary": "Read synthetic documents record 010",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/011": {
+      "get": {
+        "operationId": "documents_read_011",
+        "summary": "Read synthetic documents record 011",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/012": {
+      "get": {
+        "operationId": "documents_read_012",
+        "summary": "Read synthetic documents record 012",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/013": {
+      "get": {
+        "operationId": "documents_read_013",
+        "summary": "Read synthetic documents record 013",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/014": {
+      "get": {
+        "operationId": "documents_read_014",
+        "summary": "Read synthetic documents record 014",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/015": {
+      "get": {
+        "operationId": "documents_read_015",
+        "summary": "Read synthetic documents record 015",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/016": {
+      "get": {
+        "operationId": "documents_read_016",
+        "summary": "Read synthetic documents record 016",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/017": {
+      "get": {
+        "operationId": "documents_read_017",
+        "summary": "Read synthetic documents record 017",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/018": {
+      "get": {
+        "operationId": "documents_read_018",
+        "summary": "Read synthetic documents record 018",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/documents/records/019": {
+      "get": {
+        "operationId": "documents_read_019",
+        "summary": "Read synthetic documents record 019",
+        "description": "Returns one generated documents example used only for public scale testing.",
+        "tags": [
+          "Documents"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/001": {
+      "get": {
+        "operationId": "finance_read_001",
+        "summary": "Read synthetic finance record 001",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/002": {
+      "get": {
+        "operationId": "finance_read_002",
+        "summary": "Read synthetic finance record 002",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/003": {
+      "get": {
+        "operationId": "finance_read_003",
+        "summary": "Read synthetic finance record 003",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/004": {
+      "get": {
+        "operationId": "finance_read_004",
+        "summary": "Read synthetic finance record 004",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/005": {
+      "get": {
+        "operationId": "finance_read_005",
+        "summary": "Read synthetic finance record 005",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/006": {
+      "get": {
+        "operationId": "finance_read_006",
+        "summary": "Read synthetic finance record 006",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/007": {
+      "get": {
+        "operationId": "finance_read_007",
+        "summary": "Read synthetic finance record 007",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/008": {
+      "get": {
+        "operationId": "finance_read_008",
+        "summary": "Read synthetic finance record 008",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/009": {
+      "get": {
+        "operationId": "finance_read_009",
+        "summary": "Read synthetic finance record 009",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/010": {
+      "get": {
+        "operationId": "finance_read_010",
+        "summary": "Read synthetic finance record 010",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/011": {
+      "get": {
+        "operationId": "finance_read_011",
+        "summary": "Read synthetic finance record 011",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/012": {
+      "get": {
+        "operationId": "finance_read_012",
+        "summary": "Read synthetic finance record 012",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/013": {
+      "get": {
+        "operationId": "finance_read_013",
+        "summary": "Read synthetic finance record 013",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/014": {
+      "get": {
+        "operationId": "finance_read_014",
+        "summary": "Read synthetic finance record 014",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/015": {
+      "get": {
+        "operationId": "finance_read_015",
+        "summary": "Read synthetic finance record 015",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/016": {
+      "get": {
+        "operationId": "finance_read_016",
+        "summary": "Read synthetic finance record 016",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/017": {
+      "get": {
+        "operationId": "finance_read_017",
+        "summary": "Read synthetic finance record 017",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/018": {
+      "get": {
+        "operationId": "finance_read_018",
+        "summary": "Read synthetic finance record 018",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/finance/records/019": {
+      "get": {
+        "operationId": "finance_read_019",
+        "summary": "Read synthetic finance record 019",
+        "description": "Returns one generated finance example used only for public scale testing.",
+        "tags": [
+          "Finance"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/001": {
+      "get": {
+        "operationId": "fulfillment_read_001",
+        "summary": "Read synthetic fulfillment record 001",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/002": {
+      "get": {
+        "operationId": "fulfillment_read_002",
+        "summary": "Read synthetic fulfillment record 002",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/003": {
+      "get": {
+        "operationId": "fulfillment_read_003",
+        "summary": "Read synthetic fulfillment record 003",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/004": {
+      "get": {
+        "operationId": "fulfillment_read_004",
+        "summary": "Read synthetic fulfillment record 004",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/005": {
+      "get": {
+        "operationId": "fulfillment_read_005",
+        "summary": "Read synthetic fulfillment record 005",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/006": {
+      "get": {
+        "operationId": "fulfillment_read_006",
+        "summary": "Read synthetic fulfillment record 006",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/007": {
+      "get": {
+        "operationId": "fulfillment_read_007",
+        "summary": "Read synthetic fulfillment record 007",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/008": {
+      "get": {
+        "operationId": "fulfillment_read_008",
+        "summary": "Read synthetic fulfillment record 008",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/009": {
+      "get": {
+        "operationId": "fulfillment_read_009",
+        "summary": "Read synthetic fulfillment record 009",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/010": {
+      "get": {
+        "operationId": "fulfillment_read_010",
+        "summary": "Read synthetic fulfillment record 010",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/011": {
+      "get": {
+        "operationId": "fulfillment_read_011",
+        "summary": "Read synthetic fulfillment record 011",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/012": {
+      "get": {
+        "operationId": "fulfillment_read_012",
+        "summary": "Read synthetic fulfillment record 012",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/013": {
+      "get": {
+        "operationId": "fulfillment_read_013",
+        "summary": "Read synthetic fulfillment record 013",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/014": {
+      "get": {
+        "operationId": "fulfillment_read_014",
+        "summary": "Read synthetic fulfillment record 014",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/015": {
+      "get": {
+        "operationId": "fulfillment_read_015",
+        "summary": "Read synthetic fulfillment record 015",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/016": {
+      "get": {
+        "operationId": "fulfillment_read_016",
+        "summary": "Read synthetic fulfillment record 016",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/017": {
+      "get": {
+        "operationId": "fulfillment_read_017",
+        "summary": "Read synthetic fulfillment record 017",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/018": {
+      "get": {
+        "operationId": "fulfillment_read_018",
+        "summary": "Read synthetic fulfillment record 018",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/fulfillment/records/019": {
+      "get": {
+        "operationId": "fulfillment_read_019",
+        "summary": "Read synthetic fulfillment record 019",
+        "description": "Returns one generated fulfillment example used only for public scale testing.",
+        "tags": [
+          "Fulfillment"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/001": {
+      "get": {
+        "operationId": "inventory_read_001",
+        "summary": "Read synthetic inventory record 001",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/002": {
+      "get": {
+        "operationId": "inventory_read_002",
+        "summary": "Read synthetic inventory record 002",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/003": {
+      "get": {
+        "operationId": "inventory_read_003",
+        "summary": "Read synthetic inventory record 003",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/004": {
+      "get": {
+        "operationId": "inventory_read_004",
+        "summary": "Read synthetic inventory record 004",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/005": {
+      "get": {
+        "operationId": "inventory_read_005",
+        "summary": "Read synthetic inventory record 005",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/006": {
+      "get": {
+        "operationId": "inventory_read_006",
+        "summary": "Read synthetic inventory record 006",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/007": {
+      "get": {
+        "operationId": "inventory_read_007",
+        "summary": "Read synthetic inventory record 007",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/008": {
+      "get": {
+        "operationId": "inventory_read_008",
+        "summary": "Read synthetic inventory record 008",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/009": {
+      "get": {
+        "operationId": "inventory_read_009",
+        "summary": "Read synthetic inventory record 009",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/010": {
+      "get": {
+        "operationId": "inventory_read_010",
+        "summary": "Read synthetic inventory record 010",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/011": {
+      "get": {
+        "operationId": "inventory_read_011",
+        "summary": "Read synthetic inventory record 011",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/012": {
+      "get": {
+        "operationId": "inventory_read_012",
+        "summary": "Read synthetic inventory record 012",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/013": {
+      "get": {
+        "operationId": "inventory_read_013",
+        "summary": "Read synthetic inventory record 013",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/014": {
+      "get": {
+        "operationId": "inventory_read_014",
+        "summary": "Read synthetic inventory record 014",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/015": {
+      "get": {
+        "operationId": "inventory_read_015",
+        "summary": "Read synthetic inventory record 015",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/016": {
+      "get": {
+        "operationId": "inventory_read_016",
+        "summary": "Read synthetic inventory record 016",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/017": {
+      "get": {
+        "operationId": "inventory_read_017",
+        "summary": "Read synthetic inventory record 017",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/018": {
+      "get": {
+        "operationId": "inventory_read_018",
+        "summary": "Read synthetic inventory record 018",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/inventory/records/019": {
+      "get": {
+        "operationId": "inventory_read_019",
+        "summary": "Read synthetic inventory record 019",
+        "description": "Returns one generated inventory example used only for public scale testing.",
+        "tags": [
+          "Inventory"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/001": {
+      "get": {
+        "operationId": "operations_read_001",
+        "summary": "Read synthetic operations record 001",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/002": {
+      "get": {
+        "operationId": "operations_read_002",
+        "summary": "Read synthetic operations record 002",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/003": {
+      "get": {
+        "operationId": "operations_read_003",
+        "summary": "Read synthetic operations record 003",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/004": {
+      "get": {
+        "operationId": "operations_read_004",
+        "summary": "Read synthetic operations record 004",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/005": {
+      "get": {
+        "operationId": "operations_read_005",
+        "summary": "Read synthetic operations record 005",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/006": {
+      "get": {
+        "operationId": "operations_read_006",
+        "summary": "Read synthetic operations record 006",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/007": {
+      "get": {
+        "operationId": "operations_read_007",
+        "summary": "Read synthetic operations record 007",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/008": {
+      "get": {
+        "operationId": "operations_read_008",
+        "summary": "Read synthetic operations record 008",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/009": {
+      "get": {
+        "operationId": "operations_read_009",
+        "summary": "Read synthetic operations record 009",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/010": {
+      "get": {
+        "operationId": "operations_read_010",
+        "summary": "Read synthetic operations record 010",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/011": {
+      "get": {
+        "operationId": "operations_read_011",
+        "summary": "Read synthetic operations record 011",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/012": {
+      "get": {
+        "operationId": "operations_read_012",
+        "summary": "Read synthetic operations record 012",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/013": {
+      "get": {
+        "operationId": "operations_read_013",
+        "summary": "Read synthetic operations record 013",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/014": {
+      "get": {
+        "operationId": "operations_read_014",
+        "summary": "Read synthetic operations record 014",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/015": {
+      "get": {
+        "operationId": "operations_read_015",
+        "summary": "Read synthetic operations record 015",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/016": {
+      "get": {
+        "operationId": "operations_read_016",
+        "summary": "Read synthetic operations record 016",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/017": {
+      "get": {
+        "operationId": "operations_read_017",
+        "summary": "Read synthetic operations record 017",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/018": {
+      "get": {
+        "operationId": "operations_read_018",
+        "summary": "Read synthetic operations record 018",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/operations/records/019": {
+      "get": {
+        "operationId": "operations_read_019",
+        "summary": "Read synthetic operations record 019",
+        "description": "Returns one generated operations example used only for public scale testing.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/001": {
+      "get": {
+        "operationId": "orders_read_001",
+        "summary": "Read synthetic orders record 001",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/002": {
+      "get": {
+        "operationId": "orders_read_002",
+        "summary": "Read synthetic orders record 002",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/003": {
+      "get": {
+        "operationId": "orders_read_003",
+        "summary": "Read synthetic orders record 003",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/004": {
+      "get": {
+        "operationId": "orders_read_004",
+        "summary": "Read synthetic orders record 004",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/005": {
+      "get": {
+        "operationId": "orders_read_005",
+        "summary": "Read synthetic orders record 005",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/006": {
+      "get": {
+        "operationId": "orders_read_006",
+        "summary": "Read synthetic orders record 006",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/007": {
+      "get": {
+        "operationId": "orders_read_007",
+        "summary": "Read synthetic orders record 007",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/008": {
+      "get": {
+        "operationId": "orders_read_008",
+        "summary": "Read synthetic orders record 008",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/009": {
+      "get": {
+        "operationId": "orders_read_009",
+        "summary": "Read synthetic orders record 009",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/010": {
+      "get": {
+        "operationId": "orders_read_010",
+        "summary": "Read synthetic orders record 010",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/011": {
+      "get": {
+        "operationId": "orders_read_011",
+        "summary": "Read synthetic orders record 011",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/012": {
+      "get": {
+        "operationId": "orders_read_012",
+        "summary": "Read synthetic orders record 012",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/013": {
+      "get": {
+        "operationId": "orders_read_013",
+        "summary": "Read synthetic orders record 013",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/014": {
+      "get": {
+        "operationId": "orders_read_014",
+        "summary": "Read synthetic orders record 014",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/015": {
+      "get": {
+        "operationId": "orders_read_015",
+        "summary": "Read synthetic orders record 015",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/016": {
+      "get": {
+        "operationId": "orders_read_016",
+        "summary": "Read synthetic orders record 016",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/017": {
+      "get": {
+        "operationId": "orders_read_017",
+        "summary": "Read synthetic orders record 017",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/018": {
+      "get": {
+        "operationId": "orders_read_018",
+        "summary": "Read synthetic orders record 018",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/orders/records/019": {
+      "get": {
+        "operationId": "orders_read_019",
+        "summary": "Read synthetic orders record 019",
+        "description": "Returns one generated orders example used only for public scale testing.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/001": {
+      "get": {
+        "operationId": "purchasing_read_001",
+        "summary": "Read synthetic purchasing record 001",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/002": {
+      "get": {
+        "operationId": "purchasing_read_002",
+        "summary": "Read synthetic purchasing record 002",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/003": {
+      "get": {
+        "operationId": "purchasing_read_003",
+        "summary": "Read synthetic purchasing record 003",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/004": {
+      "get": {
+        "operationId": "purchasing_read_004",
+        "summary": "Read synthetic purchasing record 004",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/005": {
+      "get": {
+        "operationId": "purchasing_read_005",
+        "summary": "Read synthetic purchasing record 005",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/006": {
+      "get": {
+        "operationId": "purchasing_read_006",
+        "summary": "Read synthetic purchasing record 006",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/007": {
+      "get": {
+        "operationId": "purchasing_read_007",
+        "summary": "Read synthetic purchasing record 007",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/008": {
+      "get": {
+        "operationId": "purchasing_read_008",
+        "summary": "Read synthetic purchasing record 008",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/009": {
+      "get": {
+        "operationId": "purchasing_read_009",
+        "summary": "Read synthetic purchasing record 009",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/010": {
+      "get": {
+        "operationId": "purchasing_read_010",
+        "summary": "Read synthetic purchasing record 010",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/011": {
+      "get": {
+        "operationId": "purchasing_read_011",
+        "summary": "Read synthetic purchasing record 011",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/012": {
+      "get": {
+        "operationId": "purchasing_read_012",
+        "summary": "Read synthetic purchasing record 012",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/013": {
+      "get": {
+        "operationId": "purchasing_read_013",
+        "summary": "Read synthetic purchasing record 013",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/014": {
+      "get": {
+        "operationId": "purchasing_read_014",
+        "summary": "Read synthetic purchasing record 014",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/015": {
+      "get": {
+        "operationId": "purchasing_read_015",
+        "summary": "Read synthetic purchasing record 015",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/016": {
+      "get": {
+        "operationId": "purchasing_read_016",
+        "summary": "Read synthetic purchasing record 016",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/017": {
+      "get": {
+        "operationId": "purchasing_read_017",
+        "summary": "Read synthetic purchasing record 017",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/018": {
+      "get": {
+        "operationId": "purchasing_read_018",
+        "summary": "Read synthetic purchasing record 018",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/purchasing/records/019": {
+      "get": {
+        "operationId": "purchasing_read_019",
+        "summary": "Read synthetic purchasing record 019",
+        "description": "Returns one generated purchasing example used only for public scale testing.",
+        "tags": [
+          "Purchasing"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/001": {
+      "get": {
+        "operationId": "reporting_read_001",
+        "summary": "Read synthetic reporting record 001",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/002": {
+      "get": {
+        "operationId": "reporting_read_002",
+        "summary": "Read synthetic reporting record 002",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/003": {
+      "get": {
+        "operationId": "reporting_read_003",
+        "summary": "Read synthetic reporting record 003",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/004": {
+      "get": {
+        "operationId": "reporting_read_004",
+        "summary": "Read synthetic reporting record 004",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/005": {
+      "get": {
+        "operationId": "reporting_read_005",
+        "summary": "Read synthetic reporting record 005",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/006": {
+      "get": {
+        "operationId": "reporting_read_006",
+        "summary": "Read synthetic reporting record 006",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/007": {
+      "get": {
+        "operationId": "reporting_read_007",
+        "summary": "Read synthetic reporting record 007",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/008": {
+      "get": {
+        "operationId": "reporting_read_008",
+        "summary": "Read synthetic reporting record 008",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/009": {
+      "get": {
+        "operationId": "reporting_read_009",
+        "summary": "Read synthetic reporting record 009",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/010": {
+      "get": {
+        "operationId": "reporting_read_010",
+        "summary": "Read synthetic reporting record 010",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/011": {
+      "get": {
+        "operationId": "reporting_read_011",
+        "summary": "Read synthetic reporting record 011",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/012": {
+      "get": {
+        "operationId": "reporting_read_012",
+        "summary": "Read synthetic reporting record 012",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/013": {
+      "get": {
+        "operationId": "reporting_read_013",
+        "summary": "Read synthetic reporting record 013",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/014": {
+      "get": {
+        "operationId": "reporting_read_014",
+        "summary": "Read synthetic reporting record 014",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/015": {
+      "get": {
+        "operationId": "reporting_read_015",
+        "summary": "Read synthetic reporting record 015",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/016": {
+      "get": {
+        "operationId": "reporting_read_016",
+        "summary": "Read synthetic reporting record 016",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/017": {
+      "get": {
+        "operationId": "reporting_read_017",
+        "summary": "Read synthetic reporting record 017",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/018": {
+      "get": {
+        "operationId": "reporting_read_018",
+        "summary": "Read synthetic reporting record 018",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/reporting/records/019": {
+      "get": {
+        "operationId": "reporting_read_019",
+        "summary": "Read synthetic reporting record 019",
+        "description": "Returns one generated reporting example used only for public scale testing.",
+        "tags": [
+          "Reporting"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/001": {
+      "get": {
+        "operationId": "support_read_001",
+        "summary": "Read synthetic support record 001",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/002": {
+      "get": {
+        "operationId": "support_read_002",
+        "summary": "Read synthetic support record 002",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/003": {
+      "get": {
+        "operationId": "support_read_003",
+        "summary": "Read synthetic support record 003",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/004": {
+      "get": {
+        "operationId": "support_read_004",
+        "summary": "Read synthetic support record 004",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/005": {
+      "get": {
+        "operationId": "support_read_005",
+        "summary": "Read synthetic support record 005",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/006": {
+      "get": {
+        "operationId": "support_read_006",
+        "summary": "Read synthetic support record 006",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/007": {
+      "get": {
+        "operationId": "support_read_007",
+        "summary": "Read synthetic support record 007",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/008": {
+      "get": {
+        "operationId": "support_read_008",
+        "summary": "Read synthetic support record 008",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/009": {
+      "get": {
+        "operationId": "support_read_009",
+        "summary": "Read synthetic support record 009",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/010": {
+      "get": {
+        "operationId": "support_read_010",
+        "summary": "Read synthetic support record 010",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/011": {
+      "get": {
+        "operationId": "support_read_011",
+        "summary": "Read synthetic support record 011",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/012": {
+      "get": {
+        "operationId": "support_read_012",
+        "summary": "Read synthetic support record 012",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/013": {
+      "get": {
+        "operationId": "support_read_013",
+        "summary": "Read synthetic support record 013",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/014": {
+      "get": {
+        "operationId": "support_read_014",
+        "summary": "Read synthetic support record 014",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/015": {
+      "get": {
+        "operationId": "support_read_015",
+        "summary": "Read synthetic support record 015",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/016": {
+      "get": {
+        "operationId": "support_read_016",
+        "summary": "Read synthetic support record 016",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/017": {
+      "get": {
+        "operationId": "support_read_017",
+        "summary": "Read synthetic support record 017",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/018": {
+      "get": {
+        "operationId": "support_read_018",
+        "summary": "Read synthetic support record 018",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    },
+    "/synthetic/support/records/019": {
+      "get": {
+        "operationId": "support_read_019",
+        "summary": "Read synthetic support record 019",
+        "description": "Returns one generated support example used only for public scale testing.",
+        "tags": [
+          "Support"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SyntheticRead"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "responses": {
+      "SyntheticRead": {
+        "description": "Synthetic read result",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SyntheticRecord"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "SyntheticRecord": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "value"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Synthetic record identifier."
+          },
+          "value": {
+            "type": "string",
+            "description": "Synthetic example value."
+          }
+        }
+      }
+    }
+  }
+}

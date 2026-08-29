@@ -89,7 +89,10 @@ Open the management URL and authenticate through your Cloudflare Access policy.
 
 Saving a source draft changes only customer-owned Durable Object state. Applying
 a source, updating, rolling back, or removing the gateway requires a new
-short-lived Cloudflare authorization.
+short-lived Cloudflare authorization. The complete secret-free source-state
+record is bounded to 1 MiB of canonical UTF-8 JSON; a save that would cross the
+bound in its worst-case installed projection is rejected before Durable Object
+storage is changed.
 
 Upstream per-user OAuth is handled by Cloudflare Portal. Ankka does not receive
 those tokens.

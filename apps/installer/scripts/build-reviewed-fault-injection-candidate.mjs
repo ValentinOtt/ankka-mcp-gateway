@@ -156,6 +156,7 @@ function injectProbeFailure(candidate, release) {
     artifact,
     cloudflare: candidate.manifest.cloudflare,
     components,
+    controlPlaneOrigin: candidate.manifest.controlPlaneOrigin,
     oauthScopeIds: candidate.manifest.oauthScopeIds,
     release,
     schemaVersion: 1,
@@ -174,7 +175,7 @@ function injectProbeFailure(candidate, release) {
 export async function buildReviewedFaultInjectionCandidate(input) {
   if (
     !exactKeys(input, [
-      'baseRelease', 'channel', 'fault', 'release', 'sourceCommit', 'sourceDirectory',
+      'baseRelease', 'channel', 'controlPlaneOrigin', 'fault', 'release', 'sourceCommit', 'sourceDirectory',
     ]) ||
     input.channel !== 'canary' ||
     input.fault !== REVIEWED_FAULT_INJECTION ||
@@ -185,6 +186,7 @@ export async function buildReviewedFaultInjectionCandidate(input) {
     candidate = await buildReleaseCandidate({
       sourceDirectory: input.sourceDirectory,
       sourceCommit: input.sourceCommit,
+      controlPlaneOrigin: input.controlPlaneOrigin,
       release: input.baseRelease,
     });
   } catch (error) {
@@ -223,6 +225,7 @@ export function reviewedFaultCandidateSummary(candidate, baseRelease, outputDire
 const HELP = `Usage: node scripts/build-reviewed-fault-injection-candidate.mjs \\
   --source <public ankka-mcp-gateway checkout> \\
   --source-commit <40-hex exact commit> \\
+  --control-plane-origin <canonical HTTPS installer origin> \\
   --base-release <gateway-vX.Y.Z> --release <strictly-newer gateway-vX.Y.Z> \\
   --channel canary --fault exact-version-health-probe-v1 \\
   --out <new directory>
@@ -236,7 +239,7 @@ uploaded. The signer requires a separate explicit fault acknowledgement.
 function parseCliArguments(argv) {
   if (argv.length === 1 && argv[0] === '--help') return { help: true };
   const flags = new Set([
-    '--source', '--source-commit', '--base-release', '--release', '--channel', '--fault', '--out',
+    '--source', '--source-commit', '--control-plane-origin', '--base-release', '--release', '--channel', '--fault', '--out',
   ]);
   const values = {};
   for (let index = 0; index < argv.length; index += 2) {
@@ -251,6 +254,7 @@ function parseCliArguments(argv) {
     help: false,
     sourceDirectory: values['--source'],
     sourceCommit: values['--source-commit'],
+    controlPlaneOrigin: values['--control-plane-origin'],
     baseRelease: values['--base-release'],
     release: values['--release'],
     channel: values['--channel'],
@@ -275,6 +279,7 @@ export async function runReviewedFaultCandidateCli({ argv, stdout, stderr }) {
     const candidate = await buildReviewedFaultInjectionCandidate({
       sourceDirectory: options.sourceDirectory,
       sourceCommit: options.sourceCommit,
+      controlPlaneOrigin: options.controlPlaneOrigin,
       baseRelease: options.baseRelease,
       release: options.release,
       channel: options.channel,

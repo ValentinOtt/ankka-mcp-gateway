@@ -146,6 +146,12 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 ## Documentation
 
 - [Customer self-service](docs/CUSTOMER_SELF_SERVICE.md)
+- [First-party Cloudflare dogfood runbook](deploy/cloudflare/FIRST_PARTY_DOGFOOD.md)
+- [Customer-owned portal audit logging](docs/CUSTOMER_AUDIT_LOGGING.md)
+- [Large sources and Code Mode](docs/LARGE_SOURCES_AND_CODE_MODE.md)
+- [Spec-driven OpenAPI allowlists](docs/OPENAPI_ALLOWLISTS.md)
+- [Per-source Cloudflare Access groups](docs/SOURCE_ACCESS_GROUPS.md)
+- [Governance roadmap](docs/GOVERNANCE_ROADMAP.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Security model](docs/SECURITY_MODEL.md)
 - [Gateway updates and rollback](docs/UPDATES.md)

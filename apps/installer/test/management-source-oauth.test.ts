@@ -86,6 +86,7 @@ function managementClaim(managementOrigin = MANAGEMENT_ORIGIN) {
     actionKey: ACTION_KEY,
     actorEmail: 'admin@example.com',
     accountId: ACCOUNT_ID,
+    controlPlaneOrigin: PUBLIC_ORIGIN,
     workerName: 'ankka-gateway-example',
     workersSubdomain: 'customer-workers',
     managementOrigin,
@@ -287,10 +288,20 @@ describe('management source OAuth', () => {
     });
     const current = managementClaim();
     const { releaseIdentity: _releaseIdentity, ...legacyClaim } = current;
+    const { controlPlaneOrigin: _controlPlaneOrigin, ...missingControlPlaneOrigin } = current;
     const invalidClaims = [
       legacyClaim,
+      missingControlPlaneOrigin,
       { ...current, releaseIdentity: null },
       { ...current, releaseIdentity: { ...current.releaseIdentity, copiedAuthority: true } },
+      { ...current, controlPlaneOrigin: 'https://foreign-control.example' },
+      {
+        ...current,
+        releaseIdentity: {
+          ...current.releaseIdentity,
+          controlPlaneOrigin: 'https://foreign-control.example',
+        },
+      },
     ];
 
     for (const claim of invalidClaims) {

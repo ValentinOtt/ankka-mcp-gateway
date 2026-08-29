@@ -90,7 +90,7 @@ async function fixture(installerOverrides?: readonly SourceFile[]): Promise<Fixt
   const worker = [await file(
     'payload/worker/index.js',
     'application/javascript+module',
-    'export default { fetch() { return new Response("worker only"); } };',
+    "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default { fetch() { return new Response(\"worker only\"); } };",
   )];
   const workerCleanup = [await file(
     'payload/worker-cleanup/index.js',
@@ -117,6 +117,7 @@ async function fixture(installerOverrides?: readonly SourceFile[]): Promise<Fixt
       treeSha256: await sha256(canonicalJson(records)),
     },
     cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+    controlPlaneOrigin: 'https://deploy.ankka.ai',
     components: {
       admin: await component(admin.map((entry) => entry.record)),
       installer: await component(installer.map((entry) => entry.record)),

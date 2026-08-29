@@ -40,6 +40,9 @@ const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const PUBLIC_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
+const MAX_CONTROL_PLANE_ORIGIN_LENGTH = 2_048;
+const WORKER_CONTROL_PLANE_ORIGIN_DECLARATION =
+  /^const CONTROL_PLANE_ORIGIN = '(https:\/\/[^'\r\n]+)';$/gmu;
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/u;
 const CREDENTIAL_NAME = /(?:^|[-_.])(?:api[-_.]?key|client[-_.]?secret|credential|credentials|password|passwd|private[-_.]?key|secret|secrets|token|tokens)(?:[-_.]|$)/iu;
 const DISALLOWED_CREDENTIAL_SEGMENT = new Set([
@@ -239,6 +242,41 @@ function exactKeys(value, keys) {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function parseControlPlaneOrigin(value) {
+  if (!v.is(STRING_SCHEMA, value) || value.length === 0 || value.length > MAX_CONTROL_PLANE_ORIGIN_LENGTH) fail();
+  try {
+    const parsed = new URL(value);
+    if (
+      parsed.protocol !== 'https:' ||
+      parsed.username !== '' ||
+      parsed.password !== '' ||
+      parsed.port !== '' ||
+      parsed.pathname !== '/' ||
+      parsed.search !== '' ||
+      parsed.hash !== '' ||
+      parsed.origin !== value ||
+      value.includes("'")
+    ) fail();
+  } catch (error) {
+    if (error instanceof ReleaseSigningError) throw error;
+    fail();
+  }
+  return value;
+}
+
+function assertWorkerControlPlaneOrigin(payload, expectedOrigin) {
+  const worker = payload.find((entry) => entry.record.path === 'payload/worker/index.js');
+  if (!worker) fail();
+  let source;
+  try {
+    source = new TextDecoder('utf-8', { fatal: true }).decode(worker.bytes);
+  } catch {
+    fail();
+  }
+  const matches = [...source.matchAll(WORKER_CONTROL_PLANE_ORIGIN_DECLARATION)];
+  if (matches.length !== 1 || parseControlPlaneOrigin(matches[0]?.[1]) !== expectedOrigin) fail();
 }
 
 function safeInteger(value, maximum = Number.MAX_SAFE_INTEGER) {
@@ -512,6 +550,7 @@ function parseCanonicalManifest(bytes, expectedRelease) {
     'artifact',
     'cloudflare',
     'components',
+    'controlPlaneOrigin',
     'oauthScopeIds',
     'release',
     'schemaVersion',
@@ -519,6 +558,7 @@ function parseCanonicalManifest(bytes, expectedRelease) {
   ])) fail();
   if (
     raw.schemaVersion !== 1 ||
+    parseControlPlaneOrigin(raw.controlPlaneOrigin) !== raw.controlPlaneOrigin ||
     !v.is(STRING_SCHEMA, raw.release) ||
     !RELEASE_PATTERN.test(raw.release) ||
     raw.release !== expectedRelease ||
@@ -580,6 +620,7 @@ function parseCanonicalManifest(bytes, expectedRelease) {
       artifact: Object.freeze({ ...raw.artifact }),
       cloudflare: APPROVED_CLOUDFLARE_CONTRACT,
       components,
+      controlPlaneOrigin: raw.controlPlaneOrigin,
       oauthScopeIds: REQUIRED_OAUTH_SCOPES,
       release: raw.release,
       schemaVersion: 1,
@@ -748,6 +789,7 @@ export async function loadVerifiedPublicRelease(releaseDirectory, expectedReleas
         payload.push(Object.freeze({ record, bytes }));
       }
       if (totalBytes !== parsed.manifest.artifact.byteSize) fail();
+      assertWorkerControlPlaneOrigin(payload, parsed.manifest.controlPlaneOrigin);
       const afterTree = await enumeratePayloadTree(root);
       if (!setsEqual(afterTree.files, expectedFiles) || !setsEqual(afterTree.directories, expectedDirs)) fail();
       return Object.freeze({ root, manifestBytes, ...parsed, payload: Object.freeze(payload) });
@@ -907,6 +949,7 @@ export async function prepareSignedReleasePublishPlan(input) {
     const objectPlan = immutablePlan({
       artifactSha256: loaded.manifest.artifact.treeSha256,
       channel: input.channel,
+      controlPlaneOrigin: loaded.manifest.controlPlaneOrigin,
       immutability: {
         externalAtomicCreateOnlyRequired: true,
         overwriteAllowed: false,
@@ -927,6 +970,7 @@ export async function prepareSignedReleasePublishPlan(input) {
       channel: input.channel,
       keyId: input.keyId,
       artifactSha256: loaded.manifest.artifact.treeSha256,
+      controlPlaneOrigin: loaded.manifest.controlPlaneOrigin,
       releaseEnvelopeCanonicalJson: envelopeCanonicalJson,
       releaseEnvelopeSha256: sha256Hex(envelopeBytes),
       objectPlan,

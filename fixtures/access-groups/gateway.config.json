@@ -1,0 +1,27 @@
+{
+  "$schema": "../../schema/gateway-config.schema.json",
+  "schemaVersion": 1,
+  "gateway": {
+    "name": "Synthetic group gateway",
+    "hostname": "mcp.example.com",
+    "codeMode": "default_on"
+  },
+  "policy": {
+    "capabilityMode": "read_only",
+    "credentialCustody": "customer",
+    "telemetry": "off"
+  },
+  "sources": [
+    {
+      "id": "synthetic-erp",
+      "label": "Synthetic ERP",
+      "url": "https://erp.example.com/mcp",
+      "authentication": {
+        "mode": "oauth",
+        "onBehalfOfUser": true
+      },
+      "accessGroup": "ERP Readers",
+      "enabledTools": ["erp_search"]
+    }
+  ]
+}

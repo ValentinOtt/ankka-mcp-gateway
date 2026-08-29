@@ -39,6 +39,7 @@ const GENERATED_FILES = Object.freeze([
 const PIN = Object.freeze({
   schemaVersion: 1,
   channel: 'canary',
+  controlPlaneOrigin: 'https://deploy.ankka.ai',
   release: 'gateway-v1.2.3',
   keyId: 'gateway-canary-key-1',
   publicKey: 'A'.repeat(43),
@@ -51,6 +52,7 @@ const PUBLICATION = Object.freeze({
   accountId: ACCOUNT_ID,
   bucketName: 'ankka-gateway-release-canary',
   channel: PIN.channel,
+  controlPlaneOrigin: PIN.controlPlaneOrigin,
   release: PIN.release,
   prefix: `ankka-mcp-gateway/releases/${PIN.channel}/${PIN.release}/`,
   keyId: PIN.keyId,
@@ -67,6 +69,14 @@ const ISOLATED_TARGET = Object.freeze({
   oauthClientId: '2'.repeat(32),
   schemaVersion: 1,
   workerName: 'ankka-gateway-deploy-isolated-proof',
+});
+const ISOLATED_PIN = Object.freeze({
+  ...PIN,
+  controlPlaneOrigin: `https://${ISOLATED_TARGET.hostname}`,
+});
+const ISOLATED_PUBLICATION = Object.freeze({
+  ...PUBLICATION,
+  controlPlaneOrigin: ISOLATED_PIN.controlPlaneOrigin,
 });
 
 const canonicalRecordSchema = v.record(v.string(), v.unknown());
@@ -261,8 +271,8 @@ describe('offline reviewed canary artifact generator', () => {
       await expect(generateReviewedIsolatedCanaryArtifacts({
         isolatedTarget: ISOLATED_TARGET,
         outputDirectory: fixture.output,
-        pin: PIN,
-        publicationResult: PUBLICATION,
+        pin: ISOLATED_PIN,
+        publicationResult: ISOLATED_PUBLICATION,
       })).resolves.toMatchObject({ accountId: ACCOUNT_ID, release: PIN.release, schemaVersion: 2 });
       const [canary, rollback, recordText, activeModule, rollbackModule] = await Promise.all([
         readFile(path.join(fixture.output, 'wrangler.canary.toml'), 'utf8'),
@@ -306,6 +316,26 @@ describe('offline reviewed canary artifact generator', () => {
   });
 
   it('refuses live identities and account drift in the isolated generation path', async () => {
+    for (const [pin, publicationResult] of [
+      [{ ...ISOLATED_PIN, controlPlaneOrigin: 'https://foreign-control.example' }, ISOLATED_PUBLICATION],
+      [ISOLATED_PIN, { ...ISOLATED_PUBLICATION, controlPlaneOrigin: 'https://foreign-control.example' }],
+      [
+        { ...ISOLATED_PIN, controlPlaneOrigin: 'https://foreign-control.example' },
+        { ...ISOLATED_PUBLICATION, controlPlaneOrigin: 'https://foreign-control.example' },
+      ],
+    ]) {
+      const fixture = await sandbox();
+      try {
+        await expect(generateReviewedIsolatedCanaryArtifacts({
+          isolatedTarget: ISOLATED_TARGET,
+          outputDirectory: fixture.output,
+          pin,
+          publicationResult,
+        })).rejects.toBeInstanceOf(ReviewedCanaryGenerationError);
+      } finally {
+        await fixture.cleanup();
+      }
+    }
     const invalidTargets = [
       { ...ISOLATED_TARGET, hostname: 'deploy.ankka.ai' },
       { ...ISOLATED_TARGET, workerName: 'ankka-gateway-deploy' },
@@ -407,6 +437,12 @@ describe('offline reviewed canary artifact generator', () => {
       [{ ...PIN, keyId: 'other-key' }, PUBLICATION],
       [{ ...PIN, publicKey: 'B'.repeat(43) }, PUBLICATION],
       [{ ...PIN, artifactSha256: 'd'.repeat(64) }, PUBLICATION],
+      [{ ...PIN, controlPlaneOrigin: 'https://foreign-control.example' }, PUBLICATION],
+      [PIN, { ...PUBLICATION, controlPlaneOrigin: 'https://foreign-control.example' }],
+      [
+        { ...PIN, controlPlaneOrigin: 'https://foreign-control.example' },
+        { ...PUBLICATION, controlPlaneOrigin: 'https://foreign-control.example' },
+      ],
       [PIN, { ...PUBLICATION, accountId: 'F'.repeat(32) }],
       [PIN, { ...PUBLICATION, accountId: '1'.repeat(31) }],
       [PIN, publicationWithoutAccount],
@@ -523,8 +559,8 @@ describe('offline reviewed canary artifact generator', () => {
       const publicationFile = path.join(fixture.root, 'publication.json');
       const targetFile = path.join(fixture.root, 'target.json');
       await Promise.all([
-        writeFile(pinFile, JSON.stringify(PIN)),
-        writeFile(publicationFile, JSON.stringify(PUBLICATION)),
+        writeFile(pinFile, JSON.stringify(ISOLATED_PIN)),
+        writeFile(publicationFile, JSON.stringify(ISOLATED_PUBLICATION)),
         writeFile(targetFile, JSON.stringify(ISOLATED_TARGET)),
       ]);
       const stdout = sink();

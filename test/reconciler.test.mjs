@@ -1537,6 +1537,70 @@ test('pending update retry requires fresh prerequisites and exact approval', asy
   assert.equal(provider.mutations.length, before + 2);
 });
 
+test('recovers a group-policy ID change and commits only new hashes to the same locator', async () => {
+  const provider = new FakeProvider();
+  const receiptStore = new MemoryReceiptStore();
+  const gatewayConfig = config();
+  gatewayConfig.sources[0].accessGroup = 'Context Readers';
+  const oldAccess = {
+    ...access(),
+    groups: [{ id: 'group-old-recovery-sentinel', name: 'Context Readers' }],
+  };
+  const { base } = await install(provider, receiptStore, {
+    config: gatewayConfig,
+    access: oldAccess,
+  });
+  const oldPolicy = clone(receiptStore.value.resources.find(({ kind }) =>
+    kind === 'source_access_policy'));
+  const changed = {
+    ...base,
+    access: {
+      ...access(),
+      groups: [{ id: 'group-new-recovery-sentinel', name: 'Context Readers' }],
+    },
+  };
+  const preview = await planLiveGateway(changed);
+  assert.deepEqual(
+    preview.plan.changes.filter(({ action }) => action !== 'noop').map(({ action, kind }) => [
+      action,
+      kind,
+    ]),
+    [['update', 'source_access_policy']],
+  );
+  provider.failBeforeRemoteMutationOnce = true;
+  await expectCode(
+    applyGateway({ ...changed, approvedPlanId: preview.plan.planId }),
+    'mutation_failed',
+  );
+  const pendingPlanId = receiptStore.value.pending.planId;
+  assert.equal(
+    receiptStore.value.resources.find(({ kind }) => kind === 'source_access_policy').desiredHash,
+    oldPolicy.desiredHash,
+  );
+
+  await expectCode(
+    applyGateway({ ...changed, approvedPlanId: pendingPlanId }),
+    'approval_required',
+  );
+  const updatedPolicy = receiptStore.value.resources.find(({ kind }) =>
+    kind === 'source_access_policy');
+  assert.equal(receiptStore.value.pending, null);
+  assert.deepEqual(updatedPolicy.provider, oldPolicy.provider);
+  assert.notEqual(updatedPolicy.desiredHash, oldPolicy.desiredHash);
+  assert.notEqual(updatedPolicy.identityHash, oldPolicy.identityHash);
+  const output = JSON.stringify({ preview, receipt: receiptStore.value });
+  for (const forbidden of [
+    'group-old-recovery-sentinel',
+    'group-new-recovery-sentinel',
+    'Context Readers',
+  ]) assert.equal(output.includes(forbidden), false);
+
+  const converged = await planLiveGateway(changed);
+  assert.ok(converged.plan.changes.every(({ action }) => action === 'noop'));
+  const result = await applyGateway({ ...changed, approvedPlanId: converged.plan.planId });
+  assert.equal(result.status, 'ready');
+});
+
 test('stale owned resources are retained unless apply explicitly enables prune', async () => {
   const timeline = [];
   const provider = new FakeProvider({ timeline });
@@ -1610,6 +1674,51 @@ test('stale owned resources are retained unless apply explicitly enables prune',
     );
     previousMutationIndex = mutation.index;
   }
+});
+
+test('prunes a removed group-bound source from receipt ownership without its old observation', async () => {
+  const provider = new FakeProvider();
+  const receiptStore = new MemoryReceiptStore();
+  const initialConfig = config(2);
+  initialConfig.sources[1].accessGroup = 'Analytics Readers';
+  const initial = context(provider, receiptStore, {
+    config: initialConfig,
+    access: {
+      ...access(),
+      groups: [{ id: 'group-prune-sentinel', name: 'Analytics Readers' }],
+    },
+  });
+  const initialPlan = await planLiveGateway(initial);
+  await applyGateway({ ...initial, approvedPlanId: initialPlan.plan.planId });
+  const installedOutput = JSON.stringify(receiptStore.value);
+  assert.equal(installedOutput.includes('group-prune-sentinel'), false);
+  assert.equal(installedOutput.includes('Analytics Readers'), false);
+
+  const reduced = context(provider, receiptStore, {
+    config: config(1),
+    access: access(),
+  });
+  const preview = await planLiveGateway(reduced);
+  assert.deepEqual(
+    preview.plan.changes.filter(({ action }) => action === 'delete').map(({ kind }) => kind),
+    ['source_access_policy', 'source_access_application', 'mcp_server'],
+  );
+  const before = provider.mutations.length;
+  await applyGateway({
+    ...reduced,
+    approvedPlanId: preview.plan.planId,
+    approvedPruneId: preview.pruneApprovalId,
+    prune: true,
+  });
+  assert.deepEqual(
+    provider.mutations.slice(before).filter(({ action }) => action === 'delete')
+      .map(({ kind }) => kind),
+    ['source_access_policy', 'source_access_application', 'mcp_server'],
+  );
+  assert.equal(receiptStore.value.resources.length, 7);
+  const output = JSON.stringify({ preview, receipt: receiptStore.value });
+  assert.equal(output.includes('group-prune-sentinel'), false);
+  assert.equal(output.includes('Analytics Readers'), false);
 });
 
 test('interrupted prune retry requires the originally journaled destructive approval', async () => {
@@ -1794,6 +1903,37 @@ test('uninstall requires exact approval, deletes in reverse order, converges on 
     );
     previousDeleteIndex = deletion.index;
   }
+});
+
+test('uninstalls a group-bound installation from receipt authority without the group snapshot', async () => {
+  const provider = new FakeProvider();
+  const receiptStore = new MemoryReceiptStore();
+  const gatewayConfig = config();
+  gatewayConfig.sources[0].accessGroup = 'Context Readers';
+  const { base } = await install(provider, receiptStore, {
+    config: gatewayConfig,
+    access: {
+      ...access(),
+      groups: [{ id: 'group-uninstall-sentinel', name: 'Context Readers' }],
+    },
+  });
+  const removal = { ...base, access: access() };
+  const preview = await planGatewayUninstall(removal);
+  assert.deepEqual(preview.blockers, []);
+  assert.deepEqual(preview.actions.map(({ kind }) => kind), REVERSE_ORDER);
+  const before = provider.mutations.length;
+  const result = await uninstallGateway({
+    ...removal,
+    approvedUninstallId: preview.uninstallId,
+  });
+
+  assert.equal(result.status, 'removed');
+  assert.deepEqual(provider.mutations.slice(before).map(({ kind }) => kind), REVERSE_ORDER);
+  assert.equal(receiptStore.value.state, 'removed');
+  assert.deepEqual(receiptStore.value.resources, []);
+  const output = JSON.stringify({ preview, result, receipt: receiptStore.value });
+  assert.equal(output.includes('group-uninstall-sentinel'), false);
+  assert.equal(output.includes('Context Readers'), false);
 });
 
 test('an interrupted uninstall cannot be reversed through apply', async () => {

@@ -717,6 +717,26 @@ describe('provider-ID-free reviewed static uninstall plan', () => {
     await expect(parseStaticUninstallPlan(plan)).resolves.toEqual(plan);
   });
 
+  it.each([228, 251])('preserves the exact %i-tool source through install authority and uninstall review', async (toolCount) => {
+    const largeToolNames = Array.from(
+      { length: toolCount },
+      (_value, index) => `synthetic_read_${String(index + 1).padStart(3, '0')}`,
+    );
+    const largeJournal = await completedInstallJournal({
+      ...selectionInput,
+      firstSource: { ...selectionInput.firstSource, enabledTools: largeToolNames },
+    });
+    const plan = await buildStaticUninstallPlan(
+      largeJournal,
+      largeJournal.updatedAt,
+      largeJournal.updatedAt + MAX_STATIC_UNINSTALL_PLAN_TTL_MS,
+    );
+
+    expect(plan.source?.enabledTools).toEqual(largeToolNames);
+    await expect(parseStaticUninstallPlan(JSON.parse(JSON.stringify(plan))))
+      .resolves.toEqual(plan);
+  });
+
   it('commits the exact private install authority behind one public opaque hash', async () => {
     const plan = await buildStaticUninstallPlan(completed, CREATED_AT, CREATED_AT + 60_000);
     const final = completed.actions.at(-1)?.locator;

@@ -14,11 +14,13 @@ import type {
 type PreviewScenario = 'empty' | 'ready' | 'update' | 'error'
 const PREVIEW_STORAGE_KEY = 'ankka-gateway-ui-preview-scenario'
 const ACTION_ID = `action_${'a'.repeat(32)}`
-const HANDOFF = `https://deploy.ankka.ai/manage#${'a'.repeat(40)}`
+const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai'
+const HANDOFF = `${CONTROL_PLANE_ORIGIN}/manage#${'a'.repeat(40)}`
 
 const status: GatewayStatus = {
   schemaVersion: 1,
   status: 'ready',
+  controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
   release: 'gateway-v0.1.12',
   gateway: {
     name: 'Example MCP Gateway',

@@ -145,7 +145,7 @@ export function durableNamespace(env, AdminStateClass, objects = new Map()) {
   };
 }
 
-export function primaryEnvironment({ objects } = {}) {
+export function primaryEnvironment({ objects, bindings = {} } = {}) {
   const env = {
     CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
     CLOUDFLARE_ZONE_ID: ZONE_ID,
@@ -163,6 +163,7 @@ export function primaryEnvironment({ objects } = {}) {
     ADMIN_EMAILS: 'admin@example.com,owner@example.com',
     CF_ACCESS_AUD: 'access-audience-tag',
     CF_ACCESS_ISSUER: 'https://tenant.cloudflareaccess.com',
+    ...bindings,
   };
   env.ADMIN_STATE = durableNamespace(env, PrimaryAdminState, objects);
   return env;
@@ -225,18 +226,15 @@ async function stableResourceKey(prefix, installationId, logicalId) {
     : `${prefix}-${digest.slice(0, 32 - prefix.length - 1)}`;
 }
 
-/** The current hosted wizard's empty-Portal bootstrap claim. */
-export async function portalOnlyClaim(requestId = 'A'.repeat(22)) {
-  const settings = {
-    schemaVersion: 1,
-    connect: { name: GATEWAY_NAME, hostname: HOSTNAME, codeMode: 'default_on' },
-    access: { adminEmails: ['admin@example.com'], memberEmails: ['owner@example.com'] },
-    sources: [],
-  };
-  const target = { accountId: ACCOUNT_ID, zoneId: ZONE_ID, zoneName: ZONE_NAME };
-  const release = { id: RELEASE, artifactSha256: RELEASE_SHA256 };
+async function derivedBootstrapClaim(
+  settings,
+  requestId,
+  cloudflareAccessToken,
+  target = { accountId: ACCOUNT_ID, zoneId: ZONE_ID, zoneName: ZONE_NAME },
+  release = { id: RELEASE, artifactSha256: RELEASE_SHA256 },
+) {
   const installationDigest = (await prefixedSha256({
-    hostname: HOSTNAME, accountId: ACCOUNT_ID, zoneId: ZONE_ID,
+    hostname: settings.connect.hostname, accountId: ACCOUNT_ID, zoneId: ZONE_ID,
   })).slice('sha256:'.length);
   const installationId = `acg-${installationDigest.slice(0, 24)}`;
   const allowedEmails = [...settings.access.adminEmails, ...settings.access.memberEmails].sort(compareText);
@@ -246,18 +244,58 @@ export async function portalOnlyClaim(requestId = 'A'.repeat(22)) {
     identitiesRef: 'access.allowedEmails', identityType: 'email',
     identityCount: allowedEmails.length, identitiesHash,
   };
-  const portalKey = await stableResourceKey('portal', installationId, HOSTNAME);
-  const portalApplicationKey = await stableResourceKey('portal-app', installationId, HOSTNAME);
-  const portalAccessKey = await stableResourceKey('portal-access', installationId, HOSTNAME);
-  const dnsKey = await stableResourceKey('dns', installationId, HOSTNAME);
+  const source = settings.sources[0] ?? null;
+  const mcpKey = source === null ? null : await stableResourceKey('mcp', installationId, source.id);
+  const sourceApplicationKey = source === null
+    ? null
+    : await stableResourceKey('source-app', installationId, source.id);
+  const sourceAccessKey = source === null
+    ? null
+    : await stableResourceKey('source-access', installationId, source.id);
+  const portalKey = await stableResourceKey('portal', installationId, settings.connect.hostname);
+  const portalApplicationKey = await stableResourceKey(
+    'portal-app', installationId, settings.connect.hostname,
+  );
+  const portalAccessKey = await stableResourceKey(
+    'portal-access', installationId, settings.connect.hostname,
+  );
+  const dnsKey = await stableResourceKey('dns', installationId, settings.connect.hostname);
+  const sourceMappings = source === null ? [] : [{
+    sourceResourceKey: mcpKey,
+    defaultDisabled: true,
+    allowedTools: [...source.enabledTools].sort(compareText),
+    onBehalfOfUser: source.authentication.onBehalfOfUser,
+  }];
+  const sourceSpecifications = source === null ? [] : [
+    { kind: 'mcp_server', key: mcpKey, desired: {
+      metadata, sourceId: source.id, name: source.label, endpoint: source.url,
+      capabilityMode: 'read_only', secureWebGateway: false,
+      toolPolicy: { defaultDisabled: true, allowedTools: [...source.enabledTools].sort(compareText) },
+      authentication: {
+        mode: source.authentication.mode,
+        onBehalfOfUser: source.authentication.onBehalfOfUser,
+        credentialCustody: 'customer',
+      },
+    } },
+    { kind: 'source_access_application', key: sourceApplicationKey, desired: {
+      metadata, sourceResourceKey: mcpKey, applicationType: 'mcp',
+    } },
+    { kind: 'source_access_policy', key: sourceAccessKey, desired: {
+      metadata, sourceApplicationResourceKey: sourceApplicationKey,
+      defaultAction: 'deny', allow: emailAllowPolicy,
+    } },
+  ];
   const specifications = [
+    ...sourceSpecifications,
     { kind: 'portal', key: portalKey, desired: {
-      metadata, name: GATEWAY_NAME, hostname: HOSTNAME, capabilityMode: 'read_only',
-      codeMode: 'default_on', secureWebGateway: false, sourceMappings: [],
+      metadata, name: settings.connect.name, hostname: settings.connect.hostname,
+      capabilityMode: 'read_only', codeMode: settings.connect.codeMode,
+      secureWebGateway: false, sourceMappings,
     } },
     { kind: 'portal_access_application', key: portalApplicationKey, desired: {
-      metadata, portalResourceKey: portalKey, name: GATEWAY_NAME, hostname: HOSTNAME,
-      applicationType: 'mcp_portal', destination: { type: 'public', uri: HOSTNAME },
+      metadata, portalResourceKey: portalKey, name: settings.connect.name,
+      hostname: settings.connect.hostname, applicationType: 'mcp_portal',
+      destination: { type: 'public', uri: settings.connect.hostname },
       authentication: {
         mode: 'managed_oauth',
         dynamicClientRegistration: { enabled: true, allowAnyOnLocalhost: true, allowAnyOnLoopback: true },
@@ -269,8 +307,9 @@ export async function portalOnlyClaim(requestId = 'A'.repeat(22)) {
       defaultAction: 'deny', allow: emailAllowPolicy,
     } },
     { kind: 'dns_record', key: dnsKey, desired: {
-      metadata, recordType: 'CNAME', hostname: HOSTNAME,
-      content: 'gateway.agents.cloudflare.com', proxied: true, dependsOnResourceKey: portalKey,
+      metadata, recordType: 'CNAME', hostname: settings.connect.hostname,
+      content: 'gateway.agents.cloudflare.com', proxied: true,
+      dependsOnResourceKey: portalKey,
     } },
   ];
   const resources = await Promise.all(specifications.map(async (resource) => ({
@@ -288,8 +327,50 @@ export async function portalOnlyClaim(requestId = 'A'.repeat(22)) {
       installationId,
       desiredHash: await prefixedSha256({ schemaVersion: 1, installationId, resources }),
     },
-    cloudflareAccessToken: BOOTSTRAP_GRANT,
+    cloudflareAccessToken,
   };
+}
+
+/** The current hosted wizard's empty-Portal bootstrap claim. */
+export async function portalOnlyClaim(requestId = 'A'.repeat(22)) {
+  return derivedBootstrapClaim({
+    schemaVersion: 1,
+    connect: { name: GATEWAY_NAME, hostname: HOSTNAME, codeMode: 'default_on' },
+    access: { adminEmails: ['admin@example.com'], memberEmails: ['owner@example.com'] },
+    sources: [],
+  }, requestId, BOOTSTRAP_GRANT);
+}
+
+/** A valid claim at every variable-sized bootstrap field's supported maximum. */
+export async function maximumBootstrapClaim(requestId = 'A'.repeat(22)) {
+  const emailDomain = `${'d'.repeat(185)}.com`;
+  const zoneName = `${'z'.repeat(63)}.${'z'.repeat(63)}.${'z'.repeat(61)}`;
+  const portalHostname = `${'m'.repeat(63)}.${zoneName}`;
+  const memberEmails = Array.from({ length: 50 }, (_value, index) => (
+    `m${String(index).padStart(2, '0')}${'x'.repeat(61)}@${emailDomain}`
+  ));
+  const sourceUrlPrefix = 'https://source.example.net/';
+  return derivedBootstrapClaim({
+    schemaVersion: 1,
+    connect: { name: 'G'.repeat(80), hostname: portalHostname, codeMode: 'default_on' },
+    access: { adminEmails: [`${'a'.repeat(64)}@${emailDomain}`], memberEmails },
+    sources: [{
+      id: 'company-context',
+      label: 'S'.repeat(80),
+      url: `${sourceUrlPrefix}${'p'.repeat(2048 - sourceUrlPrefix.length)}`,
+      authentication: { mode: 'none', onBehalfOfUser: false },
+      enabledTools: Array.from({ length: 500 }, (_value, index) => (
+        `tool_${String(index).padStart(3, '0')}_`.padEnd(128, 'x')
+      )),
+    }],
+  }, requestId, 't'.repeat(16 * 1024), {
+    accountId: ACCOUNT_ID,
+    zoneId: ZONE_ID,
+    zoneName,
+  }, {
+    id: `gateway-v${'1'.repeat(67)}.1.1`,
+    artifactSha256: RELEASE_SHA256,
+  });
 }
 
 export async function bootstrapRequest(input = goldenClaim()) {
@@ -543,15 +624,15 @@ export async function withProviderFetch(providerFetch, run) {
  * hosted installer would later present, and the live provider state.
  */
 export async function installReadyGateway({
-  provider = cloudflareProvider(), objects = new Map(), claimInput = goldenClaim(),
+  provider = cloudflareProvider(), objects = new Map(), claimInput = goldenClaim(), environmentBindings = {},
 } = {}) {
-  const env = primaryEnvironment({ objects });
+  const env = primaryEnvironment({ objects, bindings: environmentBindings });
   const request = await bootstrapRequest(claimInput);
   const response = await withProviderFetch(provider.fetch, () => primaryWorker.fetch(request, env));
   assert.equal(response.status, 200, `bootstrap must reach ready: ${await response.clone().text()}`);
   const body = await response.json();
   assert.equal(body.status, 'ready');
-  const entry = objects.get(DURABLE_OBJECT_NAME);
+  const entry = objects.get(`v1:${claimInput.expected.installationId}`);
   assert.ok(entry, 'bootstrap must populate the installation Durable Object');
   const readyReceipt = entry.storage.snapshot();
   assert.deepEqual(readyReceipt, body.receipt.evidence);

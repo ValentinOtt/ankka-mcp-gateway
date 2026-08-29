@@ -27,15 +27,20 @@ function config() {
 const target = { accountId: 'account_123', zoneId: 'zone_123' };
 const access = { allowedEmails: ['OWNER@example.com', 'member@example.com'] };
 
-async function fixture({ mappingIdField = 'id', includeReceipt = true } = {}) {
-  const desired = await buildGatewayDesiredState(config(), {
+async function fixture({
+  accessInput = access,
+  gatewayConfig = config(),
+  mappingIdField = 'id',
+  includeReceipt = true,
+} = {}) {
+  const desired = await buildGatewayDesiredState(gatewayConfig, {
     target: {
       ...target,
       zoneName: 'example.com',
       zoneStatus: 'active',
       zeroTrustReady: true,
     },
-    access,
+    access: accessInput,
   });
   const byKind = Object.fromEntries(desired.resources.map((resource) => [resource.kind, resource]));
   const server = byKind.mcp_server;
@@ -96,8 +101,8 @@ async function fixture({ mappingIdField = 'id', includeReceipt = true } = {}) {
     id: portalAppId,
     name: portalApplication.desired.name,
     type: 'mcp_portal',
-    domain: config().gateway.hostname,
-    destinations: [{ type: 'public', uri: config().gateway.hostname }],
+    domain: gatewayConfig.gateway.hostname,
+    destinations: [{ type: 'public', uri: gatewayConfig.gateway.hostname }],
     oauth_configuration: {
       enabled: true,
       dynamic_client_registration: {
@@ -108,12 +113,17 @@ async function fixture({ mappingIdField = 'id', includeReceipt = true } = {}) {
       grant: { access_token_lifetime: '15m', session_duration: '336h' },
     },
   };
+  const sourceGroup = sourcePolicy.desired.allow.identityType === 'group'
+    ? accessInput.groups?.find((group) => group.name === gatewayConfig.sources[0].accessGroup)
+    : undefined;
   const policies = {
     [serverAppId]: [{
       id: sourcePolicyId,
       name: ownershipMarker(desired.installationId, sourcePolicy.key),
       decision: 'allow',
-      include: [{ email: { email: 'member@example.com' } }, { email: { email: 'owner@example.com' } }],
+      include: sourceGroup
+        ? [{ group: { id: sourceGroup.id } }]
+        : [{ email: { email: 'member@example.com' } }, { email: { email: 'owner@example.com' } }],
       exclude: [],
       require: [],
     }],
@@ -146,7 +156,7 @@ async function fixture({ mappingIdField = 'id', includeReceipt = true } = {}) {
   const receipt = includeReceipt
     ? await createInstallationReceipt({
       plan: { installationId: desired.installationId, desiredHash: desired.desiredHash, release: 'test' },
-      target: { ...target, zoneName: 'example.com', hostname: config().gateway.hostname },
+      target: { ...target, zoneName: 'example.com', hostname: gatewayConfig.gateway.hostname },
       accessPolicy: desired.accessPolicy,
       resources: resourceReceipts,
     })
@@ -167,7 +177,22 @@ async function fixture({ mappingIdField = 'id', includeReceipt = true } = {}) {
     async listAppPolicies(id) { calls.push(['listAppPolicies', id]); return policies[id] ?? []; },
     async getAppPolicy(parentId, id) { calls.push(['getAppPolicy', parentId, id]); return (policies[parentId] ?? []).find((policy) => policy.id === id) ?? null; },
   };
-  return { desired, byKind, receipt, cloudflare, calls, serverLive, portalLive, serverApp, portalApp, policies, dnsLive, resourceReceipts };
+  return {
+    accessInput,
+    gatewayConfig,
+    desired,
+    byKind,
+    receipt,
+    cloudflare,
+    calls,
+    serverLive,
+    portalLive,
+    serverApp,
+    portalApp,
+    policies,
+    dnsLive,
+    resourceReceipts,
+  };
 }
 
 async function pendingCreateReceipt(data, resource, excludedKinds = [resource.kind]) {
@@ -215,6 +240,57 @@ test('verifies Cloudflare prerequisites and reduces exact receipt-owned state to
 
   const plan = await buildGatewayPlan(config(), observed, { release: 'test', access });
   assert.deepEqual(plan.changes.map((change) => change.action), Array(7).fill('noop'));
+});
+
+test('reads back one exact source group selector and detects every selector drift', async () => {
+  const gatewayConfig = config();
+  gatewayConfig.sources[0].accessGroup = 'ERP Readers';
+  const accessInput = {
+    ...access,
+    groups: [{ id: 'group-erp-readers', name: 'ERP Readers' }],
+  };
+  const exact = await fixture({ gatewayConfig, accessInput });
+  const observed = await readCloudflareObservedState({
+    cloudflare: exact.cloudflare,
+    config: gatewayConfig,
+    target,
+    access: accessInput,
+    receipt: exact.receipt,
+  });
+  const exactPlan = await buildGatewayPlan(gatewayConfig, observed, {
+    release: 'test',
+    access: accessInput,
+  });
+  assert.equal(
+    exactPlan.changes.find((change) => change.kind === 'source_access_policy').action,
+    'noop',
+  );
+  assert.equal(JSON.stringify(observed).includes('group-erp-readers'), false);
+
+  for (const include of [
+    [{ group: { id: 'group-wrong' } }],
+    [{ group: { id: 'group-erp-readers', name: 'ERP Readers' } }],
+    [{ group: { id: 'group-erp-readers' } }, { email: { email: 'owner@example.com' } }],
+  ]) {
+    const drift = await fixture({ gatewayConfig, accessInput });
+    drift.policies.app_server_123[0].include = include;
+    const driftObserved = await readCloudflareObservedState({
+      cloudflare: drift.cloudflare,
+      config: gatewayConfig,
+      target,
+      access: accessInput,
+      receipt: drift.receipt,
+    });
+    const driftPlan = await buildGatewayPlan(gatewayConfig, driftObserved, {
+      release: 'test',
+      access: accessInput,
+    });
+    assert.equal(
+      driftPlan.changes.find((change) => change.kind === 'source_access_policy').action,
+      'update',
+      JSON.stringify(include),
+    );
+  }
 });
 
 for (const mappingIdField of ['id', 'server_id']) {

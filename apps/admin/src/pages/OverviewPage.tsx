@@ -136,7 +136,7 @@ export function OverviewPage() {
               <h2 id="teardown-title" className="text-base font-semibold">Teardown gateway</h2>
             </div>
             <p className="mt-2 text-sm leading-6 text-red-900/75">
-              Generate a one-time receipt proof, then review the exact zero-write removal plan on deploy.ankka.ai. Cloudflare authorization is requested only after that review.
+              Generate a one-time receipt proof, then review the exact zero-write removal plan in the signed installer. Cloudflare authorization is requested only after that review.
             </p>
           </div>
           <Button

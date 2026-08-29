@@ -21,9 +21,14 @@ const preparedActionSchema = v.strictObject({
   expiresAt: v.string(),
   handoffUrl: v.string(),
 })
+const controlPlaneOriginSchema = v.pipe(
+  v.string(),
+  v.check(validControlPlaneOrigin),
+)
 const gatewayStatusSchema = v.strictObject({
   schemaVersion: v.literal(1),
   status: v.literal('ready'),
+  controlPlaneOrigin: controlPlaneOriginSchema,
   release: v.string(),
   gateway: v.strictObject({
     name: v.string(),
@@ -183,6 +188,7 @@ const ERROR_MESSAGES = new Map([
   ['source_action_invalid', 'The source action no longer matches the saved draft.'],
   ['source_authentication_changed', 'The endpoint authentication mode changed. Inspect it again before saving.'],
   ['source_authentication_unsupported', 'The endpoint did not return the standard MCP OAuth discovery challenge.'],
+  ['source_capacity_exceeded', 'This source would exceed the gateway source-state capacity. Reduce its tool selection or remove another draft.'],
   ['source_conflict', 'The source list changed in another tab. Refresh and try again.'],
   ['source_invalid', 'The source draft was rejected. Review its endpoint and exact tool selection.'],
   ['source_protocol_unsupported', 'The endpoint did not accept a supported MCP discovery protocol.'],
@@ -212,10 +218,22 @@ export class GatewayApiError extends Error {
   }
 }
 
-export function validHandoffUrl(value: string): string | null {
+function validControlPlaneOrigin(value: string): boolean {
+  if (value.length === 0 || value.length > 2_048) return false
   try {
     const url = new URL(value)
-    return url.origin === 'https://deploy.ankka.ai' && !url.username && !url.password && !url.port &&
+    return url.protocol === 'https:' && url.origin === value && !url.username && !url.password &&
+      !url.port && url.pathname === '/' && url.search === '' && url.hash === ''
+  } catch {
+    return false
+  }
+}
+
+export function validHandoffUrl(value: string, expectedOrigin: string): string | null {
+  if (!validControlPlaneOrigin(expectedOrigin)) return null
+  try {
+    const url = new URL(value)
+    return url.origin === expectedOrigin && !url.username && !url.password && !url.port &&
       url.pathname === '/manage' &&
       url.search === '' && /^#[A-Za-z0-9_-]{40,4096}$/u.test(url.hash) ? url.href : null
   } catch {

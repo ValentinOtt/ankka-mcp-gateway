@@ -29,8 +29,14 @@ export async function readBoundedText(
   errorCode: DeployErrorCode,
   maxBytes = 64 * 1024,
 ): Promise<string> {
-  const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > maxBytes) throw new DeployError(502, errorCode);
+  const declaredHeader = response.headers.get('content-length');
+  if (declaredHeader !== null) {
+    const declared = Number(declaredHeader);
+    if (!Number.isSafeInteger(declared) || declared < 0 || declared > maxBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new DeployError(502, errorCode);
+    }
+  }
   if (!response.body) return '';
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];

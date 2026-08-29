@@ -359,6 +359,45 @@ test('public cleanup accepts an untouched portal-only management state', async (
   assert.equal(gateway.provider.liveResourceCount(), 0);
 });
 
+test('cleanup rejects a source journal above the 1 MiB contract before provider access', async () => {
+  const gateway = await installed();
+  const tools = Array.from({ length: 500 }, (_value, index) => (
+    `tool_${String(index).padStart(3, '0')}_`.padEnd(128, 'x')
+  ));
+  const oversizedSources = {
+    schemaVersion: 1,
+    revision: 32,
+    applyMode: 'oauth_per_action',
+    sources: Array.from({ length: 32 }, (_value, index) => ({
+      id: `source-${index.toString(16).padStart(16, '0')}`,
+      label: `Source ${index}`,
+      url: `https://source-${index}.example.com/mcp`,
+      authMode: 'none',
+      enabledTools: tools,
+      status: 'draft',
+    })),
+  };
+  assert.ok(Buffer.byteLength(canonicalJson(oversizedSources)) > 1024 * 1024);
+  const managementStorage = gateway.objects.get('v1:management').storage;
+  await managementStorage.put('ankka-mcp-gateway/management-sources/v1', oversizedSources);
+  const providerRequests = gateway.provider.requests.length;
+  const managementWrites = managementStorage.writes.length;
+
+  const env = environment();
+  env.ADMIN_STATE = durableNamespace(env, AdminState, gateway.objects);
+  const request = await uninstallRequest({ readyReceipt: gateway.readyReceipt });
+  const response = await withProviderFetch(gateway.provider.fetch, () => (
+    cleanupWorker.fetch(request, env)
+  ));
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    schemaVersion: 1, error: 'uninstall_requires_repair', retryable: false,
+  });
+  assert.equal(gateway.provider.requests.length, providerRequests);
+  assert.equal(managementStorage.writes.length, managementWrites);
+  assert.equal(gateway.provider.liveResourceCount(), 7);
+});
+
 test('cleanup first removes every day-two source and Portal mapping, then removes the original gateway', async () => {
   const gateway = await installedWithAdditionalSource();
   assert.equal(gateway.provider.liveResourceCount(), 10);
@@ -727,6 +766,93 @@ test('a provider response stream failure remains an unknown read and performs no
   assert.equal(provider.liveResourceCount(), 7);
 });
 
+test('cleanup accepts a streamed provider response above the former 64 KiB cap', async () => {
+  const gateway = await installed();
+  const { readyReceipt, storage, provider } = gateway;
+  const dnsPath = expectedDeletePaths(readyReceipt)[0];
+  let injectedBytes = 0;
+  provider.intercept(({ request }) => {
+    if (injectedBytes === 0 && request.method === 'GET' && new URL(request.url).pathname === dnsPath) {
+      const serialized = JSON.stringify({
+        success: true,
+        errors: [],
+        messages: [],
+        result: { ...provider.state.dns, padding: 'x'.repeat(2_500_000) },
+      });
+      injectedBytes = Buffer.byteLength(serialized);
+      return new Response(serialized, {
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      });
+    }
+    return undefined;
+  });
+  const response = await runCleanupCore(
+    await uninstallRequest({ readyReceipt }), environment(), storage, provider.fetch,
+  );
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.ok(injectedBytes > 64 * 1024);
+  assert.ok(injectedBytes < 4 * 1024 * 1024);
+  assert.equal(gateway.cleanupDeletes().length, 7);
+  assert.equal(provider.liveResourceCount(), 0);
+});
+
+test('a provider response above the 4 MiB bound performs no DELETE', async () => {
+  const gateway = await installed();
+  const { readyReceipt, storage, provider } = gateway;
+  const dnsPath = expectedDeletePaths(readyReceipt)[0];
+  let responseBodyCancelled = false;
+  provider.intercept(({ request }) => {
+    if (request.method === 'GET' && new URL(request.url).pathname === dnsPath) {
+      return new Response(new ReadableStream({
+        cancel() { responseBodyCancelled = true; },
+      }), {
+        headers: {
+          'content-length': String((4 * 1024 * 1024) + 1),
+          'content-type': 'application/json',
+        },
+      });
+    }
+    return undefined;
+  });
+  const response = await runCleanupCore(
+    await uninstallRequest({ readyReceipt }), environment(), storage, provider.fetch,
+  );
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    schemaVersion: 1, error: 'uninstall_requires_repair', retryable: false,
+  });
+  assert.equal(responseBodyCancelled, true);
+  assert.equal(gateway.cleanupDeletes().length, 0);
+  assert.equal(provider.liveResourceCount(), 7);
+});
+
+test('a chunked provider response crossing the 4 MiB bound performs no DELETE', async () => {
+  const gateway = await installed();
+  const { readyReceipt, storage, provider } = gateway;
+  const dnsPath = expectedDeletePaths(readyReceipt)[0];
+  provider.intercept(({ request }) => {
+    if (request.method === 'GET' && new URL(request.url).pathname === dnsPath) {
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(4 * 1024 * 1024));
+          controller.enqueue(new Uint8Array(1));
+          controller.close();
+        },
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    return undefined;
+  });
+  const response = await runCleanupCore(
+    await uninstallRequest({ readyReceipt }), environment(), storage, provider.fetch,
+  );
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    schemaVersion: 1, error: 'uninstall_requires_repair', retryable: false,
+  });
+  assert.equal(gateway.cleanupDeletes().length, 0);
+  assert.equal(provider.liveResourceCount(), 7);
+});
+
 test('cleanup rejects bad HMAC, noncanonical bodies, drifted receipts, and expired grants before state access', async () => {
   const { readyReceipt } = await installed();
   const cases = [];
@@ -879,7 +1005,10 @@ test('hand-authored payload layout keeps cleanup and retirement as single-module
   const cleanupModule = await import('../payload/worker-cleanup/index.js');
   assert.deepEqual(Object.keys(cleanupModule), ['AdminState', 'default']);
   assert.deepEqual(
-    (await readdir(new URL('../payload/', import.meta.url))).sort(compareText),
+    (await readdir(new URL('../payload/', import.meta.url), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort(compareText),
     ['installer', 'worker', 'worker-cleanup', 'worker-retirement'],
   );
   assert.deepEqual(await readdir(new URL('../payload/worker-cleanup/', import.meta.url)), ['index.js']);

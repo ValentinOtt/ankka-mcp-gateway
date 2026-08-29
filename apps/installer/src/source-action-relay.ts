@@ -11,7 +11,7 @@ import {
   parseGatewayWorkerDomains,
   parseGatewayWorkerSubdomainState,
 } from './cloudflare-gateway-runtime-state';
-import { CLOUDFLARE_API_ORIGIN } from './constants';
+import { CLOUDFLARE_API_ORIGIN, PUBLIC_ORIGIN } from './constants';
 import {
   prepareVerifiedWorkerRelease,
   prepareWorkerVersionRecoveryRecord,
@@ -394,6 +394,7 @@ export async function relaySourceAction(input: SourceActionRelayInput): Promise<
   let directRelease: Awaited<ReturnType<typeof adaptVerifiedReleaseBundleForWorkerDirectUpload>>;
   try {
     identity = parseExactReleaseBundleIdentity(input.releaseIdentity);
+    if (identity.controlPlaneOrigin !== PUBLIC_ORIGIN) conflict();
     assertExactReleaseBundleIdentity(input.releaseBundle, identity);
     directRelease = await adaptVerifiedReleaseBundleForWorkerDirectUpload(input.releaseBundle);
     if (directRelease.release !== identity.release ||

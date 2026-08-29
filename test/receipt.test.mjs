@@ -401,6 +401,53 @@ test('commits update without changing provider ownership', async () => {
   );
 });
 
+test('updates a group-bound policy receipt using only changed digests', async () => {
+  const policy = resource({
+    kind: 'source_access_policy',
+    key: 'source-access-context-a1b2c3d4',
+    provider: { id: 'policy-1', parentId: 'application-1' },
+    marker: ownershipMarker(
+      'acg-0123456789abcdef01234567',
+      'source-access-context-a1b2c3d4',
+    ),
+    desiredHash: HASH_A,
+    identityHash: HASH_B,
+  });
+  const receipt = await emptyReceipt({ resources: [policy] });
+  const updating = await beginReceiptAction(receipt, createIntent({
+    operationId: 'op-update-group-policy',
+    action: 'update',
+    kind: policy.kind,
+    key: policy.key,
+    expectedDesiredHash: HASH_B,
+  }));
+  const updated = await commitReceiptAction(updating, {
+    provider: { ...policy.provider },
+    desiredHash: HASH_B,
+    marker: policy.marker,
+    identityHash: HASH_C,
+  });
+  const updatedPolicy = updated.resources[0];
+
+  assert.deepEqual(updatedPolicy.provider, policy.provider);
+  assert.equal(updatedPolicy.desiredHash, HASH_B);
+  assert.equal(updatedPolicy.identityHash, HASH_C);
+  assert.deepEqual(Object.keys(updatedPolicy).sort(), [
+    'desiredHash',
+    'identityHash',
+    'key',
+    'kind',
+    'marker',
+    'provider',
+  ]);
+  const output = JSON.stringify(updated);
+  for (const forbidden of [
+    'group-provider-id-sentinel',
+    'ERP Readers',
+    'member@example.com',
+  ]) assert.equal(output.includes(forbidden), false);
+});
+
 test('owns the explicit Portal Access app by exact provider ID and policy parent binding', async () => {
   const portalApp = resource({
     kind: 'portal_access_application',

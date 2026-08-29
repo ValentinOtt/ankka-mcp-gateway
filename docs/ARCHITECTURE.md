@@ -124,7 +124,10 @@ Unrelated Cloudflare and upstream-provider resources are outside its scope.
 
 Customer releases are built from one clean public source commit and signed with
 Ed25519 outside the repository. The signed manifest covers the release channel,
-source commit, deployment contract, and every payload file.
+one canonical HTTPS control-plane origin, source commit, deployment contract,
+and every payload file. Candidate generation compiles that origin into the
+customer Worker before hashing; update discovery and management handoffs use
+the same non-runtime-selectable origin.
 
 The customer Worker payloads remain hand-authored JavaScript by design. Each is
 a dependency-free, single-module deployment unit, and the reviewed file bytes

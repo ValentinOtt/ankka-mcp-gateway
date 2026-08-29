@@ -30,10 +30,12 @@ customer-approved migration or a fresh installation.
 
 ## Release trust
 
-Each installation receives a fixed release channel and an Ed25519 public key.
-The customer Worker fetches only that channel's public descriptor and verifies
-the signed channel, key identity, manifest, deployment contract, and payload
-digests.
+Each installation receives a fixed release channel, an Ed25519 public key, and
+one signed canonical HTTPS control-plane origin compiled into its Worker. The
+customer Worker fetches only that origin and channel's public descriptor and
+verifies the signed channel, key identity, origin, manifest, deployment
+contract, and payload digests. An update signed for a different origin fails
+closed even when its signature is otherwise valid.
 
 Release discovery is anonymous and sends no customer account, hostname, user,
 cookie, authorization, or referrer. A channel outage does not prevent source

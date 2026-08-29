@@ -7,6 +7,7 @@ import { GatewayProvider, useGateway } from './GatewayContext'
 const status: GatewayStatus = {
   schemaVersion: 1,
   status: 'ready',
+  controlPlaneOrigin: 'https://deploy.ankka.ai',
   release: 'gateway-v1.0.0',
   gateway: { name: 'Example Gateway', hostname: 'mcp.example.com', mcpUrl: 'https://mcp.example.com/mcp', capabilityMode: 'read_only', codeMode: 'default_on' },
   source: null,

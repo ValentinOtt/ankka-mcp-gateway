@@ -19,6 +19,7 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const RELEASE_PATTERN = /^gateway-v\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/u;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:/-]{1,128}$/u;
+const MAX_ENABLED_TOOLS_PER_SOURCE = 500;
 const MANAGEMENT_OWNERSHIP_MARKER_PATTERN = /^acg-[a-f0-9]{24}$/u;
 const NON_PUBLIC_SOURCE_SUFFIXES = Object.freeze([
   '.localhost',
@@ -194,7 +195,10 @@ export function parseDeploySelection<Input>(value: Input): DeploySelection {
     sourceUrl.hostname.includes(':') || !isPublicSourceHostname(sourceUrl.hostname)
   ) throw new DeployError(400, 'bad_request', 'source_url_invalid');
   normalizeDnsName(sourceUrl.hostname, 'source_url_invalid');
-  if (input.firstSource.enabledTools.length < 1 || input.firstSource.enabledTools.length > 64) {
+  if (
+    input.firstSource.enabledTools.length < 1 ||
+    input.firstSource.enabledTools.length > MAX_ENABLED_TOOLS_PER_SOURCE
+  ) {
     throw new DeployError(400, 'bad_request', 'enabled_tools_invalid');
   }
   const enabledTools = [...new Set(input.firstSource.enabledTools.map((tool) => {
@@ -216,6 +220,9 @@ export function parseDeploySelection<Input>(value: Input): DeploySelection {
     ...input.firstSource.portalUserEmails
       .map((email) => normalizeEmail(email, 'portal_user_emails_invalid')),
   ])].sort();
+  if (portalUserEmails.length > 51) {
+    throw new DeployError(400, 'bad_request', 'portal_user_emails_invalid');
+  }
   return Object.freeze({
     schemaVersion: 1,
     basics: Object.freeze({

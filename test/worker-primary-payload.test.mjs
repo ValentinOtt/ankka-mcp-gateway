@@ -31,6 +31,8 @@ import {
   goldenClaim as claim,
   hmac as signWith,
   installReadyGateway,
+  maximumBootstrapClaim,
+  prefixedSha256,
   portalOnlyClaim,
   primaryEnvironment as environment,
   withProviderFetch,
@@ -38,6 +40,71 @@ import {
 } from './payload-lifecycle.mjs';
 
 const hmac = (rawBody) => signWith(rawBody, BOOTSTRAP_NONCE_BYTES);
+
+const MANAGEMENT_SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
+const MANAGEMENT_SOURCES_LIMIT_BYTES = 1024 * 1024;
+const DURABLE_OBJECT_ENTRY_LIMIT_BYTES = 2 * 1024 * 1024;
+
+function canonicalByteLength(value) {
+  return Buffer.byteLength(canonicalJson(value));
+}
+
+function aggregateToolNames(length = 128, extraCharacters = 0) {
+  return Array.from({ length: 500 }, (_value, index) => (
+    `boundary_${String(index).padStart(3, '0')}_`.padEnd(
+      length + (index < extraCharacters ? 1 : 0),
+      'x',
+    )
+  ));
+}
+
+function aggregateManagedSource(index, enabledTools) {
+  return {
+    id: `source-${index.toString(16).padStart(16, '0')}`,
+    label: `Source ${index}`,
+    url: `https://source-${index}.example.com/mcp`,
+    authMode: 'none',
+    enabledTools,
+    status: 'draft',
+  };
+}
+
+function aggregateManagementSources(sources, revision = sources.length) {
+  return { schemaVersion: 1, revision, applyMode: 'oauth_per_action', sources };
+}
+
+function aggregateInstalledProjection(record) {
+  return {
+    ...record,
+    revision: Number.MAX_SAFE_INTEGER,
+    sources: record.sources.map((source) => ({ ...source, status: 'installed' })),
+  };
+}
+
+function platformBoundedStorage(initialEntries = []) {
+  const values = new Map(initialEntries.map(([key, value]) => [key, structuredClone(value)]));
+  const stats = { writeAttempts: 0, platformRejections: 0 };
+  return {
+    stats,
+    async get(key) {
+      const value = values.get(key);
+      return value === undefined ? undefined : structuredClone(value);
+    },
+    async put(key, value) {
+      stats.writeAttempts += 1;
+      const entryBytes = Buffer.byteLength(key) + canonicalByteLength(value);
+      if (entryBytes > DURABLE_OBJECT_ENTRY_LIMIT_BYTES) {
+        stats.platformRejections += 1;
+        throw new TypeError('synthetic_durable_object_entry_limit');
+      }
+      values.set(key, structuredClone(value));
+    },
+    snapshot(key) {
+      const value = values.get(key);
+      return value === undefined ? undefined : structuredClone(value);
+    },
+  };
+}
 
 const UPDATE_COMPONENTS = Object.freeze([
   ['admin', 'admin'],
@@ -62,7 +129,11 @@ function updateComponentRoot(component, directory) {
     : new URL(`../payload/${directory}/`, import.meta.url);
 }
 
-async function signedUpdateChannel(release = 'gateway-v0.1.1', channel = 'canary') {
+async function signedUpdateChannel(
+  release = 'gateway-v0.1.1',
+  channel = 'canary',
+  controlPlaneOrigin = 'https://deploy.ankka.ai',
+) {
   const components = {};
   const allFiles = [];
   for (const [name, directory] of UPDATE_COMPONENTS) {
@@ -104,6 +175,7 @@ async function signedUpdateChannel(release = 'gateway-v0.1.1', channel = 'canary
       treeSha256: createHash('sha256').update(canonicalJson(allFiles)).digest('hex'),
     }),
     cloudflare: APPROVED_CLOUDFLARE_CONTRACT,
+    controlPlaneOrigin,
     components: Object.freeze(components),
     oauthScopeIds: REQUIRED_OAUTH_SCOPES,
     release,
@@ -167,6 +239,333 @@ test('primary payload has the exact dependency-free Worker export and layout', a
   assert.doesNotMatch(source, /sourceMappingURL\s*=/iu);
   assert.match(source, /export class AdminState/u);
   assert.match(source, /export default/u);
+});
+
+test('bounded provider reads cover the independent 32-source and 500-tool response ceilings', async () => {
+  const maxLengthName = (sourceIndex, toolIndex) => (
+    `tool_${String(sourceIndex).padStart(2, '0')}_${String(toolIndex).padStart(3, '0')}_`.padEnd(128, 'x')
+  );
+  const servers = Array.from({ length: 32 }, (_source, sourceIndex) => ({
+    server_id: `server_${String(sourceIndex).padStart(2, '0')}_`.padEnd(128, 'a'),
+    default_disabled: true,
+    on_behalf: false,
+    updated_tools: Array.from({ length: 500 }, (_tool, toolIndex) => ({
+      name: maxLengthName(sourceIndex, toolIndex),
+      enabled: true,
+    })),
+  }));
+  const envelope = JSON.stringify({
+    success: true,
+    errors: [],
+    messages: [],
+    result: {
+      id: 'p'.repeat(128),
+      name: 'n'.repeat(128),
+      hostname: `${'h'.repeat(63)}.${'h'.repeat(63)}.${'h'.repeat(63)}.${'h'.repeat(61)}`,
+      description: 'd'.repeat(256),
+      code_mode: 'default_on',
+      secure_web_gateway: false,
+      servers,
+    },
+  });
+  const bytes = Buffer.byteLength(envelope);
+  assert.ok(bytes > 64 * 1024, 'the fixture must catch the former 64 KiB incompatibility');
+  assert.ok(bytes < 3 * 1024 * 1024, 'the schema-shaped response should retain at least 1 MiB of headroom');
+
+  const [primarySource, cleanupSource] = await Promise.all([
+    readFile(new URL('../payload/worker/index.js', import.meta.url), 'utf8'),
+    readFile(new URL('../payload/worker-cleanup/index.js', import.meta.url), 'utf8'),
+  ]);
+  for (const source of [primarySource, cleanupSource]) {
+    assert.match(source, /const PROVIDER_RESPONSE_LIMIT_BYTES = 4 \* 1024 \* 1024;/u);
+  }
+});
+
+test('primary provider reads accept a streamed response above the former 64 KiB cap', async () => {
+  let injectedBytes = 0;
+  const provider = cloudflareProvider({
+    onRequest: ({ request, state }) => {
+      const url = new URL(request.url);
+      if (injectedBytes === 0 && request.method === 'GET' && state.server &&
+          url.pathname.endsWith(`/mcp/servers/${state.server.id}`)) {
+        const serialized = JSON.stringify({
+          success: true,
+          errors: [],
+          messages: [],
+          result: { ...state.server, padding: 'x'.repeat(2_500_000) },
+        });
+        injectedBytes = Buffer.byteLength(serialized);
+        return new Response(serialized, {
+          headers: { 'content-type': 'application/json; charset=utf-8' },
+        });
+      }
+      return undefined;
+    },
+  });
+  await installReadyGateway({ provider });
+  assert.ok(injectedBytes > 64 * 1024);
+  assert.ok(injectedBytes < 4 * 1024 * 1024);
+});
+
+test('primary provider reads cancel a 4 MiB+1 response before any provider mutation', async () => {
+  let cancelled = false;
+  const provider = cloudflareProvider({
+    onRequest: ({ request }) => request.method === 'GET'
+      ? new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
+        headers: {
+          'content-type': 'application/json',
+          'content-length': String((4 * 1024 * 1024) + 1),
+        },
+      })
+      : undefined,
+  });
+  const response = await withProviderFetch(provider.fetch, async () => (
+    worker.fetch(await bootstrapRequest(), environment())
+  ));
+  assert.equal(response.status, 409);
+  assert.equal(cancelled, true);
+  assert.equal(provider.posts().length, 0);
+  assert.equal(provider.requests.some(({ method }) => method === 'DELETE'), false);
+});
+
+test('management source state enforces the canonical 1 MiB aggregate before the Durable Object entry limit', async () => {
+  const maximumTools = aggregateToolNames();
+  const retainedSources = Array.from(
+    { length: 15 },
+    (_value, index) => aggregateManagedSource(index, maximumTools),
+  );
+  const retained = aggregateManagementSources(retainedSources, 15);
+  const exactTools = aggregateToolNames(124, 90);
+  const overTools = aggregateToolNames(124, 91);
+  const storedOverTools = aggregateToolNames(124, 169);
+  const exactRecord = aggregateManagementSources([
+    ...retainedSources,
+    aggregateManagedSource(15, exactTools),
+  ], 16);
+  const overRecord = aggregateManagementSources([
+    ...retainedSources,
+    aggregateManagedSource(15, overTools),
+  ], 16);
+  const storedOverRecord = aggregateManagementSources([
+    ...retainedSources,
+    aggregateManagedSource(15, storedOverTools),
+  ], 16);
+  assert.ok(canonicalByteLength(retained) < MANAGEMENT_SOURCES_LIMIT_BYTES);
+  assert.equal(
+    canonicalByteLength(aggregateInstalledProjection(exactRecord)),
+    MANAGEMENT_SOURCES_LIMIT_BYTES,
+  );
+  assert.equal(
+    canonicalByteLength(aggregateInstalledProjection(overRecord)),
+    MANAGEMENT_SOURCES_LIMIT_BYTES + 1,
+  );
+  assert.equal(canonicalByteLength(storedOverRecord), MANAGEMENT_SOURCES_LIMIT_BYTES + 1);
+
+  const platformProbe = platformBoundedStorage();
+  const platformOversized = aggregateManagementSources(Array.from(
+    { length: 32 },
+    (_value, index) => aggregateManagedSource(index, maximumTools),
+  ), 32);
+  assert.ok(
+    Buffer.byteLength(MANAGEMENT_SOURCES_KEY) + canonicalByteLength(platformOversized) >
+      DURABLE_OBJECT_ENTRY_LIMIT_BYTES,
+  );
+  await assert.rejects(
+    platformProbe.put(MANAGEMENT_SOURCES_KEY, platformOversized),
+    /synthetic_durable_object_entry_limit/u,
+  );
+  assert.deepEqual(platformProbe.stats, { writeAttempts: 1, platformRejections: 1 });
+
+  const saveRequest = (revision, enabledTools) => new Request('https://admin-state.invalid/sources', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: canonicalJson({
+      schemaVersion: 1,
+      revision,
+      source: {
+        label: 'Source 15',
+        url: 'https://source-15.example.com/mcp',
+        authMode: 'none',
+        enabledTools,
+      },
+    }),
+  });
+
+  const exactStorage = platformBoundedStorage([[MANAGEMENT_SOURCES_KEY, retained]]);
+  const exactState = new AdminState({ storage: exactStorage }, {});
+  const exactResponse = await exactState.fetch(saveRequest(15, exactTools));
+  assert.equal(exactResponse.status, 200, await exactResponse.clone().text());
+  assert.deepEqual(exactStorage.stats, { writeAttempts: 1, platformRejections: 0 });
+  assert.equal(
+    canonicalByteLength(aggregateInstalledProjection(exactStorage.snapshot(MANAGEMENT_SOURCES_KEY))),
+    MANAGEMENT_SOURCES_LIMIT_BYTES,
+  );
+  const exactRead = await exactState.fetch(new Request('https://admin-state.invalid/sources'));
+  assert.equal(exactRead.status, 200);
+  const installedProjection = aggregateInstalledProjection(
+    exactStorage.snapshot(MANAGEMENT_SOURCES_KEY),
+  );
+  await exactStorage.put(MANAGEMENT_SOURCES_KEY, installedProjection);
+  const installedRead = await exactState.fetch(new Request('https://admin-state.invalid/sources'));
+  assert.equal(installedRead.status, 200);
+  assert.equal(canonicalByteLength(await installedRead.clone().json()), MANAGEMENT_SOURCES_LIMIT_BYTES);
+  assert.deepEqual(exactStorage.stats, { writeAttempts: 2, platformRejections: 0 });
+
+  const overStorage = platformBoundedStorage([[MANAGEMENT_SOURCES_KEY, retained]]);
+  const overState = new AdminState({ storage: overStorage }, {});
+  const overResponse = await overState.fetch(saveRequest(15, overTools));
+  assert.equal(overResponse.status, 413);
+  assert.deepEqual(await overResponse.json(), {
+    schemaVersion: 1,
+    error: 'source_capacity_exceeded',
+    revision: 15,
+  });
+  assert.deepEqual(overStorage.stats, { writeAttempts: 0, platformRejections: 0 });
+  assert.equal(canonicalJson(overStorage.snapshot(MANAGEMENT_SOURCES_KEY)), canonicalJson(retained));
+
+  const invalidStorage = platformBoundedStorage([[MANAGEMENT_SOURCES_KEY, storedOverRecord]]);
+  const invalidState = new AdminState({ storage: invalidStorage }, {});
+  const invalidRead = await invalidState.fetch(new Request('https://admin-state.invalid/sources'));
+  assert.equal(invalidRead.status, 503);
+  assert.deepEqual(await invalidRead.json(), { schemaVersion: 1, error: 'sources_unavailable' });
+  assert.deepEqual(invalidStorage.stats, { writeAttempts: 0, platformRejections: 0 });
+
+  const gateway = await installReadyGateway();
+  const managementStorage = gateway.env.ADMIN_STATE.objects.get('v1:management').storage;
+  await managementStorage.put(MANAGEMENT_SOURCES_KEY, exactRecord);
+  const management = gateway.env.ADMIN_STATE.get(
+    gateway.env.ADMIN_STATE.idFromName('v1:management'),
+  );
+  const source = exactRecord.sources.at(-1);
+  const actionId = `action_${'C'.repeat(32)}`;
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + 10 * 60 * 1000;
+  const prepared = await management.fetch(new Request('https://admin-state.invalid/source-actions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: canonicalJson({
+      schemaVersion: 1,
+      actionId,
+      sourceId: source.id,
+      sourceRevision: exactRecord.revision,
+      actorEmail: 'admin@example.com',
+      issuedAt,
+      expiresAt,
+      actionKeyHash: await prefixedSha256(BOOTSTRAP_NONCE),
+      sourceHash: await prefixedSha256({
+        id: source.id,
+        label: source.label,
+        url: source.url,
+        authMode: source.authMode,
+        enabledTools: source.enabledTools,
+      }),
+    }),
+  }));
+  assert.equal(prepared.status, 200, await prepared.clone().text());
+
+  const legacyUnsafeRecord = structuredClone(exactRecord);
+  legacyUnsafeRecord.sources[0].label += 'x';
+  assert.ok(canonicalByteLength(legacyUnsafeRecord) < MANAGEMENT_SOURCES_LIMIT_BYTES);
+  assert.equal(
+    canonicalByteLength(aggregateInstalledProjection(legacyUnsafeRecord)),
+    MANAGEMENT_SOURCES_LIMIT_BYTES + 1,
+  );
+  await managementStorage.put(MANAGEMENT_SOURCES_KEY, legacyUnsafeRecord);
+  const unsafeSource = legacyUnsafeRecord.sources.at(-2);
+  const prepareWrites = managementStorage.writes.length;
+  const unsafePrepare = await management.fetch(new Request(
+    'https://admin-state.invalid/source-actions',
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: canonicalJson({
+        schemaVersion: 1,
+        actionId: `action_${'D'.repeat(32)}`,
+        sourceId: unsafeSource.id,
+        sourceRevision: legacyUnsafeRecord.revision,
+        actorEmail: 'admin@example.com',
+        issuedAt,
+        expiresAt,
+        actionKeyHash: await prefixedSha256(BOOTSTRAP_NONCE),
+        sourceHash: await prefixedSha256({
+          id: unsafeSource.id,
+          label: unsafeSource.label,
+          url: unsafeSource.url,
+          authMode: unsafeSource.authMode,
+          enabledTools: unsafeSource.enabledTools,
+        }),
+      }),
+    },
+  ));
+  assert.equal(unsafePrepare.status, 409);
+  assert.deepEqual(await unsafePrepare.json(), {
+    schemaVersion: 1, error: 'source_action_conflict',
+  });
+  assert.equal(managementStorage.writes.length, prepareWrites);
+
+  const exhaustedRevisionRecord = { ...exactRecord, revision: Number.MAX_SAFE_INTEGER };
+  await managementStorage.put(MANAGEMENT_SOURCES_KEY, exhaustedRevisionRecord);
+  const revisionWrites = managementStorage.writes.length;
+  const exhaustedPrepare = await management.fetch(new Request(
+    'https://admin-state.invalid/source-actions',
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: canonicalJson({
+        schemaVersion: 1,
+        actionId: `action_${'E'.repeat(32)}`,
+        sourceId: unsafeSource.id,
+        sourceRevision: Number.MAX_SAFE_INTEGER,
+        actorEmail: 'admin@example.com',
+        issuedAt,
+        expiresAt,
+        actionKeyHash: await prefixedSha256(BOOTSTRAP_NONCE),
+        sourceHash: await prefixedSha256({
+          id: unsafeSource.id,
+          label: unsafeSource.label,
+          url: unsafeSource.url,
+          authMode: unsafeSource.authMode,
+          enabledTools: unsafeSource.enabledTools,
+        }),
+      }),
+    },
+  ));
+  assert.equal(exhaustedPrepare.status, 409);
+  assert.equal(managementStorage.writes.length, revisionWrites);
+
+  await managementStorage.put(MANAGEMENT_SOURCES_KEY, legacyUnsafeRecord);
+  const actionBody = canonicalJson({
+    schemaVersion: 1,
+    actionId,
+    actionKey: BOOTSTRAP_NONCE,
+    actorEmail: 'admin@example.com',
+    accountId: ACCOUNT_ID,
+    issuedAt,
+    expiresAt,
+    cloudflareAccessToken: 'ephemeral-capacity-guard-grant',
+  });
+  const actionSignature = `sha256=${createHmac(
+    'sha256', Buffer.from(BOOTSTRAP_NONCE, 'base64url'),
+  ).update(actionBody).digest('hex')}`;
+  const providerRequests = gateway.provider.requests.length;
+  const storageWrites = managementStorage.writes.length;
+  const rejectedApply = await withProviderFetch(gateway.provider.fetch, () => worker.fetch(new Request(
+    'https://ankka-gateway-test.tenant.workers.dev/__ankka/source-action',
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-ankka-source-action-signature': actionSignature,
+      },
+      body: actionBody,
+    },
+  ), gateway.env));
+  assert.equal(rejectedApply.status, 400);
+  assert.deepEqual(await rejectedApply.json(), {
+    schemaVersion: 1, error: 'source_action_rejected', retryable: false,
+  });
+  assert.equal(gateway.provider.requests.length, providerRequests);
+  assert.equal(managementStorage.writes.length, storageWrites);
 });
 
 test('bootstrap validates the private golden claim, explicitly creates seven resources, and stores an exact ready receipt', async () => {
@@ -240,6 +639,48 @@ test('bootstrap validates the private golden claim, explicitly creates seven res
   assert.equal(cloudflare.posts().length, 7);
   assert.deepEqual([...env.ADMIN_STATE.objects.keys()].sort(), [DURABLE_OBJECT_NAME, 'v1:management']);
   assert.equal(env.ADMIN_STATE.objects.get('v1:management').storage.snapshot(), undefined);
+});
+
+test('bootstrap accepts its maximum valid canonical envelope and cancels limit+1 bodies', async () => {
+  const maximumClaim = await maximumBootstrapClaim();
+  const maximumBody = canonicalJson(maximumClaim);
+  const maximumBytes = Buffer.byteLength(maximumBody);
+  assert.ok(maximumBytes > 96 * 1024, 'the fixture must catch the former bootstrap request cap');
+  assert.ok(maximumBytes < 128 * 1024, 'the maximum valid envelope must fit the dedicated cap');
+  assert.equal(maximumClaim.settings.sources[0].enabledTools.length, 500);
+  assert.equal(maximumClaim.settings.sources[0].enabledTools.every((tool) => tool.length === 128), true);
+  assert.equal(maximumClaim.settings.access.memberEmails.length, 50);
+  assert.equal(maximumClaim.settings.sources[0].url.length, 2048);
+  assert.equal(maximumClaim.cloudflareAccessToken.length, 16 * 1024);
+  await installReadyGateway({
+    claimInput: maximumClaim,
+    environmentBindings: {
+      CLOUDFLARE_ZONE_NAME: maximumClaim.target.zoneName,
+      ANKKA_GATEWAY_RELEASE: maximumClaim.release.id,
+    },
+  });
+
+  let cancelled = false;
+  const oversized = new Request('https://worker.tenant.workers.dev/__ankka/bootstrap', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'content-length': String((128 * 1024) + 1),
+      'x-ankka-bootstrap-signature': `sha256=${'0'.repeat(64)}`,
+    },
+    body: new ReadableStream({ cancel() { cancelled = true; } }),
+    duplex: 'half',
+  });
+  const cloudflare = cloudflareProvider();
+  const response = await withProviderFetch(cloudflare.fetch, () => (
+    worker.fetch(oversized, environment())
+  ));
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    schemaVersion: 1, error: 'bootstrap_rejected', retryable: false,
+  });
+  assert.equal(cancelled, true);
+  assert.equal(cloudflare.requests.length, 0);
 });
 
 test('bootstrap creates a real empty Portal without placeholder source resources', async () => {
@@ -429,8 +870,9 @@ test('management status requires a verified Access JWT and exposes no provider o
     assert.equal(response.status, 200);
     const status = await response.json();
     assert.deepEqual(Object.keys(status).sort(), [
-      'access', 'gateway', 'release', 'schemaVersion', 'source', 'status', 'updatedAt',
+      'access', 'controlPlaneOrigin', 'gateway', 'release', 'schemaVersion', 'source', 'status', 'updatedAt',
     ]);
+    assert.equal(status.controlPlaneOrigin, 'https://deploy.ankka.ai');
     const serialized = JSON.stringify(status);
     assert.doesNotMatch(serialized, /(?:provider|receipt|journal|tombstone|installationId|accountId|zoneId)/iu);
     assert.doesNotMatch(serialized, /synthetic-cloudflare-grant-never-store/u);
@@ -489,7 +931,7 @@ test('management teardown handoff is actor-bound, same-origin, receipt-backed, a
     const action = JSON.parse(Buffer.from(handoff.hash.slice(1), 'base64url').toString('utf8'));
     assert.deepEqual(Object.keys(action).sort(), [
       'accountId', 'actionId', 'actionKey', 'actionType', 'actorEmail', 'expiresAt', 'gatewayName',
-      'installationId', 'managementOrigin', 'portalHostname', 'schemaVersion', 'workerName',
+      'controlPlaneOrigin', 'installationId', 'managementOrigin', 'portalHostname', 'schemaVersion', 'workerName',
       'workersSubdomain',
     ].sort());
     assert.deepEqual({
@@ -497,6 +939,7 @@ test('management teardown handoff is actor-bound, same-origin, receipt-backed, a
       actionType: action.actionType,
       actionId: action.actionId,
       actorEmail: action.actorEmail,
+      controlPlaneOrigin: action.controlPlaneOrigin,
       accountId: action.accountId,
       installationId: action.installationId,
       gatewayName: action.gatewayName,
@@ -509,6 +952,7 @@ test('management teardown handoff is actor-bound, same-origin, receipt-backed, a
       actionType: 'gateway_teardown',
       actionId: prepared.actionId,
       actorEmail: 'admin@example.com',
+      controlPlaneOrigin: 'https://deploy.ankka.ai',
       accountId: ACCOUNT_ID,
       installationId: INSTALLATION_ID,
       gatewayName: GATEWAY_NAME,
@@ -634,6 +1078,20 @@ test('signed runtime updates require explicit authorization, journal progress in
     assert.equal(legacyResponse.status, 200);
     assert.equal((await legacyResponse.json()).status, 'unavailable');
 
+    const crossOriginChannel = await signedUpdateChannel(
+      'gateway-v0.1.1',
+      channel.body.channel,
+      'https://foreign-control.example',
+    );
+    env.ANKKA_UPDATE_PUBLIC_KEY = crossOriginChannel.publicKey;
+    servedUpdateChannel = crossOriginChannel.body;
+    const crossOriginResponse = await worker.fetch(new Request('https://manage.example.com/api/update', {
+      headers: accessHeaders,
+    }), env);
+    assert.equal(crossOriginResponse.status, 200);
+    assert.equal((await crossOriginResponse.json()).status, 'unavailable');
+
+    env.ANKKA_UPDATE_PUBLIC_KEY = channel.publicKey;
     servedUpdateChannel = channel.body;
 
     const availableResponse = await worker.fetch(new Request('https://manage.example.com/api/update', {
@@ -641,7 +1099,7 @@ test('signed runtime updates require explicit authorization, journal progress in
     }), env);
     assert.equal(availableResponse.status, 200);
     const available = await availableResponse.json();
-    assert.equal(updateFetches, 4);
+    assert.equal(updateFetches, 5);
     assert.notEqual(available.status, 'unavailable', JSON.stringify(available));
     assert.deepEqual({
       channel: available.channel,
@@ -673,6 +1131,7 @@ test('signed runtime updates require explicit authorization, journal progress in
       actionType: action.actionType,
       actionId: action.actionId,
       actorEmail: action.actorEmail,
+      controlPlaneOrigin: action.controlPlaneOrigin,
       operation: action.operation,
       from: action.from.release,
       to: action.to.release,
@@ -681,6 +1140,7 @@ test('signed runtime updates require explicit authorization, journal progress in
       actionType: 'runtime_update',
       actionId: prepared.actionId,
       actorEmail: 'admin@example.com',
+      controlPlaneOrigin: 'https://deploy.ankka.ai',
       operation: 'update',
       from: 'gateway-v0.1.0',
       to: 'gateway-v0.1.1',
@@ -756,6 +1216,52 @@ test('signed runtime updates require explicit authorization, journal progress in
 
 test('management API discovers and applies a customer-owned MCP source through one ephemeral grant', async () => {
   const { env, provider: cloudflare, readyReceipt } = await installReadyGateway();
+  const largeSourceFixture = JSON.parse(await readFile(
+    new URL('../fixtures/large-source/gateway.config.json', import.meta.url),
+    'utf8',
+  ));
+  const largeToolNames = largeSourceFixture.sources[0].enabledTools;
+  const largeToolCatalogue = largeToolNames.map((name) => ({
+    name,
+    title: name.replaceAll('_', ' '),
+    description: `Synthetic read operation ${name}. ${'x'.repeat(1_100)}`,
+    inputSchema: { type: 'object' },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  }));
+  const largeDiscoveryCatalogue = [...largeToolCatalogue, {
+    name: 'company_delete',
+    description: 'Delete context.',
+    inputSchema: { type: 'object' },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+  }];
+  const maximumToolCatalogue = Array.from({ length: 500 }, (_value, index) => ({
+    name: `maximum_read_${String(index + 1).padStart(3, '0')}_`.padEnd(128, 'x'),
+  }));
+  const cataloguePageSize = 25;
+  const expectedCatalogueCursors = Array.from(
+    { length: Math.ceil(largeDiscoveryCatalogue.length / cataloguePageSize) },
+    (_value, index) => index === 0 ? null : `offset-${index * cataloguePageSize}`,
+  );
+  const expectedMaximumCursors = Array.from(
+    { length: maximumToolCatalogue.length / cataloguePageSize },
+    (_value, index) => index === 0 ? null : `offset-${index * cataloguePageSize}`,
+  );
+  const expectedExcessivePageCursors = Array.from(
+    { length: 20 },
+    (_value, index) => index === 0 ? null : `offset-${index}`,
+  );
+  const pagedResult = (message, tools, pageSize) => {
+    const cursor = message.params.cursor;
+    const match = cursor === undefined ? null : cursor.match(/^offset-([1-9][0-9]*)$/u);
+    assert.ok(cursor === undefined || match);
+    const offset = match ? Number(match[1]) : 0;
+    assert.ok(Number.isSafeInteger(offset) && offset < tools.length);
+    const end = Math.min(offset + pageSize, tools.length);
+    const result = { tools: tools.slice(offset, end) };
+    if (end < tools.length) result.nextCursor = `offset-${end}`;
+    return result;
+  };
+  assert.equal(largeToolNames.length, 228);
   const originalFetch = globalThis.fetch;
   try {
     const keys = await crypto.subtle.generateKey(
@@ -773,6 +1279,12 @@ test('management API discovers and applies a customer-owned MCP source through o
       'cf-access-jwt-assertion': assertion,
     };
     const mcpRequests = [];
+    const catalogueCursors = [];
+    const maximumCursors = [];
+    const excessivePageCursors = [];
+    let aggregatePageCalls = 0;
+    let oversizedCatalogueRequest = null;
+    let oversizedCatalogueBodyCancelled = false;
     let loseNextSourceCreateResponse = false;
     globalThis.fetch = async (request) => {
       const url = new URL(request.url);
@@ -789,24 +1301,66 @@ test('management API discovers and applies a customer-owned MCP source through o
         const message = await request.json();
         assert.equal(message.method, 'tools/list');
         assert.equal(message.params._meta['io.modelcontextprotocol/clientInfo'].name, 'ankka-mcp-gateway');
+        catalogueCursors.push(message.params.cursor ?? null);
         return new Response(JSON.stringify({
           jsonrpc: '2.0',
           id: message.id,
-          result: {
-            tools: [{
-              name: 'company_lookup',
-              title: 'Company lookup',
-              description: 'Find approved company context.',
-              inputSchema: { type: 'object' },
-              annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-            }, {
-              name: 'company_delete',
-              description: 'Delete context.',
-              inputSchema: { type: 'object' },
-              annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-            }],
-          },
+          result: pagedResult(message, largeDiscoveryCatalogue, cataloguePageSize),
         }), { headers: { 'content-type': 'application/json; charset=utf-8' } });
+      }
+      if (url.href === 'https://maximum-paged-tools.example.net/mcp') {
+        const message = await request.json();
+        maximumCursors.push(message.params.cursor ?? null);
+        return Response.json({
+          jsonrpc: '2.0',
+          id: message.id,
+          result: pagedResult(message, maximumToolCatalogue, cataloguePageSize),
+        });
+      }
+      if (url.href === 'https://too-many-pages.example.net/mcp') {
+        const message = await request.json();
+        excessivePageCursors.push(message.params.cursor ?? null);
+        return Response.json({
+          jsonrpc: '2.0',
+          id: message.id,
+          result: pagedResult(message, maximumToolCatalogue.slice(0, 21), 1),
+        });
+      }
+      if (url.href === 'https://aggregate-limit.example.net/mcp') {
+        const message = await request.json();
+        const page = message.params.cursor === undefined
+          ? 1
+          : Number(message.params.cursor.slice('page-'.length));
+        aggregatePageCalls += 1;
+        const result = {
+          tools: [{ name: `aggregate_read_${page}` }],
+          padding: 'x'.repeat(3 * 1024 * 1024),
+        };
+        if (page < 3) result.nextCursor = `page-${page + 1}`;
+        return Response.json({ jsonrpc: '2.0', id: message.id, result });
+      }
+      if (url.href === 'https://too-many-tools.example.net/mcp') {
+        const message = await request.json();
+        return Response.json({
+          jsonrpc: '2.0',
+          id: message.id,
+          result: {
+            tools: Array.from({ length: 501 }, (_value, index) => ({
+              name: `synthetic_read_${String(index + 1).padStart(3, '0')}`,
+            })),
+          },
+        });
+      }
+      if (url.href === 'https://oversized-catalogue.example.net/mcp') {
+        oversizedCatalogueRequest = request;
+        return new Response(new ReadableStream({
+          cancel() { oversizedCatalogueBodyCancelled = true; },
+        }), {
+          headers: {
+            'content-length': String((4 * 1024 * 1024) + 1),
+            'content-type': 'application/json; charset=utf-8',
+          },
+        });
       }
       if (url.href === 'https://oauth-source.example.net/mcp') {
         return new Response(null, {
@@ -847,10 +1401,20 @@ test('management API discovers and applies a customer-owned MCP source through o
     assert.equal(discovered.status, 200);
     const catalogue = await discovered.json();
     assert.equal(catalogue.protocolVersion, '2026-07-28');
-    assert.deepEqual(catalogue.tools.map(({ name, defaultSelected }) => ({ name, defaultSelected })), [
-      { name: 'company_lookup', defaultSelected: true },
-      { name: 'company_delete', defaultSelected: false },
-    ]);
+    assert.equal(catalogue.tools.length, 229);
+    assert.deepEqual(
+      catalogue.tools.slice(0, 2).map(({ name, defaultSelected }) => ({ name, defaultSelected })),
+      largeToolNames.slice(0, 2).map((name) => ({ name, defaultSelected: true })),
+    );
+    assert.deepEqual(catalogue.tools.at(-1), {
+      name: 'company_delete',
+      title: null,
+      description: 'Delete context.',
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: true,
+      defaultSelected: false,
+    });
 
     const saved = await worker.fetch(new Request('https://manage.example.com/api/sources', {
       method: 'PUT',
@@ -862,7 +1426,7 @@ test('management API discovers and applies a customer-owned MCP source through o
           label: 'Approved catalogue',
           url: 'https://catalog.example.net/mcp',
           authMode: 'none',
-          enabledTools: ['company_lookup'],
+          enabledTools: largeToolNames,
         },
       }),
     }), env);
@@ -870,11 +1434,15 @@ test('management API discovers and applies a customer-owned MCP source through o
     const updated = await saved.json();
     assert.equal(updated.revision, 2);
     assert.equal(updated.applyMode, 'oauth_per_action');
-    assert.deepEqual(updated.sources.map(({ label, status, enabledTools }) => ({ label, status, enabledTools })), [
-      { label: 'Company context', status: 'installed', enabledTools: ['company_prepare', 'company_search'] },
-      { label: 'Approved catalogue', status: 'draft', enabledTools: ['company_lookup'] },
+    assert.deepEqual(updated.sources[0].enabledTools, ['company_prepare', 'company_search']);
+    assert.deepEqual(updated.sources[1].enabledTools, largeToolNames);
+    assert.equal(updated.sources[1].label, 'Approved catalogue');
+    assert.equal(updated.sources[1].status, 'draft');
+    assert.equal(mcpRequests.length, expectedCatalogueCursors.length * 2);
+    assert.deepEqual(catalogueCursors, [
+      ...expectedCatalogueCursors,
+      ...expectedCatalogueCursors,
     ]);
-    assert.equal(mcpRequests.length, 2);
     assert.doesNotMatch(JSON.stringify(updated), /(?:authorization|credential|secret|token)/iu);
 
     const nestedPrepare = await worker.fetch(new Request('https://manage.example.com/api/source-actions/not-an-action', {
@@ -939,13 +1507,15 @@ test('management API discovers and applies a customer-owned MCP source through o
     assert.equal(actionClaim.accountId, ACCOUNT_ID);
     assert.equal(actionClaim.workerName, 'ankka-gateway-test');
     assert.equal(actionClaim.workersSubdomain, 'tenant');
+    assert.equal(actionClaim.controlPlaneOrigin, 'https://deploy.ankka.ai');
     assert.deepEqual(Object.keys(actionClaim).sort(), [
       'accountId', 'actionId', 'actionKey', 'actorEmail', 'expiresAt', 'managementOrigin',
-      'releaseIdentity', 'schemaVersion', 'workerName', 'workersSubdomain',
+      'controlPlaneOrigin', 'releaseIdentity', 'schemaVersion', 'workerName', 'workersSubdomain',
     ].sort());
     assert.deepEqual(actionClaim.releaseIdentity, {
       schemaVersion: 1,
       channel: env.ANKKA_UPDATE_CHANNEL,
+      controlPlaneOrigin: 'https://deploy.ankka.ai',
       release: env.ANKKA_GATEWAY_RELEASE,
       keyId: env.ANKKA_UPDATE_KEY_ID,
       publicKey: env.ANKKA_UPDATE_PUBLIC_KEY,
@@ -1021,6 +1591,13 @@ test('management API discovers and applies a customer-owned MCP source through o
     ), env);
     assert.equal(recovered.status, 200, await recovered.clone().text());
     assert.equal((await recovered.json()).status, 'succeeded');
+    assert.equal(catalogueCursors.length % expectedCatalogueCursors.length, 0);
+    const lifecycleDiscoveryPasses = catalogueCursors.length / expectedCatalogueCursors.length;
+    assert.ok(lifecycleDiscoveryPasses >= 4);
+    assert.deepEqual(catalogueCursors, Array.from(
+      { length: lifecycleDiscoveryPasses },
+      () => expectedCatalogueCursors,
+    ).flat());
     const installed = await worker.fetch(new Request('https://manage.example.com/api/sources', {
       headers: accessHeaders,
     }), env);
@@ -1032,6 +1609,18 @@ test('management API discovers and applies a customer-owned MCP source through o
     assert.equal(cloudflare.state.servers.size, 2);
     assert.equal(cloudflare.state.apps.size, 3);
     assert.equal(cloudflare.state.portal.servers.length, 2);
+    const largeServer = [...cloudflare.state.servers.values()].find(
+      (server) => server.hostname === 'https://catalog.example.net/mcp',
+    );
+    assert.ok(largeServer);
+    const largeMapping = cloudflare.state.portal.servers.find(
+      (mapping) => mapping.server_id === largeServer.id,
+    );
+    assert.ok(largeMapping);
+    assert.deepEqual(
+      largeMapping.updated_tools.map(({ name }) => name),
+      largeToolNames,
+    );
     assert.doesNotMatch(JSON.stringify(env.ADMIN_STATE.objects.get('v1:management').storage.writes),
       /ephemeral-source-action-(?:grant|recovery-grant)/u);
 
@@ -1064,12 +1653,130 @@ test('management API discovers and applies a customer-owned MCP source through o
       error: 'source_authentication_unsupported',
     });
 
+    const maximumPagedDiscovery = await worker.fetch(new Request(
+      'https://manage.example.com/api/sources/discover',
+      {
+        method: 'POST',
+        headers: {
+          ...accessHeaders,
+          origin: 'https://manage.example.com',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ url: 'https://maximum-paged-tools.example.net/mcp' }),
+      },
+    ), env);
+    assert.equal(maximumPagedDiscovery.status, 200);
+    const maximumCatalogue = await maximumPagedDiscovery.json();
+    assert.equal(maximumCatalogue.tools.length, 500);
+    assert.equal(maximumCatalogue.tools[0].name, maximumToolCatalogue[0].name);
+    assert.equal(maximumCatalogue.tools.at(-1).name, maximumToolCatalogue.at(-1).name);
+    assert.equal(maximumCatalogue.tools.every(({ name }) => name.length === 128), true);
+    assert.deepEqual(maximumCursors, expectedMaximumCursors);
+
+    const sourceStateStorage = env.ADMIN_STATE.objects.get('v1:management').storage;
+    for (const declared of [true, false]) {
+      let oversizedSaveBodyCancelled = false;
+      const beforeMcpRequests = mcpRequests.length;
+      const beforeProviderRequests = cloudflare.requests.length;
+      const beforeStorageWrites = sourceStateStorage.writes.length;
+      const headers = {
+        ...accessHeaders,
+        origin: 'https://manage.example.com',
+        'content-type': 'application/json',
+      };
+      if (declared) headers['content-length'] = String((96 * 1024) + 1);
+      const oversizedSave = await worker.fetch(new Request(
+        'https://manage.example.com/api/sources',
+        {
+          method: 'PUT',
+          headers,
+          body: new ReadableStream({
+            pull(controller) {
+              if (!declared) controller.enqueue(new Uint8Array((96 * 1024) + 1));
+            },
+            cancel() { oversizedSaveBodyCancelled = true; },
+          }),
+          duplex: 'half',
+        },
+      ), env);
+      assert.equal(oversizedSave.status, 400);
+      assert.deepEqual(await oversizedSave.json(), { schemaVersion: 1, error: 'source_invalid' });
+      assert.equal(oversizedSaveBodyCancelled, true);
+      assert.equal(mcpRequests.length, beforeMcpRequests);
+      assert.equal(cloudflare.requests.length, beforeProviderRequests);
+      assert.equal(sourceStateStorage.writes.length, beforeStorageWrites);
+    }
+
+    const maximumSaveBody = JSON.stringify({
+      schemaVersion: 1,
+      revision: installedSources.revision,
+      source: {
+        label: 'Maximum bounded catalogue',
+        url: 'https://maximum-paged-tools.example.net/mcp',
+        authMode: 'none',
+        enabledTools: maximumToolCatalogue.map(({ name }) => name),
+      },
+    });
+    assert.ok(Buffer.byteLength(maximumSaveBody) > 32 * 1024);
+    assert.ok(Buffer.byteLength(maximumSaveBody) < 96 * 1024);
+    const maximumSavedResponse = await worker.fetch(new Request(
+      'https://manage.example.com/api/sources',
+      {
+        method: 'PUT',
+        headers: {
+          ...accessHeaders,
+          origin: 'https://manage.example.com',
+          'content-type': 'application/json',
+        },
+        body: maximumSaveBody,
+      },
+    ), env);
+    assert.equal(maximumSavedResponse.status, 200, await maximumSavedResponse.clone().text());
+    const maximumSavedSources = await maximumSavedResponse.json();
+    const maximumDraft = maximumSavedSources.sources.find(
+      ({ url }) => url === 'https://maximum-paged-tools.example.net/mcp',
+    );
+    assert.ok(maximumDraft);
+    assert.equal(maximumDraft.status, 'draft');
+    assert.deepEqual(maximumDraft.enabledTools, maximumToolCatalogue.map(({ name }) => name));
+    assert.deepEqual(maximumCursors, [
+      ...expectedMaximumCursors,
+      ...expectedMaximumCursors,
+    ]);
+
+    for (const [url, error] of [
+      ['https://too-many-tools.example.net/mcp', 'source_tool_list_invalid'],
+      ['https://too-many-pages.example.net/mcp', 'source_tool_list_invalid'],
+      ['https://aggregate-limit.example.net/mcp', 'source_response_invalid'],
+      ['https://oversized-catalogue.example.net/mcp', 'source_response_invalid'],
+    ]) {
+      const rejectedCatalogue = await worker.fetch(new Request(
+        'https://manage.example.com/api/sources/discover',
+        {
+          method: 'POST',
+          headers: {
+            ...accessHeaders,
+            origin: 'https://manage.example.com',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ url }),
+        },
+      ), env);
+      assert.equal(rejectedCatalogue.status, 502);
+      assert.deepEqual(await rejectedCatalogue.json(), { schemaVersion: 1, error });
+    }
+    assert.deepEqual(excessivePageCursors, expectedExcessivePageCursors);
+    assert.equal(aggregatePageCalls, 3);
+    assert.ok(oversizedCatalogueRequest);
+    assert.equal(oversizedCatalogueRequest.signal.aborted, true);
+    assert.equal(oversizedCatalogueBodyCancelled, true);
+
     const oauthSaved = await worker.fetch(new Request('https://manage.example.com/api/sources', {
       method: 'PUT',
       headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
       body: JSON.stringify({
         schemaVersion: 1,
-        revision: installedSources.revision,
+        revision: maximumSavedSources.revision,
         source: {
           label: 'Private company files',
           url: 'https://oauth-source.example.net/mcp',
@@ -1230,6 +1937,7 @@ test('management API discovers and applies a customer-owned MCP source through o
       updateChannel: env.ANKKA_UPDATE_CHANNEL,
       updateKeyId: env.ANKKA_UPDATE_KEY_ID,
       updatePublicKey: env.ANKKA_UPDATE_PUBLIC_KEY,
+      controlPlaneOrigin: 'https://deploy.ankka.ai',
       accountId: env.CLOUDFLARE_ACCOUNT_ID,
       zoneId: env.CLOUDFLARE_ZONE_ID,
       zoneName: env.CLOUDFLARE_ZONE_NAME,

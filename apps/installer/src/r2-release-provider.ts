@@ -191,6 +191,7 @@ function parseEnvelopeIndex(serialized: string, pin: PinnedR2Release): ParsedEnv
   const manifest = parseCanonicalReleaseManifest(input.manifest);
   if (
     manifest.release !== pin.release ||
+    manifest.controlPlaneOrigin !== pin.controlPlaneOrigin ||
     manifest.artifact.treeSha256 !== pin.artifactSha256 ||
     manifest.artifact.fileCount > MAX_RELEASE_OBJECT_COUNT ||
     manifest.artifact.byteSize > MAX_RELEASE_PAYLOAD_BYTES
@@ -341,6 +342,7 @@ export class PinnedR2ReleaseBundleProvider implements R2ReleaseBundleProvider {
       if (
         verified.keyId !== this.#pin.keyId ||
         verified.manifest.release !== this.#pin.release ||
+        verified.manifest.controlPlaneOrigin !== this.#pin.controlPlaneOrigin ||
         verified.manifest.artifact.treeSha256 !== this.#pin.artifactSha256
       ) invalid();
       const payload = immutablePayload(records, mutablePayload);

@@ -8,7 +8,9 @@ const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
 const SOURCE_CLEANUP_KEY = 'ankka-mcp-gateway/source-cleanup/v1';
 const MANAGER = 'ankka-mcp-gateway';
 const REQUEST_LIMIT_BYTES = 96 * 1024;
-const PROVIDER_RESPONSE_LIMIT_BYTES = 64 * 1024;
+const PROVIDER_RESPONSE_LIMIT_BYTES = 4 * 1024 * 1024;
+const MAX_ENABLED_TOOLS_PER_SOURCE = 500;
+const MANAGEMENT_SOURCES_LIMIT_BYTES = 1024 * 1024;
 const REQUEST_LIFETIME_SECONDS = 5 * 60;
 const MAX_CLOCK_SKEW_SECONDS = 30;
 const RESOURCE_ORDER = Object.freeze([
@@ -418,7 +420,8 @@ function parseManagementSources(value) {
     const current = exactKeys(source, ['id', 'label', 'url', 'authMode', 'enabledTools', 'status']);
     if ((!legacy && !current) || !SOURCE_ID.test(source.id) ||
         !isText(source.label) || !Array.isArray(source.enabledTools) ||
-        source.enabledTools.length < 1 || source.enabledTools.length > 64 ||
+        source.enabledTools.length < 1 ||
+        source.enabledTools.length > MAX_ENABLED_TOOLS_PER_SOURCE ||
         (source.status !== 'installed' && source.status !== 'draft')) return null;
     const authMode = legacy ? 'none' : source.authMode;
     if (authMode !== 'none' && authMode !== 'oauth') return null;
@@ -426,7 +429,10 @@ function parseManagementSources(value) {
     if (tools.length !== source.enabledTools.length || new Set(tools).size !== tools.length) return null;
     sources.push(Object.freeze({ ...source, authMode, enabledTools: Object.freeze([...tools]) }));
   }
-  return Object.freeze({ ...value, sources: Object.freeze(sources) });
+  const record = Object.freeze({ ...value, sources: Object.freeze(sources) });
+  return new TextEncoder().encode(canonicalJson(record)).byteLength <= MANAGEMENT_SOURCES_LIMIT_BYTES
+    ? record
+    : null;
 }
 
 function isSourceCleanupResourceKey(value) {
@@ -580,10 +586,17 @@ async function readBoundedProviderJson(response) {
   const declared = response.headers.get('content-length');
   if (declared !== null) {
     const size = Number(declared);
-    if (!Number.isSafeInteger(size) || size < 0 || size > PROVIDER_RESPONSE_LIMIT_BYTES) return null;
+    if (!Number.isSafeInteger(size) || size < 0 || size > PROVIDER_RESPONSE_LIMIT_BYTES) {
+      try { await response.body?.cancel(); } catch { /* The declared bound remains authoritative. */ }
+      return null;
+    }
   }
   const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
-  if (contentType !== 'application/json' || !response.body) return null;
+  if (contentType !== 'application/json') {
+    try { await response.body?.cancel(); } catch { /* The content-type rejection remains authoritative. */ }
+    return null;
+  }
+  if (!response.body) return null;
   const reader = response.body.getReader();
   const chunks = [];
   let total = 0;

@@ -870,6 +870,7 @@ interface SourceManagementActionHandoff {
   readonly actionKey: string;
   readonly actorEmail: string;
   readonly accountId: string;
+  readonly controlPlaneOrigin: string;
   readonly workerName: string;
   readonly workersSubdomain: string;
   readonly managementOrigin: string;
@@ -884,6 +885,7 @@ interface RuntimeManagementActionHandoff {
   readonly actionKey: string;
   readonly actorEmail: string;
   readonly accountId: string;
+  readonly controlPlaneOrigin: string;
   readonly workerName: string;
   readonly workersSubdomain: string;
   readonly managementOrigin: string;
@@ -900,6 +902,7 @@ interface GatewayTeardownManagementActionHandoff {
   readonly actionKey: string;
   readonly actorEmail: string;
   readonly accountId: string;
+  readonly controlPlaneOrigin: string;
   readonly installationId: string;
   readonly gatewayName: string;
   readonly portalHostname: string;
@@ -939,6 +942,7 @@ const managementActionSharedEntries = {
     v.check((email) => email === email.toLowerCase()),
   ),
   accountId: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
+  controlPlaneOrigin: managementOriginSchema,
   workerName: v.pipe(v.string(), v.regex(/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)),
   workersSubdomain: v.pipe(v.string(), v.regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)),
   managementOrigin: managementOriginSchema,
@@ -1011,6 +1015,10 @@ async function readManagementActionHandoff(request: Request, now: number): Promi
   const claimResult = v.safeParse(managementActionHandoffSchema, claimInput);
   if (!claimResult.success) throw new DeployError(400, 'bad_request');
   const claim = claimResult.output;
+  if (claim.controlPlaneOrigin !== PUBLIC_ORIGIN) throw new DeployError(400, 'bad_request');
+  if (claim.schemaVersion === 1 && claim.releaseIdentity.controlPlaneOrigin !== claim.controlPlaneOrigin) {
+    throw new DeployError(400, 'bad_request');
+  }
   const managementOrigin = parseManagementOrigin(claim.managementOrigin);
   if (!managementOrigin || claim.expiresAt <= now || claim.expiresAt > now + OAUTH_ATTEMPT_TTL_MS) {
     throw new DeployError(400, 'bad_request');

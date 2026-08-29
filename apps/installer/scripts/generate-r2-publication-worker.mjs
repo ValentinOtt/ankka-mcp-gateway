@@ -38,6 +38,7 @@ const PUBLIC_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const RELEASE_PATTERN = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const CHANNEL_PATTERN = /^(?:canary|stable)$/u;
 const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
+const MAX_CONTROL_PLANE_ORIGIN_LENGTH = 2_048;
 const BUCKET_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/u;
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/u;
 const CREDENTIAL_NAME = /(?:^|[-_.])(?:api[-_.]?key|client[-_.]?secret|credential|credentials|password|passwd|private[-_.]?key|secret|secrets|token|tokens)(?:[-_.]|$)/iu;
@@ -103,6 +104,22 @@ function safeInteger(value, maximum = Number.MAX_SAFE_INTEGER) {
 
 function lexicalCompare(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function parseControlPlaneOrigin(value) {
+  if (!v.is(STRING_SCHEMA, value) || value.length === 0 || value.length > MAX_CONTROL_PLANE_ORIGIN_LENGTH) fail();
+  try {
+    const parsed = new URL(value);
+    if (
+      parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' ||
+      parsed.port !== '' || parsed.pathname !== '/' || parsed.search !== '' ||
+      parsed.hash !== '' || parsed.origin !== value || value.includes("'")
+    ) fail();
+  } catch (error) {
+    if (error instanceof R2PublicationWorkerGenerationError) throw error;
+    fail();
+  }
+  return value;
 }
 
 function canonicalJson(value) {
@@ -195,6 +212,7 @@ function parseObjectPlan(input) {
   if (!exactKeys(input, [
     'artifactSha256',
     'channel',
+    'controlPlaneOrigin',
     'immutability',
     'keyId',
     'objectCount',
@@ -210,6 +228,7 @@ function parseObjectPlan(input) {
     !SHA256_PATTERN.test(input.artifactSha256) ||
     !v.is(STRING_SCHEMA, input.channel) ||
     !CHANNEL_PATTERN.test(input.channel) ||
+    parseControlPlaneOrigin(input.controlPlaneOrigin) !== input.controlPlaneOrigin ||
     MUTABLE_CHANNELS.has(input.channel) ||
     !v.is(STRING_SCHEMA, input.keyId) ||
     !KEY_ID_PATTERN.test(input.keyId) ||
@@ -254,6 +273,7 @@ function parseObjectPlan(input) {
   return Object.freeze({
     artifactSha256: input.artifactSha256,
     channel: input.channel,
+    controlPlaneOrigin: input.controlPlaneOrigin,
     immutability: Object.freeze({
       externalAtomicCreateOnlyRequired: true,
       overwriteAllowed: false,
@@ -445,6 +465,7 @@ function verifyEnvelopeSignature(verified, publicKey) {
   if (
     !isPlainRecord(manifest) ||
     manifest.release !== verified.plan.release ||
+    manifest.controlPlaneOrigin !== verified.plan.controlPlaneOrigin ||
     !isPlainRecord(manifest.artifact) ||
     manifest.artifact.treeSha256 !== verified.plan.artifactSha256
   ) fail();
@@ -480,6 +501,7 @@ function publicationIdentity(verified, accountId, bucketName, signatureIdentity)
     artifactSha256: verified.plan.artifactSha256,
     bucketName,
     channel: verified.plan.channel,
+    controlPlaneOrigin: verified.plan.controlPlaneOrigin,
     keyId: verified.plan.keyId,
     objectPlanSha256: verified.objectPlanSha256,
     prefix: verified.plan.prefix,

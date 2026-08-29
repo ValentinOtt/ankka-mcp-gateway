@@ -10,19 +10,19 @@ const ROOT = new URL('../payload/', import.meta.url);
 const ADMIN_ROOT = new URL('../apps/admin/dist/', import.meta.url);
 const COMPONENTS = Object.freeze({
   admin: null,
-  installer: ['assets/installer-2f74774a.css', 'assets/installer-3e59f085.js', 'index.html'],
+  installer: ['assets/installer-315f9095.js', 'assets/installer-ce09e938.css', 'index.html'],
   worker: ['index.js'],
   'worker-cleanup': ['index.js'],
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: '911fdb02b431c8001df3a44591d81abf120bec0654c4a04bfb0efa7a04655440',
-  worker: '1594cc4278bfd8ea2bc460066082bb09758aea64e074a4b55e145a73a8473a9d',
-  'worker-cleanup': 'bcdd1a3cabec127e21070611fb8549a6159576069d9055022c1796a3ac013f92',
+  installer: '9661bb353d8c82bd17adefa3ab9bff19ad0be0f2e6634bee363295d450d09304',
+  worker: '65048df95d1c928dfca6adb031b5f4330abaffc0d2fdf9ae657e1e000feb5116',
+  'worker-cleanup': '513047344170b4dcdbb1eaa55d2ab17931b6ba95015890b992d916df57c76fef',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
 const FROZEN_LIFECYCLE_SHA256 = Object.freeze({
-  'worker-cleanup/index.js': '494eab377c7844f35e2bd9210fd950b2bb2731ef905235afd48818f8f74fea69',
+  'worker-cleanup/index.js': 'b898b8f71f96db99622f1a33f05c9e80adf1806436b774d956bde21d1752ff37',
   'worker-retirement/index.js': '506e91323d6f6c89398a15799bfcde6cb4d271a5d6bf28a4fbbd422331751bda',
 });
 const CONTENT_TYPES = Object.freeze({
@@ -183,7 +183,7 @@ test('admin and installer HTML use external same-origin assets without inline ex
 
 test('installer assets cover the exact hosted session, plan, deploy, result, and removal contract', async () => {
   const html = await readFile(new URL('installer/index.html', ROOT), 'utf8');
-  const script = await readFile(new URL('installer/assets/installer-3e59f085.js', ROOT), 'utf8');
+  const script = await readFile(new URL('installer/assets/installer-315f9095.js', ROOT), 'utf8');
   for (const route of ['/', '/gateway', '/review', '/deploy', '/manage', '/oauth/handoff', '/oauth/callback', '/result']) {
     if (route !== '/') assert.match(`${html}\n${script}`, new RegExp(route.replace('/', '\\/'), 'u'));
   }
@@ -197,19 +197,19 @@ test('installer assets cover the exact hosted session, plan, deploy, result, and
   assert.match(script, /credentials: 'same-origin'/u);
   assert.match(script, /redirect: 'error'/u);
   assert.match(script, /origin === 'https:\/\/dash\.cloudflare\.com'/u);
-  assert.match(script, /origin === 'https:\/\/deploy\.ankka\.ai'/u);
+  assert.match(script, /origin === window\.location\.origin/u);
   assert.match(script, /!url\.username && !url\.password && !url\.port/u);
   assert.match(script, /status: 'user_authorization_required'/u);
   assert.match(script, /const management = await managementCallbackContext\(\)/u);
   assert.match(script, /window\.location\.replace\(management\.managementUrl\)/u);
   assert.match(script, /state\.callbackStreamActive \|\| state\.discovery/u);
   assert.match(`${html}\n${script}`, /Create Cloudflare sign-in link/u);
-  assert.match(`${html}\n${script}`, /Open Cloudflare sign-in/u);
-  assert.match(script, /window\.open\('about:blank', '_blank'\)/u);
-  assert.match(script, /Finish connecting Cloudflare in the new tab/u);
+  assert.match(`${html}\n${script}`, /Continue to Cloudflare/u);
+  assert.doesNotMatch(html, /target="_blank"/u);
+  assert.doesNotMatch(script, /window\.open/u);
   assert.match(script, /suggestedGatewayName\(target\.accountName\)/u);
   assert.doesNotMatch(script, /`\$\{target\.accountName\} Gateway`/u);
-  assert.doesNotMatch(script, /window\.location\.assign/u);
+  assert.match(script, /window\.location\.assign\(handoff\)/u);
   assert.match(script, /document\.modelContext/u);
   for (const tool of [
     'begin_cloudflare_discovery', 'configure_gateway', 'create_review_plan', 'get_installer_status',
@@ -267,7 +267,7 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
   assert.match(adminCss, /--color-brand:#3d132c/u);
   assert.match(adminCss, /--color-sidebar:#250e1c/u);
 
-  const installerCss = await readFile(new URL('installer/assets/installer-2f74774a.css', ROOT), 'utf8');
+  const installerCss = await readFile(new URL('installer/assets/installer-ce09e938.css', ROOT), 'utf8');
   {
     const css = installerCss;
     assert.match(css, /font-family:\s*Inter, ui-sans-serif, system-ui/u);
@@ -279,11 +279,12 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
     assert.match(css, /:focus-visible/u);
     assert.match(css, /@media \(prefers-reduced-motion: reduce\)/u);
     assert.doesNotMatch(css, /@font-face|\.ttf|\.otf/iu);
-    assert.match(css, /--canvas:\s*#fbfaf6/u);
-    assert.match(css, /--accent:\s*#3d132c/u);
-    assert.match(css, /--sidebar:\s*#250e1c/u);
+    assert.match(css, /color-scheme:\s*dark/u);
+    assert.match(css, /--canvas:\s*#1c1a15/u);
+    assert.match(css, /--accent:\s*#e0dac8/u);
+    assert.match(css, /--sidebar:\s*#1c1a15/u);
   }
-  assert.match(installerCss, /--cream:\s*#d3cfb6/u);
+  assert.match(installerCss, /--cream:\s*#14130f/u);
   assert.match(installerCss, /font-family:\s*var\(--font-display\)/u);
   assert.match(installerCss, /input,\s*\nselect,\s*\ntextarea[\s\S]*?font-size:\s*1rem/u);
 });

@@ -101,6 +101,7 @@ beforeAll(async () => {
   const root = checkout.sandbox;
   const sourceCommit = checkout.commit;
   const candidate = await buildReleaseCandidate({
+    controlPlaneOrigin: 'https://deploy.ankka.ai',
     sourceDirectory: checkout.source,
     sourceCommit,
     release: RELEASE,
@@ -124,6 +125,7 @@ beforeAll(async () => {
     artifactSha256: signed.artifactSha256,
     bucketName: 'synthetic-release-bucket',
     channel: CHANNEL,
+    controlPlaneOrigin: candidate.manifest.controlPlaneOrigin,
     keyId: signed.keyId,
     objectPlanSha256: signed.objectPlanSha256,
     prefix: `ankka-mcp-gateway/releases/${CHANNEL}/${RELEASE}/`,
@@ -176,6 +178,8 @@ describe('reviewed GitHub Release publication', () => {
     const verified = await loadGitHubReleaseOutput(output);
     assert.deepEqual(verified.plan, prepared.plan);
     const mirroredSbom = JSON.parse(await readFile(path.join(output, 'sbom.cdx.json'), 'utf8'));
+    const verification = JSON.parse(await readFile(path.join(output, 'release-verification.json'), 'utf8'));
+    assert.equal(verification.controlPlaneOrigin, 'https://deploy.ankka.ai');
     assert.equal(mirroredSbom.metadata.component.name, '@ankka/mcp-gateway');
     assert.match(await readFile(path.join(output, 'LICENSE.txt'), 'utf8'), /Apache-2\.0/u);
     assert.match(await readFile(path.join(output, 'THIRD_PARTY_LICENSES.txt'), 'utf8'), /third-party license/u);
@@ -193,6 +197,17 @@ describe('reviewed GitHub Release publication', () => {
     ])).join('\n');
     assert.doesNotMatch(allPublicOutput, /accountId|bucketName|synthetic-release-bucket/u);
     assert.match(allPublicOutput, /Ed25519/u);
+  });
+
+  it('rejects a publication receipt whose origin differs from the object plan and candidate', async () => {
+    const receipt = JSON.parse(await readFile(fixture.input.publicationResult, 'utf8'));
+    receipt.controlPlaneOrigin = 'https://foreign-control.example';
+    const mismatchedReceipt = path.join(fixture.root, 'foreign-origin-publication-result.json');
+    await writeFile(mismatchedReceipt, canonicalJson(receipt), { flag: 'wx', mode: 0o600 });
+    await assert.rejects(
+      prepareGitHubReleaseOutput({ ...fixture.input, publicationResult: mismatchedReceipt }),
+      (error) => error instanceof GitHubReleasePublicationError,
+    );
   });
 
   it('publishes the exact commit as a canary prerelease through bounded gh arguments', async () => {

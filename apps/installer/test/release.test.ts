@@ -55,7 +55,7 @@ async function releaseFixture(): Promise<{
       path: 'payload/worker-retirement/index.js',
       bytes: encoder.encode('export default { fetch() {} };'),
     }),
-    Object.freeze({ path: 'payload/worker/index.js', bytes: encoder.encode('export default { fetch() {} };') }),
+    Object.freeze({ path: 'payload/worker/index.js', bytes: encoder.encode("const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default { fetch() {} };") }),
   ]);
   const record = async (
     file: ReleasePayloadFile,
@@ -91,6 +91,7 @@ async function releaseFixture(): Promise<{
       treeSha256: await sha256Hex(canonicalJson(allFiles)),
     },
     cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+    controlPlaneOrigin: 'https://deploy.ankka.ai',
     components: {
       admin: await component(adminFiles),
       installer: await component(installerFiles),

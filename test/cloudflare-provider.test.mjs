@@ -7,6 +7,7 @@ import {
 import { buildGatewayDesiredState } from '../src/plan.ts';
 import {
   beginReceiptAction,
+  commitReceiptAction,
   createInstallationReceipt,
   ownershipMarker,
   receiptChecksum,
@@ -225,13 +226,17 @@ function dnsDependencySteps(fixture, {
 }
 
 async function mutationFixture(kind, action, {
+  accessInput = ACCESS,
   locator,
   gatewayConfig = config(),
   extraResources = [],
   includePolicyParent = true,
   receiptDesiredHash,
 } = {}) {
-  const desired = await buildGatewayDesiredState(gatewayConfig, { target: TARGET, access: ACCESS });
+  const desired = await buildGatewayDesiredState(gatewayConfig, {
+    target: TARGET,
+    access: accessInput,
+  });
   const resource = desired.resources.find((candidate) => candidate.kind === kind);
   assert.ok(resource, `missing desired resource ${kind}`);
   const marker = ownershipMarker(desired.installationId, resource.key);
@@ -385,7 +390,7 @@ async function mutationFixture(kind, action, {
   }
   if (locator) change.provider = locator;
   return {
-    input: { change, receipt, config: gatewayConfig, target: TARGET, access: ACCESS },
+    input: { change, receipt, config: gatewayConfig, target: TARGET, access: accessInput },
     desired,
     resource,
     marker,
@@ -1314,6 +1319,242 @@ test('creates an exact source application email policy after exact parent discov
     exclude: [],
     require: [],
   });
+});
+
+test('creates one exact source Access group selector without exposing it in desired state', async () => {
+  const gatewayConfig = config();
+  gatewayConfig.sources[0].accessGroup = 'ERP Readers';
+  const accessInput = {
+    ...ACCESS,
+    groups: [
+      { id: 'group-unrelated', name: 'Unrelated Readers' },
+      { id: 'group-erp-readers', name: 'ERP Readers' },
+    ],
+  };
+  const fixture = await mutationFixture('source_access_policy', 'create', {
+    gatewayConfig,
+    accessInput,
+  });
+  const parent = sourcePolicyParent(fixture);
+  const appId = 'app_source_123';
+  const appsRoot = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+  const app = exactSourceApp({ id: appId, serverId: parent.serverId, marker: parent.marker });
+  const mock = scriptedFetch([
+    { method: 'GET', path: `${appsRoot}/${appId}`, response: success(app) },
+    { method: 'GET', response: success({
+      id: parent.serverId,
+      description: ownershipMarker(fixture.desired.installationId, parent.serverId),
+    }) },
+    { method: 'GET', path: `${appsRoot}/${appId}/policies`, response: success([]) },
+    { method: 'GET', path: `${appsRoot}/${appId}`, response: success(app) },
+    { method: 'GET', response: success({
+      id: parent.serverId,
+      description: ownershipMarker(fixture.desired.installationId, parent.serverId),
+    }) },
+    { method: 'GET', path: `${appsRoot}/${appId}/policies`, response: success([]) },
+    { method: 'POST', path: `${appsRoot}/${appId}/policies`, response: success({ id: 'policy_123' }) },
+  ]);
+
+  await provider(mock.fetchImpl).applyChange(fixture.input);
+  assert.deepEqual(mock.calls[6].body, {
+    name: fixture.marker,
+    decision: 'allow',
+    include: [{ group: { id: 'group-erp-readers' } }],
+    exclude: [],
+    require: [],
+  });
+  const desiredOutput = JSON.stringify(fixture.resource.desired);
+  assert.equal(desiredOutput.includes('group-erp-readers'), false);
+  assert.equal(desiredOutput.includes('ERP Readers'), false);
+
+  const receipt = await commitReceiptAction(fixture.input.receipt, {
+    provider: { id: 'policy_123', parentId: appId },
+    desiredHash: fixture.resource.desiredHash,
+    marker: fixture.marker,
+    identityHash: fixture.resource.desired.allow.identitiesHash,
+  });
+  const receiptPolicy = receipt.resources.find((resource) =>
+    resource.kind === 'source_access_policy');
+  assert.equal(receiptPolicy.identityHash, fixture.resource.desired.allow.identitiesHash);
+  assert.match(receiptPolicy.identityHash, /^sha256:[0-9a-f]{64}$/);
+  const receiptOutput = JSON.stringify(receipt);
+  assert.equal(receiptOutput.includes('group-erp-readers'), false);
+  assert.equal(receiptOutput.includes('ERP Readers'), false);
+});
+
+test('updates a changed source group binding without changing the owned policy locator', async () => {
+  const gatewayConfig = config();
+  gatewayConfig.sources[0].accessGroup = 'ERP Readers';
+  const oldAccess = {
+    ...ACCESS,
+    groups: [{ id: 'group-old-sentinel', name: 'ERP Readers' }],
+  };
+  const newAccess = {
+    ...ACCESS,
+    groups: [{ id: 'group-new-sentinel', name: 'ERP Readers' }],
+  };
+  const oldDesired = await buildGatewayDesiredState(gatewayConfig, {
+    target: TARGET,
+    access: oldAccess,
+  });
+  const oldPolicy = oldDesired.resources.find(({ kind }) => kind === 'source_access_policy');
+  const policyId = 'policy_source_123';
+  const appId = 'app_source_123';
+  const fixture = await mutationFixture('source_access_policy', 'update', {
+    gatewayConfig,
+    accessInput: newAccess,
+    locator: { id: policyId, parentId: appId },
+    receiptDesiredHash: oldDesired.desiredHash,
+  });
+  fixture.input.receipt = await resealReceipt(fixture.input.receipt, (receipt) => {
+    const receiptPolicy = receipt.resources.find((resource) =>
+      resource.kind === 'source_access_policy');
+    receiptPolicy.desiredHash = oldPolicy.desiredHash;
+    receiptPolicy.identityHash = oldPolicy.desired.allow.identitiesHash;
+  });
+  const parent = sourcePolicyParent(fixture);
+  const app = exactSourceApp({ id: appId, serverId: parent.serverId, marker: parent.marker });
+  const mock = scriptedFetch([
+    { response: success(app) },
+    { response: success({
+      id: parent.serverId,
+      description: ownershipMarker(fixture.desired.installationId, parent.serverId),
+    }) },
+    { response: success([{ id: policyId, name: fixture.marker }]) },
+    { response: success({ id: policyId, name: fixture.marker }) },
+    { response: success(app) },
+    { response: success({
+      id: parent.serverId,
+      description: ownershipMarker(fixture.desired.installationId, parent.serverId),
+    }) },
+    { response: success([{ id: policyId, name: fixture.marker }]) },
+    { method: 'PUT', response: success({ id: policyId }) },
+  ]);
+
+  await provider(mock.fetchImpl).applyChange(fixture.input);
+  assert.deepEqual(mock.calls[7].body, {
+    name: fixture.marker,
+    decision: 'allow',
+    include: [{ group: { id: 'group-new-sentinel' } }],
+    exclude: [],
+    require: [],
+  });
+  const committed = await commitReceiptAction(fixture.input.receipt, {
+    desiredHash: fixture.resource.desiredHash,
+    marker: fixture.marker,
+    identityHash: fixture.resource.desired.allow.identitiesHash,
+  });
+  const committedPolicy = committed.resources.find((resource) =>
+    resource.kind === 'source_access_policy');
+  assert.deepEqual(committedPolicy.provider, { id: policyId, parentId: appId });
+  assert.notEqual(committedPolicy.desiredHash, oldPolicy.desiredHash);
+  assert.notEqual(committedPolicy.identityHash, oldPolicy.desired.allow.identitiesHash);
+  const receiptOutput = JSON.stringify(committed);
+  for (const forbidden of [
+    'group-old-sentinel',
+    'group-new-sentinel',
+    'ERP Readers',
+  ]) assert.equal(receiptOutput.includes(forbidden), false);
+});
+
+test('source group policy mutation fails closed on stale or ambiguous observations', async () => {
+  const gatewayConfig = config();
+  gatewayConfig.sources[0].accessGroup = 'ERP Readers';
+  const validAccess = {
+    ...ACCESS,
+    groups: [{ id: 'group-erp-readers', name: 'ERP Readers' }],
+  };
+  const stale = await mutationFixture('source_access_policy', 'create', {
+    gatewayConfig,
+    accessInput: validAccess,
+  });
+  stale.input.access = {
+    ...ACCESS,
+    groups: [{ id: 'group-replaced', name: 'ERP Readers' }],
+  };
+  const staleMock = scriptedFetch([]);
+  await assert.rejects(provider(staleMock.fetchImpl).applyChange(stale.input), (error) =>
+    error instanceof CloudflareGatewayProviderError
+      && error.code === 'access_identity_mismatch'
+      && error.mutationOutcome === 'not_submitted');
+  assert.equal(staleMock.calls.length, 0);
+
+  for (const { groups, forbidden } of [
+    {
+      groups: [
+        ...validAccess.groups,
+        { id: 'group-erp-second', name: 'ERP Readers' },
+      ],
+      forbidden: ['group-erp-second', 'ERP Readers'],
+    },
+    {
+      groups: [
+        ...validAccess.groups,
+        { id: 'group-erp-readers', name: 'Finance Readers' },
+      ],
+      forbidden: ['group-erp-readers', 'Finance Readers'],
+    },
+    {
+      groups: [
+        ...validAccess.groups,
+        { id: 'group-unrelated-duplicate', name: 'Unrelated Readers' },
+        { id: 'group-unrelated-duplicate', name: 'Unrelated Readers' },
+      ],
+      forbidden: ['group-unrelated-duplicate', 'Unrelated Readers'],
+    },
+  ]) {
+    const changed = await mutationFixture('source_access_policy', 'create', {
+      gatewayConfig,
+      accessInput: validAccess,
+    });
+    changed.input.access = { ...ACCESS, groups };
+    const changedMock = scriptedFetch([]);
+    await assert.rejects(provider(changedMock.fetchImpl).applyChange(changed.input), (error) => {
+      assert.ok(error instanceof CloudflareGatewayProviderError);
+      assert.equal(error.code, 'access_identity_mismatch');
+      assert.equal(error.mutationOutcome, 'not_submitted');
+      const safeOutput = `${String(error)}\n${JSON.stringify(error)}`;
+      for (const value of forbidden) assert.equal(safeOutput.includes(value), false);
+      return true;
+    });
+    assert.equal(changedMock.calls.length, 0);
+  }
+
+  const ambiguous = await mutationFixture('source_access_policy', 'create', {
+    gatewayConfig,
+    accessInput: {
+      ...ACCESS,
+      groups: [
+        { id: 'group-erp-a', name: 'ERP Readers' },
+        { id: 'group-erp-b', name: 'ERP Readers' },
+      ],
+    },
+  });
+  const ambiguousMock = scriptedFetch([]);
+  await assert.rejects(provider(ambiguousMock.fetchImpl).applyChange(ambiguous.input), (error) =>
+    error instanceof CloudflareGatewayProviderError
+      && error.code === 'access_identity_mismatch'
+      && error.mutationOutcome === 'not_submitted');
+  assert.equal(ambiguousMock.calls.length, 0);
+
+  const rebound = await mutationFixture('source_access_policy', 'create', {
+    gatewayConfig: structuredClone(gatewayConfig),
+    accessInput: validAccess,
+  });
+  rebound.input.config.sources[0].accessGroup = 'Finance Readers';
+  rebound.input.access = {
+    ...validAccess,
+    groups: [
+      ...validAccess.groups,
+      { id: 'group-finance-readers', name: 'Finance Readers' },
+    ],
+  };
+  const reboundMock = scriptedFetch([]);
+  await assert.rejects(provider(reboundMock.fetchImpl).applyChange(rebound.input), (error) =>
+    error instanceof CloudflareGatewayProviderError
+      && error.code === 'invalid_input'
+      && error.mutationOutcome === 'not_submitted');
+  assert.equal(reboundMock.calls.length, 0);
 });
 
 test('deletes an exact receipt-owned source policy after its MCP server is already absent', async () => {
