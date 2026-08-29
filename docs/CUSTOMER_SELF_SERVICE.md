@@ -75,6 +75,16 @@ customer dashboard after the gateway is ready.
 If discovery finds an existing or conflicting installation, the installer
 stops instead of adopting or overwriting it.
 
+Fresh-hostname checks are read-only and run before the installer creates its
+journal or any Gateway resource. If the requested hostname already has a DNS
+record, that record is left untouched; start a new static plan with an unused
+hostname, or intentionally retire the old hostname outside the installer.
+
+After a write begins, exact journaled resources may remain for reviewed resume
+or reconciliation and are not blindly auto-deleted. Continue through the
+reviewed recovery flow and use its receipt-bound uninstall path for full
+cleanup.
+
 ## Managing the gateway
 
 Open the management URL and authenticate through your Cloudflare Access policy.

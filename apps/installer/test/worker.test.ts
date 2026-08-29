@@ -20,8 +20,12 @@ import type { InstallExecutor } from '../src/install-executor';
 import type { GatewayDeploySessionNamespace } from '../src/env';
 import { buildStaticDeployPlan, parseDeploySelection, parseStaticDeployPlan, type StaticDeployPlan } from '../src/schema';
 import type { AuthorizedTarget } from '../src/cloudflare-target';
+import { CustomerGatewayFreshPreflightError } from '../src/cloudflare-gateway-fresh-preflight';
 import { deriveCustomerGatewayExpectedProjection } from '../src/customer-bootstrap-request';
-import { UNCONFIRMED_GRANT_REVOCATION_DETAIL } from '../src/installer-contract';
+import {
+  FRESH_DNS_COLLISION_DETAIL,
+  UNCONFIRMED_GRANT_REVOCATION_DETAIL,
+} from '../src/installer-contract';
 import { publicSession, requireStoredSession, type StoredDeploySession } from '../src/session';
 import {
   CLIENT_SECRET,
@@ -87,7 +91,7 @@ const deploymentViewResponseSchema = v.object({
   recovery: v.nullable(v.object({ status: v.string(), expiresAt: v.string() })),
   deployment: v.object({
     status: v.string(),
-    failure: v.nullable(v.object({ code: v.string(), detail: v.string() })),
+    failure: v.nullable(v.object({ code: v.string(), title: v.string(), detail: v.string() })),
     canRetry: v.boolean(),
     receipt: v.nullable(v.object({
       receiptId: v.string(),
@@ -430,6 +434,24 @@ function completionAcceptingNamespace(
           }
           return delegate.fetch(request);
         },
+      };
+    },
+  };
+}
+
+function installJournalReadNamespace(
+  base: FakeDeploySessionNamespace,
+  response: () => Response,
+): GatewayDeploySessionNamespace {
+  return {
+    idFromName: (name: string) => base.idFromName(name),
+    get: (id: DurableObjectId) => {
+      const delegate = base.get(id);
+      return {
+        fetch: (request: Request) => request.method === 'GET' &&
+          new URL(request.url).pathname === '/install-journal'
+          ? Promise.resolve(response())
+          : delegate.fetch(request),
       };
     },
   };
@@ -899,9 +921,138 @@ describe('hosted deploy Worker boundary', () => {
     }), workerEnv, undefined);
     const session = await responseJson(result, deploymentFailureResponseSchema);
     expect(session.deployment.failure.code).toBe('oauth_exchange_failed');
-    expect(session.deployment.failure.detail).toMatch(/Diagnostic: token_endpoint_400_invalid_grant_at_journal_unreadable\./u);
+    expect(session.deployment.failure.detail).toMatch(/Diagnostic: token_endpoint_400_invalid_grant_at_journal_absent\./u);
     expect(JSON.stringify(session)).not.toContain('cfoat_should_not_leak');
     expect(namespace.serialized()).not.toContain('cfoat_should_not_leak');
+  });
+
+  it.each([
+    {
+      journalState: 'malformed',
+      response: () => new Response(JSON.stringify({ journal: { unexpected: true } }), {
+        headers: { 'content-type': 'application/json' },
+      }),
+    },
+    {
+      journalState: 'unreadable',
+      response: () => new Response('{', { headers: { 'content-type': 'application/json' } }),
+    },
+  ])('distinguishes a $journalState install journal from an absent journal', async ({ journalState, response }) => {
+    const namespace = new FakeDeploySessionNamespace();
+    const workerEnv = {
+      ...env(namespace),
+      GATEWAY_DEPLOY_SESSION: installJournalReadNamespace(namespace, response),
+    };
+    const calls: Array<{ url: string; body: string }> = [];
+    const worker = createGatewayDeployWorker({
+      now: () => NOW,
+      releaseProvider,
+      transport: successfulTransport(calls),
+      installExecutor: {
+        execute: async () => {
+          throw new TypeError('provider failure body must not surface');
+        },
+      },
+    });
+    const browser = await createBrowserSession(worker, workerEnv);
+    const { plan } = await saveAndPlan(worker, workerEnv, browser);
+    const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+      method: 'POST',
+      headers: mutationHeaders(browser),
+      body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
+    }), workerEnv, undefined);
+    const deployPayload = await responseJson(deploy, authorizationResponseSchema);
+    const state = new URL(deployPayload.authorizationUrl).searchParams.get('state');
+    const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
+    const callback = await worker.fetch(new Request(
+      `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
+      { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
+    ), workerEnv, undefined);
+
+    expect(callback.status).toBe(303);
+    const result = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+      headers: { cookie: browser.cookie },
+    }), workerEnv, undefined);
+    const session = await responseJson(result, deploymentFailureResponseSchema);
+    expect(session.deployment.failure.detail).toMatch(
+      new RegExp(`Diagnostic: unclassified_typeerror_at_journal_${journalState}\\.$`, 'u'),
+    );
+    expect(JSON.stringify(session)).not.toContain('provider failure body must not surface');
+  });
+
+  it('explains a pre-journal DNS collision without claiming writes or failed grant revocation', async () => {
+    const namespace = new FakeDeploySessionNamespace();
+    const workerEnv = env(namespace);
+    const calls: Array<{ url: string; body: string }> = [];
+    const sensitiveProviderContext = {
+      accessToken: 'cfoat_collision_token_must_not_surface',
+      actorEmail: 'collision-owner@example.invalid',
+      recordContent: 'private-origin.example.invalid',
+      recordId: 'provider-record-id-must-not-surface',
+    };
+    const worker = createGatewayDeployWorker({
+      now: () => NOW,
+      releaseProvider,
+      transport: successfulTransport(calls),
+      installExecutor: {
+        execute: async () => {
+          const error = new CustomerGatewayFreshPreflightError('fresh_collision', 'dns_record_list');
+          Object.defineProperty(error, 'providerContext', {
+            enumerable: true,
+            value: sensitiveProviderContext,
+          });
+          throw error;
+        },
+      },
+    });
+    const browser = await createBrowserSession(worker, workerEnv);
+    const { plan } = await saveAndPlan(worker, workerEnv, browser);
+    const deploy = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/deploy`, {
+      method: 'POST',
+      headers: mutationHeaders(browser),
+      body: JSON.stringify({ planId: plan.planId, planHash: plan.planHash }),
+    }), workerEnv, undefined);
+    const deployPayload = await responseJson(deploy, authorizationResponseSchema);
+    const state = new URL(deployPayload.authorizationUrl).searchParams.get('state');
+    const oauthPair = cookiePair(deploy.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
+    const callback = await worker.fetch(new Request(
+      `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
+      { headers: { cookie: `${browser.cookie}; ${oauthPair}` } },
+    ), workerEnv, undefined);
+
+    expect(callback.status).toBe(303);
+    expect(calls.filter(({ url }) => url.includes('/oauth2/revoke'))).toHaveLength(2);
+    const result = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
+      headers: { cookie: browser.cookie },
+    }), workerEnv, undefined);
+    const payload = await responseJson(result, deploymentViewResponseSchema);
+    expect(payload.deployment.failure).toEqual({
+      code: 'internal_error',
+      title: 'Portal hostname is already in use',
+      detail: `${FRESH_DNS_COLLISION_DETAIL} Diagnostic: fresh_collision_dns_record_list_customergatewayfreshpreflighterror_at_journal_absent.`,
+    });
+    const collisionDetail = payload.deployment.failure?.detail ?? '';
+    expect(collisionDetail).toContain('No Gateway resources were created');
+    expect(collisionDetail).toContain('existing DNS record was left untouched');
+    expect(collisionDetail).toContain('new static plan with an unused hostname');
+    expect(collisionDetail).toContain('intentionally retire the old hostname outside the installer');
+    expect(payload.deployment.operations.find(({ id }) => id === 'verify')?.status).toBe('succeeded');
+    expect(payload.deployment.operations.find(({ id }) => id === 'gateway_fresh_preflight')).toEqual({
+      id: 'gateway_fresh_preflight',
+      label: 'Checking requested Cloudflare names',
+      detail: FRESH_DNS_COLLISION_DETAIL,
+      status: 'failed',
+    });
+    expect(payload.deployment.operations.find(({ id }) => id === 'revoke')).toEqual({
+      id: 'revoke',
+      label: 'Revoking the short-lived Cloudflare grant',
+      detail: null,
+      status: 'succeeded',
+    });
+    const publicAndStored = `${JSON.stringify(payload)}\n${namespace.serialized()}`;
+    for (const value of Object.values(sensitiveProviderContext)) {
+      expect(publicAndStored).not.toContain(value);
+    }
   });
 
   it('can return the installer shell while the memory-only grant is still executing', async () => {
@@ -1096,8 +1247,8 @@ describe('hosted deploy Worker boundary', () => {
     const result = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: browser.cookie },
     }), workerEnv, undefined);
-    const payload = await responseJson(result, deploymentViewResponseSchema);
-    expect(payload.deployment).toMatchObject({
+    const resultPayload = await responseJson(result, deploymentViewResponseSchema);
+    expect(resultPayload.deployment).toMatchObject({
       status: 'succeeded',
       failure: null,
       canRetry: false,
@@ -1107,7 +1258,7 @@ describe('hosted deploy Worker boundary', () => {
         portalUrl: 'https://mcp.example.com/mcp',
       },
     });
-    expect(payload.deployment.operations.find(({ id }: { id: string }) => id === 'revoke')).toEqual({
+    expect(resultPayload.deployment.operations.find(({ id }: { id: string }) => id === 'revoke')).toEqual({
       id: 'revoke',
       label: 'Revoking the short-lived Cloudflare grant',
       detail: UNCONFIRMED_GRANT_REVOCATION_DETAIL,
@@ -1195,13 +1346,18 @@ describe('hosted deploy Worker boundary', () => {
     const result = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/session`, {
       headers: { cookie: browser.cookie },
     }), workerEnv, undefined);
-    expect(await result.json()).toMatchObject({
-      deployment: {
-        status: 'failed',
-        canRetry: true,
-        failure: { code: 'oauth_revoke_failed' },
-        receipt: null,
-      },
+    const failurePayload = await responseJson(result, deploymentViewResponseSchema);
+    expect(failurePayload.deployment).toMatchObject({
+      status: 'failed',
+      canRetry: true,
+      failure: { code: 'oauth_revoke_failed' },
+      receipt: null,
+    });
+    expect(failurePayload.deployment.operations.find(({ id }) => id === 'revoke')).toEqual({
+      id: 'revoke',
+      label: 'Revoking the short-lived Cloudflare grant',
+      detail: UNCONFIRMED_GRANT_REVOCATION_DETAIL,
+      status: 'failed',
     });
   });
 

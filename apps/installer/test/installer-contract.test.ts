@@ -1,4 +1,5 @@
 import {
+  JOURNALED_INSTALL_RECOVERY_DETAIL,
   installerSession,
   UNCONFIRMED_GRANT_REVOCATION_DETAIL,
 } from '../src/installer-contract';
@@ -262,6 +263,58 @@ describe('installer UI/server cross-contract', () => {
     expect(JSON.stringify(response)).not.toMatch(
       /accountId|applicationId|bindingHash|locator|requestHash|token/iu,
     );
+  });
+
+  it('explains receipt-bound recovery only after a journaled write may have started', async () => {
+    const selection = parseDeploySelection(selectionInput);
+    const plan = await buildStaticDeployPlan(selection, manifest, NOW + 600_000);
+    const session: PublicDeploySession = {
+      schemaVersion: 1,
+      status: 'failed',
+      expiresAt: NOW + 1_800_000,
+      updatedAt: NOW + 50,
+      selection,
+      plan,
+      result: {
+        code: 'internal_error',
+        completedAt: NOW + 50,
+      },
+    };
+    const progress = (workerPhase: 'prepared' | 'send_armed'): PublicInstallProgress => ({
+      schemaVersion: 1,
+      revision: 2,
+      updatedAt: NOW + 40,
+      actions: [
+        { name: 'gateway_fresh_preflight', phase: 'verified', updatedAt: NOW + 20 },
+        { name: 'worker_create', phase: workerPhase, updatedAt: NOW + 40 },
+      ],
+    });
+
+    const afterWriteArmed = installerSession(
+      session,
+      null,
+      undefined,
+      null,
+      null,
+      progress('send_armed'),
+    );
+    expect(afterWriteArmed.deployment?.failure?.detail).toContain(JOURNALED_INSTALL_RECOVERY_DETAIL);
+    const recoveryDetail = afterWriteArmed.deployment?.failure?.detail ?? '';
+    expect(recoveryDetail).toContain('Exact journaled resources may remain');
+    expect(recoveryDetail).toContain('resume or reconciliation');
+    expect(recoveryDetail).toContain('not blindly auto-deleted');
+    expect(recoveryDetail).toContain('reviewed recovery flow');
+    expect(recoveryDetail).toContain('receipt-bound uninstall path for full cleanup');
+    expect(afterWriteArmed.deployment?.operations.find(({ id }) => id === 'worker_create')?.status)
+      .toBe('failed');
+    expect(afterWriteArmed.deployment?.operations.find(({ id }) => id === 'revoke')?.status)
+      .toBe('succeeded');
+    expect(JSON.stringify(afterWriteArmed)).not.toMatch(
+      /accountId|applicationId|bindingHash|locator|requestHash|recordContent|token/iu,
+    );
+
+    const preparedOnly = installerSession(session, null, undefined, null, null, progress('prepared'));
+    expect(preparedOnly.deployment?.failure?.detail).not.toContain(JOURNALED_INSTALL_RECOVERY_DETAIL);
   });
 
   it('projects a canary removal plan and recovery without journal or provider locators', async () => {
