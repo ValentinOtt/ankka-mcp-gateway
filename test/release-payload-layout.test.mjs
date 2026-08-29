@@ -10,13 +10,13 @@ const ROOT = new URL('../payload/', import.meta.url);
 const ADMIN_ROOT = new URL('../apps/admin/dist/', import.meta.url);
 const COMPONENTS = Object.freeze({
   admin: null,
-  installer: ['assets/installer-315f9095.js', 'assets/installer-ce09e938.css', 'index.html'],
+  installer: ['assets/installer-315f9095.js', 'assets/installer-b89856ad.css', 'index.html'],
   worker: ['index.js'],
   'worker-cleanup': ['index.js'],
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: '9661bb353d8c82bd17adefa3ab9bff19ad0be0f2e6634bee363295d450d09304',
+  installer: 'c2f5d405422f88611d4a335e56e249b1749c75c0cb86aceb34d73cd1ef2cbdac',
   worker: '65048df95d1c928dfca6adb031b5f4330abaffc0d2fdf9ae657e1e000feb5116',
   'worker-cleanup': '513047344170b4dcdbb1eaa55d2ab17931b6ba95015890b992d916df57c76fef',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
@@ -267,7 +267,7 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
   assert.match(adminCss, /--color-brand:#3d132c/u);
   assert.match(adminCss, /--color-sidebar:#250e1c/u);
 
-  const installerCss = await readFile(new URL('installer/assets/installer-ce09e938.css', ROOT), 'utf8');
+  const installerCss = await readFile(new URL('installer/assets/installer-b89856ad.css', ROOT), 'utf8');
   {
     const css = installerCss;
     assert.match(css, /font-family:\s*Inter, ui-sans-serif, system-ui/u);
@@ -286,7 +286,11 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
   }
   assert.match(installerCss, /--cream:\s*#14130f/u);
   assert.match(installerCss, /font-family:\s*var\(--font-display\)/u);
-  assert.match(installerCss, /input,\s*\nselect,\s*\ntextarea[\s\S]*?font-size:\s*1rem/u);
+  assert.match(installerCss, /--font-size-body:\s*1rem/u);
+  assert.match(installerCss, /input,\s*\nselect,\s*\ntextarea[\s\S]*?font-size:\s*var\(--font-size-body\)/u);
+  assert.match(installerCss, /\.promise-grid h2\s*\{[^}]*font-size:\s*var\(--font-size-body\)/u);
+  assert.match(installerCss, /\.operation-copy > p:last-child\s*\{[^}]*font-size:\s*var\(--font-size-body\)/u);
+  assert.match(installerCss, /\.stage-position\s*\{[^}]*font-size:\s*var\(--font-size-body\)/u);
 });
 
 test('admin and installer carry the reviewed Ankka wordmark and navigation treatment', async () => {
