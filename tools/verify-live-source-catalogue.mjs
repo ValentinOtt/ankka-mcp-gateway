@@ -6,6 +6,8 @@ import * as v from 'valibot';
 import { validateGatewayConfig } from '../src/config.ts';
 
 const PROTOCOL_VERSION = '2026-07-28';
+const CLIENT_NAME = 'ankka-live-source-catalogue-verifier';
+const CLIENT_VERSION = '1.0.0';
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_AGGREGATE_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -68,6 +70,17 @@ function compareText(left, right) {
 
 function catalogueDigest(names) {
   return `sha256:${createHash('sha256').update(JSON.stringify(names), 'utf8').digest('hex')}`;
+}
+
+function modernRequestMeta() {
+  return {
+    'io.modelcontextprotocol/protocolVersion': PROTOCOL_VERSION,
+    'io.modelcontextprotocol/clientInfo': {
+      name: CLIENT_NAME,
+      version: CLIENT_VERSION,
+    },
+    'io.modelcontextprotocol/clientCapabilities': {},
+  };
 }
 
 async function readBoundedBody(response, remainingBytes) {
@@ -201,20 +214,15 @@ async function listLiveToolNames(endpoint, fetchImpl, oauthAccessToken) {
     if (remainingTime <= 0) fail('source_request_timeout');
     const id = page + 1;
     const params = {
-      _meta: {
-        'io.modelcontextprotocol/clientInfo': {
-          name: 'ankka-live-source-catalogue-verifier',
-          version: '1.0.0',
-        },
-      },
+      _meta: modernRequestMeta(),
     };
     if (cursor !== undefined) params.cursor = cursor;
 
     const headers = {
-      accept: 'application/json, text/event-stream',
-      'content-type': 'application/json',
-      'mcp-method': 'tools/list',
-      'mcp-protocol-version': PROTOCOL_VERSION,
+      Accept: 'application/json, text/event-stream',
+      'Content-Type': 'application/json',
+      'MCP-Protocol-Version': PROTOCOL_VERSION,
+      'Mcp-Method': 'tools/list',
     };
     if (oauthAccessToken !== undefined) headers.authorization = `Bearer ${oauthAccessToken}`;
 

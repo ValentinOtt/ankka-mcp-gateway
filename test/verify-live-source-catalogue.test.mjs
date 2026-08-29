@@ -4,6 +4,10 @@ import {
   LiveSourceCatalogueError,
   verifyLiveSourceCatalogue,
 } from '../tools/verify-live-source-catalogue.mjs';
+import {
+  handleSyntheticMcpRequest,
+  SYNTHETIC_TOOL_NAME,
+} from '../fixtures/synthetic-mcp/worker.mjs';
 
 function config(authenticationMode = 'none') {
   return {
@@ -39,11 +43,21 @@ function rpcResult(id, result) {
   return Response.json({ jsonrpc: '2.0', id, result });
 }
 
+const MODERN_REQUEST_META = Object.freeze({
+  'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+  'io.modelcontextprotocol/clientInfo': {
+    name: 'ankka-live-source-catalogue-verifier',
+    version: '1.0.0',
+  },
+  'io.modelcontextprotocol/clientCapabilities': {},
+});
+
 test('verifies an exact paginated catalogue and reports only counts and digests', async () => {
   const requests = [];
   const fetchImpl = async (url, options) => {
     requests.push({ url, options });
     const message = JSON.parse(options.body);
+    assert.deepEqual(message.params._meta, MODERN_REQUEST_META);
     if (message.params.cursor === undefined) {
       return rpcResult(message.id, {
         tools: [{ name: 'catalog_item_read' }, { name: '1st-read' }],
@@ -76,8 +90,33 @@ test('verifies an exact paginated catalogue and reports only counts and digests'
   assert.equal(requests[0].url, 'https://source.example.com/mcp');
   assert.equal(requests[0].options.redirect, 'error');
   assert.equal(requests[0].options.headers.authorization, undefined);
-  assert.equal(requests[0].options.headers['mcp-method'], 'tools/list');
-  assert.equal(requests[0].options.headers['mcp-protocol-version'], '2026-07-28');
+  assert.equal(requests[0].options.headers['Mcp-Method'], 'tools/list');
+  assert.equal(requests[0].options.headers['MCP-Protocol-Version'], '2026-07-28');
+  assert.equal(requests[0].options.headers.Accept, 'application/json, text/event-stream');
+  assert.equal(requests[0].options.headers['Content-Type'], 'application/json');
+});
+
+test('uses the complete MCP 2026-07-28 request envelope required by strict sources', async () => {
+  const strictConfig = config();
+  strictConfig.sources[0].enabledTools = [SYNTHETIC_TOOL_NAME];
+  const fetchImpl = async (url, options) => {
+    assert.equal(options.headers['Mcp-Method'], 'tools/list');
+    assert.equal(options.headers['MCP-Protocol-Version'], '2026-07-28');
+    assert.deepEqual(JSON.parse(options.body), {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      params: { _meta: MODERN_REQUEST_META },
+    });
+    return handleSyntheticMcpRequest(new Request(url, options));
+  };
+
+  const result = await verifyLiveSourceCatalogue(
+    strictConfig,
+    'synthetic-source',
+    { fetchImpl },
+  );
+  assert.equal(result.status, 'verified');
 });
 
 test('accepts an OAuth token only from the caller and sends it to the exact source', async () => {
