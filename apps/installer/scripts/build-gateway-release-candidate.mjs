@@ -198,6 +198,7 @@ async function assertExactSourceCommit(sourceRoot, sourceCommit) {
     'status', '--porcelain=v1', '--untracked-files=all', '--',
     'apps/admin', 'package.json', 'package-lock.json', 'LICENSE',
     'scripts/write-admin-license-bundle.mjs',
+    'third_party/licenses',
     'apps/installer/scripts/build-reviewed-fault-injection-candidate.mjs',
     ...RELEASE_TOOL_PATHS,
     'payload',

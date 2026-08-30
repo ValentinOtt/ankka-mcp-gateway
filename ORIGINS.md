@@ -23,9 +23,9 @@ The implementation under `apps/installer/` was transferred from Ankka's
 private product codebase on 2026-08-24. The copyright owner approved publishing
 and relicensing it under Apache-2.0 for this repository.
 
-The public version was adapted to the documented customer-owned Cloudflare
+The public version was adapted to the documented self-hosted Cloudflare
 boundary. It excludes private history, credentials, signing material, generated
-release output, customer data, and Cloudflare account or resource identifiers.
+release output, private data, and Cloudflare account or resource identifiers.
 
 ## Brand assets
 
@@ -33,8 +33,18 @@ The Ankka wordmark and visual-token references were transferred from Ankka's
 private product codebase on 2026-08-26. The copyright owner approved their use
 in this Apache-2.0 repository.
 
-No private product implementation, font files, customer theme values, or
+No private product implementation, font files, private theme values, or
 generated build output were transferred.
+
+## @cfworker/json-schema license fallback
+
+The file
+`third_party/licenses/cfworker-json-schema-4.1.1-LICENSE.md` was copied on
+2026-08-29 from the public `cfworker/cfworker` repository at revision
+`5409fdc2bd144f68e8b28c61c71fcb16600000a6`. It is the upstream MIT license,
+Copyright (c) 2020 Jeremy Danyow. The published
+`@cfworker/json-schema@4.1.1` npm tarball declares MIT but omits the repository
+license file, so the release license generator uses this reviewed copy.
 
 ## Other repository code
 

@@ -23,6 +23,7 @@ const SENSITIVE_FIELD = /^(?:accountId|apiKey|bucketName|clientSecret|credential
 const LOCAL_LOCATOR = /(?:^|[\s"'])(?:\/Users\/|\/home\/|[A-Za-z]:\\)/u;
 const CLOUDFLARE_LOCATOR = /(?:api\.cloudflare\.com\/client\/v4\/accounts\/|r2\.cloudflarestorage\.com)/iu;
 const PRIVATE_MATERIAL = /-----BEGIN [^-\r\n]*PRIVATE KEY-----|(?:CLOUDFLARE_API_TOKEN|GITHUB_TOKEN|NPM_TOKEN)\s*=/iu;
+const NPM_PACKAGE_PATH = /^(?:apps|node_modules)\/[A-Za-z0-9@._/-]+$/u;
 const BOOLEAN_SCHEMA = v.boolean();
 const NUMBER_SCHEMA = v.number();
 const OBJECT_SCHEMA = v.object({});
@@ -91,34 +92,80 @@ function assertPublicSbomValue(value, seen = new Set()) {
 }
 
 function normalizeComponents(input) {
-  const references = new Set();
-  const components = structuredClone(input).map((component) => {
-    if (!isRecord(component) || !v.is(STRING_SCHEMA, component['bom-ref']) || component['bom-ref'].length === 0 ||
-        references.has(component['bom-ref'])) fail();
+  const byReference = new Map();
+  for (const component of structuredClone(input)) {
+    if (!isRecord(component) || !v.is(STRING_SCHEMA, component['bom-ref']) || component['bom-ref'].length === 0) fail();
     if (component.scope === 'optional' || (Array.isArray(component.properties) &&
         component.properties.some((entry) => isRecord(entry) &&
           entry.name === 'cdx:npm:package:development' && entry.value === 'true'))) fail();
-    references.add(component['bom-ref']);
-    return component;
+    const npmPaths = [];
+    const otherProperties = [];
+    for (const property of Array.isArray(component.properties) ? component.properties : []) {
+      if (isRecord(property) && property.name === 'cdx:npm:package:path') {
+        if (!exactKeys(property, ['name', 'value']) || !v.is(STRING_SCHEMA, property.value) ||
+            !NPM_PACKAGE_PATH.test(property.value) ||
+            property.value.split('/').some((segment) => segment === '.' || segment === '..')) fail();
+        npmPaths.push(property.value);
+      } else {
+        otherProperties.push(property);
+      }
+    }
+    const identity = structuredClone(component);
+    if (otherProperties.length === 0) delete identity.properties;
+    else identity.properties = otherProperties;
+    const fingerprint = canonicalJson(identity);
+    const existing = byReference.get(component['bom-ref']);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) fail();
+      for (const npmPath of npmPaths) existing.npmPaths.add(npmPath);
+      continue;
+    }
+    byReference.set(component['bom-ref'], {
+      component,
+      fingerprint,
+      npmPaths: new Set(npmPaths),
+      otherProperties,
+    });
+  }
+  const components = [...byReference.values()].map((entry) => {
+    if (entry.npmPaths.size > 0) {
+      entry.component.properties = [
+        ...entry.otherProperties,
+        ...[...entry.npmPaths].sort(lexicalCompare)
+          .map((value) => ({ name: 'cdx:npm:package:path', value })),
+      ];
+    } else if (entry.otherProperties.length === 0) {
+      delete entry.component.properties;
+    } else {
+      entry.component.properties = entry.otherProperties;
+    }
+    return entry.component;
   });
   components.sort((left, right) => lexicalCompare(left['bom-ref'], right['bom-ref']));
-  return { components, references };
+  return { components, references: new Set(byReference.keys()) };
 }
 
 function normalizeDependencies(input, oldRootReference, rootReference, componentReferences) {
-  const references = new Set();
-  const dependencies = structuredClone(input).map((dependency) => {
+  const byReference = new Map();
+  for (const dependency of structuredClone(input)) {
     if (!isRecord(dependency) || !exactKeys(dependency, ['dependsOn', 'ref']) ||
         !v.is(STRING_SCHEMA, dependency.ref) || !Array.isArray(dependency.dependsOn)) fail();
     const ref = dependency.ref === oldRootReference ? rootReference : dependency.ref;
-    if (references.has(ref)) fail();
-    references.add(ref);
     const dependsOn = dependency.dependsOn.map((entry) =>
       entry === oldRootReference ? rootReference : entry);
     if (dependsOn.some((entry) => !v.is(STRING_SCHEMA, entry)) || new Set(dependsOn).size !== dependsOn.length) fail();
-    dependsOn.sort(lexicalCompare);
-    return { dependsOn, ref };
-  });
+    const existing = byReference.get(ref);
+    if (existing) {
+      for (const reference of dependsOn) existing.add(reference);
+    } else {
+      byReference.set(ref, new Set(dependsOn));
+    }
+  }
+  const references = new Set(byReference.keys());
+  const dependencies = [...byReference].map(([ref, dependsOn]) => ({
+    dependsOn: [...dependsOn].sort(lexicalCompare),
+    ref,
+  }));
   if (!references.has(rootReference) || references.size !== componentReferences.size + 1 ||
       [...componentReferences].some((reference) => !references.has(reference)) ||
       dependencies.some((dependency) => dependency.dependsOn.some((reference) => !references.has(reference)))) fail();

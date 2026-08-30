@@ -47,6 +47,60 @@ const external = Object.entries(lock.packages)
 if (external.length === 0) throw new Error('license_bundle_empty');
 
 const licenseName = /^(?:license|licence|copying|notice)(?:[-._].*)?$/iu;
+
+async function familyLicenseInputs(packageName, expectedVersion) {
+  const directory = path.join(projectRoot, 'node_modules', packageName);
+  let manifest;
+  try {
+    manifest = JSON.parse(await readUtf8(
+      path.join(directory, 'package.json'),
+      'license_bundle_fallback_invalid',
+    ));
+  } catch {
+    throw new Error('license_bundle_fallback_invalid');
+  }
+  if (manifest.name !== packageName || manifest.version !== expectedVersion) {
+    throw new Error('license_bundle_fallback_invalid');
+  }
+  const filenames = (await readdir(directory, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && licenseName.test(entry.name))
+    .map((entry) => entry.name)
+    .sort(lexicalCompare);
+  if (filenames.length === 0) throw new Error('license_bundle_fallback_invalid');
+  return filenames.map((filename) => ({
+    label: `${packageName}/${filename}`,
+    filename: path.join(directory, filename),
+  }));
+}
+
+async function reviewedLicenseFallback(manifest) {
+  if (manifest.name === '@cfworker/json-schema' && manifest.version === '4.1.1') {
+    return [{
+      label: 'cfworker-json-schema-4.1.1-LICENSE.md',
+      filename: path.join(
+        projectRoot,
+        'third_party',
+        'licenses',
+        'cfworker-json-schema-4.1.1-LICENSE.md',
+      ),
+    }];
+  }
+  if (manifest.name.startsWith('@esbuild/')) {
+    return familyLicenseInputs('esbuild', manifest.version);
+  }
+  if (manifest.name.startsWith('@rolldown/binding-')) {
+    return familyLicenseInputs('rolldown', manifest.version);
+  }
+  throw new Error('license_bundle_text_missing');
+}
+
+function optionalFamilyManifest(relative, locked) {
+  if (locked.optional !== true) return null;
+  const name = relative.slice('node_modules/'.length);
+  if (!name.startsWith('@esbuild/') && !name.startsWith('@rolldown/binding-')) return null;
+  return { name, version: locked.version };
+}
+
 const sections = [];
 for (const [relative, locked] of external) {
   const directory = path.join(projectRoot, relative);
@@ -57,25 +111,33 @@ for (const [relative, locked] of external) {
       'license_bundle_package_invalid',
     ));
   } catch {
-    throw new Error('license_bundle_package_invalid');
+    manifest = optionalFamilyManifest(relative, locked);
+    if (manifest === null) throw new Error('license_bundle_package_invalid');
   }
   if (!v.is(STRING_SCHEMA, manifest.name) || !v.is(STRING_SCHEMA, manifest.version) ||
       manifest.version !== locked.version || !v.is(STRING_SCHEMA, locked.resolved) ||
       !locked.resolved.startsWith('https://registry.npmjs.org/') || !v.is(STRING_SCHEMA, locked.integrity)) {
     throw new Error('license_bundle_package_invalid');
   }
-  const filenames = (await readdir(directory, { withFileTypes: true }))
-    .filter((entry) => entry.isFile() && licenseName.test(entry.name))
-    .map((entry) => entry.name)
-    .sort(lexicalCompare);
-  if (filenames.length === 0) throw new Error('license_bundle_text_missing');
+  let filenames = [];
+  try {
+    filenames = (await readdir(directory, { withFileTypes: true }))
+      .filter((entry) => entry.isFile() && licenseName.test(entry.name))
+      .map((entry) => entry.name)
+      .sort(lexicalCompare);
+  } catch {
+    if (locked.optional !== true) throw new Error('license_bundle_package_invalid');
+  }
+  const licenseInputs = filenames.length === 0
+    ? await reviewedLicenseFallback(manifest)
+    : filenames.map((filename) => ({ label: filename, filename: path.join(directory, filename) }));
   const texts = [];
-  for (const filename of filenames) {
-    const text = await readUtf8(path.join(directory, filename), 'license_bundle_text_invalid');
+  for (const input of licenseInputs) {
+    const text = await readUtf8(input.filename, 'license_bundle_text_invalid');
     if (text.length === 0 || text.length > 2 * 1024 * 1024 || text.includes('\0')) {
       throw new Error('license_bundle_text_invalid');
     }
-    texts.push(`--- ${filename} ---\n${canonicalLf(text).trim()}\n`);
+    texts.push(`--- ${input.label} ---\n${canonicalLf(text).trim()}\n`);
   }
   sections.push([
     `Package: ${manifest.name}@${manifest.version}`,
