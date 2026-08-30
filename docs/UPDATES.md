@@ -5,10 +5,15 @@ narrower than a general Cloudflare configuration deployment.
 
 ## What an ordinary update can change
 
-The only persisted changes from an ordinary update are:
+An ordinary update changes:
 
 - gateway Worker code; and
 - gateway management assets.
+
+The updater also records its action, installed release, rollback reference, and
+public status in the existing Durable Object. This normal bookkeeping does not
+replace application data, ownership receipts, saved audiences, or recovery
+history. It is not a Durable Object migration or an out-of-band state rewrite.
 
 It must not change:
 
@@ -18,7 +23,8 @@ It must not change:
 - credentials;
 - Cloudflare bindings or compatibility settings;
 - the signing trust root; or
-- Durable Object data or migrations.
+- application data, ownership receipts, saved audiences, or Durable Object
+  migrations.
 
 During the approved operation, the updater temporarily enables the existing
 gateway Worker's `workers.dev` subdomain for a bounded, authenticated action
@@ -27,6 +33,12 @@ cleanup result becomes recovery-required rather than success.
 
 Changes outside this boundary require a separately designed and
 operator-approved migration or a fresh installation.
+
+The [reviewed Team upgrade](TEAM_UPGRADE.md) uses a signed compatibility bridge
+before the customer-local Team release. Recognizing the exact optional-secret
+contract does not create or change a secret binding. The management credential
+is a separate administrator-approved setup step in Cloudflare; neither update
+provisions it.
 
 ## Release trust
 

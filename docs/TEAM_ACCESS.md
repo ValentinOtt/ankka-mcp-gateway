@@ -224,64 +224,35 @@ not accept this changed binding contract. A retained Team proposal also blocks
 ordinary lifecycle operations. Do not bypass those checks or delete pending
 state to make an update proceed.
 
-Before live work, approve a maintenance deployment built from the reviewed
-current source with the new contract, preserving the existing Durable Object,
-source configuration, ownership receipts, credentials, and exact pending Team
-proposal and journal. Verify the current v16 bytes, current policies, and
-whether the proposal is unstarted or has uncertain writes; a previously blocked
-callback is not proof that nothing changed. Reconcile any uncertain provider
-state before proceeding. Keep unrelated dashboard and connector work out of an
-older maintenance checkout.
+Follow the [signed bridge upgrade procedure](TEAM_UPGRADE.md): apply an
+explicitly approved legacy-contract bridge through the ordinary updater, then
+apply the customer-local Team release through that same updater. The bridge
+recognizes exactly the legacy and reviewed optional-secret contracts; it does
+not provision a credential or activate customer-local Team saves. Both actual
+update completions preserve the existing Durable Object and maintain its
+release bookkeeping. Do not replace this sequence with a direct Worker deploy,
+delete `ankka-mcp-gateway/runtime-updates/v1`, or rewrite its `current` tuple.
 
-The maintenance plan must also explicitly reconcile the release bookkeeping in
-the same customer Durable Object. Deploying new code alone leaves
-`ankka-mcp-gateway/runtime-updates/v1` at v16; `prepareRuntimeAction` deliberately
-refuses future updates when its `current.release` or `current.artifactSha256`
-differs from the deployed environment. Do not delete this key or add an
-automatic reset to make that check pass. This candidate provides no maintenance
-migration endpoint or command; the following narrow state transition still
-requires a reviewed customer-local migration mechanism before live migration:
+Before the first update, verify the installed bytes, current policies, and
+pending proposal's journal. Only the administrator's explicit normal
+cancellation may resolve a provably unstarted proposal for this procedure.
+Cancellation retains the action; it is not deletion or a lifecycle bypass.
+An armed, partial, or uncertain proposal blocks this upgrade path and must be
+reconciled through its existing recovery flow. A browser-blocked callback does
+not prove that nothing changed.
 
-1. Capture and validate the existing update record and its revision. Resolve
-   any pending or uncertain runtime operation first; preserve the action
-   history without fabricating a successful update. Keep the Team proposal,
-   its journal, and all source/lifecycle records unchanged.
-2. Verify the maintenance release signature, exact deployed Worker bytes,
-   bindings, and sole active deployment at 100%. The new record's `current`
-   must contain that release identifier, its `sha256:`-prefixed aggregate
-   artifact digest, and the provider-verified active Worker version ID. Its
-   release and digest must equal `ANKKA_GATEWAY_RELEASE` and
-   `ANKKA_GATEWAY_RELEASE_SHA256`; neither the v16 digest nor a module-only
-   digest is valid.
-3. In a guarded storage transaction requiring the captured update record to
-   remain unchanged, preserve `schemaVersion: 1` and `actions`, advance
-   `revision` by one, and replace only `current` and the incompatible rollback
-   pointer. Set `previous: null`: v16's earlier binding contract is not a
-   supported rollback target. Preserve the old record in customer-controlled
-   migration evidence. If the update key is genuinely absent, explicitly
-   initialize the same verified current tuple with revision 1, no actions, and
-   no previous version; absence must not be manufactured by deleting it.
-4. Update only `release` and `updatedAt` in
-   `ankka-mcp-gateway/public-status/v1` to the verified release and verification
-   time. Re-read both records and the active deployment. Do not rewrite the
-   original ownership receipt, credentials, roster, source state,
-   `teardownDisabled`, or any recovery journal. Drift or ambiguous storage or
-   deployment outcomes require review, not a claimed completed migration.
+After both updates, verify their installed artifacts, completed action records,
+public status, unchanged source configuration, and disabled temporary routes.
+Team must fail closed while the credential is absent. Provision the separate
+secret only after approving its standing authority, then review and re-enter
+any canceled proposal. Never replay an old OAuth link.
 
-Deploy the compatible code without a token first, complete the reviewed
-bookkeeping transition, verify that Team fails closed,
-and check that the pending proposal is still visible. Provision the separate
-secret only after the standing authority is approved. Resume the same proposal
-locally with fresh before/after verification; never submit its old OAuth link.
-Only an administrator may explicitly cancel a provably unstarted proposal.
-In-flight or uncertain proposals must remain available for recovery.
-
-The hosted installer rejects both new and already-issued legacy Team OAuth
-handoffs before exchanging a code; the relay and new Worker reject legacy Team
-grant submissions too. No old installer grant is retained or converted into the
-new secret. Existing installer grants from other actions keep their bounded
-revocation and discard behavior. Callback redirect/load-listener fixes for
-installation and updates are separate work.
+The customer-local release's hosted installer rejects new and already-issued
+legacy Team OAuth handoffs before exchanging a code; the relay and new Worker
+reject legacy Team grant submissions too. No old installer grant is retained or
+converted into the new secret. Existing installer grants from other actions
+keep their bounded revocation and discard behavior. This release also includes the separately
+reviewed [updater redirect fix](UPDATER_REDIRECT_FIX.md).
 
 After migration, compatible forward code updates preserve the optional secret
 without reading its value or provisioning it. Rollback is refused when either

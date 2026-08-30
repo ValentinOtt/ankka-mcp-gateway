@@ -134,10 +134,12 @@ permissions, bindings, migrations, compatibility settings, signing keys, or
 provider resources require a separately designed and approved release path.
 
 The customer-local Team release adds an explicitly optional secret contract.
-It requires a reviewed migration from v16; a normal update does not provision
-the secret. Compatible subsequent forward updates preserve it from the exact
-verified current Worker version without revealing its value. Rollback is
-refused when the current or target version carries this secret. The original
+The [reviewed bridge sequence](TEAM_UPGRADE.md) crosses the v16 contract boundary
+using two normal signed updates, without out-of-band rewrites of durable release
+records or provisioning the secret. Normal updater actions maintain their own
+release records and status. Compatible subsequent forward updates preserve the
+secret from the exact verified current Worker version without revealing its
+value. Rollback is refused when the current or target version carries this secret. The original
 teardown restrictions remain, including after token revocation or binding
 deletion if any Team policy write may have occurred.
 

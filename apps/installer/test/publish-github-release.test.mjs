@@ -161,7 +161,7 @@ afterAll(async () => {
 });
 
 describe('reviewed GitHub Release publication', () => {
-  it.each(['gateway-v0.1.15', 'gateway-v0.1.16', 'gateway-v0.1.17'])('discloses %s Team limitations before the verification details', (release) => {
+  it.each(['gateway-v0.1.15', 'gateway-v0.1.16', 'gateway-v0.1.17', 'gateway-v0.1.18'])('discloses %s Team limitations before the verification details', (release) => {
     const notes = releaseNotes(REPOSITORY, {
       release, sourceCommit: 'a'.repeat(40),
     }, { channel: 'stable', artifactSha256: 'b'.repeat(64), keyId: 'test-public-key' });
@@ -182,7 +182,17 @@ describe('reviewed GitHub Release publication', () => {
     assert.ok(notes.indexOf('Compatibility bridge:') < notes.indexOf('- Source commit:'));
   });
 
-  it.each(['gateway-v0.1.14', 'gateway-v0.1.18'])(
+  it('discloses the v18 customer-local Team credential and bridge prerequisite', () => {
+    const notes = releaseNotes(REPOSITORY, {
+      release: 'gateway-v0.1.18', sourceCommit: 'a'.repeat(40),
+    }, { channel: 'canary', artifactSha256: 'b'.repeat(64), keyId: 'test-public-key' });
+    assert.match(notes, /Team saves run in your Cloudflare account without installer OAuth; they require a separately approved management credential\./u);
+    assert.match(notes, /Upgrade v16 through the v17 compatibility bridge first\. This update does not provision that credential\./u);
+    assert.ok(notes.indexOf('Team saves run in your Cloudflare account') < notes.indexOf('- Source commit:'));
+    assert.doesNotMatch(notes, /does not create a Team credential or enable customer-local Team management/u);
+  });
+
+  it.each(['gateway-v0.1.14', 'gateway-v0.1.19'])(
     'preserves generic GitHub release notes for %s', (release) => {
       const sourceCommit = 'a'.repeat(40);
       const artifactSha256 = 'b'.repeat(64);

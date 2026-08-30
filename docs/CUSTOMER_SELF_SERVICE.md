@@ -86,8 +86,10 @@ The public installer is designed to:
 6. create and verify the gateway management surface and empty MCP Portal; and
 7. return the MCP URL and management URL.
 
-Installation does not add an upstream MCP source. Add the first source from the
-gateway dashboard after the gateway is ready.
+Installation does not add an upstream MCP source. First-source onboarding is
+unavailable in this release: a fresh empty gateway cannot add a source through
+the dashboard or API. Use this release only for gateways with sources already
+installed until a compatible release restores source installation.
 
 If discovery finds an existing or conflicting installation, the installer
 stops instead of adopting or overwriting it.
@@ -182,20 +184,23 @@ execution, or compatibility with every MCP client.
 Updates are never automatic. A gateway administrator reviews the signed
 release and approves a new Cloudflare authorization.
 
-An ordinary update persists only Worker code and management asset changes. It
-preserves Portal configuration, Access, DNS, sources, credentials, and Durable
-Object data. Rollback restores a previous Worker version without rolling back
-data. See [Gateway updates and rollback](UPDATES.md) for the temporary,
-authenticated action route used during the operation.
+An ordinary update changes Worker code and management assets, and records its
+own action, installed release, and status in the existing Durable Object. It
+preserves Portal configuration, Access, DNS, sources, credentials, ownership
+receipts, and team data. Rollback restores a previous Worker version without
+rolling back application data. See [Gateway updates and rollback](UPDATES.md)
+for the temporary, authenticated action route used during the operation.
 
 The customer-local Team release changes the optional secret-binding contract.
-An installed v16 gateway requires a separately reviewed maintenance migration;
-its normal code-only update cannot silently accept or provision that authority.
+An installed v16 gateway first needs a reviewed signed compatibility bridge,
+then a second normal update to the Team release. Neither update provisions the
+credential; that remains a separate administrator action in Cloudflare.
 Compatible later forward updates preserve the secret by inheriting it from the
 verified deployed version. Rollback is blocked when the current or target
 version has the management secret. Follow the
-[migration plan](TEAM_ACCESS.md#migration-from-the-v16-oauth-flow), preserving
-pending proposals, source credentials, and Durable Object data.
+[bridge upgrade procedure](TEAM_UPGRADE.md), preserving source credentials and
+application data. It requires explicit normal cancellation of any provably
+unstarted Team proposal; an armed or uncertain proposal must be reconciled first.
 
 After a Team policy write may have occurred, rollback to an older runtime is
 blocked. Rolling back code would not undo saved permissions or Access policies.
