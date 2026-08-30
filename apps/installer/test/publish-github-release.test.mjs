@@ -161,18 +161,19 @@ afterAll(async () => {
 });
 
 describe('reviewed GitHub Release publication', () => {
-  it('discloses v0.1.15 Team limitations before the verification details', () => {
+  it.each(['gateway-v0.1.15', 'gateway-v0.1.16'])('discloses %s Team limitations before the verification details', (release) => {
     const notes = releaseNotes(REPOSITORY, {
-      release: 'gateway-v0.1.15', sourceCommit: 'a'.repeat(40),
+      release, sourceCommit: 'a'.repeat(40),
     }, { channel: 'stable', artifactSha256: 'b'.repeat(64), keyId: 'test-public-key' });
     assert.match(notes, /Team permissions apply only to MCP sources already installed in your gateway\./u);
     assert.match(notes, /New-source creation is unavailable in this release, including first-source onboarding for fresh empty gateways\./u);
     assert.match(notes, /Administrators remain fixed; source write tools are not activated and existing read-only boundaries are unchanged\./u);
     assert.match(notes, /Once a permission-policy write is armed, automatic teardown and rollback to older runtimes are blocked, including when the write outcome is uncertain\./u);
-    assert.ok(notes.indexOf('## v0.1.15 scope and limits') < notes.indexOf('- Source commit:'));
+    const headingIndex = notes.indexOf(`## ${release.slice('gateway-'.length)} scope and limits`);
+    assert.ok(headingIndex >= 0 && headingIndex < notes.indexOf('- Source commit:'));
   });
 
-  it.each(['gateway-v0.1.14', 'gateway-v0.1.16'])(
+  it.each(['gateway-v0.1.14', 'gateway-v0.1.17'])(
     'preserves generic GitHub release notes for %s', (release) => {
       const sourceCommit = 'a'.repeat(40);
       const artifactSha256 = 'b'.repeat(64);
