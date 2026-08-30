@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   unlink,
@@ -14,11 +15,14 @@ import path from 'node:path';
 import {
   R2PublicationWorkerGenerationError,
   generateR2PublicationWorker,
+  loadVerifiedR2PublicationDirectory,
   runR2PublicationWorkerGeneratorCli,
 } from '../scripts/generate-r2-publication-worker.mjs';
 import {
   canonicalJson,
   prepareSignedReleasePublishPlan,
+  RELEASE_ENVELOPE_SCHEMA_VERSION,
+  RELEASE_SIGNATURE_CONTEXT,
   writeSignedReleasePublishDirectory,
 } from '../scripts/sign-gateway-release.mjs';
 
@@ -175,7 +179,44 @@ function component(files) {
   });
 }
 
-async function fixture() {
+function fixtureManifest(files) {
+  const records = files.map((entry) => entry.record);
+  const componentFiles = (directory) => files.filter((entry) =>
+    entry.record.path.startsWith(`payload/${directory}/`));
+  return canonicalJson({
+    artifact: {
+      byteSize: records.reduce((total, record) => total + record.byteSize, 0),
+      fileCount: records.length,
+      treeSha256: sha256(Buffer.from(canonicalJson(records))),
+    },
+    cloudflare: CLOUDFLARE,
+    controlPlaneOrigin: 'https://deploy.ankka.ai',
+    components: {
+      admin: component(componentFiles('admin')),
+      installer: component(componentFiles('installer')),
+      worker: component(componentFiles('worker')),
+      workerCleanup: component(componentFiles('worker-cleanup')),
+      workerRetirement: component(componentFiles('worker-retirement')),
+    },
+    oauthScopeIds: REQUIRED_OAUTH_SCOPES,
+    release: RELEASE,
+    schemaVersion: 1,
+    sourceCommit: '0123456789abcdef0123456789abcdef01234567',
+  });
+}
+
+function signedObjectBytes(files, manifest) {
+  // Ed25519 signatures have a fixed encoded length; no signing authority is
+  // needed to size the envelope before the fixture's real synthetic signature.
+  const envelopeBytes = Buffer.byteLength(canonicalJson({
+    channel: CHANNEL, keyId: KEY_ID, manifest,
+    schemaVersion: RELEASE_ENVELOPE_SCHEMA_VERSION,
+    signature: 'A'.repeat(86), signatureContext: RELEASE_SIGNATURE_CONTEXT,
+  }));
+  return envelopeBytes + files.reduce((total, entry) => total + entry.record.byteSize, 0);
+}
+
+async function fixture({ totalObjectBytes, extraAdminFiles = 11, fileNamePadding = 0 } = {}) {
   const sandbox = await mkdtemp(path.join(os.tmpdir(), 'gateway-r2-operator-'));
   const releaseDirectory = path.join(sandbox, 'release');
   const publishDirectory = path.join(sandbox, 'publish');
@@ -195,27 +236,25 @@ async function fixture() {
     ),
     await sourceFile('payload/worker/index.js', 'application/javascript+module', "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default {}"),
   ];
-  const records = files.map((entry) => entry.record);
-  const manifest = canonicalJson({
-    artifact: {
-      byteSize: records.reduce((total, record) => total + record.byteSize, 0),
-      fileCount: records.length,
-      treeSha256: sha256(Buffer.from(canonicalJson(records))),
-    },
-    cloudflare: CLOUDFLARE,
-    controlPlaneOrigin: 'https://deploy.ankka.ai',
-    components: {
-      admin: component(files.slice(0, 1)),
-      installer: component(files.slice(1, 2)),
-      worker: component(files.slice(4, 5)),
-      workerCleanup: component(files.slice(2, 3)),
-      workerRetirement: component(files.slice(3, 4)),
-    },
-    oauthScopeIds: REQUIRED_OAUTH_SCOPES,
-    release: RELEASE,
-    schemaVersion: 1,
-    sourceCommit: '0123456789abcdef0123456789abcdef01234567',
-  });
+  let manifest = fixtureManifest(files);
+  if (totalObjectBytes !== undefined) {
+    const originalFiles = [...files];
+    let paddingBytes = totalObjectBytes - signedObjectBytes(files, manifest);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const extra = await Promise.all(Array.from({ length: extraAdminFiles }, (_entry, index) => sourceFile(
+        `payload/admin/${'f'.repeat(fileNamePadding)}data-${String(index).padStart(3, '0')}.txt`,
+        'text/plain; charset=utf-8',
+        'x'.repeat(Math.floor(paddingBytes / extraAdminFiles) + (index < paddingBytes % extraAdminFiles ? 1 : 0)),
+      )));
+      files.splice(0, files.length, ...originalFiles, ...extra);
+      files.sort((left, right) => left.record.path < right.record.path ? -1 : left.record.path > right.record.path ? 1 : 0);
+      manifest = fixtureManifest(files);
+      const difference = totalObjectBytes - signedObjectBytes(files, manifest);
+      if (difference === 0) break;
+      paddingBytes += difference;
+    }
+    expect(signedObjectBytes(files, manifest)).toBe(totalObjectBytes);
+  }
   await writeFile(path.join(releaseDirectory, 'manifest.json'), manifest);
   for (const entry of files) {
     const target = path.join(releaseDirectory, ...entry.record.path.split('/'));
@@ -507,17 +546,59 @@ describe('release-specific R2 publication Worker generator', () => {
     }
   });
 
-  it('rejects a canonical plan above the deliberately small embedded-Worker byte bound', async () => {
-    const input = await fixture();
+  it.each([1_777_000, 2_000_000])('generates a bounded signed 16-file release totaling %i object bytes', async (totalObjectBytes) => {
+    const input = await fixture({ totalObjectBytes });
     try {
       const plan = await readPlan(input);
-      const excess = 1_500_001 - plan.totalByteSize;
-      plan.objects[0].byteSize += excess;
-      plan.totalByteSize += excess;
-      await writePlan(input, plan);
+      expect(plan.objectCount).toBe(17);
+      expect(plan.totalByteSize).toBe(totalObjectBytes);
+      expect(Math.max(...plan.objects.map((object) => object.byteSize))).toBeLessThan(1_500_000);
+      const output = path.join(input.sandbox, 'operator-large');
+      const generated = await generateR2PublicationWorker(generationArgs(input, output));
+      expect(generated.objectPlanSha256).toBe(input.objectPlanSha256);
+      const dataModule = await readFile(path.join(output, 'src/release-data.ts'), 'utf8');
+      expect(Buffer.byteLength(dataModule)).toBeGreaterThan(2_250_000);
+      expect(Buffer.byteLength(dataModule)).toBeLessThanOrEqual(3_000_000);
+      for (const object of plan.objects) {
+        const bytes = await readFile(path.join(input.publishDirectory, object.sourcePath));
+        expect(dataModule).toContain(bytes.toString('base64'));
+      }
+    } finally {
+      await input.cleanup();
+    }
+  });
+
+  it('rejects a valid signed release one byte above the raw aggregate limit before creating output', async () => {
+    const input = await fixture({ totalObjectBytes: 2_000_001 });
+    try {
+      const plan = await readPlan(input);
+      expect(plan.totalByteSize).toBe(2_000_001);
+      const output = path.join(input.sandbox, 'operator-oversize');
       await expectGenerationFailure(generateR2PublicationWorker(
-        generationArgs(input, path.join(input.sandbox, 'operator-oversize')),
+        generationArgs(input, output),
       ));
+      await expect(readdir(output)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await input.cleanup();
+    }
+  });
+
+  it('retains the independent generated-module cap when permitted paths expand metadata', async () => {
+    const input = await fixture({ totalObjectBytes: 2_000_000, extraAdminFiles: 395, fileNamePadding: 200 });
+    try {
+      const verified = await loadVerifiedR2PublicationDirectory(input.publishDirectory);
+      expect(verified.plan.objectCount).toBe(401);
+      expect(verified.plan.totalByteSize).toBe(2_000_000);
+      expect(Buffer.byteLength(verified.canonicalPlan)).toBeLessThan(1024 * 1024);
+      // The actual module also includes content types, JSON syntax, identity,
+      // and decoder code, so this is a conservative lower bound.
+      const minimumModuleBytes = Buffer.byteLength(verified.canonicalPlan) + verified.objects.reduce(
+        (total, object) => total + 4 * Math.ceil(object.byteSize / 3) + Buffer.byteLength(object.key), 0,
+      );
+      expect(minimumModuleBytes).toBeGreaterThan(3_000_000);
+      const output = path.join(input.sandbox, 'operator-expanded-metadata');
+      await expectGenerationFailure(generateR2PublicationWorker(generationArgs(input, output)));
+      expect(await readdir(output)).toEqual([]);
     } finally {
       await input.cleanup();
     }
