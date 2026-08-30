@@ -1,0 +1,26 @@
+{
+  "name": "@ankka/search-console-adapter",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "npm run typecheck && wrangler deploy --dry-run --outdir dist",
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@cloudflare/codemode": "0.5.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "agents": "0.22.0",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "~5.20260825.1",
+    "typescript": "7.0.2",
+    "vitest": "~4.1.9",
+    "wrangler": "~4.125.0"
+  }
+}

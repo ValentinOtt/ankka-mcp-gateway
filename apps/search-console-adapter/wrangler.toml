@@ -1,0 +1,18 @@
+name = "ankka-search-console-codemode-adapter"
+main = "src/index.ts"
+compatibility_date = "2026-08-29"
+compatibility_flags = ["nodejs_compat"]
+preview_urls = false
+
+[[worker_loaders]]
+binding = "LOADER"
+
+# Provider tokens pass through request-local memory only. Disable logs and
+# traces so neither credentials nor provider data can enter telemetry.
+[observability.logs]
+enabled = false
+invocation_logs = false
+
+[observability.traces]
+enabled = false
+head_sampling_rate = 0

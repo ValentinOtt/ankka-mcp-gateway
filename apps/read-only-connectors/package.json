@@ -1,0 +1,25 @@
+{
+  "name": "@ankka/read-only-connectors",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "npm run typecheck && wrangler deploy --dry-run --outdir dist",
+    "dev": "wrangler dev --local",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types --include-runtime false --strict-vars false",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "jose": "6.2.10",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "~5.20260825.1",
+    "typescript": "7.0.2",
+    "vitest": "~4.1.9",
+    "wrangler": "~4.125.0"
+  }
+}
