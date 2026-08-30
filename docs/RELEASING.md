@@ -93,9 +93,9 @@ That verifies GitHub's release provenance and asset digest. The installer
 separately verifies Ankka's Ed25519 envelope, pinned public key, manifest, and
 payload digests before using a release.
 
-There is no supported release or stable tag yet. The first release must publish
-its signing key identity and sanitized verification record alongside the signed
-envelope before users can perform the complete check.
+There is no stable tag yet. Published canary releases carry the signing key
+identity and sanitized verification record alongside the signed envelope, so
+the complete check applies to every published release.
 
 ## Signing-key lifecycle
 

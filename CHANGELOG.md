@@ -4,6 +4,9 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Correct the release-verification note: published canary releases already
+  carry the signing key identity and sanitized verification record, so the
+  complete verification check applies to them today.
 - Add an opt-in, disposable two-version Worker/Durable Object probe with
   synthetic state, bounded diagnostics, and verified cleanup. It is a platform
   diagnostic, not a gateway release or source-connection acceptance test.
