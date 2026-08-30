@@ -1,0 +1,15 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "ankka-oauth-scope-diagnostic",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-08-30",
+  "workers_dev": true,
+  "preview_urls": false,
+  "logpush": false,
+  // OAuth request URLs must not become Worker invocation logs or traces.
+  "observability": {
+    "enabled": false,
+    "logs": { "enabled": false, "invocation_logs": false, "persist": false },
+    "traces": { "enabled": false, "persist": false }
+  }
+}

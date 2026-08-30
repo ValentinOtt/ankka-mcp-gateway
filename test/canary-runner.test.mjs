@@ -400,6 +400,120 @@ test('exact approval runs apply, no-op reapply, verification, and reverse uninst
   assertDoesNotInclude(JSON.stringify({ result, progress }), SENSITIVE);
 });
 
+test('machine canary verifies the tool and cleans up without claiming human OAuth coverage', async () => {
+  const canaryServiceTokenId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  const machine = input({ allowedEmail: undefined, canaryServiceTokenId });
+  const deps = dependencies();
+  const preview = await previewCloudflareCanaryLifecycle(machine, deps);
+  const result = await runCloudflareCanaryLifecycle({
+    ...machine,
+    approvalId: preview.approvalId,
+    targetConfirmationId: preview.targetConfirmationId,
+  }, deps);
+  assert.equal(result.status, 'complete');
+  assert.equal(result.authentication, 'service_token');
+  assert.equal(result.interactiveVerification, 'not_run');
+  assert.equal(result.portalToolCallVerified, true);
+  assert.equal(result.cleanup.ownedResourceCount, 0);
+  assert.equal(deps.receiptStore.value.accessPolicy.identityType, 'service_token');
+  assertDoesNotInclude(JSON.stringify({ preview, result, receipt: deps.receiptStore.value }), canaryServiceTokenId);
+});
+
+test('machine canary rejects mixed identities and missing verification before mutation', async () => {
+  const canaryServiceTokenId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  const deps = dependencies();
+  await assert.rejects(previewCloudflareCanaryLifecycle(input({ canaryServiceTokenId }), deps),
+    (error) => error.code === 'invalid_input');
+  const machine = input({ allowedEmail: undefined, canaryServiceTokenId });
+  const preview = await previewCloudflareCanaryLifecycle(machine, deps);
+  await assert.rejects(runCloudflareCanaryLifecycle({
+    ...machine,
+    approvalId: preview.approvalId,
+    targetConfirmationId: preview.targetConfirmationId,
+  }, { ...deps, verifyInstalledGateway: undefined }), (error) => error.code === 'invalid_input');
+  assert.equal(deps.provider.mutations.length, 0);
+});
+
+test('machine residue and interrupted-uninstall recovery retain the authentication boundary', async () => {
+  for (const operation of ['residue_recovery', 'resume_uninstall']) {
+    const machine = input({
+      allowedEmail: undefined,
+      canaryServiceTokenId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    });
+    const provider = new FakeProvider();
+    provider.failDeleteOnce = operation === 'resume_uninstall';
+    let verificationCalls = 0;
+    const deps = dependencies({
+      provider,
+      verifyInstalledGateway: async () => {
+        verificationCalls += 1;
+        return { ready: true, fixture: CANARY_FIXTURE_ID, toolName: CANARY_TOOL_NAME };
+      },
+    });
+    const initial = await previewCloudflareCanaryLifecycle(machine, deps);
+    const run = runCloudflareCanaryLifecycle({
+      ...machine,
+      approvalId: initial.approvalId,
+      targetConfirmationId: initial.targetConfirmationId,
+    }, deps);
+    if (operation === 'resume_uninstall') {
+      await assert.rejects(run, (error) => error.code === 'cleanup_failed');
+    } else {
+      await run;
+    }
+    assert.equal(verificationCalls, 1);
+    const recovery = await previewCloudflareCanaryLifecycle(machine, deps);
+    assert.equal(recovery.operation, operation);
+    const recovered = await runCloudflareCanaryLifecycle({
+      ...machine,
+      approvalId: recovery.approvalId,
+      targetConfirmationId: recovery.targetConfirmationId,
+    }, deps);
+    assert.equal(recovered.authentication, 'service_token');
+    assert.equal(recovered.interactiveVerification, 'not_run');
+    assert.equal(recovered.portalToolCallVerified, false);
+    assert.equal(recovered.status, 'verification_pending');
+    assert.equal(recovered.cleanup.ownedResourceCount, 0);
+    assert.equal(deps.receiptStore.value.state, 'removed');
+    assert.equal(verificationCalls, 1);
+  }
+});
+
+test('machine rollback and partial cleanup carry mode metadata without claiming tool verification', async () => {
+  const machine = input({
+    allowedEmail: undefined,
+    canaryServiceTokenId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+  });
+  const provider = new FakeProvider();
+  provider.failPortalCreateWithoutGeneratedAppOnce = true;
+  const deps = dependencies({ provider });
+  const initial = await previewCloudflareCanaryLifecycle(machine, deps);
+  await assert.rejects(runCloudflareCanaryLifecycle({
+    ...machine,
+    approvalId: initial.approvalId,
+    targetConfirmationId: initial.targetConfirmationId,
+  }, deps), (error) => error.code === 'pending_apply_blocked');
+
+  for (const [operation, interactiveVerification] of [
+    ['rollback_pending_portal_create', 'not_run'],
+    ['cleanup_partial_install', 'not_applicable'],
+  ]) {
+    const recovery = await previewCloudflareCanaryLifecycle(machine, deps);
+    assert.equal(recovery.operation, operation);
+    const recovered = await runCloudflareCanaryLifecycle({
+      ...machine,
+      approvalId: recovery.approvalId,
+      targetConfirmationId: recovery.targetConfirmationId,
+    }, deps);
+    assert.equal(recovered.authentication, 'service_token');
+    assert.equal(recovered.interactiveVerification, interactiveVerification);
+    assert.equal(recovered.portalToolCallVerified, false);
+    assert.equal(recovered.operation, operation);
+  }
+  assert.equal(deps.receiptStore.value.state, 'removed');
+  assert.equal(provider.resources.length, 0);
+});
+
 test('inspection hold exposes only the installed hostname and cleanup starts after release', async () => {
   let releaseHold;
   let holdReached;

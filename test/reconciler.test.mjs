@@ -172,6 +172,7 @@ class FakeProvider {
     this.timeline = timeline;
     this.resources = [];
     this.mutations = [];
+    this.mutationTargets = [];
     this.readCount = 0;
     this.nextId = 1;
     this.definiteNotSubmittedOnce = false;
@@ -241,7 +242,8 @@ class FakeProvider {
     };
   }
 
-  async applyChange({ change, receipt }) {
+  async applyChange({ change, receipt, target }) {
+    this.mutationTargets.push(clone(target));
     if (this.beforeMutation) await this.beforeMutation(change, receipt);
     if (this.definiteNotSubmittedOnce) {
       this.definiteNotSubmittedOnce = false;
@@ -487,6 +489,22 @@ test('live plan and status report fresh drift without performing writes', async 
   assert.equal(JSON.stringify(status).includes('must-not-escape'), false);
   assert.equal(provider.mutations.length, 0);
   assert.equal(receiptStore.writes.length, 0);
+});
+
+test('provider mutations receive the full fresh target when the caller selects only IDs', async () => {
+  const provider = new FakeProvider();
+  const receiptStore = new MemoryReceiptStore();
+  const selected = selectedTarget();
+  delete selected.zoneName;
+  const base = context(provider, receiptStore, { target: selected });
+  const preview = await planLiveGateway(base);
+
+  await applyGateway({ ...base, approvedPlanId: preview.plan.planId });
+
+  assert.equal(provider.mutationTargets.length, EXPECTED_ORDER.length);
+  for (const target of provider.mutationTargets) {
+    assert.deepEqual(target, liveTarget());
+  }
 });
 
 test('rejects malformed normalized ownership before planning or mutation', async () => {

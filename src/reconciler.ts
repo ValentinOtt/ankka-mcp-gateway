@@ -306,7 +306,7 @@ export class GatewayReconcileError extends Error {
 }
 
 /**
- * Read customer-owned live state and calculate a fresh, approval-ready plan.
+ * Read gateway state in the deployment account and calculate a fresh, approval-ready plan.
  * The provider is injected; this module never reads tokens or environment variables.
  */
 export async function planLiveGateway(input: ReconcilerInput) {
@@ -874,7 +874,7 @@ async function uninstallGatewayLocked(context: ReconcileContext) {
     receipt = await journalAction(context, receipt, preview.uninstallId, change, 'uninstall');
 
     if (current.action === 'delete') {
-      await mutate(context, change, receipt);
+      await mutate(context, change, receipt, fresh.observed.target);
       const verified = await readLive({ ...context, receiptOverride: receipt });
       if (matchingResources(verified.observed.resources, owned.kind, owned.key).length !== 0) {
         throw new GatewayReconcileError('verification_failed');
@@ -911,7 +911,7 @@ async function recoverApplyPending(
     }
     if (change?.action === 'delete') {
       await assertRecoveryApplyRetry(context, pending, live);
-      await mutate(context, change, receiptAtStart);
+      await mutate(context, change, receiptAtStart, live.observed.target);
       const verified = await readLive({ ...context, receiptOverride: receiptAtStart });
       if (matchingResources(verified.observed.resources, pending.kind, pending.key).length > 0) {
         throw new GatewayReconcileError('pending_conflict');
@@ -1043,6 +1043,7 @@ async function recoverUninstallPending(
         desiredHash: owned.desiredHash,
       },
       preview.receipt,
+      preview.observed.target,
     );
     const verified = await readLive({ ...context, receiptOverride: preview.receipt });
     if (matchingResources(verified.observed.resources, pending.kind, pending.key).length !== 0) {
@@ -1070,7 +1071,7 @@ async function performPendingMutation(
     }
   }
   if (pending.action === 'delete') {
-    await mutate(context, change, receiptAtStart);
+    await mutate(context, change, receiptAtStart, live.observed.target);
     const verified = await readLive({ ...context, receiptOverride: receiptAtStart });
     if (matchingResources(verified.observed.resources, pending.kind, pending.key).length !== 0) {
       throw new GatewayReconcileError('verification_failed');
@@ -1083,7 +1084,12 @@ async function performPendingMutation(
     throw new GatewayReconcileError('pending_conflict');
   }
   assertLowerRankDependenciesConverged(live.plan, receiptAtStart, change);
-  const mutationResult = await mutate(context, change, receiptAtStart);
+  const mutationResult = await mutate(
+    context,
+    change,
+    receiptAtStart,
+    live.observed.target,
+  );
 
   // Portal Access applications have no ownership marker. A newly created app
   // may therefore be claimed only from the exact ID returned and fully proved
@@ -1181,6 +1187,7 @@ async function mutate(
   context: ReconcileContext,
   change: PlanChange,
   receipt: InstallationReceipt,
+  target: VerifiedCloudflareTarget,
 ): Promise<MutationResult> {
   let normalizedResult;
   try {
@@ -1188,7 +1195,7 @@ async function mutate(
       change: copyChange(change),
       receipt,
       config: context.config,
-      target: context.target,
+      target: { ...target },
       access: context.access,
     });
     normalizedResult = normalizeMutationResult(change, result);
@@ -1957,7 +1964,7 @@ function progress(context: ReconcileContext, event: ProgressEvent): void {
   try {
     context.onProgress({ ...event });
   } catch {
-    // Progress sinks are observational and cannot affect customer resources.
+    // Progress sinks are observational and cannot affect deployment resources.
   }
 }
 
@@ -2019,15 +2026,15 @@ function messageFor(code: string): string {
     plan_blocked: 'The current plan has blockers and cannot be applied.',
     plan_changed: 'Live state changed after approval; review a fresh plan.',
     prune_approval_required: 'Prune requires the exact destructive-change approval.',
-    receipt_invalid: 'The customer-owned installation receipt is invalid.',
-    receipt_changed: 'The customer-owned installation receipt changed during the operation.',
+    receipt_invalid: 'The gateway installation receipt is invalid.',
+    receipt_changed: 'The gateway installation receipt changed during the operation.',
     receipt_locked: 'Another receipt mutation is already in progress.',
-    receipt_lock_failed: 'The customer-owned receipt could not be locked for mutation.',
+    receipt_lock_failed: 'The gateway installation receipt could not be locked for mutation.',
     rollback_approval_required: 'Rollback requires the exact current pending-create recovery approval.',
     receipt_mismatch: 'The receipt belongs to a different installation.',
-    receipt_read_failed: 'The customer-owned installation receipt could not be read.',
-    receipt_required: 'A customer-owned installation receipt is required.',
-    receipt_write_failed: 'The customer-owned installation receipt could not be persisted safely.',
+    receipt_read_failed: 'The gateway installation receipt could not be read.',
+    receipt_required: 'A gateway installation receipt is required.',
+    receipt_write_failed: 'The gateway installation receipt could not be persisted safely.',
     target_mismatch: 'Cloudflare returned a different account or zone than the selected target.',
     uninstall_approval_required: 'Uninstall requires the exact current uninstall approval.',
     verification_failed: 'The provider mutation could not be verified from fresh live state.',

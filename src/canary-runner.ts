@@ -92,6 +92,7 @@ type CleanupStatus = v.InferOutput<typeof cleanupStatusSchema>;
 interface CanaryLifecycleInput {
   readonly accountId?: BoundaryValue;
   readonly allowedEmail?: BoundaryValue;
+  readonly canaryServiceTokenId?: BoundaryValue;
   readonly approvalId?: BoundaryValue;
   readonly hostname?: BoundaryValue;
   readonly syntheticMcpUrl?: BoundaryValue;
@@ -124,6 +125,7 @@ export interface CanaryLifecyclePreviewReport {
 }
 
 export interface CanaryLifecycleResultReport {
+  readonly authentication?: 'service_token';
   readonly cleanup: {
     readonly ownedResourceCount?: number;
     readonly partialInstallRemoved?: boolean;
@@ -226,7 +228,8 @@ interface NormalizedReceiptStore {
 
 interface CanaryContext {
   readonly accountId: string;
-  readonly allowedEmail: string;
+  readonly access: JsonObject;
+  readonly machineAuthentication: boolean;
   readonly cleanupStore: NormalizedReceiptStore;
   readonly cloudflare: CloudflarePreflightClient;
   readonly config: JsonValue;
@@ -442,10 +445,11 @@ export async function runCloudflareCanaryLifecycle(
 ): Promise<CanaryLifecycleResultReport> {
   const context = requireContext(input, dependencies, { mutations: true });
   try {
-    return await context.cleanupStore.withExclusiveLock(
+    const report = await context.cleanupStore.withExclusiveLock(
       () => runCloudflareCanaryLifecycleLocked(input, context),
       { operationId: 'canary-lifecycle' },
     );
+    return withCanaryAuthentication(report, context.machineAuthentication);
   } catch (error) {
     if (error instanceof CanaryLifecycleError) throw error;
     if (v.is(codedErrorSchema, error) && error.code === 'locked') {
@@ -453,6 +457,20 @@ export async function runCloudflareCanaryLifecycle(
     }
     throw new CanaryLifecycleError('lifecycle_lock_failed');
   }
+}
+
+function withCanaryAuthentication(
+  report: CanaryLifecycleResultReport,
+  machineAuthentication: boolean,
+): CanaryLifecycleResultReport {
+  if (!machineAuthentication) return report;
+  return Object.freeze({
+    ...report,
+    authentication: 'service_token',
+    interactiveVerification: report.interactiveVerification === 'not_applicable'
+      ? 'not_applicable'
+      : 'not_run',
+  });
 }
 
 async function runCloudflareCanaryLifecycleLocked(
@@ -1428,6 +1446,7 @@ function requireContext(
     'hostname',
     'syntheticMcpUrl',
     'allowedEmail',
+    'canaryServiceTokenId',
     ...(mutations ? ['approvalId', 'targetConfirmationId'] : []),
   ]);
   requireExactObject(dependencies, [
@@ -1468,7 +1487,20 @@ function requireContext(
     throw new CanaryLifecycleError('invalid_input');
   }
   const syntheticMcpUrl = normalizeSyntheticUrl(input.syntheticMcpUrl);
-  const allowedEmail = normalizeEmail(input.allowedEmail);
+  const machineAuthentication = input.canaryServiceTokenId !== undefined;
+  let access: JsonObject;
+  if (machineAuthentication) {
+    if (
+      input.allowedEmail !== undefined ||
+      !v.is(stringSchema, input.canaryServiceTokenId) ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(input.canaryServiceTokenId)
+    ) {
+      throw new CanaryLifecycleError('invalid_input');
+    }
+    access = { canaryServiceTokenId: input.canaryServiceTokenId };
+  } else {
+    access = { allowedEmails: [normalizeEmail(input.allowedEmail)] };
+  }
   const cloudflare = dependencies.cloudflare;
   const provider = dependencies.provider;
   const receiptStore = normalizeReceiptStore(dependencies.receiptStore, mutations);
@@ -1490,6 +1522,9 @@ function requireContext(
     dependencies.verifyInstalledGateway !== undefined &&
     !v.is(functionSchema, dependencies.verifyInstalledGateway)
   ) {
+    throw new CanaryLifecycleError('invalid_input');
+  }
+  if (mutations && machineAuthentication && dependencies.verifyInstalledGateway === undefined) {
     throw new CanaryLifecycleError('invalid_input');
   }
   if (
@@ -1531,7 +1566,8 @@ function requireContext(
     zoneId: input.zoneId.toLowerCase(),
     hostname,
     syntheticMcpUrl,
-    allowedEmail,
+    access,
+    machineAuthentication,
     config,
     cloudflare,
     provider,
@@ -1556,7 +1592,7 @@ function reconciliationContext(
   return {
     config: context.config,
     target: { accountId: context.accountId, zoneId: context.zoneId },
-    access: { allowedEmails: [context.allowedEmail] },
+    access: context.access,
     release: RELEASE,
     provider: context.provider,
     receiptStore: context.receiptStore,
@@ -1749,7 +1785,7 @@ async function buildDesiredForReceipt(
       zoneStatus: 'active',
       zeroTrustReady: true,
     },
-    access: { allowedEmails: [context.allowedEmail] },
+    access: context.access,
   });
 }
 
@@ -1900,7 +1936,7 @@ async function isExactPendingPortalCreateNoopRecovery(
         zoneStatus: 'active',
         zeroTrustReady: true,
       },
-      access: { allowedEmails: [context.allowedEmail] },
+      access: context.access,
     });
   } catch {
     return false;

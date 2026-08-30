@@ -12,6 +12,7 @@ import {
   ownershipMarker,
   receiptChecksum,
 } from '../src/receipt.ts';
+import { CANARY_SERVICE_ID, OTHER_SERVICE_ID, canaryConfig } from './fixtures/canary-service-identity.mjs';
 
 const TOKEN = 'test-only-provider-token';
 const ACCOUNT_ID = 'account_123';
@@ -247,6 +248,9 @@ async function mutationFixture(kind, action, {
     desiredHash: resource.desiredHash,
     marker,
   }];
+  if (resource.desired.allow?.identityType === 'service_token' && resources.length === 1) {
+    resources[0].identityHash = resource.desired.allow.identitiesHash;
+  }
   if (kind === 'portal' && action === 'create') {
     const server = desired.resources.find((candidate) => candidate.kind === 'mcp_server');
     const application = desired.resources.find((candidate) =>
@@ -1283,6 +1287,161 @@ test('updates owned server, Portal, policy, and DNS resources through exact loca
   const dnsUpdate = dnsMock.calls.find((call) => call.init.method === 'PUT');
   assert.equal(dnsUpdate.body.content, 'gateway.agents.cloudflare.com');
   assert.equal(dnsUpdate.body.ttl, 1);
+});
+
+for (const policyKind of ['source_access_policy', 'portal_access_policy']) {
+  const setup = async (action, options = {}) => {
+    const source = policyKind === 'source_access_policy';
+    const appId = source ? 'app_source_123' : 'app_portal_123';
+    const fixtureOptions = {
+      gatewayConfig: canaryConfig(),
+      accessInput: { canaryServiceTokenId: CANARY_SERVICE_ID },
+      ...options,
+    };
+    if (action !== 'create') fixtureOptions.locator = { id: 'policy_123', parentId: appId };
+    const fixture = await mutationFixture(policyKind, action, fixtureOptions);
+    const sourceParent = source ? sourcePolicyParent(fixture) : null;
+    const app = source
+      ? exactSourceApp({ id: appId, serverId: sourceParent.serverId, marker: sourceParent.marker })
+      : exactPortalApp({ id: appId, ...canaryConfig().gateway });
+    const parent = source
+      ? { id: sourceParent.serverId, description: ownershipMarker(fixture.desired.installationId, sourceParent.serverId) }
+      : exactOwnedPortal(fixture);
+    const policy = {
+      id: 'policy_123', name: fixture.marker, decision: 'non_identity',
+      include: [{ service_token: { token_id: CANARY_SERVICE_ID } }], exclude: [], require: [],
+    };
+    return { fixture, appId, app, parent, policy };
+  };
+
+  test(`${policyKind} creates only the exact canary Service Auth selector`, async () => {
+    const { fixture, appId, app, parent, policy } = await setup('create');
+    const mock = scriptedFetch([
+      { response: success(app) }, { response: success(parent) }, { response: success([]) },
+      { response: success(app) }, { response: success(parent) }, { response: success([]) },
+      { method: 'POST', path: `/client/v4/accounts/${ACCOUNT_ID}/access/apps/${appId}/policies`, response: success({ id: policy.id }) },
+    ]);
+    await provider(mock.fetchImpl).applyChange(fixture.input);
+    const { id: _id, ...expectedBody } = policy;
+    assert.deepEqual(mock.calls[6].body, expectedBody);
+    assert.equal(mock.remaining.length, 0);
+    const committed = await commitReceiptAction(fixture.input.receipt, {
+      provider: { id: policy.id, parentId: appId }, desiredHash: fixture.resource.desiredHash,
+      marker: fixture.marker, identityHash: fixture.resource.desired.allow.identitiesHash,
+    });
+    assert.equal(JSON.stringify({ committed, desired: fixture.desired }).includes(CANARY_SERVICE_ID), false);
+  });
+
+  test(`${policyKind} rejects changed or mixed canary credentials before network I/O`, async () => {
+    for (const accessInput of [
+      { canaryServiceTokenId: OTHER_SERVICE_ID },
+      { canaryServiceTokenId: CANARY_SERVICE_ID, allowedEmails: [] },
+    ]) {
+      const { fixture } = await setup('create');
+      fixture.input.access = accessInput;
+      const mock = scriptedFetch([]);
+      await assert.rejects(provider(mock.fetchImpl).applyChange(fixture.input), (error) =>
+        error.code === 'access_identity_mismatch' && error.mutationOutcome === 'not_submitted');
+      assert.equal(mock.calls.length, 0);
+    }
+  });
+
+  test(`${policyKind} refuses canary identity drift during receipt-owned cleanup`, async () => {
+    for (const override of [
+      { decision: 'allow' },
+      { include: [{ service_token: { token_id: OTHER_SERVICE_ID } }] },
+      { include: [{ any_valid_service_token: {} }] },
+      { include: [{ service_token: { token_id: CANARY_SERVICE_ID, extra: true } }] },
+      { include: [{ service_token: { token_id: CANARY_SERVICE_ID }, everyone: {} }] },
+      { require: [{ email: { email: 'owner@example.com' } }] },
+    ]) {
+      const { fixture, app, parent, policy } = await setup('delete');
+      const drifted = { ...policy, ...override };
+      const mock = scriptedFetch([
+        { response: success(app) }, { response: success(parent) },
+        { response: success([drifted]) }, { response: success(drifted) },
+      ]);
+      await assert.rejects(provider(mock.fetchImpl).applyChange(fixture.input), (error) =>
+        error.code === 'ownership_conflict' && error.mutationOutcome === 'not_submitted');
+      assert.equal(mock.calls.some(({ init }) => init.method !== 'GET'), false);
+    }
+  });
+
+  test(`${policyKind} rechecks machine identity before deletion and preserves an exact cleanup path`, async () => {
+    for (const lateDrift of [false, true]) {
+      const { fixture, app, parent, policy } = await setup('delete');
+      const confirmedPolicy = lateDrift
+        ? { ...policy, include: [{ service_token: { token_id: OTHER_SERVICE_ID } }] }
+        : policy;
+      const steps = [
+        { response: success(app) }, { response: success(parent) },
+        { response: success([policy]) }, { response: success(policy) },
+        { response: success(app) }, { response: success(parent) },
+        { response: success([confirmedPolicy]) },
+      ];
+      if (!lateDrift) steps.push({ method: 'DELETE', response: success({ id: policy.id }) });
+      const mock = scriptedFetch(steps);
+      if (lateDrift) {
+        await assert.rejects(provider(mock.fetchImpl).applyChange(fixture.input), (error) =>
+          error.code === 'ownership_conflict' && error.mutationOutcome === 'not_submitted');
+      } else {
+        await provider(mock.fetchImpl).applyChange(fixture.input);
+      }
+      assert.equal(mock.calls.filter(({ init }) => init.method === 'DELETE').length, lateDrift ? 0 : 1);
+      assert.equal(mock.remaining.length, 0);
+    }
+  });
+}
+
+test('provider enforces the narrow canary guard before non-policy writes as well', async () => {
+  for (const mutate of [
+    (input) => { input.config.gateway.name = 'Customer gateway'; },
+    (input) => { input.config.gateway.codeMode = 'default_on'; },
+    (input) => { input.config.sources[0].enabledTools.push('customer_search'); },
+    (input) => { input.access = { canaryServiceTokenId: OTHER_SERVICE_ID }; },
+    (input) => { input.access = ACCESS; },
+  ]) {
+    const fixture = await mutationFixture('mcp_server', 'create', {
+      gatewayConfig: canaryConfig(), accessInput: { canaryServiceTokenId: CANARY_SERVICE_ID },
+    });
+    mutate(fixture.input);
+    const mock = scriptedFetch([]);
+    await assert.rejects(provider(mock.fetchImpl).applyChange(fixture.input), (error) =>
+      error.code === 'access_identity_mismatch' && error.mutationOutcome === 'not_submitted');
+    assert.equal(mock.calls.length, 0);
+  }
+});
+
+test('canary DNS publication requires the exact Service Auth policy at both dependency checks', async () => {
+  for (const lateDrift of [false, true]) {
+    const gatewayConfig = canaryConfig();
+    const fixture = await mutationFixture('dns_record', 'create', {
+      gatewayConfig, accessInput: { canaryServiceTokenId: CANARY_SERVICE_ID },
+    });
+    const app = exactPortalApp(gatewayConfig.gateway);
+    const policy = exactPortalPolicy(fixture, {
+      decision: 'non_identity',
+      include: [{ service_token: { token_id: CANARY_SERVICE_ID } }],
+    });
+    const confirmedPolicy = lateDrift
+      ? { ...policy, include: [{ any_valid_service_token: {} }] }
+      : policy;
+    const steps = [
+      ...dnsDependencySteps(fixture, { app, policy }),
+      { response: success([]) },
+      ...dnsDependencySteps(fixture, { app, policy: confirmedPolicy }),
+    ];
+    if (!lateDrift) steps.push({ method: 'POST', response: success({ id: 'dns_123' }) });
+    const mock = scriptedFetch(steps);
+    if (lateDrift) {
+      await assert.rejects(provider(mock.fetchImpl).applyChange(fixture.input), (error) =>
+        error.code === 'ownership_conflict' && error.mutationOutcome === 'not_submitted');
+    } else {
+      await provider(mock.fetchImpl).applyChange(fixture.input);
+    }
+    assert.equal(mock.calls.filter(({ init }) => init.method === 'POST').length, lateDrift ? 0 : 1);
+    assert.equal(mock.remaining.length, 0);
+  }
 });
 
 test('creates an exact source application email policy after exact parent discovery', async () => {

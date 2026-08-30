@@ -8,6 +8,7 @@ import {
   createInstallationReceipt,
   ownershipMarker,
 } from '../src/receipt.ts';
+import { CANARY_SERVICE_ID, OTHER_SERVICE_ID, canaryConfig } from './fixtures/canary-service-identity.mjs';
 
 function config() {
   return {
@@ -59,7 +60,7 @@ async function fixture({
     id: server.key,
     name: server.desired.name,
     hostname: server.desired.endpoint,
-    auth_type: 'oauth',
+    auth_type: server.desired.authentication.mode === 'none' ? 'unauthenticated' : 'oauth',
     secure_web_gateway: false,
     description: ownershipMarker(desired.installationId, server.key),
     status: 'ready',
@@ -75,7 +76,7 @@ async function fixture({
   const portalMapping = {
     [mappingIdField]: server.key,
     default_disabled: true,
-    on_behalf: true,
+    on_behalf: gatewayConfig.sources[0].authentication.onBehalfOfUser,
     updated_prompts: [],
     updated_tools: server.desired.toolPolicy.allowedTools.map((name) => ({ name, enabled: true })),
     tools: [{ name: 'future_admin_tool', enabled: true }],
@@ -136,6 +137,12 @@ async function fixture({
       require: [],
     }],
   };
+  if (desired.accessPolicy.identityType === 'service_token') {
+    for (const policy of Object.values(policies).flat()) {
+      policy.decision = 'non_identity';
+      policy.include = [{ service_token: { token_id: accessInput.canaryServiceTokenId } }];
+    }
+  }
   const dnsLive = {
     id: dnsId,
     type: 'CNAME',
@@ -153,6 +160,11 @@ async function fixture({
     { kind: portalPolicy.kind, key: portalPolicy.key, provider: { id: portalPolicyId, parentId: portalAppId }, desiredHash: portalPolicy.desiredHash, marker: policies[portalAppId][0].name },
     { kind: dns.kind, key: dns.key, provider: { id: dnsId }, desiredHash: dns.desiredHash, marker: dnsLive.comment },
   ];
+  if (desired.accessPolicy.identityType === 'service_token') {
+    for (const resource of resourceReceipts.filter(({ kind }) => kind.endsWith('_policy'))) {
+      resource.identityHash = desired.accessPolicy.identitiesHash;
+    }
+  }
   const receipt = includeReceipt
     ? await createInstallationReceipt({
       plan: { installationId: desired.installationId, desiredHash: desired.desiredHash, release: 'test' },
@@ -198,7 +210,7 @@ async function fixture({
 async function pendingCreateReceipt(data, resource, excludedKinds = [resource.kind]) {
   const receipt = await createInstallationReceipt({
     plan: { installationId: data.desired.installationId, desiredHash: data.desired.desiredHash, release: 'test' },
-    target: { ...target, zoneName: 'example.com', hostname: config().gateway.hostname },
+    target: { ...target, zoneName: 'example.com', hostname: data.gatewayConfig.gateway.hostname },
     accessPolicy: data.desired.accessPolicy,
     resources: data.resourceReceipts.filter((candidate) => !excludedKinds.includes(candidate.kind)),
   });
@@ -240,6 +252,82 @@ test('verifies Cloudflare prerequisites and reduces exact receipt-owned state to
 
   const plan = await buildGatewayPlan(config(), observed, { release: 'test', access });
   assert.deepEqual(plan.changes.map((change) => change.action), Array(7).fill('noop'));
+});
+
+test('canary Service Auth readback is digest-only and idempotent for both applications', async () => {
+  const data = await fixture({
+    gatewayConfig: canaryConfig(), accessInput: { canaryServiceTokenId: CANARY_SERVICE_ID },
+  });
+  const observed = await readCloudflareObservedState({
+    cloudflare: data.cloudflare, config: data.gatewayConfig, target,
+    access: data.accessInput, receipt: data.receipt,
+  });
+  const plan = await buildGatewayPlan(data.gatewayConfig, observed, { access: data.accessInput });
+  assert.deepEqual(plan.changes.map(({ action }) => action), Array(7).fill('noop'));
+  assert.equal(JSON.stringify({ observed, plan, receipt: data.receipt }).includes(CANARY_SERVICE_ID), false);
+});
+
+test('canary policy readback conflicts on every changed decision or broadened selector', async () => {
+  for (const policyKind of ['source_access_policy', 'portal_access_policy']) {
+    for (const override of [
+      { decision: 'allow' },
+      { include: [{ service_token: { token_id: OTHER_SERVICE_ID } }] },
+      { include: [{ any_valid_service_token: {} }] },
+      { include: [{ service_token: { token_id: CANARY_SERVICE_ID, extra: true } }] },
+      { include: [{ service_token: { token_id: CANARY_SERVICE_ID }, everyone: {} }] },
+      { include: [{ service_token: { token_id: CANARY_SERVICE_ID } }, { service_token: { token_id: CANARY_SERVICE_ID } }] },
+      { exclude: undefined },
+      { require: [{ email: { email: 'owner@example.com' } }] },
+    ]) {
+      const data = await fixture({
+        gatewayConfig: canaryConfig(), accessInput: { canaryServiceTokenId: CANARY_SERVICE_ID },
+      });
+      const appId = policyKind === 'source_access_policy' ? data.serverApp.id : data.portalApp.id;
+      Object.assign(data.policies[appId][0], override);
+      const observed = await readCloudflareObservedState({
+        cloudflare: data.cloudflare, config: data.gatewayConfig, target,
+        access: data.accessInput, receipt: data.receipt,
+      });
+      const plan = await buildGatewayPlan(data.gatewayConfig, observed, { access: data.accessInput });
+      assert.equal(plan.changes.find(({ kind }) => kind === policyKind).action, 'conflict');
+    }
+  }
+});
+
+test('changing a canary service identity cannot rebind receipt-owned policies', async () => {
+  const data = await fixture({
+    gatewayConfig: canaryConfig(), accessInput: { canaryServiceTokenId: CANARY_SERVICE_ID },
+  });
+  const changedAccess = { canaryServiceTokenId: OTHER_SERVICE_ID };
+  const observed = await readCloudflareObservedState({
+    cloudflare: data.cloudflare, config: data.gatewayConfig, target,
+    access: changedAccess, receipt: data.receipt,
+  });
+  const plan = await buildGatewayPlan(data.gatewayConfig, observed, { access: changedAccess });
+  assert.deepEqual(plan.changes.filter(({ kind }) => kind.endsWith('_policy'))
+    .map(({ action }) => action), ['conflict', 'conflict']);
+});
+
+test('pending canary policy recovery requires the exact live service identity proof', async () => {
+  for (const policyKind of ['source_access_policy', 'portal_access_policy']) {
+    for (const matching of [true, false]) {
+      const data = await fixture({
+        gatewayConfig: canaryConfig(), accessInput: { canaryServiceTokenId: CANARY_SERVICE_ID },
+      });
+      const policy = data.byKind[policyKind];
+      const app = policyKind === 'source_access_policy' ? data.serverApp : data.portalApp;
+      const live = data.policies[app.id][0];
+      if (!matching) live.include = [{ service_token: { token_id: OTHER_SERVICE_ID } }];
+      app.policies = [{ id: live.id, name: live.name }];
+      const pending = await pendingCreateReceipt(data, policy);
+      const observed = await readCloudflareObservedState({
+        cloudflare: data.cloudflare, config: data.gatewayConfig, target,
+        access: data.accessInput, receipt: pending,
+      });
+      const plan = await buildGatewayPlan(data.gatewayConfig, observed, { access: data.accessInput });
+      assert.equal(plan.changes.find(({ kind }) => kind === policyKind).action, matching ? 'noop' : 'conflict');
+    }
+  }
 });
 
 test('reads back one exact source group selector and detects every selector drift', async () => {

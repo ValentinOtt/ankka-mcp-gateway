@@ -2,6 +2,7 @@ import { inspectSyntheticEndpoint } from '../fixtures/synthetic-mcp/inspect.mjs'
 import * as v from 'valibot';
 
 import { validateCloudflareId } from './canary-command.ts';
+import { verifyCanaryPortal, type CanaryPortalVerificationOptions } from './canary-portal-verifier.ts';
 import { createCloudflareClient, type CloudflareFetch } from './cloudflare-client.ts';
 import { createCloudflareGatewayProvider } from './cloudflare-provider.ts';
 import { boundaryObjectSchema, type BoundaryValue } from './json.ts';
@@ -55,6 +56,7 @@ type LockStore = 'cleanup' | 'receipt';
 
 export interface LifecycleInvocation {
   readonly accountId?: BoundaryValue;
+  readonly authentication?: BoundaryValue;
   readonly allowedEmail?: never;
   readonly approvalId?: BoundaryValue;
   readonly hostname?: BoundaryValue;
@@ -68,6 +70,7 @@ export interface LifecycleInvocation {
 
 interface ParsedLifecycleInvocationBase {
   readonly accountId: string;
+  readonly authentication: 'email' | 'service_token';
   readonly hostname: string;
   readonly json: boolean;
   readonly receiptPath: string;
@@ -111,11 +114,15 @@ type ParsedLockInvocation =
 interface LifecycleDependencies {
   readonly clientFactory?: (options: ProviderOptions) => CloudflareClient;
   readonly fetchImpl?: CloudflareFetch;
+  readonly portalFetchImpl?: CanaryPortalVerificationOptions['fetchImpl'];
   readonly holdForInspection?: RunnerDependencies['holdForInspection'];
   readonly inspectSyntheticUpstream?: typeof inspectSyntheticEndpoint;
   readonly onProgress?: RunnerDependencies['onProgress'];
   readonly providerFactory?: (options: ProviderOptions) => GatewayProvider;
   readonly readAllowedEmail?: SecretReader;
+  readonly readServiceTokenId?: SecretReader;
+  readonly readServiceClientId?: SecretReader;
+  readonly readServiceClientSecret?: SecretReader;
   readonly readToken?: SecretReader;
   readonly receiptStoreFactory?: ReceiptStoreFactory;
   readonly sleep?: RunnerDependencies['sleep'];
@@ -125,11 +132,15 @@ interface LifecycleDependencies {
 interface NormalizedLifecycleDependencies {
   readonly clientFactory: (options: ProviderOptions) => CloudflareClient;
   readonly fetchImpl: CloudflareFetch;
+  readonly portalFetchImpl: NonNullable<CanaryPortalVerificationOptions['fetchImpl']>;
   readonly holdForInspection: RunnerDependencies['holdForInspection'];
   readonly inspectSyntheticUpstream: typeof inspectSyntheticEndpoint;
   readonly onProgress: RunnerDependencies['onProgress'];
   readonly providerFactory: (options: ProviderOptions) => GatewayProvider;
   readonly readAllowedEmail: SecretReader;
+  readonly readServiceTokenId: SecretReader;
+  readonly readServiceClientId: SecretReader;
+  readonly readServiceClientSecret: SecretReader;
   readonly readToken: SecretReader;
   readonly receiptStoreFactory: ReceiptStoreFactory;
   readonly sleep: NonNullable<RunnerDependencies['sleep']>;
@@ -192,7 +203,7 @@ export class CanaryLifecycleCommandError extends Error {
       ['runtime_not_configured', 'The canary lifecycle runtime is not configured.'],
       [
         'secret_unavailable',
-        'Required canary values could not be read from the customer-controlled environment.',
+        'Required canary values could not be read from the operator-controlled environment.',
       ],
       ['command_failed', 'The canary lifecycle command failed safely.'],
     ]);
@@ -349,9 +360,10 @@ export function renderCanaryLockRecovery(report: LockRecoveryReport): string {
 }
 
 /**
- * CLI-facing composition. Cloudflare credentials and the Access email are read
- * only through closures/environment and are never accepted in the invocation,
- * returned report, or rendered output.
+ * CLI-facing composition. Management credentials and the selected Access
+ * identity are read only through closures/environment, never invocation fields.
+ * The Portal transport receives only its own service credentials, not the
+ * management token. Reports and rendered output omit both credential sets.
  */
 export async function executeCanaryLifecycleCommand(
   invocation: LifecycleInvocation = {},
@@ -361,15 +373,34 @@ export async function executeCanaryLifecycleCommand(
   const runtime = validateDependencies(dependencies);
   let token: BoundaryValue;
   let allowedEmail: BoundaryValue;
+  let serviceTokenId: BoundaryValue;
+  let serviceClientId: BoundaryValue;
+  let serviceClientSecret: BoundaryValue;
   try {
     token = await runtime.readToken();
-    allowedEmail = await runtime.readAllowedEmail();
+    if (parsed.authentication === 'service_token') {
+      serviceTokenId = await runtime.readServiceTokenId();
+      serviceClientId = await runtime.readServiceClientId();
+      serviceClientSecret = await runtime.readServiceClientSecret();
+    } else {
+      allowedEmail = await runtime.readAllowedEmail();
+    }
   } catch {
     throw new CanaryLifecycleCommandError('secret_unavailable');
   }
-  if (!validSecret(token) || !validSecret(allowedEmail)) {
+  if (!validSecret(token) || (parsed.authentication === 'service_token'
+    ? !validSecret(serviceTokenId) ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(serviceTokenId) ||
+      !validServiceCredential(serviceClientId) || !validServiceCredential(serviceClientSecret)
+    : !validSecret(allowedEmail))) {
     throw new CanaryLifecycleCommandError('secret_unavailable');
   }
+  const machineVerifier: RunnerDependencies['verifyInstalledGateway'] =
+    validServiceCredential(serviceClientId) && validServiceCredential(serviceClientSecret)
+      ? createMachineVerifier(serviceClientId, serviceClientSecret, runtime.portalFetchImpl)
+      : undefined;
+  serviceClientId = undefined;
+  serviceClientSecret = undefined;
 
   let cloudflare: CloudflareClient;
   let provider: GatewayProvider;
@@ -397,7 +428,9 @@ export async function executeCanaryLifecycleCommand(
     zoneId: parsed.zoneId,
     hostname: parsed.hostname,
     syntheticMcpUrl: parsed.syntheticMcpUrl,
-    allowedEmail,
+    ...(parsed.authentication === 'service_token'
+      ? { canaryServiceTokenId: serviceTokenId }
+      : { allowedEmail }),
   };
   const input = parsed.mode === 'run'
     ? {
@@ -407,6 +440,7 @@ export async function executeCanaryLifecycleCommand(
     }
     : baseInput;
   allowedEmail = undefined;
+  serviceTokenId = undefined;
   const reconcilerProvider: NonNullable<RunnerDependencies['provider']> = {
     readObservedState: async (providerInput) => v.parse(
       boundaryObjectSchema,
@@ -435,12 +469,15 @@ export async function executeCanaryLifecycleCommand(
     inspectCanaryResidue: parsed.mode === 'run'
       ? async (residueInput) => v.parse(
         boundaryObjectSchema,
-        await provider.inspectCanaryResidue(v.parse(boundaryObjectSchema, residueInput)),
+        // The provider validates every JSON member itself. Preserve the live
+        // AbortSignal: JSON boundary parsing would normalize it to `{}` and
+        // make every receipt-owned cleanup verification fail closed.
+        await provider.inspectCanaryResidue(residueInput),
       )
       : undefined,
     holdForInspection: parsed.mode === 'run' ? runtime.holdForInspection : undefined,
     verifyInstalledGateway: parsed.mode === 'run'
-      ? runtime.verifyInstalledGateway
+      ? runtime.verifyInstalledGateway ?? machineVerifier
       : undefined,
     onProgress: runtime.onProgress,
     sleep: runtime.sleep,
@@ -503,7 +540,9 @@ export function lifecycleResultExitCode(report: LifecycleResultReport): 0 | 3 {
     report.idempotentApplyVerified === true &&
     report.portalToolCallVerified === true &&
     report.resourceLifecycle === 'removed' &&
-    report.interactiveVerification === 'verified' &&
+    (report.authentication === 'service_token'
+      ? report.interactiveVerification === 'not_run'
+      : report.interactiveVerification === 'verified') &&
     report.cleanup?.status === 'removed' &&
     report.cleanup?.ownedResourceCount === 0
     ? 0
@@ -589,12 +628,16 @@ export function renderLifecycleResult(report: LifecycleResultReport): string {
     '',
     `Resource lifecycle: ${report.resourceLifecycle === 'removed' ? 'removed' : 'incomplete'}`,
     `Installed provider state verified: ${report.installedStateVerified === true ? 'yes' : 'no'}`,
-    `Interactive Portal tool call: ${report.portalToolCallVerified === true ? 'verified' : 'pending'}`,
+    `${report.authentication === 'service_token' ? 'Machine-authenticated' : 'Interactive'} Portal tool call: ${report.portalToolCallVerified === true ? 'verified' : 'pending'}`,
     `Idempotent apply verified: ${report.idempotentApplyVerified === true ? 'yes' : 'no'}`,
     `Receipt-owned cleanup: ${report.cleanup?.status === 'removed' ? 'removed' : 'incomplete'}`,
     `Owned resources remaining: ${safeCount(report.cleanup?.ownedResourceCount)}`,
   ];
-  if (!fullyVerified) lines.push('', 'Interactive Portal verification is still pending.');
+  if (report.authentication === 'service_token') {
+    lines.push('', 'Human OAuth login was not tested by this machine canary.');
+  } else if (!fullyVerified) {
+    lines.push('', 'Interactive Portal verification is still pending.');
+  }
   return lines.join('\n');
 }
 
@@ -604,6 +647,7 @@ function validateInvocation(value: LifecycleInvocation): ParsedLifecycleInvocati
   }
   const allowed = [
     'mode',
+    'authentication',
     'accountId',
     'zoneId',
     'hostname',
@@ -631,6 +675,10 @@ function validateInvocation(value: LifecycleInvocation): ParsedLifecycleInvocati
   if (value.json !== undefined && !v.is(v.boolean(), value.json)) {
     throw new CanaryLifecycleCommandError('invalid_invocation');
   }
+  if (value.authentication !== undefined &&
+    !v.is(v.picklist(['email', 'service_token']), value.authentication)) {
+    throw new CanaryLifecycleCommandError('invalid_invocation');
+  }
   let approvalId: string | undefined;
   let targetConfirmationId: string | undefined;
   if (value.mode === 'preview') {
@@ -655,6 +703,7 @@ function validateInvocation(value: LifecycleInvocation): ParsedLifecycleInvocati
     throw new CanaryLifecycleCommandError('invalid_invocation');
   }
   const parsedBase = {
+    authentication: value.authentication ?? 'email',
     accountId: value.accountId.toLowerCase(),
     zoneId: value.zoneId.toLowerCase(),
     hostname: value.hostname,
@@ -739,6 +788,9 @@ function validateDependencies(value: LifecycleDependencies): NormalizedLifecycle
   const allowed = [
     'readToken',
     'readAllowedEmail',
+    'readServiceTokenId',
+    'readServiceClientId',
+    'readServiceClientSecret',
     'clientFactory',
     'providerFactory',
     'receiptStoreFactory',
@@ -746,6 +798,7 @@ function validateDependencies(value: LifecycleDependencies): NormalizedLifecycle
     'verifyInstalledGateway',
     'holdForInspection',
     'fetchImpl',
+    'portalFetchImpl',
     'sleep',
     'onProgress',
   ];
@@ -755,6 +808,9 @@ function validateDependencies(value: LifecycleDependencies): NormalizedLifecycle
   const runtime = {
     readToken: value.readToken ?? (() => process.env.CLOUDFLARE_API_TOKEN),
     readAllowedEmail: value.readAllowedEmail ?? (() => process.env.ANKKA_CANARY_ALLOWED_EMAIL),
+    readServiceTokenId: value.readServiceTokenId ?? (() => process.env.ANKKA_CANARY_SERVICE_TOKEN_ID),
+    readServiceClientId: value.readServiceClientId ?? (() => process.env.CF_ACCESS_CLIENT_ID),
+    readServiceClientSecret: value.readServiceClientSecret ?? (() => process.env.CF_ACCESS_CLIENT_SECRET),
     clientFactory: value.clientFactory ?? createCloudflareClient,
     providerFactory: value.providerFactory ?? createCloudflareGatewayProvider,
     receiptStoreFactory: value.receiptStoreFactory ?? createFileReceiptStore,
@@ -762,6 +818,7 @@ function validateDependencies(value: LifecycleDependencies): NormalizedLifecycle
     verifyInstalledGateway: value.verifyInstalledGateway,
     holdForInspection: value.holdForInspection,
     fetchImpl: value.fetchImpl ?? globalThis.fetch,
+    portalFetchImpl: value.portalFetchImpl ?? globalThis.fetch,
     sleep: value.sleep ?? ((milliseconds: number) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds))),
     onProgress: value.onProgress,
@@ -769,11 +826,15 @@ function validateDependencies(value: LifecycleDependencies): NormalizedLifecycle
   if (
     !v.is(functionSchema, runtime.readToken) ||
     !v.is(functionSchema, runtime.readAllowedEmail) ||
+    !v.is(functionSchema, runtime.readServiceTokenId) ||
+    !v.is(functionSchema, runtime.readServiceClientId) ||
+    !v.is(functionSchema, runtime.readServiceClientSecret) ||
     !v.is(functionSchema, runtime.clientFactory) ||
     !v.is(functionSchema, runtime.providerFactory) ||
     !v.is(functionSchema, runtime.receiptStoreFactory) ||
     !v.is(functionSchema, runtime.inspectSyntheticUpstream) ||
     !v.is(functionSchema, runtime.fetchImpl) ||
+    !v.is(functionSchema, runtime.portalFetchImpl) ||
     !v.is(functionSchema, runtime.sleep)
   ) {
     throw new CanaryLifecycleCommandError('runtime_not_configured');
@@ -852,6 +913,21 @@ function validSecret(value: BoundaryValue): value is string {
       const codePoint = character.codePointAt(0);
       return codePoint !== undefined && codePoint >= 32 && codePoint !== 127;
     });
+}
+
+function validServiceCredential(value: BoundaryValue): value is string {
+  return v.is(stringSchema, value) && /^[\x21-\x7e]{1,4096}$/.test(value);
+}
+
+function createMachineVerifier(
+  clientId: string,
+  clientSecret: string,
+  fetchImpl: NonNullable<CanaryPortalVerificationOptions['fetchImpl']>,
+): NonNullable<RunnerDependencies['verifyInstalledGateway']> {
+  return async (input) => v.parse(
+    boundaryObjectSchema,
+    await verifyCanaryPortal(input, { clientId, clientSecret, fetchImpl }),
+  );
 }
 
 function safeCount(value: BoundaryValue): number {
