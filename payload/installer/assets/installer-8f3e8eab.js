@@ -1269,7 +1269,11 @@ async function start() {
         state.route = '/manage';
         render();
         showNotice('Cloudflare authorized. Completing the approved gateway action…', 'success');
-        window.addEventListener('load', () => window.location.replace(management.managementUrl), { once: true });
+        // The context fetch can finish after load. A complete document has
+        // already drained the callback response; otherwise wait for it once.
+        const returnToManagement = () => window.location.replace(management.managementUrl);
+        if (document.readyState === 'complete') returnToManagement();
+        else window.addEventListener('load', returnToManagement, { once: true });
         return;
       }
       window.history.replaceState(null, '', '/result');
