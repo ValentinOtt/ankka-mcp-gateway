@@ -10,14 +10,14 @@ const ROOT = new URL('../payload/', import.meta.url);
 const ADMIN_ROOT = new URL('../apps/admin/dist/', import.meta.url);
 const COMPONENTS = Object.freeze({
   admin: null,
-  installer: ['assets/installer-315f9095.js', 'assets/installer-b89856ad.css', 'index.html'],
+  installer: ['assets/installer-b89856ad.css', 'assets/installer-de4ef4f0.js', 'index.html'],
   worker: ['index.js'],
   'worker-cleanup': ['index.js'],
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: 'c2f5d405422f88611d4a335e56e249b1749c75c0cb86aceb34d73cd1ef2cbdac',
-  worker: '1e2a9883089680e75e677d279d8ef280a7a4818ee62ebba03d7f85be7b553891',
+  installer: '1a4167836c1306de02a6771919bc5b0e48186e35190abd38560b639f12385da9',
+  worker: '5d1dbd3d3cd4d4197a2b762f66fcb21cf3da0176cc85a7797d1465cad6338e00',
   'worker-cleanup': '294518970598816944bae9e5e6f6411d3aa7ce00238e81e6b5abebb6b449e46f',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
@@ -144,7 +144,15 @@ test('generated admin distribution carries the project and complete production d
   const expectedPackages = [];
   for (const [relative, value] of Object.entries(lock.packages)) {
     if (!relative.startsWith('node_modules/') || value.dev === true || value.link === true) continue;
-    const manifest = JSON.parse(await readFile(new URL(`../${relative}/package.json`, import.meta.url), 'utf8'));
+    let manifest;
+    try {
+      manifest = JSON.parse(await readFile(new URL(`../${relative}/package.json`, import.meta.url), 'utf8'));
+    } catch {
+      assert.equal(value.optional, true);
+      const name = relative.slice('node_modules/'.length);
+      assert.match(name, /^@(?:esbuild\/|rolldown\/binding-)/u);
+      manifest = { name, version: value.version };
+    }
     assert.ok(thirdPartyLicenses.includes(`Package: ${manifest.name}@${manifest.version}`));
     expectedPackages.push({ relative, heading: `${manifest.name}@${manifest.version}` });
   }
@@ -183,7 +191,8 @@ test('admin and installer HTML use external same-origin assets without inline ex
 
 test('installer assets cover the exact hosted session, plan, deploy, result, and removal contract', async () => {
   const html = await readFile(new URL('installer/index.html', ROOT), 'utf8');
-  const script = await readFile(new URL('installer/assets/installer-315f9095.js', ROOT), 'utf8');
+  const script = await readFile(new URL('installer/assets/installer-de4ef4f0.js', ROOT), 'utf8');
+  assert.doesNotMatch(`${html}\n${script}`, /\bcustomers?\b/iu);
   for (const route of ['/', '/gateway', '/review', '/deploy', '/manage', '/oauth/handoff', '/oauth/callback', '/result']) {
     if (route !== '/') assert.match(`${html}\n${script}`, new RegExp(route.replace('/', '\\/'), 'u'));
   }
@@ -227,6 +236,24 @@ test('installer assets cover the exact hosted session, plan, deploy, result, and
   assert.doesNotMatch(`${html}\n${script}`, /(?:provider.?id|journal|tombstone|cloudflareAccessToken|client.?secret)/iu);
 });
 
+// Provider names in setup guidance are not telemetry. Reject executable SDK
+// imports, instrumentation calls and beacon APIs, including aliased SDK imports.
+const ADMIN_TELEMETRY = /(?:\b(?:from\s*|import\s*(?:\(\s*)?|require\s*\(\s*)['"](?:@sentry\/|@datadog\/|@segment\/|posthog(?:-js|-react)?\b|react-ga\b|react-ga4\b|analytics-node\b)|\b(?:Sentry\.(?:init|captureException|captureMessage)|datadogRum\.|datadogLogs\.|posthog\.(?:init|capture|identify)|analytics\.(?:track|page|identify)|gtag\s*\(|sendBeacon\s*\(|dataLayer\.push\s*\())/iu;
+
+test('admin telemetry check distinguishes provider documentation from executable instrumentation', () => {
+  assert.doesNotMatch('Sentry, Google Analytics, Segment and PostHog provider setup guides', ADMIN_TELEMETRY);
+  assert.doesNotMatch('https://mcp.sentry.dev/mcp', ADMIN_TELEMETRY);
+  for (const source of [
+    'import { init as observe } from "@sentry/browser"',
+    'import("@datadog/browser-rum")',
+    'require("posthog-js")',
+    'import "@segment/analytics-next"',
+    'Sentry.init({})', 'analytics.track("event")', 'posthog.capture("event")',
+    'navigator.sendBeacon("https://example.com", body)', 'gtag("event", "visit")',
+    'window.dataLayer.push({event: "visit"})',
+  ]) assert.match(source, ADMIN_TELEMETRY);
+});
+
 test('admin assets provide safe source discovery, signed updates, one-time apply, and WebMCP tools', async () => {
   const script = await componentText('admin', '.js');
   for (const endpoint of [
@@ -249,7 +276,8 @@ test('admin assets provide safe source discovery, signed updates, one-time apply
   const sourceFiles = (await readdir(new URL('../apps/admin/src/', import.meta.url), { recursive: true }))
     .filter((file) => /\.(?:ts|tsx)$/u.test(file));
   const source = (await Promise.all(sourceFiles.map((file) => readFile(new URL(`../apps/admin/src/${file}`, import.meta.url), 'utf8')))).join('\n');
-  assert.doesNotMatch(source, /(?:localStorage|document\.cookie|dangerouslySetInnerHTML|innerHTML|insertAdjacentHTML|eval\s*\(|console\.(?:log|info|warn|error|debug)|\b(?:Sentry|Datadog|Google Analytics|Segment|PostHog)\b)/iu);
+  assert.doesNotMatch(source, /(?:localStorage|document\.cookie|dangerouslySetInnerHTML|innerHTML|insertAdjacentHTML|eval\s*\(|console\.(?:log|info|warn|error|debug))/iu);
+  assert.doesNotMatch(source, ADMIN_TELEMETRY);
 });
 
 test('plain CSS keeps the reviewed typography and accessibility floors', async () => {

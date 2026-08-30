@@ -99,7 +99,7 @@ function update(available: boolean): RuntimeUpdate {
           'tool_allowlists',
         ],
       },
-      notes: ['Updates the signed management interface.', 'Preserves customer configuration and Durable Object state.'],
+      notes: ['Updates the signed management interface.', 'Preserves your configuration and Durable Object state.'],
     } : null,
     rollback: { available: true, release: 'gateway-v0.1.11', artifactSha256: '4'.repeat(64), dataRollback: false },
   }

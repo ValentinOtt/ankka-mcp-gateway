@@ -514,7 +514,7 @@ function renderDeploy() {
   }
   appendSummary(container, 'Gateway', session.selection.basics.gatewayName);
   appendSummary(container, 'Cloudflare zone', session.selection.basics.zoneName);
-  appendSummary(container, 'Runtime', 'Customer-owned Worker and durable state');
+  appendSummary(container, 'Runtime', 'Worker and durable state in your account');
   appendSummary(container, 'Gateway access', 'Read-only allowlist');
   byId('authorize').disabled = state.busy || session.capabilities?.deploy !== true;
 }
@@ -696,7 +696,7 @@ function renderResult() {
     state.callbackStreamActive = false;
     intro.textContent = deployment.operations?.some((operation) => operation.status === 'blocked')
       ? 'The gateway is ready, with one Cloudflare grant action still requiring attention.'
-      : 'The customer-owned gateway is ready.';
+      : 'Your gateway is ready.';
     addResultLink(actions, 'Open management page', deployment.receipt?.managementUrl);
     addResultLink(actions, 'Open MCP endpoint', deployment.receipt?.portalUrl);
     showNotice('');
@@ -715,7 +715,7 @@ function renderResult() {
     }
     showNotice('');
   } else {
-    intro.textContent = 'The customer-owned gateway is being created. The active stage updates live below.';
+    intro.textContent = 'Your gateway is being created. The active stage updates live below.';
     showNotice('');
   }
   renderExistingGateway();
@@ -959,7 +959,7 @@ async function registerAgentTools() {
     },
     {
       name: 'configure_gateway',
-      description: 'Save an empty Ankka MCP Portal configuration for a target returned by Cloudflare discovery. The actor email and zone are derived from that target. Sources are added later from the customer management page. Performs no Cloudflare writes.',
+      description: 'Save an empty Ankka MCP Portal configuration for a target returned by Cloudflare discovery. The actor email and zone are derived from that target. Sources are added later from the gateway dashboard. Performs no Cloudflare writes.',
       inputSchema: {
         type: 'object',
         additionalProperties: false,

@@ -1,11 +1,11 @@
-import { ArrowsClockwise, Cloud, Database, House, Users, WarningCircle, X } from '@phosphor-icons/react'
+import { Cloud, Database, GearSix, House, Users, WarningCircle, X } from '@phosphor-icons/react'
 import { Link, Outlet } from '@tanstack/react-router'
 import { Button, Loader } from '@cloudflare/kumo'
 import type { ComponentType } from 'react'
 import { useGateway } from '../GatewayContext'
 import { BrandMark } from './BrandMark'
 
-type AppPath = '/' | '/sources' | '/team' | '/updates'
+type AppPath = '/' | '/sources' | '/team' | '/settings'
 
 interface NavItem {
   to: AppPath
@@ -17,7 +17,7 @@ const navigation: NavItem[] = [
   { to: '/', label: 'Overview', icon: House },
   { to: '/sources', label: 'Sources', icon: Database },
   { to: '/team', label: 'Team', icon: Users },
-  { to: '/updates', label: 'Updates', icon: ArrowsClockwise },
+  { to: '/settings', label: 'Settings', icon: GearSix },
 ]
 
 export function AppShell() {
@@ -54,13 +54,13 @@ export function AppShell() {
 
   return (
     <div className="min-h-dvh bg-canvas text-kumo-default">
-      <aside className="fixed inset-y-0 left-0 z-20 hidden w-60 bg-sidebar px-2 py-5 text-sidebar-ink lg:flex lg:flex-col">
-        <div className="px-2 py-1">
-          <BrandMark className="w-[136px] opacity-70" />
-          <p className="mt-3 text-xs font-medium text-sidebar-ink">MCP Gateway</p>
+      <aside className="fixed inset-y-0 left-0 z-20 hidden w-60 gap-4 bg-sidebar p-3 text-sidebar-ink lg:flex lg:flex-col">
+        <div className="-mb-3 grid gap-1 rounded-lg px-2 py-1 text-sidebar-ink">
+          <BrandMark className="sidebar-wordmark w-[100%] opacity-40" />
+          <p className="text-xs font-semibold uppercase tracking-[0.08em] text-sidebar-muted">MCP Gateway</p>
         </div>
 
-        <nav className="mt-8" aria-label="Gateway management">
+        <nav aria-label="Gateway management">
           {navigation.map(({ to, label, icon: Icon }) => (
             <Link
               key={to}
@@ -79,7 +79,7 @@ export function AppShell() {
           <div className="flex items-center gap-2.5">
             <Cloud size={18} className="text-sidebar-accent" weight="fill" />
             <div className="min-w-0">
-              <p className="text-xs font-medium text-sidebar-ink">Customer-owned</p>
+              <p className="text-xs font-medium text-sidebar-ink">Self-hosted</p>
               <p className="mt-0.5 truncate text-xs text-sidebar-muted">
                 {status?.gateway.hostname ?? 'Cloudflare account'}
               </p>

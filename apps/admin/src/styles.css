@@ -126,6 +126,13 @@ button { user-select: none; }
   text-align: center;
 }
 
+/* Match the Ankka app rail: the oversized wordmark reads as a watermark and
+   dissolves into the navigation instead of ending on a hard baseline. */
+.sidebar-wordmark {
+  -webkit-mask-image: linear-gradient(to bottom, rgb(0 0 0) 20%, rgb(0 0 0 / 0) 100%);
+  mask-image: linear-gradient(to bottom, rgb(0 0 0) 20%, rgb(0 0 0 / 0) 100%);
+}
+
 .nav-item {
   display: flex;
   min-height: 2rem;
@@ -229,6 +236,51 @@ button { user-select: none; }
 
 .tool-option-card input { margin-top: 0.2rem; accent-color: var(--color-brand); }
 
+.source-mode-button {
+  display: inline-flex;
+  min-height: 2.25rem;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--color-kumo-line);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  background: var(--color-kumo-overlay);
+  color: var(--text-color-kumo-subtle);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+}
+
+.source-mode-button[aria-pressed="true"] {
+  border-color: rgb(61 19 44 / 0.28);
+  background: var(--color-brand-soft);
+  color: var(--color-brand);
+}
+
+.source-mode-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.source-mode-button span {
+  display: inline-flex;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgb(61 19 44 / 0.1);
+  padding-inline: 0.35rem;
+  font-size: 0.6875rem;
+}
+
+.catalog-source-card {
+  border: 1px solid var(--color-kumo-line);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  background: var(--color-kumo-overlay);
+}
+
 .tool-chip {
   display: inline-flex;
   align-items: center;
@@ -252,6 +304,8 @@ button { user-select: none; }
     color: var(--color-sidebar-ink);
     background: rgb(255 255 255 / 0.08);
   }
+
+  .source-mode-button:not(:disabled):hover { border-color: var(--color-kumo-ring); }
 }
 
 @media (min-width: 640px) {

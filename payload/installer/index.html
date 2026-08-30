@@ -33,14 +33,14 @@
 
         <section class="panel" data-route="/" aria-labelledby="welcome-title" hidden>
           <p class="eyebrow">MCP Gateway canary</p>
-          <h1 id="welcome-title">One approved gateway for your company’s agents</h1>
+          <h1 id="welcome-title">One approved gateway for your team’s agents</h1>
           <p class="lede">Start with a read-only Cloudflare sign-in so the installer can find your accounts and active zones. The installer attempts immediate revocation and always discards its local copy; deployment still requires a separate authorization after you review the exact plan.</p>
           <div class="promise-grid">
-            <article><h2>Customer-owned</h2><p>Runtime state and access controls remain inside your Cloudflare account.</p></article>
+            <article><h2>In your account</h2><p>Runtime state and access controls remain inside your Cloudflare account.</p></article>
             <article><h2>Ready for sources</h2><p>The portal starts empty. Add sources and explicit tool allowlists later from your management page.</p></article>
             <article><h2>Reversible canary</h2><p>The retained result offers a bounded removal plan during the recovery window.</p></article>
           </div>
-          <div class="callout" role="note"><strong>Hosted analytics</strong><p>Ankka keeps setup funnel events—page view and setup steps with public release/channel, coarse outcome and flow, a per-session key, country, browser family, and, for page views, the referring site—for three months in Cloudflare Analytics Engine. Analytics set no cookies and store no IP address, raw user agent, or identifier that outlives the session. Cloudflare separately processes hosted-zone reliability data. Customer gateways do not report usage to Ankka. Prefer no analytics? Deploy from the public source repository instead.</p></div>
+          <div class="callout" role="note"><strong>Hosted analytics</strong><p>Ankka keeps setup funnel events—page view and setup steps with public release/channel, coarse outcome and flow, a per-session key, country, browser family, and, for page views, the referring site—for three months in Cloudflare Analytics Engine. Analytics set no cookies and store no IP address, raw user agent, or identifier that outlives the session. Cloudflare separately processes hosted-zone reliability data. Self-hosted gateways do not report usage to Ankka. Prefer no analytics? Deploy from the public source repository instead.</p></div>
           <div class="button-row"><button id="discover-cloudflare" class="primary-button" type="button">Connect Cloudflare</button></div>
           <div id="discovery-handoff" class="callout" hidden><strong>Continue to Cloudflare</strong><p>If Cloudflare does not open automatically, use this short-lived read-only discovery link.</p><a id="discovery-link" class="primary-button" hidden>Continue to Cloudflare</a></div>
         </section>
@@ -52,7 +52,7 @@
           <form id="gateway-form" novalidate>
             <div class="field-grid">
               <label class="wide-field"><span>Cloudflare account and zone</span><select id="cloudflare-target" required></select><small>Discovered with a short-lived read-only grant.</small></label>
-              <label><span>Gateway name</span><input id="gateway-name" name="gatewayName" autocomplete="organization" maxlength="80" required><small>Shown in Cloudflare and the customer dashboard.</small></label>
+              <label><span>Gateway name</span><input id="gateway-name" name="gatewayName" autocomplete="organization" maxlength="80" required><small>Shown in Cloudflare and your gateway dashboard.</small></label>
               <label><span>Active zone</span><input id="zone-name" name="zoneName" inputmode="url" autocomplete="off" readonly required><small>Fetched from Cloudflare.</small></label>
               <label><span>Primary administrator</span><input id="admin-email" name="adminEmail" type="email" autocomplete="email" readonly required><small>Fetched from the Cloudflare identity that connected.</small></label>
               <label><span>Additional administrators</span><textarea id="additional-admins" name="additionalAdminEmails" rows="3" placeholder="admin@example.com"></textarea><small>One email per line; optional.</small></label>
@@ -97,9 +97,9 @@
           <div id="result-actions" class="button-row"></div>
 
           <section id="existing-gateway-section" class="existing-gateway-card" aria-labelledby="existing-gateway-title" hidden>
-            <p class="eyebrow">Existing customer gateway</p>
+            <p class="eyebrow">Existing gateway</p>
             <h2 id="existing-gateway-title"><span id="existing-gateway-name">Ankka MCP Gateway</span> is already running</h2>
-            <p>The preflight made no Cloudflare changes and the inspection grant was revoked. Teardown starts in the customer-owned dashboard so its stored receipt—not a hostname match—authorizes the removal plan.</p>
+            <p>The preflight made no Cloudflare changes and the inspection grant was revoked. Teardown starts in your gateway dashboard so its stored receipt—not a hostname match—authorizes the removal plan.</p>
             <div class="summary-card">
               <div class="summary-row"><span>Portal</span><strong id="existing-gateway-portal"></strong></div>
               <div class="summary-row"><span>Management</span><strong id="existing-gateway-management"></strong></div>
@@ -119,7 +119,7 @@
         <section class="panel" data-route="/manage" aria-labelledby="manage-action-title" hidden>
           <p class="eyebrow">Gateway action authorization</p>
           <h1 id="manage-action-title">Authorize the approved action in Cloudflare</h1>
-          <p class="lede">After consent, this page keeps the short-lived grant only in the connected callback while your customer-owned Worker performs the exact action you reviewed.</p>
+          <p class="lede">After consent, this page keeps the short-lived grant only in the connected callback while your gateway Worker performs the exact action you reviewed.</p>
           <div class="callout"><strong>Live action</strong><p>The temporary workers.dev route is enabled only for the signed action, then disabled and verified before grant revocation is attempted and the local copy is discarded.</p></div>
         </section>
 
@@ -132,11 +132,11 @@
       country, browser family, and, for page views, the referring site—for three
       months. Analytics set no cookies and store no IP address, raw user agent, or
       identifier that outlives the session. Cloudflare separately processes
-      hosted-zone reliability data. Customer gateways do not report usage to Ankka.
+      hosted-zone reliability data. Self-hosted gateways do not report usage to Ankka.
       Prefer no analytics? Deploy from the public source repository instead. Session
       data expires automatically.</p></footer>
     <!-- Classic and parser-blocking by design: it starts progress polling while
          the OAuth callback keeps streaming heartbeats after this HTML shell. -->
-    <script src="/assets/installer-315f9095.js"></script>
+    <script src="/assets/installer-de4ef4f0.js"></script>
   </body>
 </html>
