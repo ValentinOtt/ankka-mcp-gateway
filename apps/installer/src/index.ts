@@ -91,6 +91,7 @@ import {
   resolveAuthorizedTarget,
   type AuthorizedTargetResolutionInput,
 } from './cloudflare-target';
+import { CloudflareDirectUploadError } from './cloudflare-worker-direct-upload';
 import { relaySourceAction } from './source-action-relay';
 import { buildPublicUpdateChannel } from './update-channel';
 import { relayRuntimeUpdate } from './runtime-update-relay';
@@ -1833,17 +1834,40 @@ function managementRedirect(
   return new Response(null, { status: 303, headers });
 }
 
-type SourceCallbackPhase =
+type ManagementCallbackPhase =
   | 'source_release_verification'
   | 'source_grant_exchange'
   | 'source_account_authorization'
   | 'source_action_relay'
-  | 'source_callback_shell';
+  | 'source_callback_shell'
+  | 'runtime_release_verification'
+  | 'runtime_grant_exchange'
+  | 'runtime_account_authorization'
+  | 'runtime_action_relay'
+  | 'runtime_callback_shell';
 
-function sourceCallbackError<ErrorInput>(error: ErrorInput, phase: SourceCallbackPhase): DeployError {
+const runtimeUploadDiagnosticSchema = v.strictObject({
+  code: v.picklist([
+    'invalid_input', 'worker_name_collision', 'provider_rejected',
+    'provider_unknown', 'provider_mismatch', 'recovery_ambiguous',
+  ]),
+  stage: v.picklist(['validate', 'asset_session', 'asset_bucket', 'worker_version', 'version_verify']),
+  outcome: v.picklist(['not_sent', 'rejected', 'unknown', 'submitted']),
+});
+
+function managementCallbackError<ErrorInput>(error: ErrorInput, phase: ManagementCallbackPhase): DeployError {
   const stable = stableError(error);
   // Request-local fixed vocabulary only; never derive diagnostics from the
   // handoff, grant, provider response, or thrown exception text.
+  if (phase === 'runtime_action_relay' && stable.reason === null && error instanceof CloudflareDirectUploadError) {
+    const diagnostic = v.safeParse(runtimeUploadDiagnosticSchema, {
+      code: error.code, stage: error.stage, outcome: error.outcome,
+    });
+    if (diagnostic.success) {
+      const { code, stage, outcome } = diagnostic.output;
+      return new DeployError(stable.status, stable.code, `runtime_upload_${code}_${stage}_${outcome}`);
+    }
+  }
   return new DeployError(stable.status, stable.code, stable.reason ?? phase);
 }
 
@@ -1862,7 +1886,7 @@ async function sourceActionOauthCallback(
     throw new DeployError(400, 'session_invalid');
   }
   if (callback.denied) return errorResponse(new DeployError(400, 'oauth_denied'), true);
-  let phase: SourceCallbackPhase = 'source_release_verification';
+  let phase: ManagementCallbackPhase = 'source_release_verification';
   let execution: Promise<void> | null = null;
   const executeOnce = (): Promise<void> => {
     execution ??= (async () => {
@@ -1921,7 +1945,7 @@ async function sourceActionOauthCallback(
   try {
     await executeOnce();
   } catch (error) {
-    return errorResponse(sourceCallbackError(error, phase), true);
+    return errorResponse(managementCallbackError(error, phase), true);
   }
   if (managementCallbackResponse) {
     phase = 'source_callback_shell';
@@ -1933,7 +1957,7 @@ async function sourceActionOauthCallback(
         await managementCallbackResponse(callbackInput), env, sealed, now,
       );
     } catch (error) {
-      return errorResponse(sourceCallbackError(error, phase), true);
+      return errorResponse(managementCallbackError(error, phase), true);
     }
   }
   return managementRedirect(sealed, 'finished');
@@ -1954,6 +1978,7 @@ async function runtimeUpdateOauthCallback(
     throw new DeployError(400, 'session_invalid');
   }
   if (callback.denied) return errorResponse(new DeployError(400, 'oauth_denied'), true);
+  let phase: ManagementCallbackPhase = 'runtime_release_verification';
   let execution: Promise<void> | null = null;
   const executeOnce = (): Promise<void> => {
     execution ??= (async () => {
@@ -1964,6 +1989,7 @@ async function runtimeUpdateOauthCallback(
           releaseBundle.manifest.release !== sealed.to.release ||
           `sha256:${releaseBundle.manifest.artifact.treeSha256}` !== sealed.to.artifactSha256
         )) throw new DeployError(409, 'session_conflict');
+        phase = 'runtime_grant_exchange';
         grant = await exchangeAuthorizationCode({
           code: callback.code,
           verifier: sealed.verifier,
@@ -1971,6 +1997,7 @@ async function runtimeUpdateOauthCallback(
           transport,
         });
         grant.assertUsable();
+        phase = 'runtime_account_authorization';
         await grant.withAccessToken(async (accessToken) => {
           await resolveAuthorizedAccount({
             accessToken,
@@ -1978,6 +2005,7 @@ async function runtimeUpdateOauthCallback(
             expectedAccountId: sealed.accountId,
             transport,
           });
+          phase = 'runtime_action_relay';
           await relayRuntimeUpdate({
             accessToken,
             accountId: sealed.accountId,
@@ -2007,9 +2035,10 @@ async function runtimeUpdateOauthCallback(
   try {
     await executeOnce();
   } catch (error) {
-    return errorResponse(error, true);
+    return errorResponse(managementCallbackError(error, phase), true);
   }
   if (managementCallbackResponse) {
+    phase = 'runtime_callback_shell';
     try {
       const callbackInput: InstallCallbackResponseInput = context === undefined
         ? { request, env, execute: executeOnce }
@@ -2018,7 +2047,7 @@ async function runtimeUpdateOauthCallback(
         await managementCallbackResponse(callbackInput), env, sealed, now,
       );
     } catch (error) {
-      return errorResponse(error, true);
+      return errorResponse(managementCallbackError(error, phase), true);
     }
   }
   return managementRedirect(sealed, 'finished');

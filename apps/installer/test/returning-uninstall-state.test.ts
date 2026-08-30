@@ -1,5 +1,6 @@
 import { REQUIRED_OAUTH_SCOPES } from '../src/constants';
-import { sha256 } from '../src/crypto';
+import { sha256, sha256Hex } from '../src/crypto';
+import { canonicalJson } from '../src/release-manifest';
 import {
   buildReturningUninstallPlan,
   MAX_RETURNING_UNINSTALL_PLAN_TTL_MS,
@@ -60,6 +61,32 @@ function oauthAttempt(expiresAt: number, usedAt: number | null = null) {
 }
 
 describe('returning-customer uninstall plan', () => {
+  it('preserves the published schema-v1 returning plan identity across display-copy updates', async () => {
+    const current = await plannedState();
+    const semantic = {
+      schemaVersion: 1,
+      writesPerformed: false,
+      authority: 'customer_receipt_one_time_action',
+      requiredScopes: REQUIRED_OAUTH_SCOPES,
+      gateway,
+      steps: [
+        'Prove the one-time action and exact root receipt in the customer-owned Worker.',
+        ...current.plan.steps.slice(1),
+      ],
+    };
+    const digest = await sha256Hex(canonicalJson(semantic));
+    const legacy = {
+      ...semantic,
+      planId: `returning-uninstall-plan-${digest.slice(0, 24)}`,
+      planHash: `sha256:${digest}`,
+      createdAt: current.plan.createdAt,
+      expiresAt: current.plan.expiresAt,
+    };
+    expect(current.plan).toEqual(legacy);
+    await expect(parseReturningUninstallPlan(structuredClone(legacy))).resolves.toEqual(current.plan);
+    await expect(requireStoredReturningUninstall({ ...current, plan: legacy })).resolves.toEqual(current);
+  });
+
   it('builds and reparses a deterministic, zero-write, exact-scope plan', async () => {
     const plan = await buildReturningUninstallPlan(
       gateway,
