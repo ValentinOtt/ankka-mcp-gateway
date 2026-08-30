@@ -38,6 +38,9 @@ const WORKER_ID = /^[a-f0-9]{32}$/u;
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const RELEASE = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+// Version creation includes provider-side compilation. Give this one POST a
+// bounded allowance beyond the shared 10s request limit; never retry it here.
+const VERSION_CREATE_TIMEOUT_MS = 30_000;
 const RUNTIME_PATH = '/__ankka/runtime-action';
 const BINDING_NAMES = Object.freeze([
   'ADMIN_EMAILS',
@@ -527,7 +530,10 @@ async function createCandidate(
   }
   await progress(input, 'assets_uploaded', current.versionId, null);
   const mutation = await prepareWorkerVersionMutation(prepared, current.worker, completionJwt, 'clean');
-  const submitted = await submitWorkerVersionMutation(mutation.ephemeral, mutation.recovery, call);
+  const submitted = await submitWorkerVersionMutation(mutation.ephemeral, mutation.recovery, {
+    ...call,
+    timeoutMs: VERSION_CREATE_TIMEOUT_MS,
+  });
   await verifyWorkerVersionSubmission(mutation.recovery, submitted, call);
   return submitted;
 }

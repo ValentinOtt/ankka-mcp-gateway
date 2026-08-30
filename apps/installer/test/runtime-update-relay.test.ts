@@ -1,5 +1,5 @@
 import * as v from 'valibot';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { boundaryObjectSchema, type BoundaryObject } from '../src/boundary';
 import { relayRuntimeUpdate } from '../src/runtime-update-relay';
 import { verifiedReleaseBundle } from './fixtures';
@@ -29,6 +29,8 @@ const subdomainSchema = v.object({ enabled: v.boolean() });
 const deploymentBodySchema = v.object({
   versions: v.array(v.object({ percentage: v.number(), version_id: v.string() })),
 });
+
+afterEach(() => vi.useRealTimers());
 
 interface DeploymentTarget {
   readonly percentage: number;
@@ -301,7 +303,125 @@ async function updateTransportFixture(failure?: 'asset_session' | 'worker_versio
   };
 }
 
+function holdProviderRequest(
+  transport: TransportFixture['transport'],
+  path: string,
+  delayMs?: number,
+) {
+  let announce: ((request: Request) => void) | null = null;
+  const arrived = new Promise<Request>((resolve) => { announce = resolve; });
+  let calls = 0;
+  return {
+    arrived,
+    callCount: () => calls,
+    transport: (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (new URL(request.url).pathname !== `/client/v4/accounts/${ACCOUNT_ID}${path}`) {
+        return transport(request);
+      }
+      calls += 1;
+      return new Promise<Response>((resolve, reject) => {
+        const timer = delayMs === undefined ? undefined : setTimeout(() => resolve(transport(request)), delayMs);
+        request.signal.addEventListener('abort', () => {
+          if (timer !== undefined) clearTimeout(timer);
+          reject(new Error(`synthetic aborted provider request ${ACCESS_TOKEN}`));
+        }, { once: true });
+        if (announce === null) throw new TypeError('missing request observer');
+        announce(request);
+      });
+    },
+  };
+}
+
+function caughtError<Thrown>(error: Thrown): Error {
+  if (!(error instanceof Error)) throw new TypeError('unexpected relay rejection');
+  return error;
+}
+
 describe('runtime update relay', () => {
+  it('allows a version POST taking fifteen seconds and then verifies, probes, and activates it', async () => {
+    const fixture = await updateTransportFixture();
+    const delayed = holdProviderRequest(
+      fixture.relayInput.transport, `/workers/workers/${WORKER_ID}/versions`, 15_000,
+    );
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const outcome = relayRuntimeUpdate({ ...fixture.relayInput, transport: delayed.transport })
+      .catch(caughtError);
+    const request = await delayed.arrived;
+    expect(request.method).toBe('POST');
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(request.signal.aborted).toBe(false);
+    expect(fixture.deployments).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(outcome).resolves.toMatchObject({ operation: 'update', status: 'succeeded' });
+    expect(delayed.callCount()).toBe(1);
+    expect(fixture.events).toEqual([
+      'control:begin', 'progress:current_verified', 'asset_session', 'asset_bucket',
+      'progress:assets_uploaded', 'worker_version', 'version_verify', 'progress:candidate_created',
+      'deployment', 'progress:candidate_staged', 'control:probe', 'progress:candidate_verified',
+      'deployment', 'progress:activated', 'control:probe', 'progress:health_verified', 'control:complete',
+    ]);
+    expect(fixture.deployments).toEqual([
+      [{ version_id: OLD_VERSION, percentage: 100 }, { version_id: TARGET_VERSION, percentage: 0 }],
+      [{ version_id: TARGET_VERSION, percentage: 100 }],
+    ]);
+    expect(fixture.subdomainStates).toEqual([true, false]);
+  });
+
+  it('aborts one hung version POST at thirty seconds without deploying or retrying', async () => {
+    const fixture = await updateTransportFixture();
+    const held = holdProviderRequest(fixture.relayInput.transport, `/workers/workers/${WORKER_ID}/versions`);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const outcome = relayRuntimeUpdate({ ...fixture.relayInput, transport: held.transport })
+      .catch(caughtError);
+    const request = await held.arrived;
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(request.signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(request.signal.aborted).toBe(true);
+    const error = await outcome;
+    expect(error).toMatchObject({
+      code: 'provider_unknown', stage: 'worker_version', outcome: 'unknown', canRetry: false, submissions: [],
+    });
+    expect(String(error)).not.toContain(ACCESS_TOKEN);
+    expect(JSON.stringify(error)).not.toContain(ACCESS_TOKEN);
+    expect(held.callCount()).toBe(1);
+    expect(fixture.events).not.toContain('version_verify');
+    expect(fixture.deployments).toEqual([]);
+    expect(fixture.commands).not.toContain('probe');
+    expect(fixture.commands).not.toContain('complete');
+    expect(fixture.controls.at(-1)?.body).toMatchObject({ command: 'fail', failureCode: 'runtime_action_failed' });
+    expect(fixture.subdomainStates).toEqual([true, false]);
+    expect(fixture.currentSubdomain()).toBe(false);
+  });
+
+  it.each([
+    ['asset_session', `/workers/scripts/${WORKER_NAME}/assets-upload-session`],
+    ['version_verify', `/workers/workers/${WORKER_ID}/versions/${TARGET_VERSION}`],
+  ] as const)('keeps the %s deadline at ten seconds', async (stage, path) => {
+    const fixture = await updateTransportFixture();
+    const held = holdProviderRequest(fixture.relayInput.transport, path);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const outcome = relayRuntimeUpdate({ ...fixture.relayInput, transport: held.transport })
+      .catch(caughtError);
+    const request = await held.arrived;
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(request.signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(request.signal.aborted).toBe(true);
+    await expect(outcome).resolves.toMatchObject({
+      code: 'provider_unknown', stage, canRetry: false,
+      outcome: stage === 'version_verify' ? 'submitted' : 'unknown',
+    });
+    expect(held.callCount()).toBe(1);
+    expect(fixture.deployments).toEqual([]);
+    expect(fixture.commands).toContain('fail');
+    expect(fixture.commands).not.toContain('probe');
+    expect(fixture.commands).not.toContain('complete');
+    expect(fixture.subdomainStates).toEqual([true, false]);
+    expect(fixture.currentSubdomain()).toBe(false);
+  });
+
   it('uploads and verifies a new update candidate before zero-traffic probe and activation', async () => {
     const fixture = await updateTransportFixture();
     const result = await relayRuntimeUpdate(fixture.relayInput);
