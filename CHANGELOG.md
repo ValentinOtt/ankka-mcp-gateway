@@ -4,6 +4,9 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Add a minimal best-effort support policy: only the newest release of each
+  channel receives fixes, no backports, canary as the evaluation channel, and
+  stable as a maintainer recommendation rather than an SLA.
 - Add documentation-only native provider setup guides to the Sources dashboard,
   with explicit compatibility, read-only grant, and release prerequisites.
   These guides do not create source drafts or approve catalog entries.

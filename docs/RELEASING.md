@@ -3,8 +3,11 @@
 This document describes the public release-integrity contract. It is not a
 deployment runbook and grants no signing, publication, or Cloudflare authority.
 
-The project has no production-supported release yet. Preview artifacts remain
-prereleases until the project publishes a stable support policy.
+Release support expectations are defined by the
+[support policy](../SUPPORT.md): support is best-effort, and only the newest
+release of each channel receives fixes. Canary artifacts are prereleases for
+evaluation; a stable release marks a maintainer recommendation, not a
+warranty.
 
 ## Source binding
 
