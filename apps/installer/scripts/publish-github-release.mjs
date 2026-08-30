@@ -248,8 +248,8 @@ function releaseTitle(release, channel) {
 export function releaseNotes(repository, manifest, receipt) {
   const commitUrl = `https://github.com/${repository}/commit/${manifest.sourceCommit}`;
   const channelLabel = receipt.channel === 'canary' ? 'Canary pre-release' : 'Stable release';
-  const teamReleaseNotes = manifest.release === 'gateway-v0.1.15'
-    ? '## v0.1.15 scope and limits\n\n' +
+  const teamReleaseNotes = ['gateway-v0.1.15', 'gateway-v0.1.16'].includes(manifest.release)
+    ? `## ${manifest.release.slice('gateway-'.length)} scope and limits\n\n` +
       '- Team permissions apply only to MCP sources already installed in your gateway.\n' +
       '- New-source creation is unavailable in this release, including first-source onboarding for fresh empty gateways.\n' +
       '- Administrators remain fixed; source write tools are not activated and existing read-only boundaries are unchanged.\n' +

@@ -1202,7 +1202,7 @@ test('signed runtime updates require explicit authorization, journal progress in
       to: 'gateway-v0.1.1',
     });
 
-    const sendControl = async (command) => {
+    const controlRequest = (command, headers = {}) => {
       const body = canonicalJson({
         schemaVersion: 1,
         actionId: action.actionId,
@@ -1214,15 +1214,16 @@ test('signed runtime updates require explicit authorization, journal progress in
       });
       const signature = `sha256=${createHmac('sha256', Buffer.from(action.actionKey, 'base64url'))
         .update(body).digest('hex')}`;
-      return worker.fetch(new Request(
+      return new Request(
         'https://ankka-gateway-test.tenant.workers.dev/__ankka/runtime-action',
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-ankka-runtime-action-signature': signature },
+          headers: { 'content-type': 'application/json', 'x-ankka-runtime-action-signature': signature, ...headers },
           body,
         },
-      ), env);
+      );
     };
+    const sendControl = (command) => worker.fetch(controlRequest(command), env);
     const oldVersionId = '11111111-1111-4111-8111-111111111111';
     const newVersionId = '22222222-2222-4222-8222-222222222222';
     assert.equal((await sendControl({ command: 'begin' })).status, 200);
@@ -1230,6 +1231,95 @@ test('signed runtime updates require explicit authorization, journal progress in
       command: 'progress', stage: 'candidate_staged',
       fromVersionId: oldVersionId, toVersionId: newVersionId,
     })).status, 200);
+
+    // The candidate outer shares the existing namespace; its DO still runs with
+    // the old release environment. Simulate the platform rejecting a forwarded
+    // outer version override rather than silently accepting it as Node would.
+    const retainedNamespace = env.ADMIN_STATE;
+    const retainedStub = retainedNamespace.get('v1:management');
+    const forwardedProbes = [];
+    const candidateEnvironment = {
+      ...env,
+      ANKKA_GATEWAY_RELEASE: action.to.release,
+      ANKKA_GATEWAY_RELEASE_SHA256: action.to.artifactSha256,
+      ADMIN_STATE: {
+        idFromName(name) {
+          assert.equal(name, 'v1:management');
+          return retainedNamespace.idFromName(name);
+        },
+        get(id) {
+          assert.equal(id, 'v1:management');
+          return { async fetch(request) {
+            assert.equal(env.ANKKA_GATEWAY_RELEASE, action.from.release, 'the retained DO must keep its old environment');
+            if (request.headers.has('Cloudflare-Workers-Version-Overrides')) {
+              throw new Error('synthetic_internal_version_override_rejected');
+            }
+            forwardedProbes.push({
+              url: request.url,
+              body: await request.clone().text(),
+              headers: new Headers(request.headers),
+            });
+            return retainedStub.fetch(request);
+          } };
+        },
+      },
+    };
+    const probeCommand = {
+      command: 'probe', targetRelease: action.to.release, targetArtifactSha256: action.to.artifactSha256,
+    };
+    assert.equal(action.workerName, 'ankka-gateway-test');
+    const override = `${action.workerName}="${newVersionId}"`;
+    const probeRequest = controlRequest(probeCommand, {
+      'Cloudflare-Workers-Version-Overrides': override,
+      'x-synthetic-preserved-header': 'preserved',
+    });
+    const expectedProbeBody = await probeRequest.clone().text();
+    const expectedProbeHeaders = new Headers(probeRequest.headers);
+    expectedProbeHeaders.delete('Cloudflare-Workers-Version-Overrides');
+    expectedProbeHeaders.set('x-ankka-runtime-probe-version', 'verified');
+    const storedWrites = () => [...retainedNamespace.objects].map(([name, entry]) => ({ name, writes: entry.storage.writes }));
+    const writesBeforeProbes = structuredClone(storedWrites());
+    const providerRequestsBeforeProbes = cloudflare.requests.length;
+    const ready = await worker.fetch(probeRequest, candidateEnvironment);
+    assert.equal(ready.status, 204);
+    assert.equal(ready.headers.get('x-ankka-runtime-action'), 'ready');
+    assert.equal(forwardedProbes.length, 1);
+    assert.equal(forwardedProbes[0].url, 'https://admin-state.invalid/runtime-updates/control');
+    assert.equal(forwardedProbes[0].body, expectedProbeBody, 'the exact HMAC-signed body is preserved');
+    assert.deepEqual(Object.fromEntries(forwardedProbes[0].headers), Object.fromEntries(expectedProbeHeaders));
+    assert.equal(forwardedProbes[0].headers.get('x-ankka-runtime-action-signature'),
+      `sha256=${createHmac('sha256', Buffer.from(action.actionKey, 'base64url')).update(expectedProbeBody).digest('hex')}`);
+    assert.equal(probeRequest.headers.get('Cloudflare-Workers-Version-Overrides'), override, 'incoming headers remain untouched');
+
+    for (const wrongEnvironment of [
+      { ...candidateEnvironment, ANKKA_GATEWAY_RELEASE: action.from.release },
+      { ...candidateEnvironment, ANKKA_GATEWAY_RELEASE_SHA256: action.from.artifactSha256 },
+    ]) {
+      const rejected = await worker.fetch(controlRequest(probeCommand, {
+        'Cloudflare-Workers-Version-Overrides': override,
+        'x-ankka-runtime-probe-version': 'verified',
+      }), wrongEnvironment);
+      assert.equal(rejected.status, 409);
+      assert.deepEqual(await rejected.json(), { schemaVersion: 1, error: 'runtime_probe_version_mismatch' });
+    }
+    assert.equal(forwardedProbes.length, 1, 'a forged marker cannot bypass exact outer release and artifact checks');
+
+    const badSignature = await worker.fetch(controlRequest(probeCommand, {
+      'Cloudflare-Workers-Version-Overrides': override,
+      'x-ankka-runtime-probe-version': 'verified',
+      'x-ankka-runtime-action-signature': `sha256=${'0'.repeat(64)}`,
+    }), candidateEnvironment);
+    assert.equal(badSignature.status, 400);
+    assert.deepEqual(await badSignature.json(), { schemaVersion: 1, error: 'runtime_action_rejected' });
+    assert.equal(forwardedProbes.length, 2, 'the retained DO independently verifies the signature');
+    const missingMarker = await retainedStub.fetch(new Request(
+      'https://admin-state.invalid/runtime-updates/control', controlRequest(probeCommand),
+    ));
+    assert.equal(missingMarker.status, 409);
+    assert.deepEqual(await missingMarker.json(), { schemaVersion: 1, error: 'runtime_action_conflict' });
+    assert.deepEqual(storedWrites(), writesBeforeProbes, 'successful and rejected probes never write storage');
+    assert.equal(cloudflare.requests.length, providerRequestsBeforeProbes, 'probes never call the provider');
+
     const completed = await sendControl({
       command: 'complete', fromVersionId: oldVersionId, toVersionId: newVersionId,
     });

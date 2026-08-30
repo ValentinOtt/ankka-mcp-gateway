@@ -5128,6 +5128,8 @@ async function handleRuntimeActionApply(request, env) {
         return fixedJson(409, { schemaVersion: 1, error: 'runtime_probe_version_mismatch' });
       }
       const headers = new Headers(request.headers);
+      // The override selects the outer candidate, not the retained Durable Object.
+      headers.delete('Cloudflare-Workers-Version-Overrides');
       headers.set('x-ankka-runtime-probe-version', 'verified');
       internal = new Request(request, { headers });
     }

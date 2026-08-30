@@ -142,7 +142,7 @@ export function buildPublicUpdateChannel(bundle: VerifiedReleaseBundle): PublicU
     notes: Object.freeze([
       `Signed ${bundle.manifest.release} gateway runtime and management application.`,
       'Normal update: customer configuration, credentials, Access, DNS, MCP sources, and tool allowlists are unchanged.',
-      ...(bundle.manifest.release === 'gateway-v0.1.15' ? [
+      ...(['gateway-v0.1.15', 'gateway-v0.1.16'].includes(bundle.manifest.release) ? [
         'Team permissions apply only to MCP sources already installed in your gateway.',
         'New-source creation is unavailable in this release, including first-source onboarding for fresh empty gateways.',
         'Administrators remain fixed; source write tools are not activated and existing read-only boundaries are unchanged.',
