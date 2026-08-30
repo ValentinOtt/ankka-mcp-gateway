@@ -9,6 +9,10 @@ export const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 export const GOOGLE_READONLY_SCOPES = {
   'search-console': 'https://www.googleapis.com/auth/webmasters.readonly',
   'google-analytics': 'https://www.googleapis.com/auth/analytics.readonly',
+  // BigQuery accepts no bigquery.readonly scope on jobs.query or metadata
+  // reads; cloud-platform.read-only is the narrowest read-only scope all five
+  // used methods accept. Read-only IAM on the identity remains the boundary.
+  bigquery: 'https://www.googleapis.com/auth/cloud-platform.read-only',
 } as const;
 type GoogleProvider = keyof typeof GOOGLE_READONLY_SCOPES;
 
@@ -55,7 +59,7 @@ export function createGoogleAuthorization(rawSecret: string, provider: GooglePro
     if (rawSecret.length > GOOGLE_AUTH_LIMITS.secretBytes ||
       encoder.encode(rawSecret).byteLength > GOOGLE_AUTH_LIMITS.secretBytes) throw new Error();
     account = serviceAccount.parse(JSON.parse(rawSecret));
-    scope = GOOGLE_READONLY_SCOPES[z.enum(['search-console', 'google-analytics']).parse(provider)];
+    scope = GOOGLE_READONLY_SCOPES[z.enum(['search-console', 'google-analytics', 'bigquery']).parse(provider)];
   } catch {
     throw new GoogleAuthorizationError('GOOGLE_AUTH_CONFIGURATION_INVALID');
   }
