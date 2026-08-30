@@ -77,6 +77,10 @@ the [changelog](../CHANGELOG.md) for repository changes, and the
 credential-free tests. The [governance roadmap](GOVERNANCE_ROADMAP.md) describes
 future work, not a promise that every feature is available in a signed release.
 
+For update-routing investigations, the [runtime probe canary](RUNTIME_PROBE_CANARY.md)
+tests two Worker versions against disposable synthetic Durable Object state.
+It never targets an existing gateway and is not a release acceptance test.
+
 For a non-security issue, share fixed public error codes and non-sensitive
 version information only. Never include tokens, cookies, private hostnames,
 account or resource identifiers, raw provider responses, or private data.

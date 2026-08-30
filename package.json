@@ -41,6 +41,7 @@
     "canary:fixture:test": "node --test test/synthetic-mcp.test.mjs",
     "canary:lifecycle": "node src/canary-lifecycle-cli.ts",
     "canary:live": "node tools/live-portal-canary.mjs",
+    "canary:runtime-probe": "node tools/runtime-probe-canary.mjs",
     "check": "npm run check:toolchain && npm run lint && npm run typecheck && npm run build && npm run test:core && npm run test:apps && npm run check:boundary && npm run check:history",
     "check:boundary": "node scripts/check-public-boundary.mjs",
     "check:fast": "npm run lint && npm run typecheck && npm run typecheck --workspace @ankka/gateway-installer && npm run typecheck --workspace @ankka/search-console-adapter && npm run typecheck --workspace @ankka/read-only-connectors && npm run check:boundary && npm run build:admin && npm run build --workspace @ankka/search-console-adapter && npm run build --workspace @ankka/read-only-connectors && npm run test --workspace @ankka/gateway-admin && npm run test --workspace @ankka/search-console-adapter && npm run test --workspace @ankka/read-only-connectors && npm run test:core",
