@@ -10,15 +10,20 @@ import {
 } from 'react'
 import * as v from 'valibot'
 import {
+  GatewayApiError,
   type GatewayAdminApi,
   type GatewayStatus,
   HttpGatewayAdminApi,
+  SOURCE_ADDITION_PAUSED_MESSAGE,
   type ManagedSources,
   type PreparedAction,
   type RuntimeOperation,
   type RuntimeUpdate,
   type SourceDiscovery,
   type SourceDraftInput,
+  type Team,
+  type TeamAction,
+  type TeamMember,
   validHandoffUrl,
 } from './api'
 
@@ -45,6 +50,10 @@ interface GatewayContextValue {
   prepareSourceApply(sourceId: string): Promise<PreparedAction>
   prepareRuntimeAction(operation: RuntimeOperation): Promise<PreparedAction>
   prepareTeardownAction(): Promise<PreparedAction>
+  getTeam(): Promise<Team>
+  prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<PreparedAction>
+  getTeamAction(actionId: string): Promise<TeamAction>
+  cancelTeamAction(actionId: string): Promise<TeamAction>
 }
 
 interface GatewayProviderProps extends PropsWithChildren {
@@ -104,6 +113,9 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     return next
   }, [])
 
+  const getTeam = useCallback(() => apiRef.current.getTeam(), [])
+  const getTeamAction = useCallback((actionId: string) => apiRef.current.getTeamAction(actionId), [])
+
   const refreshUpdate = useCallback(async () => {
     try {
       const next = await apiRef.current.getUpdate()
@@ -155,6 +167,13 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
           if (action.status === 'succeeded') {
             setSourceNotice({ tone: 'success', message: 'Source installed and the Cloudflare MCP Portal was updated.' })
             await reload()
+            return
+          }
+          const currentSources = await apiRef.current.getSources()
+          if (!active) return
+          setSources(currentSources)
+          if (currentSources.installationEnabled !== true) {
+            setSourceNotice({ tone: 'neutral', message: SOURCE_ADDITION_PAUSED_MESSAGE })
             return
           }
           if (Date.parse(action.expiresAt) <= Date.now()) {
@@ -241,6 +260,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     discoverSource: (url) => runBusy(() => apiRef.current.discoverSource(url)),
     saveSourceDraft: (source) => runBusy(async () => {
       const current = sources ?? await refreshSources()
+      if (current.installationEnabled !== true) throw new GatewayApiError(409, 'source_addition_paused')
       const next = await apiRef.current.saveSourceDraft(current.revision, source)
       setSources(next)
       setSourceNotice({ tone: 'success', message: 'Draft saved inside your gateway. The live Portal was not changed.' })
@@ -248,6 +268,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     }),
     prepareSourceApply: (sourceId) => runBusy(async () => {
       const current = sources ?? await refreshSources()
+      if (current.installationEnabled !== true) throw new GatewayApiError(409, 'source_addition_paused')
       const trustedStatus = status ?? await apiRef.current.getStatus()
       if (status === null) setStatus(trustedStatus)
       const prepared = await apiRef.current.prepareSourceAction(current.revision, sourceId)
@@ -271,9 +292,29 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       if (!handoffUrl) throw new Error('The teardown handoff could not be verified.')
       return { ...prepared, handoffUrl }
     }),
+    getTeam,
+    getTeamAction,
+    prepareTeamAction: (expectedRevision, members) => runBusy(async () => {
+      try {
+        const trustedStatus = status ?? await apiRef.current.getStatus()
+        if (status === null) setStatus(trustedStatus)
+        const prepared = await apiRef.current.prepareTeamAction(expectedRevision, members)
+        const handoffUrl = validHandoffUrl(prepared.handoffUrl, trustedStatus.controlPlaneOrigin)
+        if (!handoffUrl) throw new GatewayApiError(502, 'team_handoff_invalid')
+        return { ...prepared, handoffUrl }
+      } catch (cause) {
+        throw cause instanceof GatewayApiError ? cause : new GatewayApiError(502, 'team_prepare_failed')
+      }
+    }),
+    cancelTeamAction: (actionId) => runBusy(async () => {
+      try { return await apiRef.current.cancelTeamAction(actionId) }
+      catch (cause) {
+        throw cause instanceof GatewayApiError ? cause : new GatewayApiError(502, 'team_cancel_failed')
+      }
+    }),
   }), [
     busyCount, error, hasLoaded, isLoading, refreshSources, refreshUpdate, reload, runBusy,
-    sourceNotice, sources, status, update, updateNotice,
+    sourceNotice, sources, status, update, updateNotice, getTeam, getTeamAction,
   ])
 
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>

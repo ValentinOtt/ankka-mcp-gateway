@@ -22,7 +22,7 @@ const status: GatewayStatus = {
   updatedAt: '2026-08-27T12:00:00.000Z',
 }
 const sources: ManagedSources = {
-  schemaVersion: 1, revision: 1, applyMode: 'oauth_per_action', sources: [],
+  schemaVersion: 1, revision: 1, applyMode: 'oauth_per_action', installationEnabled: false, sources: [],
 }
 const update: RuntimeUpdate = {
   schemaVersion: 1,
@@ -37,6 +37,7 @@ function api(): GatewayAdminApi {
   return {
     getStatus: vi.fn(async () => status),
     getSources: vi.fn(async () => sources),
+    getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     getUpdate: vi.fn(async () => update),
     discoverSource: vi.fn(),
     saveSourceDraft: vi.fn(),

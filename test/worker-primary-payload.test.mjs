@@ -4,7 +4,13 @@ import { readFile, readdir } from 'node:fs/promises';
 import test from 'node:test';
 import * as v from 'valibot';
 
-import worker, { AdminState } from '../payload/worker/index.js';
+import worker, {
+  AdminState,
+  managementSourcesInstallProjectionFits,
+  parseSourceSave,
+  safeManagementSources,
+  saveDraftSource,
+} from '../payload/worker/index.js';
 import {
   APPROVED_CLOUDFLARE_CONTRACT,
   RELEASE_ENVELOPE_SCHEMA_VERSION,
@@ -426,50 +432,56 @@ test('management source state enforces the canonical 1 MiB aggregate before the 
   );
   assert.deepEqual(platformProbe.stats, { writeAttempts: 1, platformRejections: 1 });
 
+  const saveInput = (revision, enabledTools) => ({
+    schemaVersion: 1, revision,
+    source: { label: 'Source 15', url: 'https://source-15.example.com/mcp', authMode: 'none', enabledTools },
+  });
   const saveRequest = (revision, enabledTools) => new Request('https://admin-state.invalid/sources', {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: canonicalJson({
-      schemaVersion: 1,
-      revision,
-      source: {
-        label: 'Source 15',
-        url: 'https://source-15.example.com/mcp',
-        authMode: 'none',
-        enabledTools,
-      },
-    }),
+    method: 'PUT', headers: { 'content-type': 'application/json' },
+    body: canonicalJson(saveInput(revision, enabledTools)),
   });
 
-  const exactStorage = platformBoundedStorage([[MANAGEMENT_SOURCES_KEY, retained]]);
+  // Preserve the canonical aggregate-capacity contract independently of the
+  // temporary release-wide source-addition pause. This calls only pure
+  // validators: no route, storage, provider or authorization bypass is enabled.
+  const exactSaved = await saveDraftSource(retained, parseSourceSave(saveInput(15, exactTools)));
+  assert.ok(exactSaved);
+  assert.equal(canonicalByteLength(aggregateInstalledProjection(exactSaved)), MANAGEMENT_SOURCES_LIMIT_BYTES);
+  assert.equal(managementSourcesInstallProjectionFits(exactSaved), true);
+  assert.equal(await saveDraftSource(retained, parseSourceSave(saveInput(15, overTools))), null);
+  assert.equal(safeManagementSources(storedOverRecord), null);
+
+  const legacyUnsafeRecord = structuredClone(exactRecord);
+  legacyUnsafeRecord.sources[0].label += 'x';
+  assert.ok(canonicalByteLength(legacyUnsafeRecord) < MANAGEMENT_SOURCES_LIMIT_BYTES);
+  assert.equal(canonicalByteLength(aggregateInstalledProjection(legacyUnsafeRecord)), MANAGEMENT_SOURCES_LIMIT_BYTES + 1);
+  assert.ok(safeManagementSources(legacyUnsafeRecord));
+  assert.equal(managementSourcesInstallProjectionFits(legacyUnsafeRecord), false);
+  const exhaustedRevisionRecord = { ...exactRecord, revision: Number.MAX_SAFE_INTEGER };
+  assert.equal(managementSourcesInstallProjectionFits(exhaustedRevisionRecord), false);
+  assert.equal(await saveDraftSource(exhaustedRevisionRecord,
+    parseSourceSave(saveInput(Number.MAX_SAFE_INTEGER, exactTools))), null);
+
+  const exactStorage = platformBoundedStorage([[MANAGEMENT_SOURCES_KEY, exactSaved]]);
   const exactState = new AdminState({ storage: exactStorage }, {});
-  const exactResponse = await exactState.fetch(saveRequest(15, exactTools));
-  assert.equal(exactResponse.status, 200, await exactResponse.clone().text());
-  assert.deepEqual(exactStorage.stats, { writeAttempts: 1, platformRejections: 0 });
-  assert.equal(
-    canonicalByteLength(aggregateInstalledProjection(exactStorage.snapshot(MANAGEMENT_SOURCES_KEY))),
-    MANAGEMENT_SOURCES_LIMIT_BYTES,
-  );
+  const exactResponse = await exactState.fetch(saveRequest(exactSaved.revision, exactTools));
+  assert.equal(exactResponse.status, 409);
+  assert.deepEqual(await exactResponse.json(), { schemaVersion: 1, error: 'source_addition_paused', retryable: false });
+  assert.deepEqual(exactStorage.stats, { writeAttempts: 0, platformRejections: 0 });
   const exactRead = await exactState.fetch(new Request('https://admin-state.invalid/sources'));
   assert.equal(exactRead.status, 200);
-  const installedProjection = aggregateInstalledProjection(
-    exactStorage.snapshot(MANAGEMENT_SOURCES_KEY),
-  );
+  const installedProjection = aggregateInstalledProjection(exactSaved);
   await exactStorage.put(MANAGEMENT_SOURCES_KEY, installedProjection);
   const installedRead = await exactState.fetch(new Request('https://admin-state.invalid/sources'));
   assert.equal(installedRead.status, 200);
-  assert.equal(canonicalByteLength(await installedRead.clone().json()), MANAGEMENT_SOURCES_LIMIT_BYTES);
-  assert.deepEqual(exactStorage.stats, { writeAttempts: 2, platformRejections: 0 });
+  assert.equal(canonicalByteLength(await installedRead.json()), MANAGEMENT_SOURCES_LIMIT_BYTES);
+  assert.deepEqual(exactStorage.stats, { writeAttempts: 1, platformRejections: 0 });
 
   const overStorage = platformBoundedStorage([[MANAGEMENT_SOURCES_KEY, retained]]);
   const overState = new AdminState({ storage: overStorage }, {});
   const overResponse = await overState.fetch(saveRequest(15, overTools));
-  assert.equal(overResponse.status, 413);
-  assert.deepEqual(await overResponse.json(), {
-    schemaVersion: 1,
-    error: 'source_capacity_exceeded',
-    revision: 15,
-  });
+  assert.equal(overResponse.status, 409);
+  assert.deepEqual(await overResponse.json(), { schemaVersion: 1, error: 'source_addition_paused', retryable: false });
   assert.deepEqual(overStorage.stats, { writeAttempts: 0, platformRejections: 0 });
   assert.equal(canonicalJson(overStorage.snapshot(MANAGEMENT_SOURCES_KEY)), canonicalJson(retained));
 
@@ -482,141 +494,55 @@ test('management source state enforces the canonical 1 MiB aggregate before the 
 
   const gateway = await installReadyGateway();
   const managementStorage = gateway.env.ADMIN_STATE.objects.get('v1:management').storage;
-  await managementStorage.put(MANAGEMENT_SOURCES_KEY, exactRecord);
-  const management = gateway.env.ADMIN_STATE.get(
-    gateway.env.ADMIN_STATE.idFromName('v1:management'),
-  );
+  const management = gateway.env.ADMIN_STATE.get(gateway.env.ADMIN_STATE.idFromName('v1:management'));
   const source = exactRecord.sources.at(-1);
   const actionId = `action_${'C'.repeat(32)}`;
   const issuedAt = Date.now();
   const expiresAt = issuedAt + 10 * 60 * 1000;
-  const prepared = await management.fetch(new Request('https://admin-state.invalid/source-actions', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: canonicalJson({
-      schemaVersion: 1,
-      actionId,
-      sourceId: source.id,
-      sourceRevision: exactRecord.revision,
-      actorEmail: 'admin@example.com',
-      issuedAt,
-      expiresAt,
-      actionKeyHash: await prefixedSha256(BOOTSTRAP_NONCE),
-      sourceHash: await prefixedSha256({
-        id: source.id,
-        label: source.label,
-        url: source.url,
-        authMode: source.authMode,
-        onBehalfOfUser: source.onBehalfOfUser,
-        enabledTools: source.enabledTools,
-      }),
+  const originalPrepare = {
+    schemaVersion: 1, actionId, sourceId: source.id, sourceRevision: exactRecord.revision,
+    actorEmail: 'admin@example.com', issuedAt, expiresAt,
+    actionKeyHash: await prefixedSha256(BOOTSTRAP_NONCE),
+    sourceHash: await prefixedSha256({
+      id: source.id, label: source.label, url: source.url, authMode: source.authMode,
+      onBehalfOfUser: source.onBehalfOfUser, enabledTools: source.enabledTools,
     }),
-  }));
-  assert.equal(prepared.status, 200, await prepared.clone().text());
-
-  const legacyUnsafeRecord = structuredClone(exactRecord);
-  legacyUnsafeRecord.sources[0].label += 'x';
-  assert.ok(canonicalByteLength(legacyUnsafeRecord) < MANAGEMENT_SOURCES_LIMIT_BYTES);
-  assert.equal(
-    canonicalByteLength(aggregateInstalledProjection(legacyUnsafeRecord)),
-    MANAGEMENT_SOURCES_LIMIT_BYTES + 1,
-  );
-  await managementStorage.put(MANAGEMENT_SOURCES_KEY, legacyUnsafeRecord);
-  const unsafeSource = legacyUnsafeRecord.sources.at(-2);
-  const prepareWrites = managementStorage.writes.length;
-  const unsafePrepare = await management.fetch(new Request(
-    'https://admin-state.invalid/source-actions',
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: canonicalJson({
-        schemaVersion: 1,
-        actionId: `action_${'D'.repeat(32)}`,
-        sourceId: unsafeSource.id,
-        sourceRevision: legacyUnsafeRecord.revision,
-        actorEmail: 'admin@example.com',
-        issuedAt,
-        expiresAt,
-        actionKeyHash: await prefixedSha256(BOOTSTRAP_NONCE),
-        sourceHash: await prefixedSha256({
-          id: unsafeSource.id,
-          label: unsafeSource.label,
-          url: unsafeSource.url,
-          authMode: unsafeSource.authMode,
-          onBehalfOfUser: unsafeSource.onBehalfOfUser,
-          enabledTools: unsafeSource.enabledTools,
-        }),
-      }),
-    },
-  ));
-  assert.equal(unsafePrepare.status, 409);
-  assert.deepEqual(await unsafePrepare.json(), {
-    schemaVersion: 1, error: 'source_action_conflict',
+  };
+  // Historical unspent authorization: preserve validation of unsafe persisted
+  // projections without issuing a new source handoff in the paused release.
+  await managementStorage.put('ankka-mcp-gateway/source-actions/v1', {
+    schemaVersion: 1, revision: 2, actions: [{ ...originalPrepare, status: 'authorization_required',
+      resources: [], pending: null, portalUpdate: null, failureCode: null }],
   });
-  assert.equal(managementStorage.writes.length, prepareWrites);
-
-  const exhaustedRevisionRecord = { ...exactRecord, revision: Number.MAX_SAFE_INTEGER };
-  await managementStorage.put(MANAGEMENT_SOURCES_KEY, exhaustedRevisionRecord);
-  const revisionWrites = managementStorage.writes.length;
-  const exhaustedPrepare = await management.fetch(new Request(
-    'https://admin-state.invalid/source-actions',
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: canonicalJson({
-        schemaVersion: 1,
-        actionId: `action_${'E'.repeat(32)}`,
-        sourceId: unsafeSource.id,
-        sourceRevision: Number.MAX_SAFE_INTEGER,
-        actorEmail: 'admin@example.com',
-        issuedAt,
-        expiresAt,
-        actionKeyHash: await prefixedSha256(BOOTSTRAP_NONCE),
-        sourceHash: await prefixedSha256({
-          id: unsafeSource.id,
-          label: unsafeSource.label,
-          url: unsafeSource.url,
-          authMode: unsafeSource.authMode,
-          onBehalfOfUser: unsafeSource.onBehalfOfUser,
-          enabledTools: unsafeSource.enabledTools,
-        }),
+  for (const record of [exactRecord, legacyUnsafeRecord, exhaustedRevisionRecord]) {
+    await managementStorage.put(MANAGEMENT_SOURCES_KEY, record);
+    const before = managementStorage.writes.length;
+    const prepared = await management.fetch(new Request('https://admin-state.invalid/source-actions', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: canonicalJson({
+        ...originalPrepare, sourceRevision: record.revision,
       }),
-    },
-  ));
-  assert.equal(exhaustedPrepare.status, 409);
-  assert.equal(managementStorage.writes.length, revisionWrites);
-
+    }));
+    assert.equal(prepared.status, 409);
+    assert.deepEqual(await prepared.json(), { schemaVersion: 1, error: 'source_addition_paused', retryable: false });
+    assert.equal(managementStorage.writes.length, before);
+  }
   await managementStorage.put(MANAGEMENT_SOURCES_KEY, legacyUnsafeRecord);
   const actionBody = canonicalJson({
-    schemaVersion: 1,
-    actionId,
-    actionKey: BOOTSTRAP_NONCE,
-    actorEmail: 'admin@example.com',
-    accountId: ACCOUNT_ID,
-    issuedAt,
-    expiresAt,
+    schemaVersion: 1, actionId, actionKey: BOOTSTRAP_NONCE,
+    actorEmail: 'admin@example.com', accountId: ACCOUNT_ID, issuedAt, expiresAt,
     cloudflareAccessToken: 'ephemeral-capacity-guard-grant',
   });
-  const actionSignature = `sha256=${createHmac(
-    'sha256', Buffer.from(BOOTSTRAP_NONCE, 'base64url'),
-  ).update(actionBody).digest('hex')}`;
+  const actionSignature = `sha256=${createHmac('sha256', Buffer.from(BOOTSTRAP_NONCE, 'base64url')).update(actionBody).digest('hex')}`;
   const providerRequests = gateway.provider.requests.length;
   const storageWrites = managementStorage.writes.length;
   const rejectedApply = await withProviderFetch(gateway.provider.fetch, () => worker.fetch(new Request(
-    'https://ankka-gateway-test.tenant.workers.dev/__ankka/source-action',
-    {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-ankka-source-action-signature': actionSignature,
-      },
+    'https://ankka-gateway-test.tenant.workers.dev/__ankka/source-action', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-ankka-source-action-signature': actionSignature },
       body: actionBody,
     },
   ), gateway.env));
   assert.equal(rejectedApply.status, 400);
-  assert.deepEqual(await rejectedApply.json(), {
-    schemaVersion: 1, error: 'source_action_rejected', retryable: false,
-  });
+  assert.deepEqual(await rejectedApply.json(), { schemaVersion: 1, error: 'source_action_rejected', retryable: false });
   assert.equal(gateway.provider.requests.length, providerRequests);
   assert.equal(managementStorage.writes.length, storageWrites);
 });
@@ -886,6 +812,83 @@ test('bootstrap fails closed when Cloudflare generates a source application for 
   assert.equal(cloudflare.posts()[0].pathname.endsWith('/mcp/servers'), true);
   assert.equal(cloudflare.deletes().length, 0);
   assert.deepEqual([...cloudflare.state.apps.keys()], ['g'.repeat(32)]);
+});
+
+test('team inspection requires an administrator and permission preparation rejects unknown fields', async () => {
+  const { env, objects } = await installReadyGateway();
+  const originalFetch = globalThis.fetch;
+  const keys = await crypto.subtle.generateKey(
+    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    true, ['sign', 'verify'],
+  );
+  const kid = 'team-access-key';
+  const jwk = await crypto.subtle.exportKey('jwk', keys.publicKey);
+  const assertion = await accessAssertion('admin@example.com', env.CF_ACCESS_ISSUER, env.CF_ACCESS_AUD, keys.privateKey, kid);
+  const headers = { 'cf-access-authenticated-user-email': 'admin@example.com', 'cf-access-jwt-assertion': assertion };
+  const snapshot = () => canonicalJson([...objects].map(([name, entry]) => [name, entry.storage.writes]));
+  const beforeWrites = new Map([...objects].map(([name, entry]) => [name, entry.storage.writes.length]));
+  const network = [];
+  try {
+    globalThis.fetch = async (request) => {
+      network.push(request.url);
+      assert.equal(request.url, `${env.CF_ACCESS_ISSUER}/cdn-cgi/access/certs`, 'no Cloudflare management calls');
+      return Response.json({ keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] });
+    };
+    assert.equal((await worker.fetch(new Request('https://manage.example.com/api/team'), env)).status, 401);
+    const memberAssertion = await accessAssertion('member@example.com', env.CF_ACCESS_ISSUER, env.CF_ACCESS_AUD, keys.privateKey, kid);
+    assert.equal((await worker.fetch(new Request('https://manage.example.com/api/team', { headers: {
+      'cf-access-authenticated-user-email': 'member@example.com', 'cf-access-jwt-assertion': memberAssertion,
+    } }), env)).status, 401);
+    const response = await worker.fetch(new Request('https://manage.example.com/api/team', { headers }), env);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const body = await response.json();
+    assert.deepEqual(body.adminEmails, ['admin@example.com', 'owner@example.com']);
+    assert.deepEqual(body.members.map((person) => person.email), ['admin@example.com', 'member@example.com', 'owner@example.com']);
+    assert.equal(body.sources.length, 1);
+    assert.ok(body.members.every((person) => canonicalJson(person.sourceIds) === canonicalJson([body.sources[0].id])));
+    assert.equal(body.sources[0].status, 'installed');
+    assert.equal(body.editingEnabled, true);
+    assert.equal(body.editingDisabledReason, null);
+    assert.equal(body.pendingAction, null);
+    assert.equal(body.proposedMembers, null);
+    assert.doesNotMatch(JSON.stringify(body), /provider|accountId|zoneId|receipt|actionKey|synthetic-cloudflare-grant/iu);
+    const initializedKeys = [...objects].flatMap(([name, entry]) => entry.storage.writes
+      .slice(beforeWrites.get(name) ?? 0).map(({ key }) => key));
+    assert.deepEqual(initializedKeys, ['ankka-mcp-gateway/team-access/v1']);
+    const beforeRejectedWrites = snapshot();
+    const save = await worker.fetch(new Request('https://manage.example.com/api/team-actions', {
+      method: 'POST', headers: { ...headers, origin: 'https://manage.example.com', 'content-type': 'application/json' },
+      body: JSON.stringify({ schemaVersion: 1, expectedRevision: body.revision, members: body.members, editingEnabled: true }),
+    }), { ...env, TEAM_ACCESS_ENABLED: 'true' });
+    assert.equal(save.status, 400);
+    assert.equal((await save.json()).error, 'team_access_invalid_request');
+    assert.equal((await worker.fetch(new Request('https://other.example.com/api/team', { headers }), env)).status, 503);
+    assert.equal((await worker.fetch(new Request('https://manage.example.com/api/team', { method: 'DELETE', headers }), env)).status, 405);
+    assert.equal((await worker.fetch(new Request(`https://manage.example.com/api/team-actions/action_${'A'.repeat(32)}`, { headers }), env)).status, 404);
+    assert.equal(snapshot(), beforeRejectedWrites, 'rejected writes leave every stored record untouched');
+    assert.ok(network.length > 0);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('team inspection fails closed when saved access configuration is unavailable', async () => {
+  const { env, objects } = await installReadyGateway();
+  const management = objects.get('v1:management');
+  await management.storage.put('ankka-mcp-gateway/management-control/v1', { schemaVersion: 1 });
+  const response = await env.ADMIN_STATE.get('v1:management').fetch(new Request('https://admin-state.invalid/team'));
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, 'team_unavailable');
+});
+
+test('team inspection keeps management authority separate from the saved source audience', async () => {
+  const { env } = await installReadyGateway();
+  env.ADMIN_EMAILS = 'separate-admin@example.com';
+  const response = await env.ADMIN_STATE.get('v1:management').fetch(new Request('https://admin-state.invalid/team'));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.adminEmails, ['separate-admin@example.com']);
+  assert.deepEqual(body.members.find((person) => person.email === 'separate-admin@example.com').sourceIds, []);
+  assert.ok(body.members.find((person) => person.email === 'member@example.com').sourceIds.length > 0);
 });
 
 test('management status requires a verified Access JWT and exposes no provider or receipt internals', async () => {
@@ -1267,7 +1270,7 @@ test('signed runtime updates require explicit authorization, journal progress in
   }
 });
 
-test('management API discovers and applies a customer-owned MCP source through one ephemeral grant', async () => {
+test('management API preserves bounded discovery and existing sources while new installation is paused', async () => {
   const { env, provider: cloudflare, readyReceipt } = await installReadyGateway();
   const largeSourceFixture = JSON.parse(await readFile(
     new URL('../fixtures/large-source/gateway.config.json', import.meta.url),
@@ -1338,7 +1341,6 @@ test('management API discovers and applies a customer-owned MCP source through o
     let aggregatePageCalls = 0;
     let oversizedCatalogueRequest = null;
     let oversizedCatalogueBodyCancelled = false;
-    let loseNextSourceCreateResponse = false;
     globalThis.fetch = async (request) => {
       const url = new URL(request.url);
       if (url.href === `${env.CF_ACCESS_ISSUER}/cdn-cgi/access/certs`) {
@@ -1426,12 +1428,6 @@ test('management API discovers and applies a customer-owned MCP source through o
       if (url.href === 'https://legacy-auth.example.net/mcp') {
         return new Response(null, { status: 401 });
       }
-      if (loseNextSourceCreateResponse && request.method === 'POST' &&
-          url.pathname.endsWith('/access/ai-controls/mcp/servers')) {
-        loseNextSourceCreateResponse = false;
-        await cloudflare.fetch(request);
-        throw new Error('response lost after provider apply');
-      }
       return cloudflare.fetch(request);
     };
 
@@ -1483,199 +1479,29 @@ test('management API discovers and applies a customer-owned MCP source through o
         },
       }),
     }), env);
-    assert.equal(saved.status, 200, await saved.clone().text());
-    const updated = await saved.json();
-    assert.equal(updated.revision, 2);
-    assert.equal(updated.applyMode, 'oauth_per_action');
-    assert.deepEqual(updated.sources[0].enabledTools, ['company_prepare', 'company_search']);
-    assert.deepEqual(updated.sources[1].enabledTools, largeToolNames);
-    assert.equal(updated.sources[1].label, 'Approved catalogue');
-    assert.equal(updated.sources[1].status, 'draft');
-    assert.equal(mcpRequests.length, expectedCatalogueCursors.length * 2);
-    assert.deepEqual(catalogueCursors, [
-      ...expectedCatalogueCursors,
-      ...expectedCatalogueCursors,
-    ]);
-    assert.doesNotMatch(JSON.stringify(updated), /(?:authorization|credential|secret|token)/iu);
+    const paused = { schemaVersion: 1, error: 'source_addition_paused', retryable: false };
+    assert.equal(saved.status, 409);
+    assert.deepEqual(await saved.json(), paused);
+    assert.equal(initialSources.installationEnabled, false);
+    assert.equal(mcpRequests.length, expectedCatalogueCursors.length);
+    assert.deepEqual(catalogueCursors, expectedCatalogueCursors);
 
-    const nestedPrepare = await worker.fetch(new Request('https://manage.example.com/api/source-actions/not-an-action', {
-      method: 'POST',
-      headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        schemaVersion: 1,
-        revision: updated.revision,
-        sourceId: updated.sources[1].id,
-      }),
-    }), env);
-    assert.equal(nestedPrepare.status, 404);
-    assert.deepEqual(await nestedPrepare.json(), { schemaVersion: 1, error: 'source_action_not_found' });
-
-    const firstPrepared = await worker.fetch(new Request('https://manage.example.com/api/source-actions', {
-      method: 'POST',
-      headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        schemaVersion: 1,
-        revision: updated.revision,
-        sourceId: updated.sources[1].id,
-      }),
-    }), env);
-    assert.equal(firstPrepared.status, 200);
-    const firstAuthorization = await firstPrepared.json();
-    const cancelled = await worker.fetch(new Request(
-      `https://manage.example.com/api/source-actions/${firstAuthorization.actionId}`,
-      {
-        method: 'DELETE',
+    const sourceMutationStart = cloudflare.requests.length;
+    for (const path of ['/api/source-actions', '/api/source-actions/not-an-action']) {
+      const prepared = await worker.fetch(new Request(`https://manage.example.com${path}`, {
+        method: 'POST',
         headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
-        body: '{}',
-      },
-    ), env);
-    assert.equal(cancelled.status, 200);
-    assert.deepEqual(await cancelled.json(), {
-      schemaVersion: 1,
-      actionId: firstAuthorization.actionId,
-      sourceId: updated.sources[1].id,
-      status: 'failed',
-      expiresAt: firstAuthorization.expiresAt,
-      failureCode: 'source_action_denied',
-    });
-
-    const prepared = await worker.fetch(new Request('https://manage.example.com/api/source-actions', {
-      method: 'POST',
-      headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        schemaVersion: 1,
-        revision: updated.revision,
-        sourceId: updated.sources[1].id,
-      }),
-    }), env);
-    assert.equal(prepared.status, 200);
-    const authorization = await prepared.json();
-    const handoff = new URL(authorization.handoffUrl);
-    assert.equal(handoff.origin, 'https://deploy.ankka.ai');
-    assert.equal(handoff.pathname, '/manage');
-    assert.equal(handoff.search, '');
-    const actionClaim = JSON.parse(Buffer.from(handoff.hash.slice(1), 'base64url').toString('utf8'));
-    assert.equal(actionClaim.actionId, authorization.actionId);
-    assert.equal(actionClaim.actorEmail, 'admin@example.com');
-    assert.equal(actionClaim.accountId, ACCOUNT_ID);
-    assert.equal(actionClaim.workerName, 'ankka-gateway-test');
-    assert.equal(actionClaim.workersSubdomain, 'tenant');
-    assert.equal(actionClaim.controlPlaneOrigin, 'https://deploy.ankka.ai');
-    assert.deepEqual(Object.keys(actionClaim).sort(), [
-      'accountId', 'actionId', 'actionKey', 'actorEmail', 'expiresAt', 'managementOrigin',
-      'controlPlaneOrigin', 'releaseIdentity', 'schemaVersion', 'workerName', 'workersSubdomain',
-    ].sort());
-    assert.deepEqual(actionClaim.releaseIdentity, {
-      schemaVersion: 1,
-      channel: env.ANKKA_UPDATE_CHANNEL,
-      controlPlaneOrigin: 'https://deploy.ankka.ai',
-      release: env.ANKKA_GATEWAY_RELEASE,
-      keyId: env.ANKKA_UPDATE_KEY_ID,
-      publicKey: env.ANKKA_UPDATE_PUBLIC_KEY,
-      artifactSha256: env.ANKKA_GATEWAY_RELEASE_SHA256.slice('sha256:'.length),
-    });
-    assert.doesNotMatch(JSON.stringify(actionClaim), /(?:cloudflareAccessToken|access_token|refresh_token)/iu);
-
-    const actionBody = canonicalJson({
-      schemaVersion: 1,
-      actionId: actionClaim.actionId,
-      actionKey: actionClaim.actionKey,
-      actorEmail: actionClaim.actorEmail,
-      accountId: actionClaim.accountId,
-      issuedAt: Date.now(),
-      expiresAt: actionClaim.expiresAt,
-      cloudflareAccessToken: 'ephemeral-source-action-grant',
-    });
-    const actionSignature = `sha256=${createHmac(
-      'sha256', Buffer.from(actionClaim.actionKey, 'base64url'),
-    ).update(actionBody).digest('hex')}`;
-    loseNextSourceCreateResponse = true;
-    const applied = await worker.fetch(new Request(
-      'https://ankka-gateway-test.tenant.workers.dev/__ankka/source-action',
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-ankka-source-action-signature': actionSignature,
-        },
-        body: actionBody,
-      },
-    ), env);
-    assert.equal(applied.status, 409);
-    assert.equal((await applied.json()).error, 'source_action_recovery_required');
-
-    const recoveredPrepare = await worker.fetch(new Request('https://manage.example.com/api/source-actions', {
-      method: 'POST',
-      headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        schemaVersion: 1,
-        revision: updated.revision,
-        sourceId: updated.sources[1].id,
-      }),
-    }), env);
-    assert.equal(recoveredPrepare.status, 200);
-    const recoveredAuthorization = await recoveredPrepare.json();
-    assert.notEqual(recoveredAuthorization.actionId, authorization.actionId);
-    const recoveredHandoff = new URL(recoveredAuthorization.handoffUrl);
-    const recoveredClaim = JSON.parse(Buffer.from(recoveredHandoff.hash.slice(1), 'base64url').toString('utf8'));
-    const recoveredBody = canonicalJson({
-      schemaVersion: 1,
-      actionId: recoveredClaim.actionId,
-      actionKey: recoveredClaim.actionKey,
-      actorEmail: recoveredClaim.actorEmail,
-      accountId: recoveredClaim.accountId,
-      issuedAt: Date.now(),
-      expiresAt: recoveredClaim.expiresAt,
-      cloudflareAccessToken: 'ephemeral-source-action-recovery-grant',
-    });
-    const recoveredSignature = `sha256=${createHmac(
-      'sha256', Buffer.from(recoveredClaim.actionKey, 'base64url'),
-    ).update(recoveredBody).digest('hex')}`;
-    const recovered = await worker.fetch(new Request(
-      'https://ankka-gateway-test.tenant.workers.dev/__ankka/source-action',
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-ankka-source-action-signature': recoveredSignature,
-        },
-        body: recoveredBody,
-      },
-    ), env);
-    assert.equal(recovered.status, 200, await recovered.clone().text());
-    assert.equal((await recovered.json()).status, 'succeeded');
-    assert.equal(catalogueCursors.length % expectedCatalogueCursors.length, 0);
-    const lifecycleDiscoveryPasses = catalogueCursors.length / expectedCatalogueCursors.length;
-    assert.ok(lifecycleDiscoveryPasses >= 4);
-    assert.deepEqual(catalogueCursors, Array.from(
-      { length: lifecycleDiscoveryPasses },
-      () => expectedCatalogueCursors,
-    ).flat());
-    const installed = await worker.fetch(new Request('https://manage.example.com/api/sources', {
+        body: JSON.stringify({ schemaVersion: 1, revision: initialSources.revision, sourceId: initialSources.sources[0].id }),
+      }), env);
+      assert.equal(prepared.status, path === '/api/source-actions' ? 409 : 404);
+      assert.deepEqual(await prepared.json(), path === '/api/source-actions'
+        ? paused : { schemaVersion: 1, error: 'source_action_not_found' });
+    }
+    assert.equal(cloudflare.requests.length, sourceMutationStart);
+    const unchanged = await worker.fetch(new Request('https://manage.example.com/api/sources', {
       headers: accessHeaders,
     }), env);
-    const installedSources = await installed.json();
-    assert.deepEqual(installedSources.sources.map(({ label, status }) => ({ label, status })), [
-      { label: 'Company context', status: 'installed' },
-      { label: 'Approved catalogue', status: 'installed' },
-    ]);
-    assert.equal(cloudflare.state.servers.size, 2);
-    assert.equal(cloudflare.state.apps.size, 3);
-    assert.equal(cloudflare.state.portal.servers.length, 2);
-    const largeServer = [...cloudflare.state.servers.values()].find(
-      (server) => server.hostname === 'https://catalog.example.net/mcp',
-    );
-    assert.ok(largeServer);
-    const largeMapping = cloudflare.state.portal.servers.find(
-      (mapping) => mapping.server_id === largeServer.id,
-    );
-    assert.ok(largeMapping);
-    assert.deepEqual(
-      largeMapping.updated_tools.map(({ name }) => name),
-      largeToolNames,
-    );
-    assert.doesNotMatch(JSON.stringify(env.ADMIN_STATE.objects.get('v1:management').storage.writes),
-      /ephemeral-source-action-(?:grant|recovery-grant)/u);
+    assert.deepEqual(await unchanged.json(), initialSources);
 
     const oauthDiscovery = await worker.fetch(new Request('https://manage.example.com/api/sources/discover', {
       method: 'POST',
@@ -1728,7 +1554,6 @@ test('management API discovers and applies a customer-owned MCP source through o
 
     const sourceStateStorage = env.ADMIN_STATE.objects.get('v1:management').storage;
     for (const declared of [true, false]) {
-      let oversizedSaveBodyCancelled = false;
       const beforeMcpRequests = mcpRequests.length;
       const beforeProviderRequests = cloudflare.requests.length;
       const beforeStorageWrites = sourceStateStorage.writes.length;
@@ -1747,14 +1572,12 @@ test('management API discovers and applies a customer-owned MCP source through o
             pull(controller) {
               if (!declared) controller.enqueue(new Uint8Array((96 * 1024) + 1));
             },
-            cancel() { oversizedSaveBodyCancelled = true; },
           }),
           duplex: 'half',
         },
       ), env);
-      assert.equal(oversizedSave.status, 400);
-      assert.deepEqual(await oversizedSave.json(), { schemaVersion: 1, error: 'source_invalid' });
-      assert.equal(oversizedSaveBodyCancelled, true);
+      assert.equal(oversizedSave.status, 409);
+      assert.deepEqual(await oversizedSave.json(), paused);
       assert.equal(mcpRequests.length, beforeMcpRequests);
       assert.equal(cloudflare.requests.length, beforeProviderRequests);
       assert.equal(sourceStateStorage.writes.length, beforeStorageWrites);
@@ -1762,7 +1585,7 @@ test('management API discovers and applies a customer-owned MCP source through o
 
     const maximumSaveBody = JSON.stringify({
       schemaVersion: 1,
-      revision: installedSources.revision,
+      revision: initialSources.revision,
       source: {
         label: 'Maximum bounded catalogue',
         url: 'https://maximum-paged-tools.example.net/mcp',
@@ -1784,18 +1607,9 @@ test('management API discovers and applies a customer-owned MCP source through o
         body: maximumSaveBody,
       },
     ), env);
-    assert.equal(maximumSavedResponse.status, 200, await maximumSavedResponse.clone().text());
-    const maximumSavedSources = await maximumSavedResponse.json();
-    const maximumDraft = maximumSavedSources.sources.find(
-      ({ url }) => url === 'https://maximum-paged-tools.example.net/mcp',
-    );
-    assert.ok(maximumDraft);
-    assert.equal(maximumDraft.status, 'draft');
-    assert.deepEqual(maximumDraft.enabledTools, maximumToolCatalogue.map(({ name }) => name));
-    assert.deepEqual(maximumCursors, [
-      ...expectedMaximumCursors,
-      ...expectedMaximumCursors,
-    ]);
+    assert.equal(maximumSavedResponse.status, 409);
+    assert.deepEqual(await maximumSavedResponse.json(), paused);
+    assert.deepEqual(maximumCursors, expectedMaximumCursors);
 
     for (const [url, error] of [
       ['https://too-many-tools.example.net/mcp', 'source_tool_list_invalid'],
@@ -1824,110 +1638,29 @@ test('management API discovers and applies a customer-owned MCP source through o
     assert.equal(oversizedCatalogueRequest.signal.aborted, true);
     assert.equal(oversizedCatalogueBodyCancelled, true);
 
-    const sourceStateBeforeUserAuthOptIn = env.ADMIN_STATE.objects
-      .get('v1:management').storage.writes.length;
-    const userAuthOptIn = await worker.fetch(new Request('https://manage.example.com/api/sources', {
-      method: 'PUT',
-      headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        schemaVersion: 1,
-        revision: maximumSavedSources.revision,
-        source: {
-          label: 'Private company files',
-          url: 'https://oauth-source.example.net/mcp',
-          authMode: 'oauth',
-          onBehalfOfUser: true,
-          enabledTools: ['company_files_search'],
-        },
-      }),
-    }), env);
-    assert.equal(userAuthOptIn.status, 400);
-    assert.deepEqual(await userAuthOptIn.json(), { schemaVersion: 1, error: 'source_invalid' });
-    assert.equal(
-      env.ADMIN_STATE.objects.get('v1:management').storage.writes.length,
-      sourceStateBeforeUserAuthOptIn,
-    );
-
-    const oauthSaved = await worker.fetch(new Request('https://manage.example.com/api/sources', {
-      method: 'PUT',
-      headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        schemaVersion: 1,
-        revision: maximumSavedSources.revision,
-        source: {
-          label: 'Private company files',
-          url: 'https://oauth-source.example.net/mcp',
-          authMode: 'oauth',
-          enabledTools: ['company_files_search'],
-        },
-      }),
-    }), env);
-    assert.equal(oauthSaved.status, 200, await oauthSaved.clone().text());
-    const oauthDrafts = await oauthSaved.json();
-    const oauthDraft = oauthDrafts.sources.find((source) => source.url === 'https://oauth-source.example.net/mcp');
-    assert.deepEqual(oauthDraft, {
-      id: oauthDraft.id,
-      label: 'Private company files',
-      url: 'https://oauth-source.example.net/mcp',
-      authMode: 'oauth',
-      onBehalfOfUser: false,
-      enabledTools: ['company_files_search'],
-      status: 'draft',
-    });
-
-    const sourceActionPreparedResponse = await worker.fetch(new Request('https://manage.example.com/api/source-actions', {
-      method: 'POST',
-      headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        schemaVersion: 1,
-        revision: oauthDrafts.revision,
-        sourceId: oauthDraft.id,
-      }),
-    }), env);
-    assert.equal(sourceActionPreparedResponse.status, 200);
-    const sourceActionAuthorization = await sourceActionPreparedResponse.json();
-    const sourceActionHandoff = new URL(sourceActionAuthorization.handoffUrl);
-    const sourceActionClaim = JSON.parse(Buffer.from(
-      sourceActionHandoff.hash.slice(1),
-      'base64url',
-    ).toString('utf8'));
-    const sourceActionBody = canonicalJson({
-      schemaVersion: 1,
-      actionId: sourceActionClaim.actionId,
-      actionKey: sourceActionClaim.actionKey,
-      actorEmail: sourceActionClaim.actorEmail,
-      accountId: sourceActionClaim.accountId,
-      issuedAt: Date.now(),
-      expiresAt: sourceActionClaim.expiresAt,
-      cloudflareAccessToken: 'ephemeral-oauth-source-action-grant',
-    });
-    const sourceActionSignature = `sha256=${createHmac(
-      'sha256', Buffer.from(sourceActionClaim.actionKey, 'base64url'),
-    ).update(sourceActionBody).digest('hex')}`;
-    const oauthApplied = await worker.fetch(new Request(
-      'https://ankka-gateway-test.tenant.workers.dev/__ankka/source-action',
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-ankka-source-action-signature': sourceActionSignature,
-        },
-        body: sourceActionBody,
-      },
-    ), env);
-    assert.equal(oauthApplied.status, 200, await oauthApplied.clone().text());
-    const oauthServer = [...cloudflare.state.servers.values()].find(
-      (server) => server.hostname === 'https://oauth-source.example.net/mcp',
-    );
-    assert.equal(oauthServer.auth_type, 'oauth');
-    assert.equal(oauthServer.is_shared_oauth_callback_enabled, true);
-    const oauthMapping = cloudflare.state.portal.servers.find(
-      (mapping) => mapping.server_id === oauthServer.id,
-    );
-    assert.equal(oauthMapping.on_behalf, false);
-    assert.deepEqual(oauthMapping.updated_tools, [{ name: 'company_files_search', enabled: true }]);
-    assert.doesNotMatch(JSON.stringify(env.ADMIN_STATE.objects.get('v1:management').storage.writes),
-      /ephemeral-oauth-source-action-grant/u);
+    const sourceStateBeforePausedOauth = sourceStateStorage.writes.length;
+    const providerStateBeforePausedOauth = cloudflare.requests.length;
+    for (const onBehalfOfUser of [undefined, false, true]) {
+      const source = {
+        label: 'Private company files', url: 'https://oauth-source.example.net/mcp',
+        authMode: 'oauth', enabledTools: ['company_files_search'],
+      };
+      if (onBehalfOfUser !== undefined) source.onBehalfOfUser = onBehalfOfUser;
+      const oauthSaved = await worker.fetch(new Request('https://manage.example.com/api/sources', {
+        method: 'PUT',
+        headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 1, revision: initialSources.revision, source }),
+      }), env);
+      assert.equal(oauthSaved.status, 409);
+      assert.deepEqual(await oauthSaved.json(), paused);
+    }
+    assert.equal(sourceStateStorage.writes.length, sourceStateBeforePausedOauth);
+    assert.equal(cloudflare.requests.length, providerStateBeforePausedOauth);
+    assert.equal(cloudflare.state.servers.size, 1);
+    assert.equal(cloudflare.state.portal.servers.length, 1);
+    assert.equal(cloudflare.state.portal.servers[0].on_behalf, false);
+    assert.deepEqual(cloudflare.state.portal.servers[0].updated_tools.map(({ name }) => name),
+      initialSources.sources[0].enabledTools);
 
     const rejectedOrigin = await worker.fetch(new Request('https://manage.example.com/api/sources/discover', {
       method: 'POST',
@@ -1985,22 +1718,8 @@ test('management API discovers and applies a customer-owned MCP source through o
       canonicalJson(ownership.resources) === canonicalJson(rootSourceResources)
     ));
     assert.ok(initialOwner);
-    const collidingControl = structuredClone(control);
-    const collidingOwner = collidingControl.sourceOwnership.find((ownership) => (
-      ownership.sourceId !== initialOwner.sourceId
-    ));
-    const rootPortalApplication = readyReceipt.resources.find(
-      (resource) => resource.kind === 'portal_access_application',
-    );
-    assert.ok(collidingOwner);
-    assert.ok(rootPortalApplication);
-    collidingOwner.resources[1].provider.id = rootPortalApplication.provider.id;
-    collidingOwner.resources[2].provider.parentId = rootPortalApplication.provider.id;
-    await managementStorage.put('ankka-mcp-gateway/management-control/v1', collidingControl);
-    const collisionProof = await sendTeardown('prove');
-    assert.equal(collisionProof.status, 409);
-    assert.equal(cloudflare.deletes().length, 0);
-    await managementStorage.put('ankka-mcp-gateway/management-control/v1', control);
+    // Day-two historical receipt graphs are exercised by the uninstall suite.
+    // This current-runtime path never installs a source while the release pause is active.
 
     const proof = await sendTeardown('prove');
     assert.equal(proof.status, 200, await proof.clone().text());
@@ -2034,7 +1753,7 @@ test('management API discovers and applies a customer-owned MCP source through o
     const dayTwoOwnership = control.sourceOwnership
       .filter((ownership) => ownership.sourceId !== rootSourceOwner.sourceId)
       .sort((left, right) => left.sourceId < right.sourceId ? -1 : left.sourceId > right.sourceId ? 1 : 0);
-    assert.equal(dayTwoOwnership.length, 2);
+    assert.equal(dayTwoOwnership.length, 0);
     const expectedRemoval = [
       ...dayTwoOwnership.flatMap((ownership) => ownership.resources).reverse(),
       ...importedAuthority.authority.root.receipt.resources.slice().reverse(),
@@ -2058,7 +1777,7 @@ test('management API discovers and applies a customer-owned MCP source through o
     // A suffix marker alone is not ownership. The whole graph is preflighted,
     // so either this policy drift or a Portal application drift blocks before
     // any provider deletion.
-    const firstPolicyAuthority = expectedRemoval[0];
+    const firstPolicyAuthority = rootSourceResources[2];
     assert.equal(firstPolicyAuthority.kind, 'source_access_policy');
     const policyList = cloudflare.state.policies.get(firstPolicyAuthority.provider.parentId);
     const livePolicy = policyList.find((policy) => policy.id === firstPolicyAuthority.provider.id);

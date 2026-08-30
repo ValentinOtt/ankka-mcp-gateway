@@ -87,9 +87,16 @@ describe('opaque and sealed cookies', () => {
     expect(sealed).not.toContain(source.releaseIdentity.artifactSha256);
     await expect(openOauthCookie(ENCRYPTION_KEY, sealed)).resolves.toEqual(source);
 
+    const access = { ...source, action: 'access' as const };
+    const sealedAccess = await sealOauthCookie(ENCRYPTION_KEY, access);
+    await expect(openOauthCookie(ENCRYPTION_KEY, sealedAccess)).resolves.toEqual(access);
+
     const { releaseIdentity: _releaseIdentity, ...missingIdentity } = source;
     for (const invalid of [
       missingIdentity,
+      { ...source, action: 'source' },
+      { ...access, action: 'runtime_update' },
+      { ...access, audienceEmails: ['member@example.com'] },
       { ...source, releaseIdentity: { ...source.releaseIdentity, copiedAuthority: true } },
       { ...source, releaseIdentity: { ...source.releaseIdentity, artifactSha256: `sha256:${'c'.repeat(64)}` } },
     ]) {
@@ -168,11 +175,11 @@ describe('opaque and sealed cookies', () => {
     }
   });
 
-  it('round trips only the exact post-verification management redirect authority', async () => {
+  it.each(['source_apply', 'access_apply', 'runtime_update'] as const)('seals exact verified redirect authority (%s)', async (actionType) => {
     const verified = {
       schemaVersion: 9 as const,
       purpose: 'management_action_result' as const,
-      actionType: 'source_apply' as const,
+      actionType,
       actionId: `action_${'A'.repeat(32)}`,
       managementOrigin: 'https://manage.example.com',
       expiresAt: NOW + 600_000,

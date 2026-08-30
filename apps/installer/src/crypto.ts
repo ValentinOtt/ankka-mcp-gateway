@@ -93,6 +93,7 @@ const sealedOauthCookieV3Schema = v.strictObject({
 const sealedOauthCookieV4Schema = v.strictObject({
   schemaVersion: v.literal(4),
   purpose: v.literal('source_apply'),
+  action: v.exactOptional(v.literal('access')),
   state: base64TokenSchema,
   verifier: base64TokenSchema,
   expiresAt: expiresAtSchema,
@@ -175,7 +176,7 @@ const sealedOauthCookieV8Schema = v.strictObject({
 const sealedOauthCookieV9Schema = v.strictObject({
   schemaVersion: v.literal(9),
   purpose: v.literal('management_action_result'),
-  actionType: v.picklist(['source_apply', 'runtime_update']),
+  actionType: v.picklist(['source_apply', 'access_apply', 'runtime_update']),
   actionId: actionIdSchema,
   managementOrigin: managementOriginSchema,
   expiresAt: expiresAtSchema,
@@ -295,6 +296,7 @@ export interface SealedOauthCookieV3 {
 export interface SealedOauthCookieV4 {
   schemaVersion: 4;
   purpose: 'source_apply';
+  action?: 'access';
   state: string;
   verifier: string;
   expiresAt: number;
@@ -387,7 +389,7 @@ export interface SealedOauthCookieV8 {
 export interface SealedOauthCookieV9 {
   schemaVersion: 9;
   purpose: 'management_action_result';
-  actionType: 'source_apply' | 'runtime_update';
+  actionType: 'source_apply' | 'access_apply' | 'runtime_update';
   actionId: string;
   managementOrigin: string;
   expiresAt: number;

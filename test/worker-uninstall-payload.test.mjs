@@ -5,6 +5,7 @@ import test from 'node:test';
 import primaryWorker from '../payload/worker/index.js';
 import cleanupWorker, { AdminState } from '../payload/worker-cleanup/index.js';
 import retirementWorker from '../payload/worker-retirement/index.js';
+import { addHistoricalInstalledSource } from './historical-source-fixture.mjs';
 import {
   BOOTSTRAP_GRANT,
   BOOTSTRAP_NONCE,
@@ -64,106 +65,7 @@ async function installed(options = {}) {
 
 async function installedWithAdditionalSource(options = {}) {
   const gateway = await installed(options);
-  const management = gateway.env.ADMIN_STATE.get(gateway.env.ADMIN_STATE.idFromName('v1:management'));
-  const currentResponse = await management.fetch(new Request('https://admin-state.invalid/sources'));
-  assert.equal(currentResponse.status, 200);
-  const current = await currentResponse.json();
-  const addedResponse = await management.fetch(new Request('https://admin-state.invalid/sources', {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: canonicalJson({
-      schemaVersion: 1,
-      revision: current.revision,
-      source: {
-        label: 'Approved catalogue',
-        url: 'https://catalog.example.net/mcp',
-        authMode: 'none',
-        enabledTools: ['company_lookup'],
-      },
-    }),
-  }));
-  assert.equal(addedResponse.status, 200);
-  const sources = await addedResponse.json();
-  const source = sources.sources.find((candidate) => candidate.url === 'https://catalog.example.net/mcp');
-  assert.equal(source.status, 'draft');
-  assert.equal(source.onBehalfOfUser, false);
-
-  const actionKey = BOOTSTRAP_NONCE;
-  const actionId = `action_${'B'.repeat(32)}`;
-  const issuedAt = Date.now();
-  const expiresAt = issuedAt + 10 * 60 * 1000;
-  const prepared = await management.fetch(new Request('https://admin-state.invalid/source-actions', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: canonicalJson({
-      schemaVersion: 1,
-      actionId,
-      sourceId: source.id,
-      sourceRevision: sources.revision,
-      actorEmail: 'admin@example.com',
-      issuedAt,
-      expiresAt,
-      actionKeyHash: await prefixedSha256(actionKey),
-      sourceHash: await prefixedSha256({
-        id: source.id,
-        label: source.label,
-        url: source.url,
-        authMode: source.authMode,
-        onBehalfOfUser: source.onBehalfOfUser,
-        enabledTools: source.enabledTools,
-      }),
-    }),
-  }));
-  assert.equal(prepared.status, 200);
-  const actionBody = canonicalJson({
-    schemaVersion: 1,
-    actionId,
-    actionKey,
-    actorEmail: 'admin@example.com',
-    accountId: gateway.env.CLOUDFLARE_ACCOUNT_ID,
-    issuedAt,
-    expiresAt,
-    cloudflareAccessToken: 'ephemeral-source-action-grant',
-  });
-  const actionSignature = await hmac(actionBody, Buffer.from(actionKey, 'base64url'));
-  const actionFetch = async (request) => {
-    if (new URL(request.url).href === 'https://catalog.example.net/mcp') {
-      const message = await request.json();
-      return new Response(canonicalJson({
-        jsonrpc: '2.0',
-        id: message.id,
-        result: {
-          tools: [{
-            name: 'company_lookup',
-            description: 'Find approved company context.',
-            inputSchema: { type: 'object' },
-            annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-          }],
-        },
-      }), { headers: { 'content-type': 'application/json; charset=utf-8' } });
-    }
-    return gateway.provider.fetch(request);
-  };
-  const applied = await withProviderFetch(actionFetch, () => primaryWorker.fetch(new Request(
-    'https://ankka-gateway-test.tenant.workers.dev/__ankka/source-action',
-    {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-ankka-source-action-signature': actionSignature,
-      },
-      body: actionBody,
-    },
-  ), gateway.env));
-  assert.equal(applied.status, 200, `${await applied.clone().text()}\n${JSON.stringify(gateway.provider.requests.slice(-8))}`);
-  assert.equal((await applied.json()).status, 'succeeded');
-  const sourceServer = [...gateway.provider.state.servers.values()].find(
-    (server) => server.hostname === source.url,
-  );
-  const sourceMapping = gateway.provider.state.portal.servers.find(
-    (mapping) => mapping.server_id === sourceServer?.id,
-  );
-  assert.equal(sourceMapping?.on_behalf, false);
+  await addHistoricalInstalledSource(gateway);
   return gateway;
 }
 

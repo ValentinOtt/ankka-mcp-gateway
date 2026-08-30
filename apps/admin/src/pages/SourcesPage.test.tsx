@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { GatewayAdminApi, GatewayStatus, ManagedSources, RuntimeUpdate, SourceDiscovery } from '../api'
+import { SOURCE_ADDITION_PAUSED_MESSAGE, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type RuntimeUpdate, type SourceDiscovery } from '../api'
 import { GatewayProvider } from '../GatewayContext'
 import { SourcesPage } from './SourcesPage'
 
@@ -10,11 +10,48 @@ const status: GatewayStatus = {
   gateway: { name: 'Gateway', hostname: 'mcp.example.com', mcpUrl: 'https://mcp.example.com/mcp', capabilityMode: 'read_only', codeMode: 'default_on' },
   source: null, access: { administratorCount: 1, memberCount: 0 }, updatedAt: '2026-08-27T12:00:00.000Z',
 }
-const sources: ManagedSources = { schemaVersion: 1, revision: 4, applyMode: 'oauth_per_action', sources: [] }
+const sources: ManagedSources = { schemaVersion: 1, revision: 4, applyMode: 'oauth_per_action', installationEnabled: true, sources: [] }
 const update: RuntimeUpdate = { schemaVersion: 1, channel: 'stable', status: 'up_to_date', current: { release: 'gateway-v1.0.0', artifactSha256: 'a'.repeat(64) }, available: null, rollback: { available: false } }
 
 describe('SourcesPage', () => {
   afterEach(cleanup)
+
+  it.each([false, true])('disables source addition and draft application while retaining existing sources (empty=%s)', async (empty) => {
+    const user = userEvent.setup()
+    const current: ManagedSources = {
+      ...sources, installationEnabled: false,
+      sources: empty ? [] : [
+        { id: 'source-1111111111111111', label: 'Installed knowledge', url: 'https://knowledge.example.com/mcp', authMode: 'oauth', onBehalfOfUser: false, enabledTools: ['search'], status: 'installed' },
+        { id: 'source-2222222222222222', label: 'Retained draft', url: 'https://draft.example.com/mcp', authMode: 'none', onBehalfOfUser: false, enabledTools: ['get_product'], status: 'draft' },
+      ],
+    }
+    const api: GatewayAdminApi = {
+      getStatus: vi.fn(async () => status), getSources: vi.fn(async () => current), getUpdate: vi.fn(async () => update),
+      getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
+      discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    }
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    expect(await screen.findByText(`${SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.`)).toBeInTheDocument()
+    const add = screen.getByRole('button', { name: 'Add source' })
+    expect(add).toBeDisabled()
+    await user.click(add)
+    expect(screen.queryByRole('textbox', { name: 'MCP URL' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Authorize and apply' })).not.toBeInTheDocument()
+    if (empty) {
+      expect(screen.getByRole('button', { name: 'Add your first source' })).toBeDisabled()
+    } else {
+      expect(screen.getByText('Installed knowledge')).toBeInTheDocument()
+      expect(screen.getByText('Operator-connected OAuth')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Installation unavailable' })).toBeDisabled()
+      for (const summary of screen.getAllByText('1 exact tool')) await user.click(summary)
+      expect(screen.getByText('search')).toBeVisible()
+      expect(screen.getByText('Retained draft')).toBeInTheDocument()
+    }
+    expect(api.discoverSource).not.toHaveBeenCalled()
+    expect(api.saveSourceDraft).not.toHaveBeenCalled()
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
 
   it('discovers a catalogue and saves the reviewed exact allowlist', async () => {
     const user = userEvent.setup()
@@ -22,6 +59,7 @@ describe('SourcesPage', () => {
     const api: GatewayAdminApi = {
       getStatus: vi.fn(async () => status),
       getSources: vi.fn(async () => sources),
+      getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
         schemaVersion: 1, status: 'discovered', endpoint: url, protocolVersion: '2026-07-28', authentication: 'none',
@@ -72,6 +110,7 @@ describe('SourcesPage', () => {
     const api: GatewayAdminApi = {
       getStatus: vi.fn(async () => status),
       getSources: vi.fn(async () => sources),
+      getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
         schemaVersion: 1,
@@ -134,6 +173,7 @@ describe('SourcesPage', () => {
     const api: GatewayAdminApi = {
       getStatus: vi.fn(async () => status),
       getSources: vi.fn(async () => sources),
+      getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
         schemaVersion: 1,

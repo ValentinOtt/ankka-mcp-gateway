@@ -1,11 +1,11 @@
-import { ArrowsClockwise, Cloud, Database, House, WarningCircle, X } from '@phosphor-icons/react'
+import { ArrowsClockwise, Cloud, Database, House, Users, WarningCircle, X } from '@phosphor-icons/react'
 import { Link, Outlet } from '@tanstack/react-router'
 import { Button, Loader } from '@cloudflare/kumo'
 import type { ComponentType } from 'react'
 import { useGateway } from '../GatewayContext'
 import { BrandMark } from './BrandMark'
 
-type AppPath = '/' | '/sources' | '/updates'
+type AppPath = '/' | '/sources' | '/team' | '/updates'
 
 interface NavItem {
   to: AppPath
@@ -16,6 +16,7 @@ interface NavItem {
 const navigation: NavItem[] = [
   { to: '/', label: 'Overview', icon: House },
   { to: '/sources', label: 'Sources', icon: Database },
+  { to: '/team', label: 'Team', icon: Users },
   { to: '/updates', label: 'Updates', icon: ArrowsClockwise },
 ]
 

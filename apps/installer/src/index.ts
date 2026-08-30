@@ -866,6 +866,7 @@ async function exchangeOauthHandoff(
 
 interface SourceManagementActionHandoff {
   readonly schemaVersion: 1;
+  readonly action?: 'access';
   readonly actionId: string;
   readonly actionKey: string;
   readonly actorEmail: string;
@@ -958,6 +959,7 @@ const runtimeVersionHandoffSchema = v.strictObject({
 });
 const sourceManagementActionHandoffSchema = v.strictObject({
   schemaVersion: v.literal(1),
+  action: v.exactOptional(v.literal('access')),
   ...managementActionSharedEntries,
   releaseIdentity: exactReleaseBundleIdentitySchema,
 });
@@ -1104,7 +1106,7 @@ async function authorizeManagementAction(
   assertCloudflareOauthConfig(oauthConfig(env));
   const state = randomBase64Url(32);
   const verifier = randomBase64Url(32);
-  const sealed = await sealOauthCookie(env.DEPLOY_SESSION_ENCRYPTION_KEY, claim.schemaVersion === 2 ? {
+  const sealedPayload: Extract<SealedOauthCookie, { schemaVersion: 4 | 5 }> = claim.schemaVersion === 2 ? {
     schemaVersion: 5,
     purpose: 'runtime_update',
     state,
@@ -1134,7 +1136,11 @@ async function authorizeManagementAction(
     workersSubdomain: claim.workersSubdomain,
     managementOrigin: claim.managementOrigin,
     releaseIdentity: claim.releaseIdentity,
-  });
+  };
+  if (claim.schemaVersion === 1 && claim.action === 'access' && sealedPayload.schemaVersion === 4) {
+    sealedPayload.action = 'access';
+  }
+  const sealed = await sealOauthCookie(env.DEPLOY_SESSION_ENCRYPTION_KEY, sealedPayload);
   const authorizationUrl = buildAuthorizationUrl({
     clientId: env.CLOUDFLARE_OAUTH_CLIENT_ID,
     state,
@@ -1155,8 +1161,10 @@ async function managementActionContext(request: Request, env: GatewayDeployEnv, 
     throw new DeployError(404, 'session_invalid');
   }
   const target = new URL(sealed.managementOrigin);
+  if (sealed.actionType === 'access_apply') target.pathname = '/team';
   target.searchParams.set(
-    sealed.actionType === 'runtime_update' ? 'runtimeAction' : 'sourceAction',
+    sealed.actionType === 'runtime_update' ? 'runtimeAction'
+      : sealed.actionType === 'access_apply' ? 'accessAction' : 'sourceAction',
     sealed.actionId,
   );
   return json(
@@ -1788,7 +1796,8 @@ async function withVerifiedManagementContext(
   const verified = await sealOauthCookie(env.DEPLOY_SESSION_ENCRYPTION_KEY, {
     schemaVersion: 9,
     purpose: 'management_action_result',
-    actionType: sealed.schemaVersion === 5 ? 'runtime_update' : 'source_apply',
+    actionType: sealed.schemaVersion === 5 ? 'runtime_update'
+      : sealed.action === 'access' ? 'access_apply' : 'source_apply',
     actionId: sealed.actionId,
     managementOrigin: sealed.managementOrigin,
     expiresAt: sealed.expiresAt,
@@ -1813,9 +1822,11 @@ function managementRedirect(
   result: 'finished',
 ): Response {
   const url = new URL(sealed.managementOrigin);
-  const runtime = sealed.schemaVersion === 5;
-  url.searchParams.set(runtime ? 'runtimeAction' : 'sourceAction', sealed.actionId);
-  url.searchParams.set(runtime ? 'runtimeActionResult' : 'sourceActionResult', result);
+  const parameter = sealed.schemaVersion === 5 ? 'runtimeAction'
+    : sealed.action === 'access' ? 'accessAction' : 'sourceAction';
+  if (sealed.schemaVersion === 4 && sealed.action === 'access') url.pathname = '/team';
+  url.searchParams.set(parameter, sealed.actionId);
+  url.searchParams.set(`${parameter}Result`, result);
   const headers = new Headers(SECURITY_HEADERS);
   headers.set('location', url.toString());
   headers.append('set-cookie', clearOauthCookie());
@@ -1881,7 +1892,7 @@ async function sourceActionOauthCallback(
             transport,
           });
           phase = 'source_action_relay';
-          await relaySourceAction({
+          const relayInput = {
             accessToken,
             accountId: sealed.accountId,
             workerName: sealed.workerName,
@@ -1895,7 +1906,8 @@ async function sourceActionOauthCallback(
             releaseBundle,
             transport,
             now: () => now,
-          });
+          };
+          await relaySourceAction(sealed.action === 'access' ? { ...relayInput, action: 'access' } : relayInput);
         });
       } finally {
         if (grant) {

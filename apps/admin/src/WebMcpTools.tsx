@@ -92,11 +92,12 @@ export function WebMcpTools() {
     refreshSources,
     refreshUpdate,
     saveSourceDraft,
+    sources,
   } = useGateway()
 
   useEffect(() => {
     const modelContext = document.modelContext
-    if (!modelContext || registration) return
+    if (!modelContext || registration || !sources) return
     const register = async () => {
       const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
       await modelContext.registerTool({
@@ -119,43 +120,45 @@ export function WebMcpTools() {
           return discoverSource(url)
         }),
       })
-      await modelContext.registerTool({
-        name: 'save_mcp_source_draft',
-        description: 'Recheck an MCP endpoint and save its exact tool allowlist in customer-owned state. OAuth-protected sources use one operator connection; this does not change the live Cloudflare Portal.',
-        inputSchema: {
-          type: 'object', additionalProperties: false,
-          properties: {
-            label: { type: 'string', minLength: 2, maxLength: 80 },
-            url: { type: 'string', format: 'uri' },
-            authMode: { type: 'string', enum: ['none', 'oauth'] },
-            enabledTools: { type: 'array', minItems: 1, maxItems: 500, uniqueItems: true, items: { type: 'string' } },
+      if (sources.installationEnabled === true) {
+        await modelContext.registerTool({
+          name: 'save_mcp_source_draft',
+          description: 'Recheck an MCP endpoint and save its exact tool allowlist in customer-owned state. OAuth-protected sources use one operator connection; this does not change the live Cloudflare Portal.',
+          inputSchema: {
+            type: 'object', additionalProperties: false,
+            properties: {
+              label: { type: 'string', minLength: 2, maxLength: 80 },
+              url: { type: 'string', format: 'uri' },
+              authMode: { type: 'string', enum: ['none', 'oauth'] },
+              enabledTools: { type: 'array', minItems: 1, maxItems: 500, uniqueItems: true, items: { type: 'string' } },
+            },
+            required: ['label', 'url', 'authMode', 'enabledTools'],
           },
-          required: ['label', 'url', 'authMode', 'enabledTools'],
-        },
-        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true, untrustedContentHint: true },
-        execute: (input) => response(() => saveSourceDraft(v.parse(sourceDraftInputSchema, input))),
-      })
-      await modelContext.registerTool({
-        name: 'apply_mcp_source',
-        description: 'Prepare a one-time Cloudflare OAuth handoff for an exact saved source draft. Return the authorization URL to the user; never approve it for them.',
-        inputSchema: {
-          type: 'object', additionalProperties: false,
-          properties: { sourceId: { type: 'string', pattern: '^source-[a-f0-9]{16}$' } },
-          required: ['sourceId'],
-        },
-        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true, untrustedContentHint: false },
-        execute: (input) => response(async () => {
-          const { sourceId } = v.parse(sourceActionInputSchema, input)
-          const prepared = await prepareSourceApply(sourceId)
-          return {
-            status: 'user_authorization_required',
-            authorizationUrl: prepared.handoffUrl,
-            actionId: prepared.actionId,
-            expiresAt: prepared.expiresAt,
-            instruction: 'Send authorizationUrl to the user. Never handle or request their Cloudflare token.',
-          }
-        }),
-      })
+          annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true, untrustedContentHint: true },
+          execute: (input) => response(() => saveSourceDraft(v.parse(sourceDraftInputSchema, input))),
+        })
+        await modelContext.registerTool({
+          name: 'apply_mcp_source',
+          description: 'Prepare a one-time Cloudflare OAuth handoff for an exact saved source draft. Return the authorization URL to the user; never approve it for them.',
+          inputSchema: {
+            type: 'object', additionalProperties: false,
+            properties: { sourceId: { type: 'string', pattern: '^source-[a-f0-9]{16}$' } },
+            required: ['sourceId'],
+          },
+          annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true, untrustedContentHint: false },
+          execute: (input) => response(async () => {
+            const { sourceId } = v.parse(sourceActionInputSchema, input)
+            const prepared = await prepareSourceApply(sourceId)
+            return {
+              status: 'user_authorization_required',
+              authorizationUrl: prepared.handoffUrl,
+              actionId: prepared.actionId,
+              expiresAt: prepared.expiresAt,
+              instruction: 'Send authorizationUrl to the user. Never handle or request their Cloudflare token.',
+            }
+          }),
+        })
+      }
       await modelContext.registerTool({
         name: 'check_gateway_update',
         description: 'Check the anonymous signed release channel against this customer-owned gateway. Performs no provider writes.',
@@ -236,7 +239,7 @@ export function WebMcpTools() {
     registration = register().catch(() => { registration = null })
   }, [
     discoverSource, prepareRuntimeAction, prepareSourceApply, prepareTeardownAction,
-    refreshSources, refreshUpdate, saveSourceDraft,
+    refreshSources, refreshUpdate, saveSourceDraft, sources,
   ])
 
   return null

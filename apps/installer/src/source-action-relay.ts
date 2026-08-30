@@ -44,11 +44,13 @@ const providerEnvelopeSchema = v.looseObject({
 });
 const customerActionResultSchema = v.looseObject({
   schemaVersion: v.literal(1),
+  action: v.exactOptional(v.literal('access')),
   actionId: v.string(),
   status: v.literal('succeeded'),
 });
 
 export interface SourceActionRelayInput {
+  readonly action?: 'access';
   readonly accessToken: string;
   readonly accountId: string;
   readonly workerName: string;
@@ -86,6 +88,7 @@ function validate(input: SourceActionRelayInput, now: number): URL {
   try { management = new URL(input.managementOrigin); } catch { invalid(); }
   if (!ACCOUNT_ID.test(input.accountId) || !WORKER_NAME.test(input.workerName) ||
       !DNS_LABEL.test(input.workersSubdomain) || !ACTION_ID.test(input.actionId) ||
+      (input.action !== undefined && input.action !== 'access') ||
       !NONCE.test(input.actionKey) || input.actorEmail !== input.actorEmail.toLowerCase() ||
       !EMAIL.test(input.actorEmail) || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= now ||
       input.expiresAt > now + 10 * 60 * 1000 || !v.is(v.string(), input.accessToken) ||
@@ -347,7 +350,7 @@ async function submitCustomerAction(
   input: SourceActionRelayInput,
   now: number,
 ): Promise<void> {
-  const body = canonicalJson({
+  const claim = {
     schemaVersion: 1,
     actionId: input.actionId,
     actionKey: input.actionKey,
@@ -356,7 +359,8 @@ async function submitCustomerAction(
     issuedAt: now,
     expiresAt: input.expiresAt,
     cloudflareAccessToken: input.accessToken,
-  });
+  };
+  const body = canonicalJson(input.action === 'access' ? { ...claim, action: 'access' } : claim);
   const response = await input.transport(actionUrl(input), {
     method: 'POST',
     headers: {
@@ -378,7 +382,7 @@ async function submitCustomerAction(
   } catch {
     throw new DeployError(409, 'session_conflict');
   }
-  if (!result.success || result.output.actionId !== input.actionId) {
+  if (!result.success || result.output.actionId !== input.actionId || result.output.action !== input.action) {
     throw new DeployError(409, 'session_conflict');
   }
 }
@@ -432,7 +436,8 @@ export async function relaySourceAction(input: SourceActionRelayInput): Promise<
     }
   }
   if (operationError) throw operationError;
-  management.searchParams.set('sourceAction', input.actionId);
+  if (input.action === 'access') management.pathname = '/team';
+  management.searchParams.set(input.action === 'access' ? 'accessAction' : 'sourceAction', input.actionId);
   return Object.freeze({
     schemaVersion: 1,
     actionId: input.actionId,

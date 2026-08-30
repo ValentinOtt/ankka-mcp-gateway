@@ -58,6 +58,141 @@ describe('HttpGatewayAdminApi', () => {
     )
   })
 
+  it('requires explicit source-install availability and defaults an older response to disabled', async () => {
+    const base = { schemaVersion: 1, revision: 4, applyMode: 'oauth_per_action', sources: [] }
+    for (const installationEnabled of [undefined, false, true]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...base, installationEnabled })))
+      expect((await new HttpGatewayAdminApi().getSources()).installationEnabled).toBe(installationEnabled === true)
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...base, installationEnabled: 'yes' })))
+    await expect(new HttpGatewayAdminApi().getSources()).rejects.toThrow()
+  })
+
+  it('shows the fixed source-addition pause without exposing provider details or a handoff', async () => {
+    const fetch = vi.fn(async () => Response.json({ error: 'source_addition_paused', retryable: false, detail: 'private provider response' }, { status: 409 }))
+    vi.stubGlobal('fetch', fetch)
+    const api = new HttpGatewayAdminApi()
+    for (const request of [
+      api.prepareSourceAction(4, 'source-1111111111111111'),
+      api.saveSourceDraft(4, { label: 'Knowledge', url: 'https://knowledge.example.com/mcp', authMode: 'none', enabledTools: ['search'] }),
+    ]) await expect(request).rejects.toEqual(expect.objectContaining({ code: 'source_addition_paused', message: 'New-source installation is temporarily unavailable in this release. Existing sources and team permissions remain available.' }))
+  })
+
+  it('reads the team contract and prepares the exact revision-bound proposal', async () => {
+    const members = [{ email: 'teammate@example.com', sourceIds: ['source-1111111111111111'] }]
+    const actionId = `action_${'a'.repeat(32)}`
+    const expiresAt = '2030-01-01T00:00:00.000Z'
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(Response.json({
+        schemaVersion: 1, revision: 4, editingEnabled: true, editingDisabledReason: null, members, adminEmails: ['admin@example.com'],
+        sources: [{ id: 'source-1111111111111111', label: 'Knowledge', enabledTools: ['search'], status: 'installed' }],
+        pendingAction: null, proposedMembers: null,
+      }))
+      .mockResolvedValueOnce(Response.json({ schemaVersion: 1, actionId, status: 'authorization_required', expiresAt, handoffUrl: `https://deploy.ankka.ai/manage#${'a'.repeat(40)}` }))
+      .mockResolvedValueOnce(Response.json({ schemaVersion: 1, actionId, status: 'recovery_required', expiresAt, failureCode: 'team_recovery_required' }))
+    vi.stubGlobal('fetch', fetch)
+    const api = new HttpGatewayAdminApi()
+
+    expect(await api.getTeam()).toEqual(expect.objectContaining({ revision: 4, proposedMembers: null }))
+    await api.prepareTeamAction(4, members)
+    expect(await api.getTeamAction(actionId)).toEqual(expect.objectContaining({ status: 'recovery_required' }))
+    expect(fetch).toHaveBeenNthCalledWith(1, '/api/team', expect.objectContaining({ credentials: 'same-origin', redirect: 'error' }))
+    expect(fetch).toHaveBeenNthCalledWith(2, '/api/team-actions', expect.objectContaining({
+      method: 'POST', credentials: 'same-origin', redirect: 'error',
+      body: JSON.stringify({ schemaVersion: 1, expectedRevision: 4, members }),
+    }))
+    expect(fetch).toHaveBeenNthCalledWith(3, `/api/team-actions/${actionId}`, expect.objectContaining({ credentials: 'same-origin' }))
+  })
+
+  it('does not expose raw team failure details', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: 'team_action_conflict', detail: 'provider private response' }, { status: 409 })))
+    await expect(new HttpGatewayAdminApi().prepareTeamAction(1, [])).rejects.toEqual(expect.objectContaining({
+      code: 'team_action_conflict', message: 'A team access change is already in progress. Refresh to review or resume it.',
+    }))
+  })
+
+  it('defaults cancellation to denied when an older Team action omits explicit capability', async () => {
+    const actionId = `action_${'a'.repeat(32)}`
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, actionId, status: 'authorization_required', expiresAt: '2030-01-01T00:00:00.000Z', failureCode: null })))
+    expect(await new HttpGatewayAdminApi().getTeamAction(actionId)).toEqual(expect.objectContaining({ canCancel: false }))
+  })
+
+  it('accepts the exact runtime Team action projection in saved snapshots and action responses', async () => {
+    const actionId = `action_${'a'.repeat(32)}`
+    const expiresAt = '2030-01-01T00:00:00.000Z'
+    const members = [{ email: 'admin@example.com', sourceIds: [] }]
+    for (const [status, failureCode, canCancel] of [
+      ['authorization_required', null, true],
+      ['applying', null, false],
+      ['recovery_required', 'team_policy_drift', false],
+      ['succeeded', null, false],
+      ['failed', 'team_action_cancelled', false],
+    ] as const) {
+      const pendingAction = { schemaVersion: 1, action: 'access', actionId, status, expiresAt, failureCode, canCancel }
+      const proposedMembers = status === 'succeeded' || status === 'failed' ? null : members
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(Response.json({
+          schemaVersion: 1, revision: 4, editingEnabled: true, editingDisabledReason: null,
+          members, adminEmails: ['admin@example.com'], sources: [], pendingAction, proposedMembers,
+        }))
+        .mockResolvedValueOnce(Response.json(pendingAction)))
+      const api = new HttpGatewayAdminApi()
+      expect((await api.getTeam()).pendingAction).toEqual(pendingAction)
+      expect(await api.getTeamAction(actionId)).toEqual(pendingAction)
+    }
+  })
+
+  it('rejects other action kinds and unreviewed fields in the strict Team action contract', async () => {
+    const actionId = `action_${'a'.repeat(32)}`
+    const action = { schemaVersion: 1, action: 'access', actionId, status: 'authorization_required', expiresAt: '2030-01-01T00:00:00.000Z', failureCode: null, canCancel: true }
+    for (const extra of [{ action: 'install' }, { action: 'teardown' }, { unreviewedField: true }]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...action, ...extra })))
+      await expect(new HttpGatewayAdminApi().getTeamAction(actionId)).rejects.toThrow()
+    }
+  })
+
+  it('cancels only the exact recorded Team action through a same-origin request', async () => {
+    const actionId = `action_${'a'.repeat(32)}`
+    const fetch = vi.fn(async () => Response.json({ schemaVersion: 1, action: 'access', actionId, status: 'failed', expiresAt: '2030-01-01T00:00:00.000Z', failureCode: 'team_action_cancelled', canCancel: false }))
+    vi.stubGlobal('fetch', fetch)
+    expect(await new HttpGatewayAdminApi().cancelTeamAction(actionId)).toEqual(expect.objectContaining({ status: 'failed', canCancel: false }))
+    expect(fetch).toHaveBeenCalledWith(`/api/team-actions/${actionId}`, expect.objectContaining({ method: 'DELETE', credentials: 'same-origin', redirect: 'error', body: '{}' }))
+  })
+
+  it('bounds the Team response before rendering people, source assignments, and tools', async () => {
+    const person = { email: 'teammate@example.com', sourceIds: [] }
+    const source = { id: 'source-1111111111111111', label: 'Knowledge', enabledTools: ['search'], status: 'installed' }
+    const validTeam = {
+      schemaVersion: 1, revision: 4, editingEnabled: true, editingDisabledReason: null,
+      members: [person], adminEmails: ['admin@example.com'], sources: [source], pendingAction: null, proposedMembers: null,
+    }
+    for (const invalid of [
+      { members: Array(52).fill(person) },
+      { proposedMembers: Array(52).fill(person) },
+      { members: [{ ...person, sourceIds: Array(33).fill(source.id) }] },
+      { sources: Array(33).fill(source) },
+      { sources: [{ ...source, enabledTools: Array(501).fill('search') }] },
+      { members: [{ ...person, email: `${'a'.repeat(255)}@example.com` }] },
+      { revision: 1.5 },
+      { revision: -1 },
+    ]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...validTeam, ...invalid })))
+      await expect(new HttpGatewayAdminApi().getTeam()).rejects.toThrow()
+    }
+  })
+
+  it('maps native Team policy and lifecycle errors to fixed safe local explanations', async () => {
+    for (const [code, explanation] of [
+      ['team_access_revision_conflict', 'Team access changed in another tab'],
+      ['team_action_recovery_required', 'Some access policies may already have changed'],
+      ['team_policy_drift', 'Cloudflare access policies no longer match'],
+      ['team_teardown_requires_compatible_release', 'Teardown is paused'],
+    ] as const) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: code, detail: 'private provider detail' }, { status: 409 })))
+      await expect(new HttpGatewayAdminApi().prepareTeamAction(1, [])).rejects.toEqual(expect.objectContaining({ code, message: expect.stringContaining(explanation) }))
+    }
+  })
+
   it('keeps teardown failures local and free of provider response text', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       error: 'teardown_action_conflict',

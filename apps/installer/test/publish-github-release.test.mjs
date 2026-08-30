@@ -12,6 +12,7 @@ import {
   loadGitHubReleaseOutput,
   prepareGitHubReleaseOutput,
   publishGitHubReleaseOutput,
+  releaseNotes,
   writeGitHubReleaseOutput,
 } from '../scripts/publish-github-release.mjs';
 import {
@@ -160,6 +161,39 @@ afterAll(async () => {
 });
 
 describe('reviewed GitHub Release publication', () => {
+  it('discloses v0.1.15 Team limitations before the verification details', () => {
+    const notes = releaseNotes(REPOSITORY, {
+      release: 'gateway-v0.1.15', sourceCommit: 'a'.repeat(40),
+    }, { channel: 'stable', artifactSha256: 'b'.repeat(64), keyId: 'test-public-key' });
+    assert.match(notes, /Team permissions apply only to MCP sources already installed in your gateway\./u);
+    assert.match(notes, /New-source creation is unavailable in this release, including first-source onboarding for fresh empty gateways\./u);
+    assert.match(notes, /Administrators remain fixed; source write tools are not activated and existing read-only boundaries are unchanged\./u);
+    assert.match(notes, /Once a permission-policy write is armed, automatic teardown and rollback to older runtimes are blocked, including when the write outcome is uncertain\./u);
+    assert.ok(notes.indexOf('## v0.1.15 scope and limits') < notes.indexOf('- Source commit:'));
+  });
+
+  it.each(['gateway-v0.1.14', 'gateway-v0.1.16'])(
+    'preserves generic GitHub release notes for %s', (release) => {
+      const sourceCommit = 'a'.repeat(40);
+      const artifactSha256 = 'b'.repeat(64);
+      const notes = releaseNotes(REPOSITORY, { release, sourceCommit }, {
+        channel: CHANNEL, artifactSha256, keyId: 'test-public-key',
+      });
+      assert.equal(notes,
+        'Canary pre-release of Ankka MCP Gateway. This GitHub Release mirrors the exact signed artifact already committed to the customer update channel.\n\n' +
+        `- Source commit: [\`${sourceCommit.slice(0, 12)}\`](https://github.com/${REPOSITORY}/commit/${sourceCommit})\n` +
+        `- Artifact SHA-256: \`${artifactSha256}\`\n` +
+        '- Signature: Ed25519 (key ID `test-public-key`)\n' +
+        '- Channel: `canary`\n\n' +
+        'The attached `release-envelope.json` is the canonical signed release envelope. ' +
+        '`release-verification.json` contains only public verification material, and ' +
+        '`sbom.cdx.json` is the source-bound CycloneDX dependency inventory. ' +
+        '`LICENSE.txt` and `THIRD_PARTY_LICENSES.txt` contain the complete distributed license texts. ' +
+        'Cloudflare account, bucket, credentials, and private signing material are intentionally excluded.\n',
+      );
+    },
+  );
+
   it('prepares a public mirror only after exact signed R2 publication', async () => {
     const prepared = await prepareGitHubReleaseOutput(fixture.input);
     assert.equal(prepared.plan.release, RELEASE);
