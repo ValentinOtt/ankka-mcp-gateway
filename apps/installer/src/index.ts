@@ -1822,6 +1822,20 @@ function managementRedirect(
   return new Response(null, { status: 303, headers });
 }
 
+type SourceCallbackPhase =
+  | 'source_release_verification'
+  | 'source_grant_exchange'
+  | 'source_account_authorization'
+  | 'source_action_relay'
+  | 'source_callback_shell';
+
+function sourceCallbackError<ErrorInput>(error: ErrorInput, phase: SourceCallbackPhase): DeployError {
+  const stable = stableError(error);
+  // Request-local fixed vocabulary only; never derive diagnostics from the
+  // handoff, grant, provider response, or thrown exception text.
+  return new DeployError(stable.status, stable.code, stable.reason ?? phase);
+}
+
 async function sourceActionOauthCallback(
   request: Request,
   env: GatewayDeployEnv,
@@ -1836,7 +1850,8 @@ async function sourceActionOauthCallback(
   if (sealed.purpose !== 'source_apply' || sealed.expiresAt <= now) {
     throw new DeployError(400, 'session_invalid');
   }
-  if (callback.denied) return installerRedirect();
+  if (callback.denied) return errorResponse(new DeployError(400, 'oauth_denied'), true);
+  let phase: SourceCallbackPhase = 'source_release_verification';
   let execution: Promise<void> | null = null;
   const executeOnce = (): Promise<void> => {
     execution ??= (async () => {
@@ -1849,6 +1864,7 @@ async function sourceActionOauthCallback(
           sealed.releaseIdentity,
         );
         assertExactReleaseBundleIdentity(releaseBundle, sealed.releaseIdentity);
+        phase = 'source_grant_exchange';
         grant = await exchangeAuthorizationCode({
           code: callback.code,
           verifier: sealed.verifier,
@@ -1856,6 +1872,7 @@ async function sourceActionOauthCallback(
           transport,
         });
         grant.assertUsable();
+        phase = 'source_account_authorization';
         await grant.withAccessToken(async (accessToken) => {
           await resolveAuthorizedAccount({
             accessToken,
@@ -1863,6 +1880,7 @@ async function sourceActionOauthCallback(
             expectedAccountId: sealed.accountId,
             transport,
           });
+          phase = 'source_action_relay';
           await relaySourceAction({
             accessToken,
             accountId: sealed.accountId,
@@ -1890,10 +1908,11 @@ async function sourceActionOauthCallback(
   };
   try {
     await executeOnce();
-  } catch {
-    return installerRedirect();
+  } catch (error) {
+    return errorResponse(sourceCallbackError(error, phase), true);
   }
   if (managementCallbackResponse) {
+    phase = 'source_callback_shell';
     try {
       const callbackInput: InstallCallbackResponseInput = context === undefined
         ? { request, env, execute: executeOnce }
@@ -1901,8 +1920,8 @@ async function sourceActionOauthCallback(
       return await withVerifiedManagementContext(
         await managementCallbackResponse(callbackInput), env, sealed, now,
       );
-    } catch {
-      return installerRedirect();
+    } catch (error) {
+      return errorResponse(sourceCallbackError(error, phase), true);
     }
   }
   return managementRedirect(sealed, 'finished');
@@ -1922,7 +1941,7 @@ async function runtimeUpdateOauthCallback(
   if (sealed.purpose !== 'runtime_update' || sealed.expiresAt <= now) {
     throw new DeployError(400, 'session_invalid');
   }
-  if (callback.denied) return installerRedirect();
+  if (callback.denied) return errorResponse(new DeployError(400, 'oauth_denied'), true);
   let execution: Promise<void> | null = null;
   const executeOnce = (): Promise<void> => {
     execution ??= (async () => {
@@ -1975,8 +1994,8 @@ async function runtimeUpdateOauthCallback(
   };
   try {
     await executeOnce();
-  } catch {
-    return installerRedirect();
+  } catch (error) {
+    return errorResponse(error, true);
   }
   if (managementCallbackResponse) {
     try {
@@ -1986,8 +2005,8 @@ async function runtimeUpdateOauthCallback(
       return await withVerifiedManagementContext(
         await managementCallbackResponse(callbackInput), env, sealed, now,
       );
-    } catch {
-      return installerRedirect();
+    } catch (error) {
+      return errorResponse(error, true);
     }
   }
   return managementRedirect(sealed, 'finished');

@@ -265,8 +265,9 @@ describe('management source OAuth', () => {
       { headers: { cookie: oauth } },
     ), env);
 
-    expect(denied.status).toBe(303);
-    expect(denied.headers.get('location')).toBe(`${PUBLIC_ORIGIN}/`);
+    expect(denied.status).toBe(400);
+    expect(denied.headers.get('location')).toBeNull();
+    expect(await denied.json()).toEqual({ code: 'oauth_denied' });
     expect(denied.headers.get('set-cookie')).toContain(`${OAUTH_COOKIE}=;`);
     expect(JSON.stringify([...denied.headers])).not.toContain(attackerOrigin);
     const context = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/management/context`, {
@@ -346,8 +347,11 @@ describe('management source OAuth', () => {
       { headers: { cookie: oauth } },
     ), env);
 
-    expect(callback.status).toBe(303);
-    expect(callback.headers.get('location')).toBe(`${PUBLIC_ORIGIN}/`);
+    expect(callback.status).toBe(503);
+    expect(callback.headers.get('location')).toBeNull();
+    expect(await callback.json()).toEqual({
+      code: 'release_invalid', reason: 'source_release_verification',
+    });
     expect(callback.headers.get('set-cookie')).toContain(`${OAUTH_COOKIE}=;`);
     expect(bundleLoads).toBe(1);
     expect(providerCalls).toBe(0);
@@ -389,8 +393,9 @@ describe('management source OAuth', () => {
       { headers: { cookie: oauth } },
     ), env);
 
-    expect(callback.status).toBe(303);
-    expect(callback.headers.get('location')).toBe(`${PUBLIC_ORIGIN}/`);
+    expect(callback.status).toBe(409);
+    expect(callback.headers.get('location')).toBeNull();
+    expect(await callback.json()).toEqual({ code: 'session_conflict', reason: 'source_action_relay' });
     expect(callback.headers.get('set-cookie')).toContain(`${OAUTH_COOKIE}=;`);
     expect(JSON.stringify([...callback.headers])).not.toContain(attackerOrigin);
     expect(revoked).toBe(1);
@@ -463,8 +468,9 @@ describe('management source OAuth', () => {
       { headers: { cookie: oauth } },
     ), env);
 
-    expect(callback.status).toBe(303);
-    expect(callback.headers.get('location')).toBe(`${PUBLIC_ORIGIN}/`);
+    expect(callback.status).toBe(409);
+    expect(callback.headers.get('location')).toBeNull();
+    expect(await callback.json()).toEqual({ code: 'session_conflict', reason: 'source_action_relay' });
     expect(callback.headers.get('set-cookie')).toContain(`${OAUTH_COOKIE}=;`);
     expect(JSON.stringify([...callback.headers])).not.toContain(attackerOrigin);
     expect(customerPosts).toBe(1);
