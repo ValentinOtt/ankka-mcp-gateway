@@ -45,6 +45,8 @@ interface TransportFixture {
   readonly currentSubdomain: () => boolean;
 }
 
+type ControlResponse = (request: Request) => Promise<Response | null>;
+
 function json<Result>(result: Result, status = 200): Response {
   return new Response(JSON.stringify({ success: status < 300, errors: [], messages: [], result }), {
     status,
@@ -82,6 +84,7 @@ function transportFixture(options: Readonly<{
   initialSubdomain?: boolean;
   managementDomainService?: string;
   workerTags?: readonly string[];
+  controlResponse?: ControlResponse;
 }> = {}): TransportFixture {
   let active: readonly DeploymentTarget[] = [{ percentage: 100, version_id: OLD_VERSION }];
   let deploymentId = INITIAL_DEPLOYMENT;
@@ -102,8 +105,10 @@ function transportFixture(options: Readonly<{
         if (request.method === 'HEAD') {
           return new Response(null, { status: 204, headers: { 'x-ankka-runtime-action': 'ready' } });
         }
-        const body = await requestJson(request, commandSchema);
+        const body = await requestJson(request.clone(), commandSchema);
         commands.push(body.command);
+        const response = await options.controlResponse?.(request);
+        if (response) return response;
         if (body.command === 'probe') {
           return options.probeFails
             ? json({ error: 'broken_candidate' }, 409)
@@ -182,7 +187,10 @@ function input(transport: (input: RequestInfo | URL, init?: RequestInit) => Prom
   };
 }
 
-async function updateTransportFixture(failure?: 'asset_session' | 'worker_version' | 'version_verify') {
+async function updateTransportFixture(
+  failure?: 'asset_session' | 'worker_version' | 'version_verify',
+  controlResponse?: ControlResponse,
+) {
   const runtime = await sourceActionRuntimeFixture({
     accountId: ACCOUNT_ID,
     actorEmail: 'owner@example.com',
@@ -191,7 +199,7 @@ async function updateTransportFixture(failure?: 'asset_session' | 'worker_versio
     workerName: WORKER_NAME,
     workersSubdomain: 'tenant',
   });
-  const fixture = transportFixture();
+  const fixture = transportFixture(controlResponse ? { controlResponse } : {});
   const events: string[] = [];
   const controls: Array<Readonly<{ body: BoundaryObject; versionOverride: string | null }>> = [];
   const oldBindings = {
@@ -337,6 +345,220 @@ function caughtError<Thrown>(error: Thrown): Error {
   if (!(error instanceof Error)) throw new TypeError('unexpected relay rejection');
   return error;
 }
+
+function candidateResponse(response: (request: Request) => Promise<Response>): ControlResponse {
+  return async (request) => {
+    const body = await requestJson(request.clone(), commandSchema);
+    return body.command === 'probe' && request.headers.has('Cloudflare-Workers-Version-Overrides')
+      ? response(request) : null;
+  };
+}
+
+function expectSafeControlError(error: Error, reason: string) {
+  expect(error).toMatchObject({ status: 409, code: 'session_conflict', reason });
+  for (const privateValue of [ACCESS_TOKEN, ASSET_UPLOAD_JWT, ASSET_COMPLETION_JWT, ACTION_KEY, 'synthetic-private-control']) {
+    expect(String(error)).not.toContain(privateValue);
+    expect(JSON.stringify(error)).not.toContain(privateValue);
+  }
+}
+
+describe('bounded runtime control diagnostics', () => {
+  it.each([
+    ['runtime_probe_version_mismatch', 'version_mismatch', 409],
+    ['runtime_action_rejected', 'action_rejected', 400],
+    ['runtime_action_conflict', 'action_conflict', 409],
+    ['runtime_updates_unavailable', 'updates_unavailable', 503],
+    ['team_action_conflict', 'team_conflict', 409],
+  ] as const)('reports only the exact known candidate error %s', async (workerError, detail, status) => {
+    const fixture = await updateTransportFixture(undefined, candidateResponse(async () => (
+      new Response(JSON.stringify({ schemaVersion: 1, error: workerError }).padEnd(1_024, ' '), {
+        status, headers: { 'content-type': 'application/json; charset=utf-8' },
+      })
+    )));
+    const error = await relayRuntimeUpdate(fixture.relayInput).catch(caughtError);
+    if (!(error instanceof Error)) throw new TypeError('expected control failure');
+    expectSafeControlError(error, `runtime_candidate_probe_${detail}`);
+    expect(fixture.deployments).toEqual([
+      [{ version_id: OLD_VERSION, percentage: 100 }, { version_id: TARGET_VERSION, percentage: 0 }],
+      [{ version_id: OLD_VERSION, percentage: 100 }],
+    ]);
+    expect(fixture.commands.filter((command) => command === 'probe')).toHaveLength(1);
+    expect(fixture.commands).not.toContain('complete');
+    expect(fixture.controls.at(-1)?.body).toMatchObject({ command: 'fail', recoveryRequired: false });
+    expect(fixture.subdomainStates).toEqual([true, false]);
+  });
+
+  const knownBody = JSON.stringify({ schemaVersion: 1, error: 'runtime_probe_version_mismatch' });
+  it.each([
+    ['malformed JSON', () => new Response(`{synthetic-private-control:${ACCESS_TOKEN}`, { status: 409, headers: { 'content-type': 'application/json' } }), 'rejected'],
+    ['extra private field', () => Response.json({ schemaVersion: 1, error: 'runtime_probe_version_mismatch', message: ACCESS_TOKEN }, { status: 409 }), 'rejected'],
+    ['unknown error', () => Response.json({ schemaVersion: 1, error: 'synthetic-private-control' }, { status: 409 }), 'rejected'],
+    ['wrong schema', () => Response.json({ schemaVersion: 2, error: 'runtime_probe_version_mismatch' }, { status: 409 }), 'rejected'],
+    ['HTML body', () => new Response(`<p>${ACCESS_TOKEN}</p>`, { status: 503, headers: { 'content-type': 'text/html' } }), 'rejected'],
+    ['missing content type', () => new Response(new TextEncoder().encode(knownBody), { status: 409 }), 'rejected'],
+    ['oversize stream', () => new Response(knownBody.padEnd(1_025, ' '), { status: 409, headers: { 'content-type': 'application/json' } }), 'rejected'],
+    ['oversize declared length', () => new Response(knownBody, { status: 409, headers: { 'content-type': 'application/json', 'content-length': '1025' } }), 'rejected'],
+    ['success status with error body', () => Response.json({ schemaVersion: 1, error: 'runtime_probe_version_mismatch' }), 'rejected'],
+    ['missing probe marker', () => new Response(null, { status: 204 }), 'rejected'],
+    ['redirect', () => new Response(knownBody, { status: 302, headers: { 'content-type': 'application/json', location: `https://private.example/${ACCESS_TOKEN}` } }), 'redirect'],
+  ] as const)('uses a fixed fallback for %s without echoing its body', async (_label, response, detail) => {
+    const fixture = await updateTransportFixture(undefined, candidateResponse(async () => response()));
+    const error = await relayRuntimeUpdate(fixture.relayInput).catch(caughtError);
+    if (!(error instanceof Error)) throw new TypeError('expected control failure');
+    expectSafeControlError(error, `runtime_candidate_probe_${detail}`);
+    expect(fixture.deployments.at(-1)).toEqual([{ version_id: OLD_VERSION, percentage: 100 }]);
+    expect(fixture.commands.filter((command) => command === 'probe')).toHaveLength(1);
+    expect(fixture.commands).not.toContain('complete');
+    expect(fixture.subdomainStates).toEqual([true, false]);
+  });
+
+  it.each(['begin', 'progress_candidate_staged', 'active_probe', 'complete'] as const)(
+    'identifies the exact %s control phase without replaying it', async (phase) => {
+      let rejectedCalls = 0;
+      const fixture = await updateTransportFixture(undefined, async (request) => {
+        const body = await requestJson(request.clone(), boundaryObjectSchema);
+        const matches = phase === 'active_probe'
+          ? body.command === 'probe' && !request.headers.has('Cloudflare-Workers-Version-Overrides')
+          : phase === 'progress_candidate_staged'
+            ? body.command === 'progress' && body.stage === 'candidate_staged'
+            : body.command === phase;
+        if (!matches) return null;
+        rejectedCalls += 1;
+        return Response.json({ schemaVersion: 1, error: 'runtime_action_conflict' }, { status: 409 });
+      });
+      const error = await relayRuntimeUpdate(fixture.relayInput).catch(caughtError);
+      if (!(error instanceof Error)) throw new TypeError('expected control failure');
+      expectSafeControlError(error, `runtime_${phase}_action_conflict`);
+      expect(rejectedCalls).toBe(1);
+      if (phase === 'begin') expect(fixture.deployments).toEqual([]);
+      else expect(fixture.deployments.at(-1)).toEqual([{ version_id: OLD_VERSION, percentage: 100 }]);
+      expect(fixture.commands.at(-1)).toBe('fail');
+      expect(fixture.subdomainStates).toEqual([true, false]);
+    },
+  );
+
+  it.each(['request', 'error body'] as const)('bounds a hung candidate %s at ten seconds and compensates once', async (kind) => {
+    let announce: ((request: Request) => void) | null = null;
+    const arrived = new Promise<Request>((resolve) => { announce = resolve; });
+    let aborted = 0;
+    const fixture = await updateTransportFixture(undefined, candidateResponse(async (request) => {
+      if (announce === null) throw new TypeError('missing control observer');
+      announce(request);
+      if (kind === 'request') return new Promise<Response>((_resolve, reject) => {
+        request.signal.addEventListener('abort', () => {
+          aborted += 1;
+          reject(new Error(ACCESS_TOKEN));
+        }, { once: true });
+      });
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"schemaVersion":1,"error":'));
+          // A real fetch response body errors when its request signal aborts.
+          request.signal.addEventListener('abort', () => {
+            aborted += 1;
+            controller.error(new Error(ACCESS_TOKEN));
+          }, { once: true });
+        },
+      }), { status: 409, headers: { 'content-type': 'application/json' } });
+    }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const outcome = relayRuntimeUpdate(fixture.relayInput).catch(caughtError);
+    const request = await arrived;
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(request.signal.aborted).toBe(false);
+    expect(fixture.deployments).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await outcome;
+    if (!(error instanceof Error)) throw new TypeError('expected control failure');
+    expectSafeControlError(error, 'runtime_candidate_probe_timeout');
+    expect(request.signal.aborted).toBe(true);
+    expect(aborted).toBe(1);
+    expect(fixture.commands.filter((command) => command === 'probe')).toHaveLength(1);
+    expect(fixture.deployments).toHaveLength(2);
+    expect(fixture.deployments.at(-1)).toEqual([{ version_id: OLD_VERSION, percentage: 100 }]);
+    expect(fixture.commands).not.toContain('complete');
+    expect(fixture.subdomainStates).toEqual([true, false]);
+  });
+
+  it('labels a failed control request without using the thrown message', async () => {
+    const fixture = await updateTransportFixture(undefined, candidateResponse(async () => {
+      throw new Error(`synthetic-private-control:${ACCESS_TOKEN}`);
+    }));
+    const error = await relayRuntimeUpdate(fixture.relayInput).catch(caughtError);
+    if (!(error instanceof Error)) throw new TypeError('expected control failure');
+    expectSafeControlError(error, 'runtime_candidate_probe_request_failed');
+    expect(fixture.commands.filter((command) => command === 'probe')).toHaveLength(1);
+    expect(fixture.subdomainStates).toEqual([true, false]);
+  });
+
+  it.each(['candidate_stage', 'candidate_stage_verify', 'candidate_activate', 'candidate_active_verify'] as const)(
+    'labels the provider %s phase and preserves compensation', async (phase) => {
+      const fixture = await updateTransportFixture();
+      let rejected = 0;
+      const transport: TransportFixture['transport'] = async (input, init) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).pathname.endsWith('/deployments') && rejected === 0) {
+          const count = fixture.deployments.length;
+          const matches = phase === 'candidate_stage' ? request.method === 'POST' && count === 0
+            : phase === 'candidate_stage_verify' ? request.method === 'GET' && count === 1
+              : phase === 'candidate_activate' ? request.method === 'POST' && count === 1
+                : request.method === 'GET' && count === 2;
+          if (matches) {
+            rejected += 1;
+            if (phase.endsWith('_verify')) return json({
+              deployments: [{ id: INITIAL_DEPLOYMENT, versions: fixture.deployments.at(-1) }],
+            });
+            return Response.json({ success: false, error: ACCESS_TOKEN }, { status: 503 });
+          }
+        }
+        return fixture.relayInput.transport(request);
+      };
+      const error = await relayRuntimeUpdate({ ...fixture.relayInput, transport }).catch(caughtError);
+      if (!(error instanceof Error)) throw new TypeError('expected provider failure');
+      expectSafeControlError(error, `runtime_${phase}`);
+      expect(rejected).toBe(1);
+      if (phase === 'candidate_stage') expect(fixture.deployments).toEqual([]);
+      else expect(fixture.deployments.at(-1)).toEqual([{ version_id: OLD_VERSION, percentage: 100 }]);
+      expect(fixture.commands).not.toContain('complete');
+      expect(fixture.subdomainStates).toEqual([true, false]);
+    },
+  );
+
+  it.each(['fail record', 'compensation', 'route disable'] as const)(
+    'preserves the diagnostic boundary when %s also fails', async (cleanup) => {
+      const fixture = await updateTransportFixture(undefined, async (request) => {
+        const body = await requestJson(request.clone(), commandSchema);
+        if (body.command === 'probe') return Response.json({ schemaVersion: 1, error: 'runtime_probe_version_mismatch' }, { status: 409 });
+        if (body.command === 'fail' && cleanup === 'fail record') return Response.json({ schemaVersion: 1, error: 'runtime_action_conflict' }, { status: 409 });
+        return null;
+      });
+      let rejected = 0;
+      const transport: TransportFixture['transport'] = async (input, init) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const path = new URL(request.url).pathname;
+        const fails = cleanup === 'compensation'
+          ? request.method === 'POST' && path.endsWith('/deployments') && fixture.deployments.length === 1
+          : cleanup === 'route disable' && request.method === 'POST' && path.endsWith('/subdomain') &&
+            (await requestJson(request.clone(), subdomainSchema)).enabled === false;
+        if (fails) {
+          rejected += 1;
+          return Response.json({ success: false, error: ACCESS_TOKEN }, { status: 503 });
+        }
+        return fixture.relayInput.transport(request);
+      };
+      const error = await relayRuntimeUpdate({ ...fixture.relayInput, transport }).catch(caughtError);
+      if (!(error instanceof Error)) throw new TypeError('expected control failure');
+      expectSafeControlError(error, cleanup === 'route disable'
+        ? 'runtime_route_disable_failed' : 'runtime_candidate_probe_version_mismatch');
+      expect(rejected).toBe(cleanup === 'fail record' ? 0 : 1);
+      expect(fixture.commands.filter((command) => command === 'probe')).toHaveLength(1);
+      expect(fixture.commands.filter((command) => command === 'fail')).toHaveLength(1);
+      expect(fixture.commands).not.toContain('complete');
+      expect(fixture.controls.at(-1)?.body).toMatchObject({ command: 'fail', recoveryRequired: cleanup === 'compensation' });
+      expect(fixture.currentSubdomain()).toBe(cleanup === 'route disable');
+    },
+  );
+});
 
 describe('runtime update relay', () => {
   it('allows a version POST taking fifteen seconds and then verifies, probes, and activates it', async () => {

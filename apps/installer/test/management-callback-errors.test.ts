@@ -366,3 +366,41 @@ describe('closed runtime upload diagnostics', () => {
     current.assertRetained(response);
   });
 });
+
+describe('bounded runtime control callback diagnostics', () => {
+  it.each([
+    'runtime_candidate_probe_version_mismatch',
+    'runtime_candidate_probe_timeout',
+    'runtime_progress_candidate_staged_action_conflict',
+    'runtime_candidate_stage_verify',
+    'runtime_route_disable_failed',
+  ])('preserves %s while revoking the grant once and retaining the prior install', async (reason) => {
+    const current = await fixture('runtime');
+    const error = new DeployError(409, 'session_conflict', reason);
+    error.message = `synthetic-private-control:${ACCESS_TOKEN}`;
+    current.update.mockRejectedValue(error);
+    const response = await current.callback();
+    expect(response.status).toBe(409);
+    expect(response.headers.get('location')).toBeNull();
+    expect(response.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
+    expect(await response.json()).toEqual({ code: 'session_conflict', reason });
+    expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
+    expect(current.update).toHaveBeenCalledTimes(1);
+    expect(current.source).not.toHaveBeenCalled();
+    current.assertRetained(response);
+  });
+
+  it('does not surface a diagnostic-looking reason on an untrusted ordinary exception', async () => {
+    const current = await fixture('runtime');
+    current.update.mockRejectedValue(Object.assign(new Error(ACCESS_TOKEN), {
+      status: 409, code: 'session_conflict', reason: 'runtime_candidate_probe_version_mismatch',
+    }));
+    const response = await current.callback();
+    expect(response.status).toBe(500);
+    expect(response.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
+    expect(await response.json()).toEqual({ code: 'internal_error', reason: 'runtime_action_relay' });
+    expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
+    expect(current.update).toHaveBeenCalledTimes(1);
+    current.assertRetained(response);
+  });
+});
