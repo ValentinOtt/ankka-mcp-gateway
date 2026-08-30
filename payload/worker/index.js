@@ -1061,9 +1061,13 @@ async function discoverMcpTools(value) {
 async function inspectMcpSource(value) {
   const endpoint = publicMcpUrl(value);
   if (!endpoint) throw new SourceDiscoveryError(400, 'source_url_invalid');
+  // Google's public catalogue does not make its operations unauthenticated.
+  // Manual Portal OAuth currently has no shared administrative credential flow.
+  const connectionBlock = bigQueryConnectionBlock(endpoint);
+  const connection = connectionBlock ? { connectionBlock } : {};
   try {
     const discovered = await discoverMcpTools(endpoint);
-    return Object.freeze({ authMode: 'none', ...discovered });
+    return Object.freeze({ authMode: connectionBlock ? 'oauth' : 'none', ...discovered, ...connection });
   } catch (error) {
     const stable = sourceFailure(error);
     if (stable.code !== 'source_authentication_required') throw stable;
@@ -1072,11 +1076,20 @@ async function inspectMcpSource(value) {
       endpoint,
       protocolVersion: '2026-07-28',
       tools: Object.freeze([]),
+      ...connection,
     });
   }
 }
 
+function bigQueryConnectionBlock(endpoint) {
+  return endpoint === 'https://bigquery.googleapis.com/mcp'
+    ? 'source_google_shared_oauth_unsupported'
+    : null;
+}
+
 async function verifyManagedSource(source) {
+  const connectionBlock = bigQueryConnectionBlock(publicMcpUrl(source.url));
+  if (connectionBlock) throw new SourceDiscoveryError(409, connectionBlock);
   const inspected = await inspectMcpSource(source.url);
   if (inspected.authMode !== source.authMode) {
     throw new SourceDiscoveryError(409, 'source_authentication_changed');
@@ -4486,14 +4499,16 @@ async function handleSourceDiscovery(request, env) {
   if (!exactKeys(input, ['url'])) return fixedJson(400, { schemaVersion: 1, error: 'source_url_invalid' });
   try {
     const discovered = await inspectMcpSource(input.url);
-    return fixedJson(200, {
+    const result = {
       schemaVersion: 1,
       status: discovered.authMode === 'oauth' ? 'authorization_required' : 'discovered',
       endpoint: discovered.endpoint,
       protocolVersion: discovered.protocolVersion,
       authentication: discovered.authMode,
       tools: discovered.tools,
-    });
+    };
+    if (discovered.connectionBlock) result.connectionBlock = discovered.connectionBlock;
+    return fixedJson(200, result);
   } catch (error) {
     return sourceErrorResponse(error);
   }

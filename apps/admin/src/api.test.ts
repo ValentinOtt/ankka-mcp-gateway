@@ -21,6 +21,30 @@ describe('HttpGatewayAdminApi', () => {
     updatedAt: '2026-08-29T00:00:00.000Z',
   } as const
 
+  it('accepts the protected public BigQuery catalogue with nullable summaries and a fixed setup block', async () => {
+    const discovery = {
+      schemaVersion: 1, status: 'authorization_required', endpoint: 'https://bigquery.googleapis.com/mcp',
+      protocolVersion: '2026-07-28', authentication: 'oauth',
+      connectionBlock: 'source_google_shared_oauth_unsupported',
+      tools: [{ name: 'execute_sql_readonly', title: null, description: null,
+        readOnlyHint: true, destructiveHint: false, openWorldHint: null, defaultSelected: true }],
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(discovery)))
+    await expect(new HttpGatewayAdminApi().discoverSource(discovery.endpoint)).resolves.toEqual(discovery)
+  })
+
+  it('renders only the fixed Google compatibility error, never provider details', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      error: 'source_google_shared_oauth_unsupported', detail: 'synthetic-sensitive-provider-response',
+    }, { status: 409 })))
+    await expect(new HttpGatewayAdminApi().saveSourceDraft(0, {
+      label: 'GA4 example', url: 'https://bigquery.googleapis.com/mcp', authMode: 'oauth', enabledTools: ['execute_sql_readonly'],
+    })).rejects.toEqual(expect.objectContaining({
+      code: 'source_google_shared_oauth_unsupported',
+      message: expect.stringContaining('without an admin credential flow'),
+    }))
+  })
+
   it('saves an exact sorted source draft through the production API', async () => {
     let capturedInit: RequestInit | undefined
     const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {

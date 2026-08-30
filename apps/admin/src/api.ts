@@ -66,11 +66,11 @@ const managedSourcesSchema = v.strictObject({
 })
 const discoveredToolSchema = v.strictObject({
   name: v.string(),
-  title: v.optional(v.string()),
-  description: v.optional(v.string()),
-  readOnlyHint: v.optional(v.boolean()),
-  destructiveHint: v.optional(v.boolean()),
-  openWorldHint: v.optional(v.boolean()),
+  title: v.nullish(v.string()),
+  description: v.nullish(v.string()),
+  readOnlyHint: v.nullish(v.boolean()),
+  destructiveHint: v.nullish(v.boolean()),
+  openWorldHint: v.nullish(v.boolean()),
   defaultSelected: v.optional(v.boolean()),
 })
 const sourceDiscoverySchema = v.strictObject({
@@ -80,6 +80,7 @@ const sourceDiscoverySchema = v.strictObject({
   protocolVersion: v.nullable(v.string()),
   authentication: sourceAuthModeSchema,
   tools: v.array(discoveredToolSchema),
+  connectionBlock: v.optional(v.literal('source_google_shared_oauth_unsupported')),
 })
 const sourceActionSchema = v.strictObject({
   schemaVersion: v.literal(1),
@@ -221,6 +222,7 @@ export interface GatewayAdminApi {
 }
 
 export const SOURCE_ADDITION_PAUSED_MESSAGE = 'New-source installation is temporarily unavailable in this release. Existing sources and team permissions remain available.'
+export const GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE = 'BigQuery requires a manually registered Google OAuth client. Cloudflare currently documents manual OAuth without an admin credential flow, so one operator connection for your team is not supported. No credentials have been requested. Keep Require user auth off; see the BigQuery setup guide.'
 
 const ERROR_MESSAGES = new Map([
   ['access_required', 'Your Cloudflare Access session is no longer active. Sign in again and refresh.'],
@@ -247,6 +249,7 @@ const ERROR_MESSAGES = new Map([
   ['source_addition_paused', SOURCE_ADDITION_PAUSED_MESSAGE],
   ['source_authentication_changed', 'The endpoint authentication mode changed. Inspect it again before saving.'],
   ['source_authentication_unsupported', 'The endpoint did not return the standard MCP OAuth discovery challenge.'],
+  ['source_google_shared_oauth_unsupported', GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE],
   ['source_capacity_exceeded', 'This source would exceed the gateway source-state capacity. Reduce its tool selection or remove another draft.'],
   ['source_conflict', 'The source list changed in another tab. Refresh and try again.'],
   ['source_invalid', 'The source draft was rejected. Review its endpoint and exact tool selection.'],
@@ -300,7 +303,7 @@ export function validHandoffUrl(value: string, expectedOrigin: string): string |
   }
 }
 
-/** Typed same-origin boundary for the customer-resident management Worker. */
+/** Typed same-origin boundary for the gateway management Worker. */
 export class HttpGatewayAdminApi implements GatewayAdminApi {
   getStatus(): Promise<GatewayStatus> { return this.#request('/api/status', gatewayStatusSchema) }
   getSources(): Promise<ManagedSources> { return this.#request('/api/sources', managedSourcesSchema) }
