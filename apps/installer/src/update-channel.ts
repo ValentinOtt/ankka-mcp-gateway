@@ -142,7 +142,7 @@ export function buildPublicUpdateChannel(bundle: VerifiedReleaseBundle): PublicU
     notes: Object.freeze([
       `Signed ${bundle.manifest.release} gateway runtime and management application.`,
       'Normal update: your configuration, credentials, Access, DNS, MCP sources, and tool allowlists are unchanged.',
-      ...(['gateway-v0.1.15', 'gateway-v0.1.16', 'gateway-v0.1.17', 'gateway-v0.1.18'].includes(bundle.manifest.release) ? [
+      ...(['gateway-v0.1.15', 'gateway-v0.1.16', 'gateway-v0.1.17', 'gateway-v0.1.18', 'gateway-v0.1.19'].includes(bundle.manifest.release) ? [
         'Team permissions apply only to MCP sources already installed in your gateway.',
         'New-source creation is unavailable in this release, including first-source onboarding for fresh empty gateways.',
         'Administrators remain fixed; source write tools are not activated and existing read-only boundaries are unchanged.',
@@ -155,6 +155,10 @@ export function buildPublicUpdateChannel(bundle: VerifiedReleaseBundle): PublicU
       ...(bundle.manifest.release === 'gateway-v0.1.18' ? [
         'Team saves run in your Cloudflare account without installer OAuth; they require a separately approved management credential.',
         'Upgrade v16 through the v17 compatibility bridge first. This update does not provision that credential.',
+      ] : []),
+      ...(bundle.manifest.release === 'gateway-v0.1.19' ? [
+        'WebMCP exposes supported management actions only in compatible browsers with the gateway or installer page open; no remote management MCP endpoint is added.',
+        'Team saves run in your Cloudflare account without installer OAuth and require a separately approved management credential; this update does not provision it. Upgrade v16 through the v17 compatibility bridge first.',
       ] : []),
     ]),
     verification: Object.freeze({

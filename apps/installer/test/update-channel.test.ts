@@ -79,7 +79,23 @@ describe('public update channel', () => {
     expect(parsePublicUpdateChannel(channel)).toEqual(channel);
   });
 
-  it.each(['gateway-v0.1.0', 'gateway-v0.1.14', 'gateway-v0.1.19'])(
+  it('discloses v19 browser support, customer-local Team setup, and continued onboarding limits', () => {
+    const channel = buildPublicUpdateChannel(bundleForRelease('gateway-v0.1.19'));
+    expect(channel.notes).toEqual([
+      'Signed gateway-v0.1.19 gateway runtime and management application.',
+      'Normal update: your configuration, credentials, Access, DNS, MCP sources, and tool allowlists are unchanged.',
+      'Team permissions apply only to MCP sources already installed in your gateway.',
+      'New-source creation is unavailable in this release, including first-source onboarding for fresh empty gateways.',
+      'Administrators remain fixed; source write tools are not activated and existing read-only boundaries are unchanged.',
+      'Once a permission-policy write is armed, automatic teardown and rollback to older runtimes are blocked, including when the write outcome is uncertain.',
+      'WebMCP exposes supported management actions only in compatible browsers with the gateway or installer page open; no remote management MCP endpoint is added.',
+      'Team saves run in your Cloudflare account without installer OAuth and require a separately approved management credential; this update does not provision it. Upgrade v16 through the v17 compatibility bridge first.',
+    ]);
+    expect(channel.notes).toHaveLength(8);
+    expect(parsePublicUpdateChannel(channel)).toEqual(channel);
+  });
+
+  it.each(['gateway-v0.1.0', 'gateway-v0.1.14', 'gateway-v0.1.20'])(
     'preserves generic release notes for %s', (release) => {
       expect(buildPublicUpdateChannel(bundleForRelease(release)).notes).toEqual([
         `Signed ${release} gateway runtime and management application.`,
