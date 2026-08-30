@@ -248,7 +248,7 @@ function releaseTitle(release, channel) {
 export function releaseNotes(repository, manifest, receipt) {
   const commitUrl = `https://github.com/${repository}/commit/${manifest.sourceCommit}`;
   const channelLabel = receipt.channel === 'canary' ? 'Canary pre-release' : 'Stable release';
-  const teamReleaseNotes = ['gateway-v0.1.15', 'gateway-v0.1.16', 'gateway-v0.1.17', 'gateway-v0.1.18'].includes(manifest.release)
+  const teamReleaseNotes = ['gateway-v0.1.15', 'gateway-v0.1.16', 'gateway-v0.1.17', 'gateway-v0.1.18', 'gateway-v0.1.19'].includes(manifest.release)
     ? `## ${manifest.release.slice('gateway-'.length)} scope and limits\n\n` +
       '- Team permissions apply only to MCP sources already installed in your gateway.\n' +
       '- New-source creation is unavailable in this release, including first-source onboarding for fresh empty gateways.\n' +
@@ -259,14 +259,18 @@ export function releaseNotes(repository, manifest, receipt) {
     ? '- Compatibility bridge: accepts the reviewed next Team release contract and fixes the installer return to your gateway after completion.\n' +
       '- This update does not create a Team credential or enable customer-local Team management; a separate second update is required.\n\n'
     : '';
-  const localTeamReleaseNotes = manifest.release === 'gateway-v0.1.18'
+  const localTeamReleaseNotes = ['gateway-v0.1.18', 'gateway-v0.1.19'].includes(manifest.release)
     ? '- Team saves run in your Cloudflare account without installer OAuth; they require a separately approved management credential.\n' +
       '- Upgrade v16 through the v17 compatibility bridge first. This update does not provision that credential.\n\n'
+    : '';
+  const webMcpReleaseNotes = manifest.release === 'gateway-v0.1.19'
+    ? '- WebMCP exposes supported management actions only in compatible browsers with the gateway or installer page open; no remote management MCP endpoint is added.\n\n'
     : '';
   return `${channelLabel} of Ankka MCP Gateway. This GitHub Release mirrors the exact signed artifact already committed to the customer update channel.\n\n` +
     teamReleaseNotes +
     bridgeReleaseNotes +
     localTeamReleaseNotes +
+    webMcpReleaseNotes +
     `- Source commit: [\`${manifest.sourceCommit.slice(0, 12)}\`](${commitUrl})\n` +
     `- Artifact SHA-256: \`${receipt.artifactSha256}\`\n` +
     `- Signature: Ed25519 (key ID \`${receipt.keyId}\`)\n` +
