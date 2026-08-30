@@ -17,9 +17,10 @@ file or rewriting Git history does not revoke a credential.
 
 ## Supported versions
 
-There is no production-supported release yet. During the public preview,
-security fixes target the latest preview release and `main`. Repository
-visibility or a signed preview artifact does not imply production support.
+Security fixes target `main` and ship in the next release. Only the most
+recent published release of each channel is supported; older releases receive
+no backports. See the [support policy](SUPPORT.md). Repository visibility or
+a signed artifact does not imply production support.
 
 ## Security boundary
 

@@ -229,7 +229,8 @@ committed. Contributor-facing toolchain and history policies are documented in
 
 For a reproducible, non-security problem, open a
 [GitHub issue](https://github.com/ValentinOtt/ankka-mcp-gateway/issues) using
-synthetic values and fixed public error codes only. Check the
+synthetic values and fixed public error codes only. Support is best-effort as
+described in the [support policy](SUPPORT.md). Check the
 [release status](https://github.com/ValentinOtt/ankka-mcp-gateway/releases)
 before deploying a preview release.
 

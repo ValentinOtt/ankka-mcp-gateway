@@ -39,6 +39,8 @@ installed release; a document or fixture is not a compatibility certification.
   session-scoped installer funnel, separate from the gateway's no-telemetry boundary.
 - [Release integrity](RELEASING.md): manifests, signatures, pinned authority,
   and publication requirements.
+- [Support policy](../SUPPORT.md): best-effort support, latest-release-only
+  fixes, and reporting boundaries.
 - [Report a vulnerability privately](../SECURITY.md).
 
 ## Before sharing a gateway
