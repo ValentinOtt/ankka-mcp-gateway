@@ -4,6 +4,9 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Add an opt-in, disposable two-version Worker/Durable Object probe with
+  synthetic state, bounded diagnostics, and verified cleanup. It is a platform
+  diagnostic, not a gateway release or source-connection acceptance test.
 - Add a minimal best-effort support policy: only the newest release of each
   channel receives fixes, no backports, canary as the evaluation channel, and
   stable as a maintainer recommendation rather than an SLA.
