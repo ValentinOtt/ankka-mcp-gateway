@@ -49,7 +49,22 @@ describe('public update channel', () => {
     expect(parsePublicUpdateChannel(channel)).toEqual(channel);
   });
 
-  it.each(['gateway-v0.1.0', 'gateway-v0.1.14', 'gateway-v0.1.17'])(
+  it('discloses the v17 bridge limitations without activating the next Team release', () => {
+    const channel = buildPublicUpdateChannel(bundleForRelease('gateway-v0.1.17'));
+    expect(channel.notes).toEqual([
+      'Signed gateway-v0.1.17 gateway runtime and management application.',
+      'Normal update: your configuration, credentials, Access, DNS, MCP sources, and tool allowlists are unchanged.',
+      'Team permissions apply only to MCP sources already installed in your gateway.',
+      'New-source creation is unavailable in this release, including first-source onboarding for fresh empty gateways.',
+      'Administrators remain fixed; source write tools are not activated and existing read-only boundaries are unchanged.',
+      'Once a permission-policy write is armed, automatic teardown and rollback to older runtimes are blocked, including when the write outcome is uncertain.',
+      'Compatibility bridge: accepts the reviewed next Team release contract and fixes the installer return to your gateway after completion.',
+      'This update does not create a Team credential or enable customer-local Team management; a separate second update is required.',
+    ]);
+    expect(parsePublicUpdateChannel(channel)).toEqual(channel);
+  });
+
+  it.each(['gateway-v0.1.0', 'gateway-v0.1.14', 'gateway-v0.1.18'])(
     'preserves generic release notes for %s', (release) => {
       expect(buildPublicUpdateChannel(bundleForRelease(release)).notes).toEqual([
         `Signed ${release} gateway runtime and management application.`,
