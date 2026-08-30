@@ -2,6 +2,17 @@
 
 Notable public product and repository changes are recorded here.
 
+## gateway-v0.1.16 (canary)
+
+- Keep the exact candidate-version override on the external update probe, but
+  remove it before forwarding the authenticated probe to the retained Durable
+  Object. Release, artifact, signature, expiry, and saved-action checks remain
+  required; probe success still requires an explicit ready response.
+- Preserve the v0.1.15 dashboard and existing-source-only Team permissions.
+  New-source creation, including onboarding an empty gateway, remains paused.
+  Administrators stay fixed, source write tools remain disabled, and armed Team
+  changes still block automatic teardown and rollback to older releases.
+
 ## Unreleased
 
 - Add an opt-in, disposable two-version Worker/Durable Object probe with
