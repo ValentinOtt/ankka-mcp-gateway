@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SOURCE_ADDITION_PAUSED_MESSAGE, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type RuntimeUpdate, type SourceDiscovery } from '../api'
+import { SYNTHETIC_SOURCE_CATALOG } from '../catalog/fixtures'
 import { GatewayProvider } from '../GatewayContext'
 import { SourcesPage } from './SourcesPage'
 
@@ -53,13 +54,140 @@ describe('SourcesPage', () => {
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })
 
+  it('shows the protected BigQuery catalogue but blocks connection and keeps all tools unselected', async () => {
+    const user = userEvent.setup()
+    const saveSourceDraft = vi.fn()
+    const api: GatewayAdminApi = {
+      getStatus: vi.fn(async () => status),
+      getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(), getSources: vi.fn(async () => sources), getUpdate: vi.fn(async () => update),
+      discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
+        schemaVersion: 1, status: 'authorization_required', endpoint: url, protocolVersion: '2026-07-28',
+        authentication: 'oauth', connectionBlock: 'source_google_shared_oauth_unsupported',
+        tools: [
+          { name: 'execute_sql_readonly', description: 'Synthetic read query.', readOnlyHint: true, defaultSelected: true },
+          { name: 'execute_sql', description: 'Synthetic write query.', destructiveHint: true, defaultSelected: false },
+        ],
+      })),
+      saveSourceDraft, prepareSourceAction: vi.fn(), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    }
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await screen.findByText('No sources yet')
+    await user.click(screen.getByRole('button', { name: 'Add source' }))
+    await user.type(screen.getByLabelText('Source name'), 'GA4 example')
+    await user.type(screen.getByLabelText('MCP URL'), 'https://bigquery.googleapis.com/mcp')
+    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('without an admin credential flow')
+    expect(screen.getByText('OAuth protected')).toBeInTheDocument()
+    expect(screen.queryByText('Public endpoint')).not.toBeInTheDocument()
+    expect(screen.queryByText('One Gateway login')).not.toBeInTheDocument()
+    expect(screen.getByText('Synthetic read query.')).toBeInTheDocument()
+    for (const checkbox of screen.getAllByRole('checkbox')) expect(checkbox).not.toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Select shown' }))
+    expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled()
+    const form = screen.getByRole('button', { name: 'Save draft' }).closest('form')
+    if (!form) throw new Error('Expected source form')
+    fireEvent.submit(form)
+    expect(saveSourceDraft).not.toHaveBeenCalled()
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+
+  it('uses a reviewed catalog entry only as a seed for inspection and exact-tool review', async () => {
+    const user = userEvent.setup()
+    const preset = SYNTHETIC_SOURCE_CATALOG.sources[0]
+    const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 5 }))
+    const prepareSourceAction = vi.fn()
+    const api: GatewayAdminApi = {
+      getStatus: vi.fn(async () => status),
+      getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
+      getSources: vi.fn(async () => sources),
+      getUpdate: vi.fn(async () => update),
+      discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
+        schemaVersion: 1,
+        status: 'authorization_required',
+        endpoint: url,
+        protocolVersion: '2026-07-28',
+        authentication: 'oauth',
+        tools: [],
+      })),
+      saveSourceDraft,
+      prepareSourceAction,
+      getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
+      prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    }
+
+    render(<GatewayProvider api={api}><SourcesPage catalog={SYNTHETIC_SOURCE_CATALOG} /></GatewayProvider>)
+    await screen.findByText('No sources yet')
+    await user.click(screen.getByRole('button', { name: 'Add source' }))
+
+    await user.click(screen.getByRole('button', { name: 'Custom MCP URL' }))
+    expect(screen.getByLabelText('MCP URL')).toHaveValue('')
+    await user.click(screen.getByRole('button', { name: /Reviewed catalog/u }))
+    expect(screen.queryByLabelText('MCP URL')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: `Select ${preset.displayName}` }))
+
+    expect(screen.getByLabelText('Source name')).toHaveValue(preset.displayName)
+    expect(screen.getByLabelText('MCP URL')).toHaveValue(preset.implementation.deployment.url)
+    expect(screen.getByLabelText('MCP URL')).toHaveAttribute('readonly')
+    expect(screen.getByLabelText('Catalog-recommended tools')).toHaveTextContent('properties.list')
+    expect(screen.queryByRole('button', { name: 'Save draft' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+    expect(api.discoverSource).toHaveBeenCalledWith(preset.implementation.deployment.url)
+    expect(await screen.findByLabelText('Exact tool names')).toHaveValue('properties.list\nreports.read')
+
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    expect(saveSourceDraft).toHaveBeenCalledWith(4, {
+      label: preset.displayName,
+      url: preset.implementation.deployment.url,
+      authMode: 'oauth',
+      enabledTools: ['properties.list', 'reports.read'],
+    })
+    expect(prepareSourceAction).not.toHaveBeenCalled()
+  })
+
+  it('rejects a catalog entry when live inspection finds different authentication', async () => {
+    const user = userEvent.setup()
+    const preset = SYNTHETIC_SOURCE_CATALOG.sources[0]
+    const saveSourceDraft = vi.fn()
+    const api: GatewayAdminApi = {
+      getStatus: vi.fn(async () => status),
+      getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
+      getSources: vi.fn(async () => sources),
+      getUpdate: vi.fn(async () => update),
+      discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
+        schemaVersion: 1,
+        status: 'discovered',
+        endpoint: url,
+        protocolVersion: '2026-07-28',
+        authentication: 'none',
+        tools: [{ name: 'reports.read', defaultSelected: true }],
+      })),
+      saveSourceDraft,
+      prepareSourceAction: vi.fn(), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
+      prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    }
+
+    render(<GatewayProvider api={api}><SourcesPage catalog={SYNTHETIC_SOURCE_CATALOG} /></GatewayProvider>)
+    await screen.findByText('No sources yet')
+    await user.click(screen.getByRole('button', { name: 'Add source' }))
+    await user.click(screen.getByRole('button', { name: `Select ${preset.displayName}` }))
+    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('authentication no longer matches')
+    expect(screen.queryByRole('button', { name: 'Save draft' })).not.toBeInTheDocument()
+    expect(saveSourceDraft).not.toHaveBeenCalled()
+  })
+
   it('discovers a catalogue and saves the reviewed exact allowlist', async () => {
     const user = userEvent.setup()
     const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 5 }))
     const api: GatewayAdminApi = {
       getStatus: vi.fn(async () => status),
-      getSources: vi.fn(async () => sources),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
+      getSources: vi.fn(async () => sources),
       getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
         schemaVersion: 1, status: 'discovered', endpoint: url, protocolVersion: '2026-07-28', authentication: 'none',
@@ -88,6 +216,52 @@ describe('SourcesPage', () => {
     })
   })
 
+  it('clears a successful inspection when a retry fails', async () => {
+    const user = userEvent.setup()
+    let inspectionCount = 0
+    const saveSourceDraft = vi.fn()
+    const discoverSource = vi.fn(async (url): Promise<SourceDiscovery> => {
+      inspectionCount += 1
+      if (inspectionCount > 1) throw new Error('The source could not be reached.')
+      return {
+        schemaVersion: 1,
+        status: 'discovered',
+        endpoint: url,
+        protocolVersion: '2026-07-28',
+        authentication: 'none',
+        tools: [{ name: 'search', title: 'Search', description: 'Search documents.', defaultSelected: true }],
+      }
+    })
+    const api: GatewayAdminApi = {
+      getStatus: vi.fn(async () => status),
+      getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
+      getSources: vi.fn(async () => sources),
+      getUpdate: vi.fn(async () => update),
+      discoverSource,
+      saveSourceDraft,
+      prepareSourceAction: vi.fn(), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
+      prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    }
+
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await screen.findByText('No sources yet')
+    await user.click(screen.getByRole('button', { name: 'Add source' }))
+    await user.type(screen.getByLabelText('Source name'), 'Company knowledge')
+    await user.type(screen.getByLabelText('MCP URL'), 'https://knowledge.example.com/mcp')
+    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+
+    expect(await screen.findByText('Search documents.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save draft' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be reached')
+    expect(screen.queryByText('Search documents.')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save draft' })).not.toBeInTheDocument()
+    expect(saveSourceDraft).not.toHaveBeenCalled()
+  })
+
   it.each([228, 224])('keeps a %i-tool catalogue filterable and supports bulk exact selection', async (toolCount) => {
     const user = userEvent.setup()
     const toolNames = Array.from(
@@ -109,8 +283,8 @@ describe('SourcesPage', () => {
     }))
     const api: GatewayAdminApi = {
       getStatus: vi.fn(async () => status),
-      getSources: vi.fn(async () => sources),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
+      getSources: vi.fn(async () => sources),
       getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
         schemaVersion: 1,
@@ -172,8 +346,8 @@ describe('SourcesPage', () => {
     const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 5 }))
     const api: GatewayAdminApi = {
       getStatus: vi.fn(async () => status),
-      getSources: vi.fn(async () => sources),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
+      getSources: vi.fn(async () => sources),
       getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
         schemaVersion: 1,
