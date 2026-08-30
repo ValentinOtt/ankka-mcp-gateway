@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- State stable-channel availability in the entry-point documentation: the
+  README status banner, docs index, self-service availability notice, and
+  security-model limitations now describe stable and canary channels under
+  the support policy instead of a canary-only preview.
 - Correct the release-verification note: published canary releases already
   carry the signing key identity and sanitized verification record, so the
   complete verification check applies to them today.

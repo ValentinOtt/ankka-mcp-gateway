@@ -6,14 +6,15 @@ Ankka MCP Gateway is designed to install into and operate from your Cloudflare
 account. Your MCP Portal, management Worker, Access policies, logs, source
 configuration, and upstream credentials remain under your control.
 
-> **Availability:** canary preview. Signed [canary releases](https://github.com/ValentinOtt/ankka-mcp-gateway/releases)
-> are available, with a hosted evaluation flow at [deploy.ankka.ai](https://deploy.ankka.ai).
-> Review the exact release before authorizing changes to your account; this is
-> not a stable, production-supported release. If the installer reports that
-> deployment is unavailable, do not bypass its activation checks.
+> **Availability:** stable and canary releases. Signed [releases](https://github.com/ValentinOtt/ankka-mcp-gateway/releases)
+> are available, with a hosted flow at [deploy.ankka.ai](https://deploy.ankka.ai).
+> Review the exact release before authorizing changes to your account; support
+> is best-effort under the [support policy](../SUPPORT.md), not a production
+> SLA. If the installer reports that deployment is unavailable, do not bypass
+> its activation checks.
 
 The source installer's disabled default activation is separate from the reviewed
-canary build. Public source does not include live deployment authority or
+hosted build. Public source does not include live deployment authority or
 signing keys. The [local UI preview](../README.md#run-locally) uses synthetic
 data and cannot deploy a gateway.
 
