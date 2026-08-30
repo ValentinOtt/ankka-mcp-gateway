@@ -6,12 +6,13 @@ import { CloudflareDirectUploadError } from '../src/cloudflare-worker-direct-upl
 import { OAUTH_COOKIE, PUBLIC_ORIGIN, REQUIRED_OAUTH_SCOPES, SESSION_COOKIE } from '../src/constants';
 import { base64UrlEncode, deriveCsrfToken, openOauthCookie, sha256 } from '../src/crypto';
 import { DeployError } from '../src/errors';
-import { createGatewayDeployWorker, type GatewayDeployWorkerDependencies } from '../src/index';
+import { createGatewayDeployWorker, type GatewayDeployWorkerDependencies, type InstallCallbackResponseInput } from '../src/index';
 import * as oauthModule from '../src/oauth';
 import * as runtimeRelay from '../src/runtime-update-relay';
 import { buildStaticDeployPlan, parseDeploySelection } from '../src/schema';
 import type { StoredDeploySession } from '../src/session';
 import * as sourceRelay from '../src/source-action-relay';
+import { streamingInstallCallbackResponse } from '../src/streaming-callback';
 import { responseJson } from './boundary';
 import { cookiePair, env, FakeDeploySessionNamespace, requiredFixture, selectionInput } from './fixtures';
 import { sourceActionRuntimeFixture, type SourceActionRuntimeFixture } from './source-action-runtime-fixture';
@@ -39,6 +40,12 @@ beforeAll(async () => {
 });
 
 afterEach(() => vi.restoreAllMocks());
+
+function deferred() {
+  let resolve = (): void => undefined;
+  const promise = new Promise<void>((nextResolve) => { resolve = nextResolve; });
+  return { promise, resolve };
+}
 
 async function fixture(flow: Flow, overrides: GatewayDeployWorkerDependencies = {}) {
   const namespace = new FakeDeploySessionNamespace(() => NOW);
@@ -226,6 +233,98 @@ describe.each(['source', 'runtime'] as const)('%s management callback with a ret
       actionId: ACTION_ID,
       managementUrl: MANAGEMENT_ORIGIN + '/?' + (flow === 'source' ? 'sourceAction=' : 'runtimeAction=') + ACTION_ID,
     });
+    current.assertRetained(context);
+  });
+});
+
+describe('runtime callback completion ordering', () => {
+  it.each([
+    ['succeeded', false],
+    ['succeeded', true],
+    ['failed', false],
+    ['failed', true],
+  ] as const)('waits for action %s and cleanup (revocation failure: %s) before returning', async (outcome, revokeFails) => {
+    const relayStarted = deferred();
+    const relayComplete = deferred();
+    const cleanupStarted = deferred();
+    const cleanupComplete = deferred();
+    const discard = vi.spyOn(oauthModule.EphemeralCloudflareGrant.prototype, 'discard');
+    const shell = vi.fn(async ({ execute }: InstallCallbackResponseInput) => {
+      expect(discard).toHaveBeenCalledTimes(1);
+      const execution = execute();
+      expect(execute()).toBe(execution);
+      await execution;
+      return streamingInstallCallbackResponse(new Response('<!doctype html><title>Management action</title>', {
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      }), execute);
+    });
+    const current = await fixture('runtime', { managementCallbackResponse: shell });
+    current.update.mockImplementation(async () => {
+      relayStarted.resolve();
+      await relayComplete.promise;
+      if (outcome === 'failed') throw new DeployError(409, 'session_conflict');
+      return {
+        schemaVersion: 1, actionId: ACTION_ID, operation: 'update', status: 'succeeded',
+        managementUrl: MANAGEMENT_ORIGIN + '/?runtimeAction=' + ACTION_ID,
+      };
+    });
+    const originalRevoke = oauthModule.EphemeralCloudflareGrant.prototype.revoke;
+    const revoke = vi.spyOn(oauthModule.EphemeralCloudflareGrant.prototype, 'revoke').mockImplementation(
+      async function (this: oauthModule.EphemeralCloudflareGrant, transport, config) {
+        cleanupStarted.resolve();
+        await cleanupComplete.promise;
+        await originalRevoke.call(this, transport, config);
+        if (revokeFails) throw new DeployError(502, 'oauth_revoke_failed');
+      },
+    );
+    let responded = false;
+    const callback = current.callback().then((response) => { responded = true; return response; });
+
+    await relayStarted.promise;
+    expect(responded).toBe(false);
+    expect(shell).not.toHaveBeenCalled();
+    expect(revoke).not.toHaveBeenCalled();
+    relayComplete.resolve();
+    await cleanupStarted.promise;
+    expect(responded).toBe(false);
+    expect(shell).not.toHaveBeenCalled();
+    expect(discard).not.toHaveBeenCalled();
+    const pendingContext = await current.worker.fetch(new Request(PUBLIC_ORIGIN + '/api/management/context', {
+      headers: { cookie: SESSION_PAIR + '; ' + current.oauth },
+    }), current.workerEnv);
+    expect(pendingContext.status).toBe(404);
+    expect(await pendingContext.json()).toEqual({ code: 'session_invalid' });
+
+    cleanupComplete.resolve();
+    const response = await callback;
+    expect(revoke).toHaveBeenCalledTimes(1);
+    expect(discard).toHaveBeenCalledTimes(1);
+    expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
+    expect(current.update).toHaveBeenCalledTimes(1);
+    expect(current.source).not.toHaveBeenCalled();
+    expect(response.headers.get('location')).toBeNull();
+    current.assertRetained(response);
+    if (outcome === 'failed') {
+      expect(shell).not.toHaveBeenCalled();
+      expect(response.status).toBe(409);
+      expect(response.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
+      expect(await response.json()).toEqual({ code: 'session_conflict', reason: 'runtime_action_relay' });
+      return;
+    }
+    expect(shell).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('<!doctype html><title>Management action</title>');
+    const verified = cookiePair(response.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
+    const context = await current.worker.fetch(new Request(PUBLIC_ORIGIN + '/api/management/context', {
+      headers: { cookie: SESSION_PAIR + '; ' + verified },
+    }), current.workerEnv);
+    expect(context.status).toBe(200);
+    expect(await context.json()).toMatchObject({
+      actionId: ACTION_ID,
+      managementUrl: MANAGEMENT_ORIGIN + '/?runtimeAction=' + ACTION_ID,
+    });
+    expect(current.update).toHaveBeenCalledTimes(1);
+    expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
     current.assertRetained(context);
   });
 });

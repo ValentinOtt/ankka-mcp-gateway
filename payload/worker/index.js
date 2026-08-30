@@ -398,6 +398,17 @@ const APPROVED_UPDATE_CLOUDFLARE_CONTRACT = Object.freeze({
     }),
   }),
 });
+// Accept the next reviewed contract without changing this bridge's legacy release manifest.
+const REVIEWED_TEAM_UPDATE_CLOUDFLARE_CONTRACT = Object.freeze({
+  ...APPROVED_UPDATE_CLOUDFLARE_CONTRACT,
+  publicBindings: Object.freeze({
+    ...APPROVED_UPDATE_CLOUDFLARE_CONTRACT.publicBindings,
+    secrets: Object.freeze([
+      ...APPROVED_UPDATE_CLOUDFLARE_CONTRACT.publicBindings.secrets,
+      Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_TEAM_MANAGEMENT_TOKEN' }),
+    ]),
+  }),
+});
 const HASH = /^sha256:[a-f0-9]{64}$/u;
 const INSTALLATION_ID = /^acg-[a-f0-9]{24}$/u;
 const PLAN_ID = /^plan-[a-f0-9]{24}$/u;
@@ -1202,7 +1213,8 @@ async function parseSignedUpdateManifest(serialized) {
   ]) || value.schemaVersion !== 1 || !updateSemver(value.release) ||
       value.controlPlaneOrigin !== CONTROL_PLANE_ORIGIN ||
       !isText(value.sourceCommit) || !/^[a-f0-9]{40}$/u.test(value.sourceCommit) ||
-      canonicalJson(value.cloudflare) !== canonicalJson(APPROVED_UPDATE_CLOUDFLARE_CONTRACT) ||
+      (canonicalJson(value.cloudflare) !== canonicalJson(APPROVED_UPDATE_CLOUDFLARE_CONTRACT) &&
+       canonicalJson(value.cloudflare) !== canonicalJson(REVIEWED_TEAM_UPDATE_CLOUDFLARE_CONTRACT)) ||
       canonicalJson(value.oauthScopeIds) !== canonicalJson(UPDATE_OAUTH_SCOPES) ||
       !exactKeys(value.artifact, ['byteSize', 'fileCount', 'treeSha256']) ||
       !Number.isSafeInteger(value.artifact.byteSize) || value.artifact.byteSize < 1 ||

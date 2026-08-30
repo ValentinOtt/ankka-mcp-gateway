@@ -10,14 +10,14 @@ const ROOT = new URL('../payload/', import.meta.url);
 const ADMIN_ROOT = new URL('../apps/admin/dist/', import.meta.url);
 const COMPONENTS = Object.freeze({
   admin: null,
-  installer: ['assets/installer-b89856ad.css', 'assets/installer-de4ef4f0.js', 'index.html'],
+  installer: ['assets/installer-8f3e8eab.js', 'assets/installer-b89856ad.css', 'index.html'],
   worker: ['index.js'],
   'worker-cleanup': ['index.js'],
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: '1a4167836c1306de02a6771919bc5b0e48186e35190abd38560b639f12385da9',
-  worker: 'd9abbc051e09fd676548088324f85c770d0cce9d38c555fbf6606e93a9b4d96d',
+  installer: 'e3d4d101537f0acf5f170fb8e24fc220cc75fbc120f6540117b6f5629db29be3',
+  worker: 'fed7d9b5f65017de2f87a792dfd5b0deb8949e217358a7306fbb9426fa4648c5',
   'worker-cleanup': '294518970598816944bae9e5e6f6411d3aa7ce00238e81e6b5abebb6b449e46f',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
@@ -191,7 +191,7 @@ test('admin and installer HTML use external same-origin assets without inline ex
 
 test('installer assets cover the exact hosted session, plan, deploy, result, and removal contract', async () => {
   const html = await readFile(new URL('installer/index.html', ROOT), 'utf8');
-  const script = await readFile(new URL('installer/assets/installer-de4ef4f0.js', ROOT), 'utf8');
+  const script = await readFile(new URL('installer/assets/installer-8f3e8eab.js', ROOT), 'utf8');
   assert.doesNotMatch(`${html}\n${script}`, /\bcustomers?\b/iu);
   for (const route of ['/', '/gateway', '/review', '/deploy', '/manage', '/oauth/handoff', '/oauth/callback', '/result']) {
     if (route !== '/') assert.match(`${html}\n${script}`, new RegExp(route.replace('/', '\\/'), 'u'));
