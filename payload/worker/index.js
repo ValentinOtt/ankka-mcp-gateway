@@ -1,3 +1,273 @@
+// Canonical bounded email-audience projection shared by runtime and unit tests.
+const TEAM_MAX_PEOPLE = 51;
+const TEAM_MAX_SOURCES = 32;
+const TEAM_EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u;
+const TEAM_SOURCE_ID = /^[a-z][a-z0-9-]{0,31}$/u;
+const TEAM_PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
+const TEAM_TOOL = /^[A-Za-z0-9_.:/-]{1,128}$/u;
+const TEAM_ERROR_CODES = Object.freeze([
+  'team_access_invalid_request',
+  'team_access_revision_conflict',
+  'team_access_admin_required',
+  'team_access_invalid_state',
+  'team_access_invalid_target',
+]);
+
+export class TeamAccessError extends Error {
+  constructor(code) {
+    const safeCode = TEAM_ERROR_CODES.includes(code) ? code : 'team_access_invalid_request';
+    super(safeCode);
+    this.name = 'TeamAccessError';
+    this.code = safeCode;
+  }
+}
+
+function teamFail(code = 'team_access_invalid_request') {
+  throw new TeamAccessError(code);
+}
+
+function teamText(value) {
+  return Object(value) !== value && Object.prototype.toString.call(value) === '[object String]';
+}
+
+function teamRecord(value) {
+  if (value === null || Object(value) !== value || Array.isArray(value)) return false;
+  return Object.getPrototypeOf(value) === Object.prototype &&
+    Reflect.ownKeys(value).every((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return teamText(key) && descriptor.enumerable && Object.hasOwn(descriptor, 'value');
+    });
+}
+
+function teamKeys(value, keys) {
+  return teamRecord(value) && Object.keys(value).length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key));
+}
+
+function teamCompare(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function teamFreeze(value) {
+  if (value !== null && Object(value) === value) {
+    for (const child of Object.values(value)) teamFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function teamName(value, maximum = 512) {
+  if (!teamText(value) || value.length === 0 || value.length > maximum || value.trim() !== value) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return false;
+  }
+  return true;
+}
+
+function teamEmail(value) {
+  if (!teamText(value)) teamFail();
+  const email = value.trim().toLowerCase();
+  if (email.length > 254 || !TEAM_EMAIL.test(email)) teamFail();
+  return email;
+}
+
+function teamEmails(values, minimum = 0) {
+  if (!Array.isArray(values) || values.length < minimum || values.length > TEAM_MAX_PEOPLE) teamFail();
+  const emails = [];
+  for (const value of values) emails.push(teamEmail(value));
+  if (new Set(emails).size !== emails.length) teamFail();
+  return emails.sort(teamCompare);
+}
+
+function teamContext(context) {
+  if (!teamRecord(context) || !Number.isSafeInteger(context.revision) || context.revision < 0 ||
+      context.revision >= Number.MAX_SAFE_INTEGER || !Array.isArray(context.sources) ||
+      context.sources.length > TEAM_MAX_SOURCES) teamFail('team_access_invalid_state');
+  try {
+    const adminEmails = teamEmails(context.adminEmails, 1);
+    const sources = new Map();
+    for (const source of context.sources) {
+      if (!teamKeys(source, ['id', 'label', 'enabledTools', 'installed']) ||
+          !teamText(source.id) || !TEAM_SOURCE_ID.test(source.id) || sources.has(source.id) ||
+          !teamName(source.label, 80) || (source.installed !== true && source.installed !== false) ||
+          !Array.isArray(source.enabledTools) || source.enabledTools.length > 500) teamFail();
+      const tools = [];
+      for (const name of source.enabledTools) {
+        if (!teamText(name) || !TEAM_TOOL.test(name)) teamFail();
+        tools.push(name);
+      }
+      if (new Set(tools).size !== tools.length) teamFail();
+      sources.set(source.id, { installed: source.installed });
+    }
+    return { revision: context.revision, adminEmails, sources };
+  } catch {
+    teamFail('team_access_invalid_state');
+  }
+}
+
+function teamMembers(values, context) {
+  if (!Array.isArray(values) || values.length === 0 || values.length > TEAM_MAX_PEOPLE) teamFail();
+  const emails = new Set();
+  const members = [];
+  for (const value of values) {
+    if (!teamKeys(value, ['email', 'sourceIds']) || !Array.isArray(value.sourceIds) ||
+        value.sourceIds.length > TEAM_MAX_SOURCES) teamFail();
+    const email = teamEmail(value.email);
+    if (emails.has(email)) teamFail();
+    emails.add(email);
+    const sourceIds = [];
+    for (const id of value.sourceIds) {
+      if (!teamText(id) || context.sources.get(id)?.installed !== true) teamFail();
+      sourceIds.push(id);
+    }
+    if (new Set(sourceIds).size !== sourceIds.length) teamFail();
+    members.push({ email, sourceIds: sourceIds.sort(teamCompare) });
+  }
+  if (context.adminEmails.some((email) => !emails.has(email))) teamFail('team_access_admin_required');
+  return members.sort((left, right) => teamCompare(left.email, right.email));
+}
+
+export function normalizeTeamAccessRequest(value, context) {
+  const current = teamContext(context);
+  if (!teamKeys(value, ['schemaVersion', 'expectedRevision', 'members']) ||
+      value.schemaVersion !== 1 || !Number.isSafeInteger(value.expectedRevision) ||
+      value.expectedRevision < 0) teamFail();
+  if (value.expectedRevision !== current.revision) teamFail('team_access_revision_conflict');
+  return teamFreeze({
+    schemaVersion: 1,
+    expectedRevision: current.revision,
+    members: teamMembers(value.members, current),
+  });
+}
+
+export function teamPolicy(emails, name) {
+  if (!teamName(name)) teamFail('team_access_invalid_target');
+  const audience = teamEmails(emails);
+  return teamFreeze({
+    name,
+    decision: audience.length === 0 ? 'deny' : 'allow',
+    include: audience.length === 0
+      ? [{ everyone: {} }]
+      : audience.map((email) => ({ email: { email } })),
+    exclude: [],
+    require: [],
+  });
+}
+
+function teamPolicyAudience(policy) {
+  if (!teamRecord(policy) || !Array.isArray(policy.include) ||
+      !Array.isArray(policy.exclude) || policy.exclude.length !== 0 ||
+      !Array.isArray(policy.require) || policy.require.length !== 0) teamFail();
+  if (policy.decision === 'deny') {
+    if (policy.include.length !== 1 || !teamKeys(policy.include[0], ['everyone']) ||
+        !teamKeys(policy.include[0].everyone, [])) teamFail();
+    return [];
+  }
+  if (policy.decision !== 'allow' || policy.include.length === 0 ||
+      policy.include.length > TEAM_MAX_PEOPLE) teamFail();
+  const emails = [];
+  for (const rule of policy.include) {
+    if (!teamKeys(rule, ['email']) || !teamKeys(rule.email, ['email'])) teamFail();
+    emails.push(rule.email.email);
+  }
+  return teamEmails(emails, 1);
+}
+
+function teamNeutralPolicyFields(policy) {
+  const metadata = ['id', 'uid', 'account_id', 'created_at', 'updated_at', 'precedence'];
+  const body = ['name', 'decision', 'include', 'exclude', 'require'];
+  const falseFields = ['approval_required', 'isolation_required', 'purpose_justification_required', 'reusable'];
+  const emptyText = ['purpose_justification_prompt', 'session_duration'];
+  const emptyObjects = ['connection_rules', 'mfa_config'];
+  const known = new Set([...metadata, ...body, ...falseFields, ...emptyText, ...emptyObjects, 'approval_groups']);
+  if (Object.keys(policy).some((key) => !known.has(key))) return false;
+  if (Object.hasOwn(policy, 'uid') && policy.uid !== policy.id) return false;
+  if (falseFields.some((key) => Object.hasOwn(policy, key) && policy[key] !== false)) return false;
+  if (emptyText.some((key) => Object.hasOwn(policy, key) && policy[key] !== null && policy[key] !== '')) return false;
+  if (emptyObjects.some((key) => Object.hasOwn(policy, key) && policy[key] !== null &&
+      !teamKeys(policy[key], []))) return false;
+  if (Object.hasOwn(policy, 'approval_groups') &&
+      (!Array.isArray(policy.approval_groups) || policy.approval_groups.length !== 0)) return false;
+  return !Object.hasOwn(policy, 'precedence') ||
+    (Number.isSafeInteger(policy.precedence) && policy.precedence >= 0);
+}
+
+export function teamPolicyMatches(observed, expected, policyId) {
+  try {
+    if (!teamText(policyId) || !TEAM_PROVIDER_ID.test(policyId) || !teamRecord(observed) ||
+        !teamRecord(expected) || observed.id !== policyId || observed.name !== expected.name ||
+        !teamNeutralPolicyFields(observed)) return false;
+    const expectedKeys = ['name', 'decision', 'include', 'exclude', 'require'];
+    if (Object.hasOwn(expected, 'precedence')) expectedKeys.push('precedence');
+    if (!teamKeys(expected, expectedKeys) || !teamName(expected.name) ||
+        (Object.hasOwn(expected, 'precedence') && (!Number.isSafeInteger(expected.precedence) ||
+          expected.precedence < 0 || observed.precedence !== expected.precedence))) return false;
+    return observed.decision === expected.decision &&
+      JSON.stringify(teamPolicyAudience(observed)) === JSON.stringify(teamPolicyAudience(expected));
+  } catch {
+    return false;
+  }
+}
+
+function teamTarget(value, source = false) {
+  const keys = ['applicationId', 'policyId', 'policyName'];
+  if (source) keys.push('sourceId');
+  if (!teamKeys(value, keys) || !teamText(value.applicationId) || !TEAM_PROVIDER_ID.test(value.applicationId) ||
+      !teamText(value.policyId) || !TEAM_PROVIDER_ID.test(value.policyId) || !teamName(value.policyName) ||
+      (source && (!teamText(value.sourceId) || !TEAM_SOURCE_ID.test(value.sourceId)))) {
+    teamFail('team_access_invalid_target');
+  }
+  return { ...value };
+}
+
+export function planTeamAccessChange(value, context) {
+  const input = normalizeTeamAccessRequest(value, context);
+  const current = teamContext(context);
+  let previous;
+  try { previous = teamMembers(context.currentMembers, current); }
+  catch { teamFail('team_access_invalid_state'); }
+  const portalTarget = teamTarget(context.portalTarget);
+  if (!Array.isArray(context.sourceTargets) || context.sourceTargets.length > TEAM_MAX_SOURCES) {
+    teamFail('team_access_invalid_target');
+  }
+  const sourceTargets = context.sourceTargets.map((target) => teamTarget(target, true))
+    .sort((left, right) => teamCompare(left.sourceId, right.sourceId));
+  const installedIds = [...current.sources].filter(([, source]) => source.installed).map(([id]) => id).sort(teamCompare);
+  if (JSON.stringify(sourceTargets.map((target) => target.sourceId)) !== JSON.stringify(installedIds)) {
+    teamFail('team_access_invalid_target');
+  }
+  const targets = [portalTarget, ...sourceTargets];
+  if (new Set(targets.map((target) => target.applicationId)).size !== targets.length ||
+      new Set(targets.map((target) => target.policyId)).size !== targets.length) teamFail('team_access_invalid_target');
+  const policies = [];
+  for (const target of targets) {
+    const audience = (members) => members.filter((member) =>
+      target.sourceId === undefined || member.sourceIds.includes(target.sourceId)).map((member) => member.email);
+    const before = teamPolicy(audience(previous), target.policyName);
+    const after = teamPolicy(audience(input.members), target.policyName);
+    policies.push({
+      kind: target.sourceId === undefined ? 'portal' : 'source',
+      ...target,
+      before,
+      after,
+    });
+  }
+  const policyChanges = policies.filter((policy) => JSON.stringify(policy.before) !== JSON.stringify(policy.after));
+  const oldEmails = new Set(previous.map((member) => member.email));
+  const newEmails = new Set(input.members.map((member) => member.email));
+  return teamFreeze({
+    nextState: { schemaVersion: 1, revision: current.revision + 1, members: input.members },
+    policies,
+    policyChanges,
+    summary: {
+      addedPeople: input.members.filter((member) => !oldEmails.has(member.email)).length,
+      removedPeople: previous.filter((member) => !newEmails.has(member.email)).length,
+      changedSources: policyChanges.filter((change) => change.kind === 'source').length,
+    },
+  });
+}
+
 const API_ORIGIN = 'https://api.cloudflare.com';
 const BOOTSTRAP_PATH = '/__ankka/bootstrap';
 const SOURCE_ACTION_PATH = '/__ankka/source-action';
@@ -15,6 +285,8 @@ const INTERNAL_TEARDOWNS_PATH = '/teardown-actions';
 const INTERNAL_TEARDOWN_ROOT_PATH = '/teardown-root';
 const INTERNAL_STATUS_PATH = '/status';
 const INTERNAL_SOURCES_PATH = '/sources';
+const INTERNAL_TEAM_PATH = '/team';
+const INTERNAL_TEAM_ACTIONS_PATH = '/team-actions';
 const STORAGE_KEY = 'ankka-mcp-gateway/uninstall-state/v1';
 const STATUS_KEY = 'ankka-mcp-gateway/public-status/v1';
 const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
@@ -22,6 +294,10 @@ const CONTROL_KEY = 'ankka-mcp-gateway/management-control/v1';
 const ACTIONS_KEY = 'ankka-mcp-gateway/source-actions/v1';
 const UPDATES_KEY = 'ankka-mcp-gateway/runtime-updates/v1';
 const TEARDOWNS_KEY = 'ankka-mcp-gateway/teardown-actions/v1';
+const TEAM_KEY = 'ankka-mcp-gateway/team-access/v1';
+// This release edits existing-source audiences only. New-source installation
+// stays paused until its initial authorization boundary is reviewed separately.
+const SOURCE_ADDITION_PAUSED = true;
 const MANAGER = 'ankka-mcp-gateway';
 const PORTAL_CNAME_TARGET = 'gateway.agents.cloudflare.com';
 const REQUEST_LIMIT_BYTES = 96 * 1024;
@@ -1248,39 +1524,48 @@ async function verifyBootstrapRequest(request, env, nowMs) {
   return Object.freeze({ rawBody, claim, signature });
 }
 
-async function discardBody(response) {
+async function discardBody(response, signal) {
+  if (signal) {
+    try { void response.body?.cancel().catch(() => undefined); } catch { /* Cancellation stays best effort. */ }
+    return;
+  }
   try { await response.body?.cancel(); } catch { /* Provider status remains authoritative. */ }
 }
 
-async function readBoundedProviderJson(response) {
+async function readBoundedProviderJson(response, signal) {
   const declared = response.headers.get('content-length');
   if (declared !== null) {
     const size = Number(declared);
     if (!Number.isSafeInteger(size) || size < 0 || size > PROVIDER_RESPONSE_LIMIT_BYTES) {
-      try { await response.body?.cancel(); } catch { /* The declared bound remains authoritative. */ }
+      await discardBody(response, signal);
       return null;
     }
   }
   const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
   if (contentType !== 'application/json') {
-    try { await response.body?.cancel(); } catch { /* The content-type rejection remains authoritative. */ }
+    await discardBody(response, signal);
     return null;
   }
   if (!response.body) return null;
   const reader = response.body.getReader();
+  const abortRead = () => { void reader.cancel().catch(() => undefined); };
+  signal?.addEventListener('abort', abortRead, { once: true });
   const chunks = [];
   let total = 0;
   try {
+    if (signal?.aborted) { abortRead(); return null; }
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       if (value.byteLength > PROVIDER_RESPONSE_LIMIT_BYTES - total) {
-        try { await reader.cancel(); } catch { /* The bound remains authoritative. */ }
+        if (signal) abortRead();
+        else try { await reader.cancel(); } catch { /* The bound remains authoritative. */ }
         return null;
       }
       chunks.push(value.slice());
       total += value.byteLength;
     }
+    if (signal?.aborted) return null;
     const bytes = new Uint8Array(total);
     let offset = 0;
     for (const chunk of chunks) {
@@ -1296,6 +1581,7 @@ async function readBoundedProviderJson(response) {
       bytes.fill(0);
     }
   } finally {
+    signal?.removeEventListener('abort', abortRead);
     for (const chunk of chunks) chunk.fill(0);
     try { reader.releaseLock(); } catch { /* Provider parsing remains authoritative. */ }
   }
@@ -1321,40 +1607,40 @@ async function providerCall(path, token, init = {}) {
   } catch {
     return Object.freeze({ status: 'unknown', result: null });
   }
-  if (!(response instanceof Response) || response.redirected ||
+  if (init.signal?.aborted || !(response instanceof Response) || response.redirected ||
       (response.status >= 300 && response.status < 400)) {
-    if (response instanceof Response) await discardBody(response);
+    if (response instanceof Response) await discardBody(response, init.signal);
     return Object.freeze({ status: 'unknown', result: null });
   }
   if (response.status === 404) {
-    await discardBody(response);
+    await discardBody(response, init.signal);
     return Object.freeze({ status: 'absent', result: null });
   }
   if (response.status === 401 || response.status === 403) {
-    await discardBody(response);
+    await discardBody(response, init.signal);
     return Object.freeze({ status: 'auth', result: null });
   }
   if (response.status === 429 || response.status >= 500) {
-    await discardBody(response);
+    await discardBody(response, init.signal);
     return Object.freeze({ status: 'unknown', result: null });
   }
   if (response.status === 204) {
-    await discardBody(response);
+    await discardBody(response, init.signal);
     return Object.freeze({ status: 'ok', result: null });
   }
   if (response.status !== 200 && response.status !== 201) {
-    await discardBody(response);
+    await discardBody(response, init.signal);
     return Object.freeze({ status: 'blocked', result: null });
   }
   let envelope;
-  try { envelope = await readBoundedProviderJson(response); } catch { envelope = null; }
+  try { envelope = await readBoundedProviderJson(response, init.signal); } catch { envelope = null; }
   if (!isRecord(envelope) || envelope.success !== true || !Object.hasOwn(envelope, 'result')) {
     return Object.freeze({ status: 'unknown', result: null });
   }
   return Object.freeze({ status: 'ok', result: envelope.result });
 }
 
-async function providerList(path, token, query = {}) {
+async function providerList(path, token, query = {}, signal) {
   const values = [];
   for (let page = 1; page <= MAX_PROVIDER_PAGES; page += 1) {
     const url = new URL(providerUrl(path));
@@ -1362,7 +1648,7 @@ async function providerList(path, token, query = {}) {
     url.searchParams.set('per_page', String(PROVIDER_PAGE_SIZE));
     for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
     const relative = `${url.pathname.slice('/client/v4'.length)}${url.search}`;
-    const response = await providerCall(relative, token);
+    const response = await providerCall(relative, token, signal ? { signal } : {});
     if (response.status !== 'ok' || !Array.isArray(response.result)) return response;
     values.push(...response.result);
     if (response.result.length < PROVIDER_PAGE_SIZE) return Object.freeze({ status: 'ok', result: values });
@@ -2142,7 +2428,7 @@ function safeManagedSource(value) {
   });
 }
 
-function safeManagementSources(value) {
+export function safeManagementSources(value) {
   if (!exactKeys(value, ['schemaVersion', 'revision', 'applyMode', 'sources']) ||
       value.schemaVersion !== 1 || !Number.isSafeInteger(value.revision) || value.revision < 1 ||
       value.revision > Number.MAX_SAFE_INTEGER || value.applyMode !== 'oauth_per_action' ||
@@ -2164,7 +2450,7 @@ function safeManagementSources(value) {
   return record;
 }
 
-function managementSourcesInstallProjectionFits(record) {
+export function managementSourcesInstallProjectionFits(record) {
   if (record.revision >= Number.MAX_SAFE_INTEGER) return false;
   const projected = {
     ...record,
@@ -2202,7 +2488,7 @@ async function initialManagementSources(status) {
   return safeManagementSources(record);
 }
 
-function parseSourceSave(value) {
+export function parseSourceSave(value) {
   const validSource = isRecord(value?.source) && exactKeys(
     value.source, ['label', 'url', 'authMode', 'enabledTools'],
   );
@@ -2227,7 +2513,7 @@ function parseSourceSave(value) {
   });
 }
 
-async function saveDraftSource(current, input) {
+export async function saveDraftSource(current, input) {
   if (input.revision !== current.revision) return null;
   const existing = current.sources.find((source) => source.url === input.source.url);
   if (existing?.status === 'installed') return null;
@@ -2359,6 +2645,7 @@ function parseSourceActionPrepare(value) {
 }
 
 async function prepareSourceAction(storage, input) {
+  if (SOURCE_ADDITION_PAUSED || await teamActionBlocksLifecycle(storage)) return null;
   const parsed = parseSourceActionPrepare(input);
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
@@ -2482,6 +2769,10 @@ async function actionDesiredState(control, sources, action) {
 
 function actionRecovery(code = 'source_action_recovery_required') {
   return fixedJson(409, { schemaVersion: 1, error: code, retryable: true });
+}
+
+function sourceAdditionPaused() {
+  return fixedJson(409, { schemaVersion: 1, error: 'source_addition_paused', retryable: false });
 }
 
 async function failSourceAction(storage, action, code, terminal = false) {
@@ -2636,8 +2927,11 @@ async function finalizeSourceAction(storage, context, action) {
 }
 
 async function processSourceAction(request, env, storage, nowMs = Date.now()) {
+  if (await teamActionBlocksLifecycle(storage)) return actionRecovery('team_action_conflict');
   const parsed = await parseSourceActionRequest(request, env, storage, nowMs);
   if (!parsed) return fixedJson(400, { schemaVersion: 1, error: 'source_action_rejected', retryable: false });
+  // Old, still-valid handoffs must not bypass the pause after a runtime update.
+  if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
   let { action } = parsed;
   const desiredState = await actionDesiredState(parsed.control, parsed.sources, action);
   if (!desiredState) return failSourceAction(storage, action, 'source_action_drift');
@@ -2848,6 +3142,7 @@ async function saveRuntimeUpdates(storage, state) {
 }
 
 async function prepareRuntimeAction(storage, environment, input) {
+  if (await teamActionBlocksLifecycle(storage) || !await teamRuntimeReleaseAllowed(storage, input?.to?.release)) return null;
   if (!exactKeys(input, [
     'actionId', 'actionKeyHash', 'actorEmail', 'expiresAt', 'issuedAt', 'operation', 'to',
   ]) || !ACTION_ID.test(input.actionId) || !isText(input.actionKeyHash) ||
@@ -2922,6 +3217,9 @@ async function processRuntimeActionControl(request, env, storage, nowMs = Date.n
   }
   const state = await runtimeUpdates(storage, environment);
   const action = state?.actions.find((candidate) => candidate.actionId === value.actionId);
+  if (await teamActionBlocksLifecycle(storage) || !await teamRuntimeReleaseAllowed(storage, action?.to?.release)) {
+    return fixedJson(409, { schemaVersion: 1, error: 'team_action_conflict' });
+  }
   if (!action || !isText(value.actionKey) || !NONCE.test(value.actionKey) ||
       await sha256(value.actionKey) !== action.actionKeyHash ||
       !await verifyHmac(rawBody, value.actionKey, request.headers.get('x-ankka-runtime-action-signature')) ||
@@ -3530,6 +3828,7 @@ async function rootTeardownAuthority(storage, environment, installationId, env) 
 }
 
 async function prepareTeardownAction(storage, environment, input, env) {
+  if (await teamTeardownBlocked(storage)) return null;
   if (!exactKeys(input, [
     'schemaVersion', 'actionId', 'actionKeyHash', 'actorEmail', 'installationId', 'issuedAt', 'expiresAt',
   ]) || input.schemaVersion !== 1) return null;
@@ -3553,6 +3852,7 @@ async function prepareTeardownAction(storage, environment, input, env) {
 }
 
 async function processTeardownActionProof(request, env, storage, nowMs = Date.now()) {
+  if (await teamTeardownBlocked(storage)) return null;
   if (!(request instanceof Request) || request.method !== 'POST' || request.headers.has('authorization') ||
       request.headers.has('cookie') || request.headers.has('referer') || request.headers.has('origin') ||
       request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return null;
@@ -3599,6 +3899,7 @@ async function processTeardownActionProof(request, env, storage, nowMs = Date.no
 }
 
 async function processTeardownActionApply(request, env, storage, nowMs = Date.now()) {
+  if (await teamTeardownBlocked(storage)) return null;
   if (!(request instanceof Request) || request.method !== 'POST' || request.headers.has('authorization') ||
       request.headers.has('cookie') || request.headers.has('referer') || request.headers.has('origin') ||
       request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return null;
@@ -3739,6 +4040,7 @@ export class AdminState {
           fixedJson(409, { schemaVersion: 1, error: 'teardown_root_recovery_required' });
       }
       if (url.pathname === INTERNAL_ACTIONS_PATH && request.method === 'POST') {
+        if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
         const input = await request.json().catch(() => null);
         const action = await prepareSourceAction(this.state.storage, input);
         return action
@@ -3746,6 +4048,13 @@ export class AdminState {
           : fixedJson(409, { schemaVersion: 1, error: 'source_action_conflict' });
       }
       if (url.pathname === `${INTERNAL_ACTIONS_PATH}/apply` && request.method === 'POST') {
+        const raw = await readBoundedText(request.clone(), REQUEST_LIMIT_BYTES);
+        let value;
+        try { value = raw === null ? null : JSON.parse(raw); } catch { value = null; }
+        if (value?.action === 'access') {
+          const applied = await processTeamAction(request, this.env, this.state.storage, value, raw, Date.now());
+          return applied ?? fixedJson(400, { schemaVersion: 1, error: 'team_action_rejected' });
+        }
         return processSourceAction(request, this.env, this.state.storage);
       }
       if (url.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`) && request.method === 'GET') {
@@ -3769,6 +4078,9 @@ export class AdminState {
           : fixedJson(409, { schemaVersion: 1, error: 'source_action_conflict' });
       }
       if (url.pathname === INTERNAL_TEARDOWNS_PATH && request.method === 'POST') {
+        if (await teamTeardownBlocked(this.state.storage)) return fixedJson(409, {
+          schemaVersion: 1, error: 'team_teardown_requires_compatible_release',
+        });
         const environment = parseManagementEnvironment(this.env);
         const input = await request.json().catch(() => null);
         const action = environment
@@ -3839,7 +4151,40 @@ export class AdminState {
           ? fixedJson(200, sources)
           : fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
       }
+      if (url.pathname === INTERNAL_TEAM_PATH && request.method === 'GET') {
+        const snapshot = await teamSnapshot(this.state.storage, this.env);
+        return snapshot ? fixedJson(200, snapshot) : fixedJson(503, { schemaVersion: 1, error: 'team_unavailable' });
+      }
+      if (url.pathname === INTERNAL_TEAM_ACTIONS_PATH && request.method === 'POST') {
+        const input = await request.json().catch(() => null);
+        try {
+          const action = await prepareTeamAction(this.state.storage, this.env, input);
+          return action ? fixedJson(200, publicTeamAction(action)) : fixedJson(409, { schemaVersion: 1, error: 'team_action_conflict' });
+        } catch (error) {
+          const code = error instanceof TeamAccessError ? error.code : 'team_action_conflict';
+          return fixedJson(code === 'team_access_invalid_request' || code === 'team_access_admin_required' ? 400 : 409,
+            { schemaVersion: 1, error: code });
+        }
+      }
+      if (url.pathname.startsWith(`${INTERNAL_TEAM_ACTIONS_PATH}/`) && ['GET', 'DELETE'].includes(request.method)) {
+        const state = await readTeamState(this.state.storage, this.env);
+        const actionId = url.pathname.slice(`${INTERNAL_TEAM_ACTIONS_PATH}/`.length);
+        const action = ACTION_ID.test(actionId) && state?.pendingAction?.actionId === actionId ? state.pendingAction : null;
+        if (!action) return fixedJson(404, { schemaVersion: 1, error: 'team_action_not_found' });
+        if (request.method === 'GET') return fixedJson(200, publicTeamAction(action));
+        const input = await request.json().catch(() => null);
+        if (!exactKeys(input, ['actorEmail']) || input.actorEmail !== action.actorEmail || !publicTeamAction(action).canCancel) {
+          return fixedJson(409, { schemaVersion: 1, error: 'team_action_conflict' });
+        }
+        const cancelled = { ...action, status: 'failed', failureCode: 'team_action_cancelled' };
+        await this.state.storage.put(TEAM_KEY, { ...state, pendingAction: cancelled });
+        return fixedJson(200, publicTeamAction(cancelled));
+      }
       if (url.pathname === INTERNAL_SOURCES_PATH && request.method === 'PUT') {
+        if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
+        if (await teamActionBlocksLifecycle(this.state.storage)) return fixedJson(409, {
+          schemaVersion: 1, error: 'team_action_conflict',
+        });
         const raw = await readBoundedText(request, SOURCE_SAVE_REQUEST_LIMIT_BYTES);
         let parsed;
         try { parsed = raw === null ? null : JSON.parse(raw); } catch { parsed = null; }
@@ -4164,14 +4509,17 @@ async function handleSources(request, env) {
   if (request.method === 'PUT' && !sameOriginMutation(request)) {
     return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
   }
+  if (request.method === 'PUT' && SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
   const stub = adminStateStub(env, 'v1:management');
   if (!stub) return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
   if (request.method === 'GET') {
     try {
       const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_SOURCES_PATH}`));
-      return response instanceof Response
-        ? response
-        : fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+      if (!(response instanceof Response)) return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+      if (response.status !== 200) return response;
+      const sources = safeManagementSources(await response.json());
+      return sources ? fixedJson(200, { ...sources, installationEnabled: !SOURCE_ADDITION_PAUSED }) :
+        fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
     } catch {
       return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
     }
@@ -4191,6 +4539,338 @@ async function handleSources(request, env) {
   } catch {
     return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
   }
+}
+
+function teamSources(sources) {
+  return sources.sources.map((source) => ({
+    id: source.id, label: source.label, enabledTools: source.enabledTools,
+    installed: source.status === 'installed',
+  }));
+}
+
+function safeTeamAction(value, context) {
+  if (!exactKeys(value, ['schemaVersion', 'actionId', 'actorEmail', 'issuedAt', 'expiresAt',
+    'actionKeyHash', 'status', 'failureCode', 'request', 'sourceRevision', 'planHash', 'journal']) ||
+      value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) ||
+      normalizedEmail(value.actorEmail) !== value.actorEmail || !context.adminEmails.includes(value.actorEmail) ||
+      !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
+      value.expiresAt <= value.issuedAt || value.expiresAt - value.issuedAt > 600_000 ||
+      !HASH.test(value.actionKeyHash) || !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
+      !HASH.test(value.planHash) || !['authorization_required', 'applying', 'succeeded', 'failed', 'recovery_required'].includes(value.status) ||
+      (value.failureCode !== null && !/^[a-z][a-z0-9_]{0,63}$/u.test(value.failureCode)) ||
+      !Array.isArray(value.journal) || value.journal.length > 33) return null;
+  try {
+    normalizeTeamAccessRequest(value.request, { ...context,
+      revision: value.status === 'succeeded' ? context.revision - 1 : context.revision });
+  } catch { return null; }
+  const ids = new Set();
+  for (const entry of value.journal) {
+    if (!exactKeys(entry, ['policyId', 'phase']) || !safeProviderId(entry.policyId) ||
+        !['send_armed', 'verified'].includes(entry.phase) || ids.has(entry.policyId)) return null;
+    ids.add(entry.policyId);
+  }
+  if (value.status === 'failed' && value.journal.length > 0) return null;
+  return Object.freeze(structuredClone(value));
+}
+
+function safeTeamState(value, control, sources, admins) {
+  if (!exactKeys(value, ['schemaVersion', 'revision', 'members', 'sourceBaselines', 'minimumRuntimeRelease', 'teardownDisabled', 'pendingAction']) ||
+      value.schemaVersion !== 1 || !isBoolean(value.teardownDisabled) ||
+      (value.minimumRuntimeRelease !== null && !updateSemver(value.minimumRuntimeRelease)) ||
+      value.teardownDisabled !== (value.minimumRuntimeRelease !== null)) return null;
+  const context = { revision: value.revision, adminEmails: admins, sources: teamSources(sources) };
+  let normalized;
+  try { normalized = normalizeTeamAccessRequest({ schemaVersion: 1, expectedRevision: value.revision, members: value.members }, context); }
+  catch { return null; }
+  const baselines = exactSortedUniqueStrings(value.sourceBaselines, (id) =>
+    SOURCE_ID.test(id) && control.sourceOwnership.some((source) => source.sourceId === id) ? id : null, 32, 0);
+  const pendingAction = value.pendingAction === null ? null : safeTeamAction(value.pendingAction, context);
+  if (!baselines || (value.pendingAction !== null && !pendingAction)) return null;
+  return Object.freeze({ ...value, members: normalized.members, sourceBaselines: baselines, pendingAction });
+}
+
+async function readTeamState(storage, env) {
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  const admins = accessConfiguration(env)?.emails;
+  const environment = parseManagementEnvironment(env);
+  if (!control || !sources || !admins || !environment) return null;
+  const raw = await storage.get(TEAM_KEY);
+  if (raw !== undefined) return safeTeamState(raw, control, sources, admins);
+  const sourceIds = sources.sources.filter((source) => source.status === 'installed').map((source) => source.id).sort(compareText);
+  const initial = safeTeamState({
+    schemaVersion: 1, revision: 1, minimumRuntimeRelease: null, teardownDisabled: false,
+    sourceBaselines: sourceIds,
+    members: [...new Set([...control.audienceEmails, ...admins])].sort(compareText).map((email) => ({
+      email, sourceIds: control.audienceEmails.includes(email) ? sourceIds : [],
+    })),
+    pendingAction: null,
+  }, control, sources, admins);
+  if (initial) await storage.put(TEAM_KEY, initial);
+  return initial;
+}
+
+async function teamActionBlocksLifecycle(storage) {
+  const team = await storage.get(TEAM_KEY);
+  if (team === undefined) return false;
+  if (!isRecord(team) || !Object.hasOwn(team, 'pendingAction')) return true;
+  const action = team.pendingAction;
+  return action !== null && (!isRecord(action) ||
+    !['succeeded', 'failed'].includes(action.status));
+}
+
+async function teamRuntimeReleaseAllowed(storage, release) {
+  const team = await storage.get(TEAM_KEY);
+  if (team === undefined) return true;
+  if (!isRecord(team) || !Object.hasOwn(team, 'minimumRuntimeRelease')) return false;
+  if (team.minimumRuntimeRelease === null) return team.teardownDisabled === false;
+  return team.teardownDisabled === true && updateSemver(team.minimumRuntimeRelease) && updateSemver(release) &&
+    compareUpdateRelease(release, team.minimumRuntimeRelease) !== -1;
+}
+
+async function teamTeardownBlocked(storage) {
+  const team = await storage.get(TEAM_KEY);
+  if (team === undefined) return false;
+  // Native audience mutations cannot be interpreted by the immutable legacy
+  // teardown matcher. Refuse the action; never weaken or rewrite that receipt.
+  return !isRecord(team) || team.teardownDisabled !== false || team.minimumRuntimeRelease !== null ||
+    await teamActionBlocksLifecycle(storage);
+}
+
+async function otherLifecycleBlocksTeam(storage, now) {
+  for (const key of [ACTIONS_KEY, UPDATES_KEY, TEARDOWNS_KEY]) {
+    const raw = await storage.get(key);
+    if (raw === undefined) continue;
+    const state = key === ACTIONS_KEY ? safeSourceActions(raw) : key === UPDATES_KEY
+      ? safeRuntimeUpdates(raw) : safeTeardownActions(raw);
+    if (!state || state.actions.some((action) => !['succeeded', 'failed'].includes(action.status) &&
+      (action.status !== 'authorization_required' || action.expiresAt > now))) return true;
+  }
+  return false;
+}
+
+function publicTeamAction(action) {
+  return { schemaVersion: 1, action: 'access', actionId: action.actionId, status: action.status,
+    expiresAt: new Date(action.expiresAt).toISOString(), failureCode: action.failureCode,
+    canCancel: action.status === 'authorization_required' && action.journal.length === 0 };
+}
+
+async function teamSnapshot(storage, env) {
+  const state = await readTeamState(storage, env);
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  const admins = accessConfiguration(env)?.emails;
+  if (!state || !sources || !admins) return null;
+  const blocked = await otherLifecycleBlocksTeam(storage, Date.now());
+  return { schemaVersion: 1, revision: state.revision, members: state.members, adminEmails: admins,
+    sources: sources.sources.map((source) => ({ id: source.id, label: source.label,
+      enabledTools: source.enabledTools, status: source.status })),
+    pendingAction: state.pendingAction ? publicTeamAction(state.pendingAction) : null,
+    proposedMembers: state.pendingAction && !['succeeded', 'failed'].includes(state.pendingAction.status)
+      ? state.pendingAction.request.members : null,
+    editingEnabled: !blocked, editingDisabledReason: blocked ? 'lifecycle_action_pending' : null };
+}
+
+async function teamRuntimeContext(storage, env) {
+  const team = await readTeamState(storage, env);
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  const environment = parseManagementEnvironment(env);
+  const admins = accessConfiguration(env)?.emails;
+  if (!team || !control || !sources || !environment || !admins) return null;
+  const evidence = await rootTeardownAuthority(storage, environment, control.installationId, env);
+  if (!evidence) return null;
+  const root = { installationId: control.installationId, receipt: evidence.root.receipt };
+  const authority = await teardownAuthorityState(root, control, sources, environment);
+  if (!authority) return null;
+  const target = (resourceValue, sourceId) => {
+    const name = `${sourceId === undefined ? control.portal.name : sources.sources.find((s) => s.id === sourceId).label} users [${resourceValue.marker}]`;
+    const value = { applicationId: resourceValue.provider.parentId, policyId: resourceValue.provider.id, policyName: name };
+    if (sourceId !== undefined) value.sourceId = sourceId;
+    return value;
+  };
+  const portalResource = root.receipt.resources.find((value) => value.kind === 'portal_access_policy');
+  if (!portalResource) return null;
+  const portal = target(portalResource);
+  const sourceTargets = control.sourceOwnership.map((source) => target(source.resources[2], source.sourceId));
+  return { team, control, sources, environment, authority,
+    planner: { revision: team.revision, adminEmails: admins, sources: teamSources(sources),
+      currentMembers: team.members, portalTarget: portal, sourceTargets } };
+}
+
+async function prepareTeamAction(storage, env, input) {
+  if (!exactKeys(input, ['request', 'actorEmail', 'actionId', 'actionKeyHash', 'issuedAt', 'expiresAt']) ||
+      !ACTION_ID.test(input.actionId) || !HASH.test(input.actionKeyHash) ||
+      !Number.isSafeInteger(input.issuedAt) || !Number.isSafeInteger(input.expiresAt) ||
+      input.expiresAt - input.issuedAt !== 600_000 ||
+      !accessConfiguration(env)?.emails.includes(input.actorEmail) ||
+      await otherLifecycleBlocksTeam(storage, input.issuedAt)) return null;
+  const context = await teamRuntimeContext(storage, env);
+  if (!context) return null;
+  const plan = planTeamAccessChange(input.request, context.planner);
+  const previous = context.team.pendingAction;
+  const unfinished = previous && !['failed', 'succeeded'].includes(previous.status);
+  // A fresh authorization may replace the same reviewed proposal immediately.
+  // Replacing both action ID and key hash invalidates the older handoff. The
+  // Durable Object queue serializes this with any currently running apply.
+  if (unfinished && canonicalJson(previous.request.members) !== canonicalJson(plan.nextState.members)) return null;
+  const planHash = await sha256({ plan, sourceRevision: context.sources.revision });
+  if (unfinished && previous.planHash !== planHash) return null;
+  const action = safeTeamAction({ schemaVersion: 1, actionId: input.actionId, actorEmail: input.actorEmail,
+    actionKeyHash: input.actionKeyHash, issuedAt: input.issuedAt, expiresAt: input.expiresAt,
+    status: 'authorization_required', failureCode: null, request: { schemaVersion: 1,
+      expectedRevision: context.team.revision, members: plan.nextState.members },
+    sourceRevision: context.sources.revision, planHash, journal: unfinished ? previous.journal : [],
+  }, context.planner);
+  if (!action) return null;
+  await storage.put(TEAM_KEY, { ...context.team, pendingAction: action });
+  return action;
+}
+
+async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy = null) {
+  const account = context.environment.accountId;
+  const applications = await providerList(`/accounts/${account}/access/apps`, token, {}, context.signal);
+  if (applications.status !== 'ok' || !Array.isArray(applications.result)) return null;
+  const observed = new Map();
+  for (const policy of plan.policies) {
+    if (onlyPolicy !== null && policy.policyId !== onlyPolicy) continue;
+    const kind = policy.kind === 'portal' ? 'portal_access_application' : 'source_access_application';
+    const resourceValue = context.authority.resources.find((value) => value.kind === kind && value.provider.id === policy.applicationId);
+    const entry = resourceValue && context.authority.entries.get(teardownResourceKey(resourceValue));
+    if (!entry) return null;
+    const candidates = applications.result.filter((value) => accessApplicationCandidate(value, kind, entry.state));
+    if (candidates.length !== 1 || candidates[0].id !== policy.applicationId ||
+        (Object.hasOwn(candidates[0], 'account_id') && candidates[0].account_id !== account)) return null;
+    const path = `/accounts/${account}/access/apps/${encodeURIComponent(policy.applicationId)}`;
+    const app = await providerCall(path, token, { signal: context.signal });
+    if (app.status !== 'ok' || app.result?.id !== policy.applicationId ||
+        (Object.hasOwn(app.result, 'account_id') && app.result.account_id !== account) ||
+        !accessApplicationIdentityMatches(app.result, kind, entry.state)) return null;
+    const policies = await providerList(`${path}/policies`, token, {}, context.signal);
+    if (policies.status !== 'ok' || !Array.isArray(policies.result) || policies.result.length !== 1) return null;
+    const live = policies.result[0];
+    if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== account)) return null;
+    const armed = journal.find((value) => value.policyId === policy.policyId);
+    const before = teamPolicyMatches(live, policy.before, policy.policyId);
+    const after = teamPolicyMatches(live, policy.after, policy.policyId);
+    if ((!armed && !before) || (armed?.phase === 'verified' && !after) ||
+        (armed?.phase === 'send_armed' && !before && !after)) return null;
+    observed.set(policy.policyId, after ? 'after' : 'before');
+  }
+  const portal = await providerCall(`/accounts/${account}/access/ai-controls/mcp/portals/${encodeURIComponent(context.control.portal.id)}`, token, { signal: context.signal });
+  if (portal.status !== 'ok' || !portalExact(portal.result, context.control, context.authority.portalMappings)) return null;
+  return observed;
+}
+
+async function processTeamAction(request, env, storage, value, rawBody, nowMs) {
+  if (request.method !== 'POST' || request.headers.has('authorization') || request.headers.has('cookie') ||
+      request.headers.has('referer') || request.headers.has('origin') ||
+      request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json' ||
+      !isPlainData(value) || canonicalJson(value) !== rawBody) return null;
+  const context = await teamRuntimeContext(storage, env);
+  let action = context?.team.pendingAction;
+  if (!context || !action || value.action !== 'access' || !exactKeys(value, ['schemaVersion', 'action', 'actionId',
+    'actionKey', 'actorEmail', 'accountId', 'issuedAt', 'expiresAt', 'cloudflareAccessToken'])) return null;
+  const { action: _kind, ...claimValue } = value;
+  const claim = sourceActionClaim(claimValue, context.environment, action, nowMs);
+  if (!claim || action.status !== 'authorization_required' || await sha256(claim.actionKey) !== action.actionKeyHash ||
+      !await verifyHmac(rawBody, claim.actionKey, request.headers.get('x-ankka-source-action-signature')) ||
+      await otherLifecycleBlocksTeam(storage, nowMs)) return null;
+  // Only Team actions use this deadline. The operation-scoped grant remains
+  // request-local; cancellation covers both response headers and body reads.
+  context.signal = AbortSignal.timeout(Math.max(1, Math.min(60_000, claim.expiresAt - Date.now())));
+  const plan = planTeamAccessChange(action.request, context.planner);
+  if (action.sourceRevision !== context.sources.revision || action.planHash !== await sha256({ plan, sourceRevision: context.sources.revision }) ||
+      action.journal.some((entry) => !plan.policyChanges.some((policy) => policy.policyId === entry.policyId))) return null;
+  let teamState = context.team;
+  const persist = async (next) => {
+    action = { ...action, ...next };
+    await storage.put(TEAM_KEY, { ...teamState, pendingAction: action });
+  };
+  const fail = async (code) => {
+    await persist({ status: 'recovery_required', failureCode: code });
+    return fixedJson(409, { schemaVersion: 1, error: code });
+  };
+  await persist({ status: 'applying', failureCode: null });
+  let observed = await verifyTeamPolicies(context, plan, claim.cloudflareAccessToken, action.journal);
+  if (!observed) return fail('team_policy_drift');
+  for (const policy of plan.policyChanges) {
+    const fresh = await verifyTeamPolicies(context, plan, claim.cloudflareAccessToken, action.journal, policy.policyId);
+    if (!fresh) return fail('team_policy_drift');
+    observed.set(policy.policyId, fresh.get(policy.policyId));
+    if (Date.now() >= claim.expiresAt || context.signal.aborted) return fail('team_action_recovery_required');
+    if (observed.get(policy.policyId) !== 'after') {
+      const journal = action.journal.filter((entry) => entry.policyId !== policy.policyId);
+      teamState = { ...teamState, teardownDisabled: true,
+        minimumRuntimeRelease: teamState.minimumRuntimeRelease ?? context.environment.release };
+      await persist({ journal: [...journal, { policyId: policy.policyId, phase: 'send_armed' }] });
+      const updated = await providerCall(`/accounts/${context.environment.accountId}/access/apps/${encodeURIComponent(policy.applicationId)}/policies/${encodeURIComponent(policy.policyId)}`,
+        claim.cloudflareAccessToken, { method: 'PUT', body: canonicalJson(policy.after), signal: context.signal });
+      if (updated.status !== 'ok' || !teamPolicyMatches(updated.result, policy.after, policy.policyId) ||
+          (Object.hasOwn(updated.result, 'account_id') && updated.result.account_id !== context.environment.accountId)) {
+        return fail('team_action_recovery_required');
+      }
+    }
+    // Verify this target after each write, then the entire graph once at the
+    // end. The number of provider requests stays linear in source count.
+    const verified = await verifyTeamPolicies(context, plan, claim.cloudflareAccessToken, action.journal, policy.policyId);
+    if (!verified || verified.get(policy.policyId) !== 'after') return fail('team_action_recovery_required');
+    observed.set(policy.policyId, 'after');
+    await persist({ journal: [...action.journal.filter((entry) => entry.policyId !== policy.policyId),
+      { policyId: policy.policyId, phase: 'verified' }] });
+  }
+  observed = await verifyTeamPolicies(context, plan, claim.cloudflareAccessToken, action.journal);
+  if (!observed || plan.policies.some((policy) => observed.get(policy.policyId) !== 'after')) return fail('team_action_recovery_required');
+  const completed = { ...teamState, ...plan.nextState,
+    pendingAction: { ...action, status: 'succeeded', failureCode: null } };
+  await storage.put(TEAM_KEY, completed);
+  return fixedJson(200, publicTeamAction(completed.pendingAction));
+}
+
+async function handleTeam(request, env) {
+  const actorEmail = await verifyAccess(request, env);
+  if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  const url = new URL(request.url);
+  const environment = parseManagementEnvironment(env);
+  if (!environment || url.hostname !== environment.managementHostname) {
+    return fixedJson(503, { schemaVersion: 1, error: 'team_unavailable' });
+  }
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return fixedJson(503, { schemaVersion: 1, error: 'team_unavailable' });
+  if (request.method === 'GET' && url.pathname === '/api/team') try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEAM_PATH}`));
+    return response instanceof Response ? response : fixedJson(503, { schemaVersion: 1, error: 'team_unavailable' });
+  } catch { return fixedJson(503, { schemaVersion: 1, error: 'team_unavailable' }); }
+  if (url.pathname === '/api/team') return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET' });
+  const actionId = url.pathname.startsWith('/api/team-actions/') ? url.pathname.slice('/api/team-actions/'.length) : null;
+  if (actionId && ACTION_ID.test(actionId) && ['GET', 'DELETE'].includes(request.method)) {
+    if (request.method === 'DELETE' && !sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+    const options = { method: request.method };
+    if (request.method === 'DELETE') Object.assign(options, { headers: { 'content-type': 'application/json' }, body: canonicalJson({ actorEmail }) });
+    try { return await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEAM_ACTIONS_PATH}/${actionId}`, options)); }
+    catch { return fixedJson(503, { schemaVersion: 1, error: 'team_unavailable' }); }
+  }
+  if (request.method !== 'POST' || url.pathname !== '/api/team-actions') return fixedJson(404, { schemaVersion: 1, error: 'team_action_not_found' });
+  if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+  const input = await readJsonInput(request, REQUEST_LIMIT_BYTES);
+  const now = Date.now();
+  const expiresAt = now + 600_000;
+  const nextId = `action_${randomBase64Url(24)}`;
+  const actionKey = randomBase64Url(32);
+  let prepared;
+  try {
+    prepared = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEAM_ACTIONS_PATH}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: canonicalJson({ request: input, actorEmail, actionId: nextId, actionKeyHash: await sha256(actionKey), issuedAt: now, expiresAt }),
+    }));
+  } catch { prepared = null; }
+  if (!(prepared instanceof Response) || prepared.status !== 200) return prepared instanceof Response
+    ? prepared : fixedJson(409, { schemaVersion: 1, error: 'team_action_conflict' });
+  const claim = canonicalJson({ schemaVersion: 1, action: 'access', actionId: nextId, actionKey, actorEmail,
+    accountId: environment.accountId, controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
+    workerName: environment.workerName, workersSubdomain: environment.workersSubdomain,
+    managementOrigin: `https://${environment.managementHostname}`, releaseIdentity: exactReleaseIdentity(environment), expiresAt });
+  return fixedJson(200, { schemaVersion: 1, actionId: nextId, status: 'authorization_required',
+    expiresAt: new Date(expiresAt).toISOString(), handoffUrl: `${CONTROL_PLANE_ORIGIN}/manage#${base64UrlEncode(new TextEncoder().encode(claim))}` });
 }
 
 async function handleSourceActions(request, env) {
@@ -4245,6 +4925,7 @@ async function handleSourceActions(request, env) {
     return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
   }
   if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+  if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
   const input = await readJsonInput(request);
   if (!exactKeys(input, ['schemaVersion', 'revision', 'sourceId']) || input.schemaVersion !== 1 ||
       !Number.isSafeInteger(input.revision) || input.revision < 1 || !SOURCE_ID.test(input.sourceId)) {
@@ -4590,6 +5271,9 @@ export default {
     if (url.pathname === '/api/update') return handleRuntimeUpdate(request, env);
     if (url.pathname === '/api/sources/discover') return handleSourceDiscovery(request, env);
     if (url.pathname === '/api/sources') return handleSources(request, env);
+    if (url.pathname === '/api/team' || url.pathname === '/api/team-actions' || url.pathname.startsWith('/api/team-actions/')) {
+      return handleTeam(request, env);
+    }
     if (url.pathname === '/api/source-actions' || url.pathname.startsWith('/api/source-actions/')) {
       return handleSourceActions(request, env);
     }

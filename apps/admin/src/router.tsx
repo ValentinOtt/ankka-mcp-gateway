@@ -7,6 +7,7 @@ import {
 import { AppShell } from './components/AppShell'
 import { OverviewPage } from './pages/OverviewPage'
 import { SourcesPage } from './pages/SourcesPage'
+import { TeamPage } from './pages/TeamPage'
 import { UpdatesPage } from './pages/UpdatesPage'
 
 const rootRoute = createRootRoute({ component: AppShell })
@@ -29,6 +30,12 @@ const updatesRoute = createRoute({
   component: UpdatesPage,
 })
 
+const teamRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/team',
+  component: TeamPage,
+})
+
 const fallbackRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '$',
@@ -40,6 +47,7 @@ const fallbackRoute = createRoute({
 export const routeTree = rootRoute.addChildren([
   overviewRoute,
   sourcesRoute,
+  teamRoute,
   updatesRoute,
   fallbackRoute,
 ])

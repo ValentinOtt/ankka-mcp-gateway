@@ -89,17 +89,25 @@ cleanup.
 
 Open the management URL and authenticate through your Cloudflare Access policy.
 
+**Native-permissions preview limitation:** this release is for gateways with
+sources already installed. A fresh empty gateway cannot add its first source
+through the dashboard or source-action API until a compatible release restores
+source installation.
+
 - **Overview** shows gateway status, the MCP URL, current release, audience,
   source state, and the removal entry point.
-- **Sources** discovers a public MCP catalogue or records a standards-compliant
-  OAuth-protected source, saves an exact tool allowlist, and prepares an exact
-  apply action for customer review.
+- **Sources** shows existing sources and their selected tools. Adding a source
+  is temporarily unavailable in the native-permissions release, including from
+  previously prepared installation links. Existing connections are unchanged.
+- **Team** manages who may connect and which existing sources each person can
+  use. Administrator rights remain fixed; tool allowlists are shared per source.
+  See [Team access](TEAM_ACCESS.md) for verification and recovery limits.
 - **Updates** checks the installed signed release channel and prepares an
   update or rollback.
 
-Saving a source draft changes only customer-owned Durable Object state. Applying
-a source, updating, rolling back, or removing the gateway requires a new
-short-lived Cloudflare authorization. The complete secret-free source-state
+Permission changes, updates, rollback, and removal require a new short-lived
+Cloudflare authorization. Source draft saves and installation actions are
+refused while the source-installation pause is active. The complete secret-free source-state
 record is bounded to 1 MiB of canonical UTF-8 JSON; a save that would cross the
 bound in its worst-case installed projection is rejected before Durable Object
 storage is changed.
@@ -143,6 +151,9 @@ Object data. Rollback restores a previous Worker version without rolling back
 data. See [Gateway updates and rollback](UPDATES.md) for the temporary,
 authenticated action route used during the operation.
 
+After a Team policy write may have occurred, rollback to an older runtime is
+blocked. Rolling back code would not undo saved permissions or Access policies.
+
 ## Removing a gateway
 
 The original successful installer session can prepare a same-session removal
@@ -154,6 +165,10 @@ customer dashboard.
 
 Both paths show the exact teardown plan and require a new Cloudflare
 authorization before any deletion.
+
+Automatic teardown is unavailable after a Team policy write may have occurred,
+including for older prepared removal links. The original ownership receipt is
+preserved; a later compatible release is required to support changed audiences.
 
 Deletion authority comes from the checksum-valid receipt stored by the
 customer gateway, not from a hostname, resource name, or provider identifier.
@@ -182,6 +197,9 @@ Dashboard tools are `list_mcp_sources`, `discover_mcp_source`,
 `save_mcp_source_draft`, `apply_mcp_source`, `check_gateway_update`,
 `review_gateway_update`, `apply_gateway_update`,
 `rollback_gateway_update`, and `review_gateway_teardown`.
+
+The source draft/apply tools obey the same temporary installation pause as the
+dashboard and cannot add a source in this release.
 
 These tools call the same same-origin APIs as the visible interface. They add
 no independent mutation authority. A mutation tool can prepare a short-lived

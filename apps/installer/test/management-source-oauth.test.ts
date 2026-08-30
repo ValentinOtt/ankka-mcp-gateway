@@ -5,7 +5,7 @@ import type { JsonObject } from '../src/boundary';
 import { REQUIRED_OAUTH_SCOPES, OAUTH_COOKIE, PUBLIC_ORIGIN } from '../src/constants';
 import { base64UrlEncode } from '../src/crypto';
 import type { GatewayDeployEnv } from '../src/env';
-import { createGatewayDeployWorker } from '../src/index';
+import { createGatewayDeployWorker, type GatewayDeployWorkerDependencies } from '../src/index';
 import {
   sourceActionRuntimeFixture,
   type SourceActionRuntimeFixture,
@@ -27,7 +27,17 @@ let attackerDeployment: JsonObject;
 
 const authorizationResponseSchema = v.object({ authorizationUrl: v.string() });
 const subdomainMutationSchema = v.object({ enabled: v.boolean() });
-const relayRequestSchema = v.object({ cloudflareAccessToken: v.string() });
+const relayRequestSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  action: v.exactOptional(v.literal('access')),
+  actionId: v.string(),
+  actionKey: v.string(),
+  actorEmail: v.string(),
+  accountId: v.string(),
+  issuedAt: v.number(),
+  expiresAt: v.number(),
+  cloudflareAccessToken: v.string(),
+});
 
 const unavailableSessionNamespace = {
   idFromName(): never {
@@ -154,7 +164,11 @@ async function authorizeManagement<Claim>(
 }
 
 describe('management source OAuth', () => {
-  it('authorizes without a hosted session and relays one memory-only grant to the customer Worker', async () => {
+  it.each([
+    { action: undefined, connected: true },
+    { action: 'access', connected: true },
+    { action: 'access', connected: false },
+  ] as const)('relays one memory-only grant without a hosted session ($action, connected=$connected)', async ({ action, connected }) => {
     let enabled = false;
     let customerPosts = 0;
     let revoked = 0;
@@ -197,32 +211,40 @@ describe('management source OAuth', () => {
         customerPosts += 1;
         const body = await requestJson(request, relayRequestSchema);
         expect(body.cloudflareAccessToken).toBe('ephemeral-management-source-token');
-        return new Response(JSON.stringify({
+        expect(body.action).toBe(action);
+        const response = {
           schemaVersion: 1,
           actionId: ACTION_ID,
           sourceId: 'source-0123456789abcdef',
           status: 'succeeded',
           expiresAt: new Date(NOW + 10 * 60 * 1000).toISOString(),
           failureCode: null,
-        }), { headers: { 'content-type': 'application/json' } });
+        };
+        return Response.json(action === 'access' ? { ...response, action } : response);
       }
       throw new Error(`unexpected request ${request.method} ${url.href}`);
     };
     const env = workerEnv();
     let callbackExecuted = false;
-    const worker = createGatewayDeployWorker({
+    const dependencies: GatewayDeployWorkerDependencies = {
       now: () => NOW,
       transport,
       exactReleaseProvider,
-      managementCallbackResponse: async ({ execute }) => {
+    };
+    if (connected) {
+      dependencies.managementCallbackResponse = async ({ execute }) => {
         await execute();
         callbackExecuted = true;
         return new Response('<!doctype html><title>Applying</title>', {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         });
-      },
-    });
-    const { oauth, state } = await authorizeManagement(worker, env);
+      };
+    }
+    const worker = createGatewayDeployWorker(dependencies);
+    const claim = managementClaim();
+    const { oauth, state } = await authorizeManagement(
+      worker, env, MANAGEMENT_ORIGIN, action === 'access' ? { ...claim, action } : claim,
+    );
 
     const unverifiedContext = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/management/context`, {
       headers: { cookie: oauth },
@@ -234,11 +256,19 @@ describe('management source OAuth', () => {
       `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
       { headers: { cookie: oauth } },
     ), env, undefined);
-    expect(callback.status).toBe(200);
-    expect(callbackExecuted).toBe(true);
+    expect(callback.status).toBe(connected ? 200 : 303);
+    expect(callbackExecuted).toBe(connected);
     expect(customerPosts).toBe(1);
     expect(enabled).toBe(false);
     expect(revoked).toBe(1);
+
+    if (!connected) {
+      expect(callback.headers.get('location')).toBe(
+        `${MANAGEMENT_ORIGIN}/team?accessAction=${ACTION_ID}&accessActionResult=finished`,
+      );
+      expect(callback.headers.get('set-cookie')).toContain(`${OAUTH_COOKIE}=;`);
+      return;
+    }
 
     const verifiedOauth = cookiePair(callback.headers.get('set-cookie') ?? '');
     expect(verifiedOauth.startsWith(`${OAUTH_COOKIE}=`)).toBe(true);
@@ -249,7 +279,7 @@ describe('management source OAuth', () => {
     expect(context.status).toBe(200);
     expect(await context.json()).toMatchObject({
       actionId: ACTION_ID,
-      managementUrl: `${MANAGEMENT_ORIGIN}/?sourceAction=${ACTION_ID}`,
+      managementUrl: `${MANAGEMENT_ORIGIN}/${action === 'access' ? 'team?accessAction' : '?sourceAction'}=${ACTION_ID}`,
     });
     expect(context.headers.get('set-cookie')).toContain(`${OAUTH_COOKIE}=;`);
   });
@@ -293,6 +323,10 @@ describe('management source OAuth', () => {
     const invalidClaims = [
       legacyClaim,
       missingControlPlaneOrigin,
+      { ...current, action: 'source' },
+      { ...current, action: 'runtime_update' },
+      { ...current, action: 'access', audienceEmails: ['member@example.com'] },
+      { ...current, action: 'access', managementOrigin: `${MANAGEMENT_ORIGIN}/arbitrary-path` },
       { ...current, releaseIdentity: null },
       { ...current, releaseIdentity: { ...current.releaseIdentity, copiedAuthority: true } },
       { ...current, controlPlaneOrigin: 'https://foreign-control.example' },

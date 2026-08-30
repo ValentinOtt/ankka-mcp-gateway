@@ -24,6 +24,7 @@ const sources: ManagedSources = {
   schemaVersion: 1,
   revision: 1,
   applyMode: 'oauth_per_action',
+  installationEnabled: false,
   sources: [],
 }
 const update: RuntimeUpdate = {
@@ -50,6 +51,7 @@ describe('WebMcpTools', () => {
     const api: GatewayAdminApi = {
       getStatus: vi.fn(async () => status),
       getSources: vi.fn(async () => sources),
+      getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(),
       saveSourceDraft: vi.fn(),
@@ -68,6 +70,13 @@ describe('WebMcpTools', () => {
 
     render(<GatewayProvider api={api}><WebMcpTools /></GatewayProvider>)
     await waitFor(() => expect(tools.some((tool) => tool.name === 'review_gateway_teardown')).toBe(true))
+
+    expect(tools.map((tool) => tool.name)).not.toContain('save_mcp_source_draft')
+    expect(tools.map((tool) => tool.name)).not.toContain('apply_mcp_source')
+    expect(tools.map((tool) => tool.name)).toContain('list_mcp_sources')
+    expect(tools.map((tool) => tool.name)).toContain('discover_mcp_source')
+    expect(api.saveSourceDraft).not.toHaveBeenCalled()
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
 
     const tool = tools.find((candidate) => candidate.name === 'review_gateway_teardown')
     if (tool === undefined) throw new TypeError('teardown tool fixture missing')

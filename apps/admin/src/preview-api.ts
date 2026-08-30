@@ -1,3 +1,4 @@
+import { GatewayApiError } from './api'
 import type {
   GatewayAdminApi,
   GatewayStatus,
@@ -9,9 +10,12 @@ import type {
   SourceAction,
   SourceDiscovery,
   SourceDraftInput,
+  Team,
+  TeamAction,
+  TeamMember,
 } from './api'
 
-type PreviewScenario = 'empty' | 'ready' | 'update' | 'error'
+type PreviewScenario = 'empty' | 'ready' | 'update' | 'error' | 'team-recovery' | 'team-readonly' | 'team-lifecycle'
 const PREVIEW_STORAGE_KEY = 'ankka-gateway-ui-preview-scenario'
 const ACTION_ID = `action_${'a'.repeat(32)}`
 const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai'
@@ -38,6 +42,7 @@ const installedSources: ManagedSources = {
   schemaVersion: 1,
   revision: 3,
   applyMode: 'oauth_per_action',
+  installationEnabled: false,
   sources: [
     {
       id: 'source-1111111111111111',
@@ -62,12 +67,12 @@ const installedSources: ManagedSources = {
 
 function scenarioFromLocation(): PreviewScenario {
   const requested = new URLSearchParams(window.location.search).get('preview')
-  if (requested === 'empty' || requested === 'ready' || requested === 'update' || requested === 'error') {
+  if (requested === 'empty' || requested === 'ready' || requested === 'update' || requested === 'error' || requested === 'team-recovery' || requested === 'team-readonly' || requested === 'team-lifecycle') {
     window.sessionStorage.setItem(PREVIEW_STORAGE_KEY, requested)
     return requested
   }
   const retained = window.sessionStorage.getItem(PREVIEW_STORAGE_KEY)
-  return retained === 'empty' || retained === 'update' || retained === 'error' ? retained : 'ready'
+  return retained === 'empty' || retained === 'update' || retained === 'error' || retained === 'team-recovery' || retained === 'team-readonly' || retained === 'team-lifecycle' ? retained : 'ready'
 }
 
 function update(available: boolean): RuntimeUpdate {
@@ -102,11 +107,33 @@ function update(available: boolean): RuntimeUpdate {
 
 class PreviewGatewayAdminApi implements GatewayAdminApi {
   #sources: ManagedSources
+  #team: Team
   readonly #scenario: PreviewScenario
 
   constructor(scenario: PreviewScenario) {
     this.#scenario = scenario
     this.#sources = structuredClone(scenario === 'empty' ? { ...installedSources, revision: 1, sources: [] } : installedSources)
+    this.#team = {
+      schemaVersion: 1,
+      revision: 2,
+      editingEnabled: scenario !== 'team-readonly' && scenario !== 'team-lifecycle',
+      editingDisabledReason: scenario === 'team-readonly' ? 'release_review_required' : scenario === 'team-lifecycle' ? 'lifecycle_action_pending' : null,
+      adminEmails: ['admin@example.com'],
+      members: [
+        { email: 'admin@example.com', sourceIds: scenario === 'empty' ? [] : ['source-1111111111111111'] },
+        { email: 'analyst@example.com', sourceIds: [] },
+      ],
+      sources: this.#sources.sources.map(({ id, label, enabledTools, status: sourceStatus }) => ({ id, label, enabledTools, status: sourceStatus })),
+      pendingAction: null,
+      proposedMembers: null,
+    }
+    if (scenario === 'team-recovery') {
+      this.#team.pendingAction = { schemaVersion: 1, actionId: ACTION_ID, status: 'recovery_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: 'team_action_recovery_required', canCancel: false }
+      this.#team.proposedMembers = [
+        { email: 'admin@example.com', sourceIds: ['source-1111111111111111'] },
+        { email: 'analyst@example.com', sourceIds: ['source-1111111111111111'] },
+      ]
+    }
   }
 
   async getStatus(): Promise<GatewayStatus> {
@@ -115,6 +142,35 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   }
 
   async getSources(): Promise<ManagedSources> { return structuredClone(this.#sources) }
+  async getTeam(): Promise<Team> {
+    if (this.#scenario === 'error') throw new Error('Synthetic preview error: team access could not be loaded.')
+    return structuredClone({ ...this.#team, sources: this.#sources.sources.map(({ id, label, enabledTools, status: sourceStatus }) => ({ id, label, enabledTools, status: sourceStatus })) })
+  }
+
+  async prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<PreparedAction> {
+    if (!this.#team.editingEnabled) throw new GatewayApiError(403, this.#team.editingDisabledReason === 'release_review_required' ? 'team_release_review_required' : 'team_action_conflict')
+    if (expectedRevision !== this.#team.revision) throw new GatewayApiError(409, 'team_access_revision_conflict')
+    const pending = this.#team.pendingAction
+    const continuing = pending && ['authorization_required', 'applying', 'recovery_required'].includes(pending.status)
+    if (continuing && (pending.status === 'applying' || JSON.stringify(members) !== JSON.stringify(this.#team.proposedMembers))) throw new GatewayApiError(409, 'team_action_conflict')
+    const expiresAt = new Date(Date.now() + 600_000).toISOString()
+    this.#team.proposedMembers = structuredClone(members)
+    this.#team.pendingAction = { schemaVersion: 1, actionId: ACTION_ID, status: 'authorization_required', expiresAt, failureCode: null, canCancel: continuing ? pending.canCancel : true }
+    return { schemaVersion: 1, actionId: ACTION_ID, status: 'authorization_required', expiresAt, handoffUrl: HANDOFF }
+  }
+
+  async getTeamAction(_actionId: string): Promise<TeamAction> {
+    if (!this.#team.pendingAction || this.#team.pendingAction.actionId !== _actionId) throw new GatewayApiError(404, 'team_action_invalid')
+    return structuredClone(this.#team.pendingAction)
+  }
+
+  async cancelTeamAction(actionId: string): Promise<TeamAction> {
+    const pending = this.#team.pendingAction
+    if (!pending || pending.actionId !== actionId || pending.status !== 'authorization_required' || pending.canCancel !== true) throw new GatewayApiError(409, 'team_action_conflict')
+    this.#team.pendingAction = { ...pending, status: 'failed', failureCode: 'team_action_cancelled', canCancel: false }
+    this.#team.proposedMembers = null
+    return structuredClone(this.#team.pendingAction)
+  }
   async getUpdate(): Promise<RuntimeUpdate> { return update(this.#scenario === 'update') }
 
   async discoverSource(url: string): Promise<SourceDiscovery> {
@@ -133,6 +189,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   }
 
   async saveSourceDraft(_revision: number, source: SourceDraftInput): Promise<ManagedSources> {
+    if (!this.#sources.installationEnabled) throw new GatewayApiError(409, 'source_addition_paused')
     this.#sources = {
       ...this.#sources,
       revision: this.#sources.revision + 1,
@@ -147,7 +204,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   }
 
   async prepareSourceAction(_revision: number, _sourceId: string): Promise<PreparedAction> {
-    return { schemaVersion: 1, actionId: ACTION_ID, status: 'authorization_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), handoffUrl: HANDOFF }
+    throw new GatewayApiError(409, 'source_addition_paused')
   }
 
   async getSourceAction(_actionId: string): Promise<SourceAction> {
@@ -183,8 +240,12 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   }
 }
 
-export function createPreviewGatewayAdminApi(): GatewayAdminApi | undefined {
+export function isGatewayUiPreview(): boolean {
   return import.meta.env.DEV && import.meta.env.VITE_GATEWAY_UI_PREVIEW === '1'
+}
+
+export function createPreviewGatewayAdminApi(): GatewayAdminApi | undefined {
+  return isGatewayUiPreview()
     ? new PreviewGatewayAdminApi(scenarioFromLocation())
     : undefined
 }

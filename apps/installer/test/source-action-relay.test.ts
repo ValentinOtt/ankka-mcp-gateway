@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import * as v from 'valibot';
 
 import type { JsonObject, JsonValue } from '../src/boundary';
+import { base64UrlDecode } from '../src/crypto';
 import { relaySourceAction } from '../src/source-action-relay';
 import {
   sourceActionRuntimeFixture,
@@ -27,6 +28,7 @@ const workersDevRequestSchema = v.strictObject({
 });
 const sourceActionRequestSchema = v.strictObject({
   schemaVersion: v.literal(1),
+  action: v.exactOptional(v.literal('access')),
   actionId: v.string(),
   actionKey: v.string(),
   actorEmail: v.string(),
@@ -124,7 +126,7 @@ function input(transport: (input: RequestInfo | URL, init?: RequestInit) => Prom
 }
 
 describe('source action relay', () => {
-  it('opens only the exact Worker route, submits one HMAC action, and closes the route', async () => {
+  it.each([undefined, 'access'] as const)('relays one exact signed action (%s) and closes the Worker route', async (action) => {
     let enabled = false;
     let customerPosts = 0;
     const providerWrites: boolean[] = [];
@@ -155,7 +157,16 @@ describe('source action relay', () => {
       expect(request.headers.get('authorization')).toBeNull();
       expect(request.headers.get('cookie')).toBeNull();
       expect(request.headers.get('x-ankka-source-action-signature')).toMatch(/^sha256=[a-f0-9]{64}$/u);
-      const body = v.parse(sourceActionRequestSchema, await request.json());
+      const serialized = await request.text();
+      const key = await crypto.subtle.importKey(
+        'raw', new Uint8Array(base64UrlDecode(ACTION_KEY)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+      );
+      const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(serialized));
+      expect(request.headers.get('x-ankka-source-action-signature')).toBe(
+        `sha256=${[...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`,
+      );
+      const body = v.parse(sourceActionRequestSchema, JSON.parse(serialized));
+      expect(body.action).toBe(action);
       expect(body).toMatchObject({
         schemaVersion: 1,
         actionId: ACTION_ID,
@@ -164,24 +175,59 @@ describe('source action relay', () => {
         accountId: ACCOUNT_ID,
         cloudflareAccessToken: ACCESS_TOKEN,
       });
-      return new Response(JSON.stringify({
+      const response = {
         schemaVersion: 1,
         actionId: ACTION_ID,
         sourceId: 'source-0123456789abcdef',
         status: 'succeeded',
         expiresAt: new Date(NOW + 10 * 60 * 1000).toISOString(),
         failureCode: null,
-      }), { headers: { 'content-type': 'application/json' } });
+      };
+      return Response.json(action === 'access' ? { ...response, action } : response);
     };
 
-    const result = await relaySourceAction(input(transport));
+    const relayInput = input(transport);
+    const result = await relaySourceAction(action === 'access' ? { ...relayInput, action } : relayInput);
     expect(result).toEqual({
       schemaVersion: 1,
       actionId: ACTION_ID,
       status: 'succeeded',
-      managementUrl: `https://manage.example.com/?sourceAction=${ACTION_ID}`,
+      managementUrl: `https://manage.example.com/${action === 'access' ? 'team?accessAction' : '?sourceAction'}=${ACTION_ID}`,
     });
     expect(customerPosts).toBe(1);
+    expect(providerWrites).toEqual([true, false]);
+    expect(enabled).toBe(false);
+  });
+
+  it.each([undefined, 'access'] as const)('rejects a successful response for the wrong action (%s)', async (action) => {
+    let enabled = false;
+    const providerWrites: boolean[] = [];
+    const transport = async (requestInput: RequestInfo | URL, init: RequestInit = {}) => {
+      const request = new Request(requestInput, init);
+      const url = new URL(request.url);
+      if (url.origin === 'https://api.cloudflare.com') {
+        const preflight = runtimePreflightResponse(url);
+        if (preflight) return preflight;
+        if (request.method === 'GET') return envelope({ enabled, previews_enabled: false });
+        const body = v.parse(workersDevRequestSchema, await request.json());
+        enabled = body.enabled;
+        providerWrites.push(enabled);
+        return envelope({ enabled, previews_enabled: false });
+      }
+      if (request.method === 'HEAD') {
+        return new Response(null, { status: 204, headers: { 'x-ankka-source-action': 'ready' } });
+      }
+      const response = {
+        schemaVersion: 1,
+        actionId: ACTION_ID,
+        status: 'succeeded',
+      };
+      return Response.json(action === undefined ? { ...response, action: 'access' } : response);
+    };
+
+    const relayInput = input(transport);
+    await expect(relaySourceAction(action === 'access' ? { ...relayInput, action } : relayInput))
+      .rejects.toMatchObject({ code: 'session_conflict' });
     expect(providerWrites).toEqual([true, false]);
     expect(enabled).toBe(false);
   });

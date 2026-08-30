@@ -1,7 +1,7 @@
 import { Button, Input } from '@cloudflare/kumo'
 import { Database, LockKey, MagnifyingGlass, Plus, ShieldCheck, X } from '@phosphor-icons/react'
 import { type FormEvent, useMemo, useState } from 'react'
-import type { SourceDiscovery } from '../api'
+import { SOURCE_ADDITION_PAUSED_MESSAGE, type SourceDiscovery } from '../api'
 import { useGateway } from '../GatewayContext'
 import { PageHeader } from '../components/PageHeader'
 import { StatusPill } from '../components/StatusPill'
@@ -54,8 +54,10 @@ export function SourcesPage() {
   }, [catalogueFilter, discovery])
 
   if (!sources) return null
+  const installationEnabled = sources.installationEnabled === true
 
   const inspect = async () => {
+    if (!installationEnabled) return
     setFormError(null)
     try {
       const next = await discoverSource(url.trim())
@@ -69,6 +71,7 @@ export function SourcesPage() {
 
   const save = async (event: FormEvent) => {
     event.preventDefault()
+    if (!installationEnabled) return
     if (!discovery || label.trim().length < 2 || enabledTools.length === 0) {
       setFormError('Give the source a name and select at least one exact tool.')
       return
@@ -92,6 +95,7 @@ export function SourcesPage() {
   }
 
   const authorize = async (sourceId: string) => {
+    if (!installationEnabled) return
     try {
       const prepared = await prepareSourceApply(sourceId)
       window.location.assign(prepared.handoffUrl)
@@ -103,14 +107,16 @@ export function SourcesPage() {
       <PageHeader
         eyebrow="Customer-owned catalogue"
         title="Sources"
-        description="Discover MCP tool catalogues, save deny-by-default allowlists, and apply each draft with a fresh one-time Cloudflare authorization."
+        description={installationEnabled ? 'Discover MCP tool catalogues, save deny-by-default allowlists, and apply each draft with a fresh one-time Cloudflare authorization.' : 'Review your existing MCP sources and their exact tool allowlists. New-source installation is paused in this release.'}
         action={
-          <Button variant="primary" className="pressable" onClick={() => setShowForm((visible) => !visible)}>
+          <Button variant="primary" className="pressable" disabled={!installationEnabled} onClick={() => setShowForm((visible) => !visible)}>
             {showForm ? <X size={16} /> : <Plus size={16} weight="bold" />}
             {showForm ? 'Close' : 'Add source'}
           </Button>
         }
       />
+
+      {!installationEnabled ? <p role="status" className="notice-banner notice-neutral mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
 
       {sourceNotice ? (
         <div role="status" className={`notice-banner mt-6 notice-${sourceNotice.tone}`}>
@@ -119,7 +125,7 @@ export function SourcesPage() {
         </div>
       ) : null}
 
-      {showForm ? (
+      {showForm && installationEnabled ? (
         <section className="surface-card mt-7 p-5 sm:p-6" aria-labelledby="add-source-title">
           <div className="flex flex-col justify-between gap-4 border-b border-kumo-line pb-5 sm:flex-row sm:items-start">
             <div>
@@ -245,8 +251,8 @@ export function SourcesPage() {
           <div className="empty-card">
             <div className="flex size-12 items-center justify-center rounded-2xl bg-kumo-tint text-kumo-subtle"><Database size={23} /></div>
             <h2 className="mt-4 text-base font-semibold text-kumo-strong">No sources yet</h2>
-            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">Start with one useful MCP server and an exact allowlist you have independently verified as read-only.</p>
-            <Button variant="secondary" className="pressable mt-5" onClick={() => setShowForm(true)}><Plus size={16} weight="bold" /> Add your first source</Button>
+            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Start with one useful MCP server and an exact allowlist you have independently verified as read-only.' : 'Source installation will be available in a compatible gateway release.'}</p>
+            <Button variant="secondary" className="pressable mt-5" disabled={!installationEnabled} onClick={() => setShowForm(true)}><Plus size={16} weight="bold" /> Add your first source</Button>
           </div>
         ) : (
           <div className="grid gap-3">
@@ -264,7 +270,7 @@ export function SourcesPage() {
                     <p className="mt-1.5 truncate font-mono text-xs text-kumo-subtle">{source.url}</p>
                   </div>
                   {source.status === 'draft' ? (
-                    <Button variant="primary" className="pressable shrink-0" loading={isBusy} onClick={() => void authorize(source.id)}>Authorize and apply</Button>
+                    <Button variant="primary" className="pressable shrink-0" disabled={!installationEnabled} loading={isBusy} onClick={() => void authorize(source.id)}>{installationEnabled ? 'Authorize and apply' : 'Installation unavailable'}</Button>
                   ) : null}
                 </div>
                 <details className="mt-4 border-t border-kumo-line pt-4">

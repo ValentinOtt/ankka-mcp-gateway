@@ -61,6 +61,7 @@ const managedSourcesSchema = v.strictObject({
   schemaVersion: v.literal(1),
   revision: v.number(),
   applyMode: v.literal('oauth_per_action'),
+  installationEnabled: v.optional(v.boolean(), false),
   sources: v.array(managedSourceSchema),
 })
 const discoveredToolSchema = v.strictObject({
@@ -133,6 +134,36 @@ const teardownActionSchema = v.strictObject({
   expiresAt: v.string(),
   failureCode: v.nullable(v.string()),
 })
+const teamActionSchema = v.strictObject({
+  ...teardownActionSchema.entries,
+  action: v.optional(v.literal('access')),
+  canCancel: v.optional(v.boolean(), false),
+})
+export const TEAM_MAX_PEOPLE = 51
+const TEAM_MAX_SOURCES = 32
+const teamEmailSchema = v.pipe(v.string(), v.minLength(1), v.maxLength(254))
+const teamSourceIdSchema = v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u))
+const teamMemberSchema = v.strictObject({
+  email: teamEmailSchema,
+  sourceIds: v.pipe(v.array(teamSourceIdSchema), v.maxLength(TEAM_MAX_SOURCES)),
+})
+const teamMembersSchema = v.pipe(v.array(teamMemberSchema), v.maxLength(TEAM_MAX_PEOPLE))
+const teamSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  revision: v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(Number.MAX_SAFE_INTEGER - 1)),
+  editingEnabled: v.boolean(),
+  editingDisabledReason: v.nullable(v.picklist(['release_review_required', 'lifecycle_action_pending'])),
+  members: teamMembersSchema,
+  adminEmails: v.pipe(v.array(teamEmailSchema), v.minLength(1), v.maxLength(TEAM_MAX_PEOPLE)),
+  sources: v.pipe(v.array(v.strictObject({
+    id: teamSourceIdSchema,
+    label: v.pipe(v.string(), v.minLength(1), v.maxLength(80)),
+    enabledTools: v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.maxLength(500)),
+    status: sourceStatusSchema,
+  })), v.maxLength(TEAM_MAX_SOURCES)),
+  pendingAction: v.nullable(teamActionSchema),
+  proposedMembers: v.nullable(teamMembersSchema),
+})
 const runtimePreparedActionSchema = v.strictObject({
   schemaVersion: v.literal(1),
   actionId: v.string(),
@@ -166,10 +197,17 @@ export type RuntimeVersion = v.InferOutput<typeof runtimeVersionSchema>
 export type RuntimeUpdate = v.InferOutput<typeof runtimeUpdateSchema>
 export type RuntimeAction = v.InferOutput<typeof runtimeActionSchema>
 export type TeardownAction = v.InferOutput<typeof teardownActionSchema>
+export type TeamMember = v.InferOutput<typeof teamMemberSchema>
+export type Team = v.InferOutput<typeof teamSchema>
+export type TeamAction = v.InferOutput<typeof teamActionSchema>
 
 export interface GatewayAdminApi {
   getStatus(): Promise<GatewayStatus>
   getSources(): Promise<ManagedSources>
+  getTeam(): Promise<Team>
+  prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<PreparedAction>
+  getTeamAction(actionId: string): Promise<TeamAction>
+  cancelTeamAction(actionId: string): Promise<TeamAction>
   getUpdate(): Promise<RuntimeUpdate>
   discoverSource(url: string): Promise<SourceDiscovery>
   saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources>
@@ -182,11 +220,31 @@ export interface GatewayAdminApi {
   getTeardownAction(actionId: string): Promise<TeardownAction>
 }
 
+export const SOURCE_ADDITION_PAUSED_MESSAGE = 'New-source installation is temporarily unavailable in this release. Existing sources and team permissions remain available.'
+
 const ERROR_MESSAGES = new Map([
   ['access_required', 'Your Cloudflare Access session is no longer active. Sign in again and refresh.'],
   ['origin_required', 'Reload this management page before making changes.'],
+  ['team_conflict', 'Team access changed in another tab. Refresh before preparing another change.'],
+  ['team_invalid', 'Review the email addresses and installed source selections before trying again.'],
+  ['team_action_conflict', 'A team access change is already in progress. Refresh to review or resume it.'],
+  ['team_action_invalid', 'The team access action could not be verified. Refresh before trying again.'],
+  ['team_recovery_required', 'Some access policies may already have changed. Resume the recorded change before editing access again.'],
+  ['team_access_revision_conflict', 'Team access changed in another tab. Refresh before preparing another change.'],
+  ['team_access_invalid_request', 'Review the email addresses and installed source selections before trying again.'],
+  ['team_access_admin_required', 'Gateway administrators must remain in your team. Their roles cannot be changed here.'],
+  ['team_access_invalid_state', 'The saved access configuration could not be verified. Refresh before making changes.'],
+  ['team_access_invalid_target', 'The owned access policies could not be verified. No new change can be prepared.'],
+  ['team_action_recovery_required', 'Some access policies may already have changed. Resume the recorded change before editing access again.'],
+  ['team_policy_drift', 'Cloudflare access policies no longer match the saved configuration. Review the Cloudflare policies before trying again. This page will not reset them automatically.'],
+  ['team_release_review_required', 'Team access editing is not available in this gateway release.'],
+  ['team_handoff_invalid', 'The authorization link could not be verified.'],
+  ['team_prepare_failed', 'The team access request could not be confirmed. Refresh to check whether a change was recorded before trying again.'],
+  ['team_cancel_failed', 'Cancellation could not be confirmed. Refresh to check the recorded change before trying again.'],
+  ['team_teardown_requires_compatible_release', 'Teardown is paused because this release cannot safely verify the edited team permissions. Update to a compatible release before removing the gateway.'],
   ['source_action_conflict', 'This source already has an active authorization or changed in another tab.'],
   ['source_action_invalid', 'The source action no longer matches the saved draft.'],
+  ['source_addition_paused', SOURCE_ADDITION_PAUSED_MESSAGE],
   ['source_authentication_changed', 'The endpoint authentication mode changed. Inspect it again before saving.'],
   ['source_authentication_unsupported', 'The endpoint did not return the standard MCP OAuth discovery challenge.'],
   ['source_capacity_exceeded', 'This source would exceed the gateway source-state capacity. Reduce its tool selection or remove another draft.'],
@@ -246,6 +304,24 @@ export function validHandoffUrl(value: string, expectedOrigin: string): string |
 export class HttpGatewayAdminApi implements GatewayAdminApi {
   getStatus(): Promise<GatewayStatus> { return this.#request('/api/status', gatewayStatusSchema) }
   getSources(): Promise<ManagedSources> { return this.#request('/api/sources', managedSourcesSchema) }
+  getTeam(): Promise<Team> { return this.#request('/api/team', teamSchema) }
+
+  prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<PreparedAction> {
+    return this.#request('/api/team-actions', preparedActionSchema, {
+      method: 'POST',
+      body: JSON.stringify({ schemaVersion: 1, expectedRevision, members }),
+    })
+  }
+
+  getTeamAction(actionId: string): Promise<TeamAction> {
+    return this.#request(`/api/team-actions/${encodeURIComponent(actionId)}`, teamActionSchema)
+  }
+
+  cancelTeamAction(actionId: string): Promise<TeamAction> {
+    return this.#request(`/api/team-actions/${encodeURIComponent(actionId)}`, teamActionSchema, {
+      method: 'DELETE', body: '{}',
+    })
+  }
   getUpdate(): Promise<RuntimeUpdate> { return this.#request('/api/update', runtimeUpdateSchema) }
 
   discoverSource(url: string): Promise<SourceDiscovery> {

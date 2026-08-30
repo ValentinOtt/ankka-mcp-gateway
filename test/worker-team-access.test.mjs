@@ -1,0 +1,1154 @@
+import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
+import test from 'node:test';
+
+import worker, { AdminState } from '../payload/worker/index.js';
+import { addHistoricalInstalledSource } from './historical-source-fixture.mjs';
+import {
+  ACCOUNT_ID,
+  BOOTSTRAP_NONCE,
+  canonicalJson,
+  cloudflareProvider,
+  installReadyGateway,
+  prefixedSha256,
+  withProviderFetch,
+} from './payload-lifecycle.mjs';
+
+// Exercise the real Worker against synthetic Cloudflare resource state. These
+// tests verify native policy mutations, never just UI visibility. Live provider
+// enforcement and session propagation remain separate two-identity acceptance.
+const ADMIN = 'admin@example.com';
+const OWNER = 'owner@example.com';
+const MEMBER = 'member@example.com';
+const NEW_PERSON = 'new-person@example.com';
+const TEAM_KEY = 'ankka-mcp-gateway/team-access/v1';
+const UPDATES_KEY = 'ankka-mcp-gateway/runtime-updates/v1';
+const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
+const SOURCE_ACTIONS_KEY = 'ankka-mcp-gateway/source-actions/v1';
+const MANAGEMENT_ORIGIN = 'https://manage.example.com';
+const SYNTHETIC_GRANT = 'synthetic-team-action-grant-never-store';
+const API_APPS = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+const NEW_SOURCE_URL = 'https://catalog.example.net/mcp';
+
+function envelope(result, status = 200) {
+  return Response.json({ success: status >= 200 && status < 300, errors: [], messages: [], result }, { status });
+}
+
+// Extend the existing explicit resource fake locally: permission updates change
+// only an existing policy below its existing application, never create a target.
+function teamProvider() {
+  let hook;
+  const provider = cloudflareProvider({
+    async onRequest(context) {
+      const intercepted = await hook?.(context);
+      if (intercepted instanceof Response) return intercepted;
+      const { record, state } = context;
+      if (record.method !== 'PUT' || !record.pathname.startsWith(`${API_APPS}/`)) return undefined;
+      const [appId, segment, policyId, extra] = record.pathname.slice(API_APPS.length + 1).split('/');
+      assert.equal(segment, 'policies');
+      assert.equal(extra, undefined);
+      const policies = state.policies.get(appId);
+      const index = policies?.findIndex((policy) => policy.id === policyId) ?? -1;
+      if (index < 0) return envelope(null, 404);
+      policies[index] = { id: policyId, ...structuredClone(record.body) };
+      return envelope(policies[index]);
+    },
+  });
+  return {
+    ...provider,
+    hook(next) { hook = next; },
+    puts() { return provider.requests.filter(({ method }) => method === 'PUT'); },
+  };
+}
+
+async function fixture(run) {
+  const provider = teamProvider();
+  const gateway = await installReadyGateway({ provider });
+  // Real Durable Object instances retain their operation queue. The shared
+  // sequential lifecycle fixture recreates instances; retain them here so
+  // concurrent API regressions exercise the actual runtime serialization.
+  const namespace = gateway.env.ADMIN_STATE;
+  const instances = new Map();
+  gateway.env.ADMIN_STATE = {
+    ...namespace,
+    get(name) {
+      if (!instances.has(name)) {
+        const entry = gateway.objects.get(name);
+        assert.ok(entry);
+        instances.set(name, new AdminState({ storage: entry.storage }, gateway.env));
+      }
+      return { fetch: (request) => instances.get(name).fetch(request) };
+    },
+  };
+  const keys = await crypto.subtle.generateKey({
+    name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048,
+    publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256',
+  }, true, ['sign', 'verify']);
+  const jwk = await crypto.subtle.exportKey('jwk', keys.publicKey);
+  const kid = 'synthetic-team-regression-key';
+  async function headers(email = ADMIN) {
+    const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+    const now = Math.floor(Date.now() / 1000);
+    const unsigned = `${encode({ alg: 'RS256', kid, typ: 'JWT' })}.${encode({
+      iss: gateway.env.CF_ACCESS_ISSUER, aud: [gateway.env.CF_ACCESS_AUD],
+      email, nbf: now - 1, exp: now + 300,
+    })}`;
+    const signed = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', keys.privateKey, new TextEncoder().encode(unsigned));
+    return {
+      'cf-access-authenticated-user-email': email,
+      'cf-access-jwt-assertion': `${unsigned}.${Buffer.from(signed).toString('base64url')}`,
+      'content-type': 'application/json', origin: MANAGEMENT_ORIGIN,
+    };
+  }
+  async function api(path, { method = 'GET', body, email = ADMIN, extraHeaders = {} } = {}) {
+    const init = {
+      method, headers: { ...await headers(email), ...extraHeaders },
+    };
+    if (body !== undefined) init.body = canonicalJson(body);
+    return worker.fetch(new Request(`${MANAGEMENT_ORIGIN}${path}`, init), gateway.env);
+  }
+  async function view() {
+    const response = await api('/api/team');
+    assert.equal(response.status, 200, await response.clone().text());
+    return response.json();
+  }
+  async function prepare(input) {
+    const response = await api('/api/team-actions', { method: 'POST', body: input });
+    assert.equal(response.status, 200, await response.clone().text());
+    const authorization = await response.json();
+    const handoff = new URL(authorization.handoffUrl);
+    assert.equal(handoff.origin, 'https://deploy.ankka.ai');
+    assert.equal(handoff.pathname, '/manage');
+    assert.equal(handoff.search, '');
+    return { authorization, claim: JSON.parse(Buffer.from(handoff.hash.slice(1), 'base64url').toString('utf8')) };
+  }
+  async function apply(prepared, overrides = {}, action = 'access') {
+    const { claim } = prepared;
+    const input = {
+      schemaVersion: 1, actionId: claim.actionId,
+      actionKey: claim.actionKey, actorEmail: claim.actorEmail, accountId: claim.accountId,
+      issuedAt: Date.now(), expiresAt: claim.expiresAt,
+      cloudflareAccessToken: SYNTHETIC_GRANT,
+    };
+    if (action !== null) input.action = action;
+    Object.assign(input, overrides);
+    const body = canonicalJson(input);
+    const signature = `sha256=${createHmac('sha256', Buffer.from(claim.actionKey, 'base64url')).update(body).digest('hex')}`;
+    return worker.fetch(new Request('https://ankka-gateway-test.tenant.workers.dev/__ankka/source-action', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-ankka-source-action-signature': signature }, body,
+    }), gateway.env);
+  }
+  async function teardown() {
+    const response = await api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 } });
+    assert.equal(response.status, 200, await response.clone().text());
+    const prepared = await response.json();
+    const claim = JSON.parse(Buffer.from(new URL(prepared.handoffUrl).hash.slice(1), 'base64url').toString('utf8'));
+    return async (command, requestId) => {
+      const input = {
+        schemaVersion: 1, command, actionId: claim.actionId, actionKey: claim.actionKey,
+        actorEmail: claim.actorEmail, accountId: claim.accountId, installationId: claim.installationId,
+        issuedAt: Date.now(), expiresAt: claim.expiresAt,
+      };
+      if (requestId !== undefined) {
+        input.requestId = requestId;
+        input.cloudflareAccessToken = SYNTHETIC_GRANT;
+      }
+      const body = canonicalJson(input);
+      const signature = `sha256=${createHmac('sha256', Buffer.from(claim.actionKey, 'base64url')).update(body).digest('hex')}`;
+      return worker.fetch(new Request('https://ankka-gateway-test.tenant.workers.dev/__ankka/teardown-action', {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-ankka-teardown-action-signature': signature }, body,
+      }), gateway.env);
+    };
+  }
+  const managementStorage = gateway.objects.get('v1:management').storage;
+  const network = async (request) => {
+    if (request.url === `${gateway.env.CF_ACCESS_ISSUER}/cdn-cgi/access/certs`) {
+      return Response.json({ keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] });
+    }
+    if (request.url === NEW_SOURCE_URL) {
+      const message = await request.json();
+      return Response.json({ jsonrpc: '2.0', id: message.id, result: { tools: [{
+        name: 'company_lookup', description: 'Read synthetic reference records.', inputSchema: { type: 'object' },
+        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      }] } });
+    }
+    return provider.fetch(request);
+  };
+  return withProviderFetch(network, () => run({ ...gateway, api, view, prepare, apply, teardown,
+    headers, managementStorage }));
+}
+
+function changedRequest(view) {
+  return {
+    schemaVersion: 1, expectedRevision: view.revision,
+    members: [
+      { email: ADMIN, sourceIds: [] },
+      { email: OWNER, sourceIds: [] },
+      { email: NEW_PERSON, sourceIds: [view.sources[0].id] },
+    ],
+  };
+}
+
+function app(gateway, type = 'mcp') {
+  const result = [...gateway.provider.state.apps.values()].find((value) => value.type === type);
+  assert.ok(result);
+  return result;
+}
+
+function policy(gateway, type = 'mcp') {
+  return gateway.provider.state.policies.get(app(gateway, type).id)[0];
+}
+
+function assertNoMutation(provider, baseline) {
+  assert.deepEqual(provider.requests.slice(baseline).filter(({ method }) => method !== 'GET'), []);
+}
+
+async function assertSourcePaused(response) {
+  assert.equal(response.status, 409, await response.clone().text());
+  assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'source_addition_paused', retryable: false });
+}
+
+// A previously issued, unexpired source-installation handoff can survive a
+// runtime upgrade. Model that historical journal directly without enabling a
+// current preparation route or altering any original resource/receipt authority.
+async function historicalPreparedSource(gateway, status = 'authorization_required') {
+  const current = gateway.managementStorage.snapshot(SOURCES_KEY);
+  const source = { id: 'source-4444444444444444', label: 'Additional source', url: NEW_SOURCE_URL,
+    authMode: 'none', onBehalfOfUser: false, enabledTools: ['company_lookup'], status: 'draft' };
+  const sources = { ...current, revision: current.revision + 1, sources: [...current.sources, source] };
+  const claim = { actionId: `action_${'L'.repeat(32)}`, actionKey: BOOTSTRAP_NONCE,
+    actorEmail: ADMIN, accountId: ACCOUNT_ID, expiresAt: Date.now() + 600_000 };
+  const action = { schemaVersion: 1, actionId: claim.actionId, sourceId: source.id,
+    sourceRevision: sources.revision, actorEmail: ADMIN, issuedAt: Date.now(), expiresAt: claim.expiresAt,
+    actionKeyHash: await prefixedSha256(claim.actionKey), sourceHash: await prefixedSha256({
+      id: source.id, label: source.label, url: source.url, authMode: source.authMode,
+      onBehalfOfUser: source.onBehalfOfUser, enabledTools: source.enabledTools,
+    }), status: 'authorization_required', resources: [], pending: status === 'recovery_required'
+      ? { kind: 'mcp_server', phase: 'send_armed', provider: null } : null,
+    portalUpdate: null, failureCode: status === 'recovery_required' ? 'source_action_recovery_required' : null };
+  await gateway.managementStorage.put(SOURCES_KEY, sources);
+  if (status !== null) {
+    await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, { schemaVersion: 1, revision: 2, actions: [action] });
+  }
+  return { source, sources, claim, action };
+}
+
+async function runtimeAction(gateway, { operation = 'rollback', release = 'gateway-v0.0.9' } = {}) {
+  const to = { release, artifactSha256: `sha256:${'8'.repeat(64)}`, versionId: '00000000-0000-4000-8000-000000000008' };
+  await gateway.managementStorage.put(UPDATES_KEY, {
+    schemaVersion: 1, revision: 1, actions: [],
+    current: { release: gateway.env.ANKKA_GATEWAY_RELEASE,
+      artifactSha256: gateway.env.ANKKA_GATEWAY_RELEASE_SHA256,
+      versionId: '00000000-0000-4000-8000-000000000009' },
+    previous: to,
+  });
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + 600_000;
+  const actionId = `action_${'R'.repeat(32)}`;
+  const stub = gateway.env.ADMIN_STATE.get('v1:management');
+  const prepare = () => stub.fetch(new Request('https://admin-state.invalid/runtime-updates', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: canonicalJson({ actionId, actionKeyHash, actorEmail: ADMIN, issuedAt, expiresAt, operation, to }),
+  }));
+  const actionKeyHash = await prefixedSha256(BOOTSTRAP_NONCE);
+  const begin = () => {
+    const body = canonicalJson({ schemaVersion: 1, command: 'begin', actionId, actionKey: BOOTSTRAP_NONCE,
+      issuedAt: Date.now(), expiresAt, operation });
+    const signature = `sha256=${createHmac('sha256', Buffer.from(BOOTSTRAP_NONCE, 'base64url')).update(body).digest('hex')}`;
+    return stub.fetch(new Request('https://admin-state.invalid/runtime-updates/control', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-ankka-runtime-action-signature': signature }, body,
+    }));
+  };
+  return { prepare, begin };
+}
+
+async function shortenedTeamDeadline(prepared, run, remainingMilliseconds = null) {
+  const originalTimeout = AbortSignal.timeout;
+  const originalNow = Date.now;
+  const requested = [];
+  let guardTimer;
+  const started = performance.now();
+  if (remainingMilliseconds !== null) Date.now = () => prepared.claim.expiresAt - remainingMilliseconds;
+  AbortSignal.timeout = (milliseconds) => {
+    const remaining = prepared.claim.expiresAt - Date.now();
+    assert.ok(milliseconds > 0 && milliseconds <= 60_000 && milliseconds <= remaining);
+    requested.push(milliseconds);
+    return originalTimeout.call(AbortSignal, Math.min(50, milliseconds));
+  };
+  try {
+    const guard = new Promise((_resolve, reject) => {
+      guardTimer = setTimeout(() => reject(new Error('Team operation did not respect its shortened deadline')), 1500);
+    });
+    const result = await Promise.race([run(), guard]);
+    assert.equal(requested.length, 1);
+    assert.ok(performance.now() - started < 1500);
+    return { result, requested };
+  } finally {
+    clearTimeout(guardTimer);
+    AbortSignal.timeout = originalTimeout;
+    Date.now = originalNow;
+  }
+}
+
+test('Team API requires matching administrator identity, same origin, exact schema and current revision', async () => fixture(async (gateway) => {
+  const { api, env, provider } = gateway;
+  const initial = await gateway.view();
+  const input = changedRequest(initial);
+  const baseline = provider.requests.length;
+  const anonymous = await worker.fetch(new Request(`${MANAGEMENT_ORIGIN}/api/team-actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json', origin: MANAGEMENT_ORIGIN }, body: canonicalJson(input),
+  }), env);
+  assert.equal(anonymous.status, 401);
+  assert.equal((await api('/api/team-actions', { method: 'POST', body: input, email: MEMBER })).status, 401);
+  assert.equal((await api('/api/team-actions', {
+    method: 'POST', body: input, extraHeaders: { 'cf-access-authenticated-user-email': OWNER },
+  })).status, 401);
+  assert.equal((await api('/api/team-actions', {
+    method: 'POST', body: input, extraHeaders: { origin: 'https://foreign.example.com' },
+  })).status, 403);
+  for (const malformed of [
+    { ...input, expectedRevision: initial.revision + 1 },
+    { ...input, members: input.members.filter(({ email }) => email !== OWNER) },
+    { ...input, members: [...input.members, { email: ' ADMIN@EXAMPLE.COM ', sourceIds: [] }] },
+    { ...input, members: [{ email: ADMIN, sourceIds: ['uninstalled-source'] }, { email: OWNER, sourceIds: [] }] },
+    { ...input, members: input.members.map((member) => ({ ...member, role: 'admin' })) },
+    { ...input, cloudflareAccessToken: SYNTHETIC_GRANT },
+  ]) {
+    const response = await api('/api/team-actions', { method: 'POST', body: malformed });
+    assert.ok([400, 409].includes(response.status), await response.clone().text());
+    assert.doesNotMatch(await response.text(), /new-person@example\.com|synthetic-team-action-grant/u);
+  }
+  assertNoMutation(provider, baseline);
+}));
+
+test('Team applies only exact native source audiences and preserves original receipt, tools and shared source auth', async () => fixture(async (gateway) => {
+  const initial = await gateway.view();
+  assert.equal(initial.editingEnabled, true);
+  const input = changedRequest(initial);
+  const receiptBefore = canonicalJson(gateway.storage.snapshot());
+  const portalBefore = canonicalJson(gateway.provider.state.portal);
+  const prepared = await gateway.prepare(input);
+  const serializedClaim = JSON.stringify(prepared.claim);
+  assert.doesNotMatch(serializedClaim, /new-person@example\.com|member@example\.com|owner@example\.com|sourceIds|members|cloudflareAccessToken/u);
+  const baseline = gateway.provider.requests.length;
+  const response = await gateway.apply(prepared);
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal((await response.json()).status, 'succeeded');
+  const next = await gateway.view();
+  assert.equal(next.revision, initial.revision + 1);
+  assert.deepEqual(next.members, [...input.members].sort((left, right) => left.email.localeCompare(right.email)));
+  assert.equal(next.pendingAction.status, 'succeeded');
+  assert.equal(next.proposedMembers, null);
+  assert.equal(canonicalJson(gateway.storage.snapshot()), receiptBefore, 'original bootstrap receipt is immutable');
+  assert.equal(canonicalJson(gateway.provider.state.portal), portalBefore, 'source tools and on_behalf are untouched');
+  assert.deepEqual(policy(gateway).include, [{ email: { email: NEW_PERSON } }]);
+  assert.equal(policy(gateway).decision, 'allow');
+  assert.deepEqual(policy(gateway, 'mcp_portal').include.map(({ email }) => email.email), [ADMIN, NEW_PERSON, OWNER]);
+  const mutations = gateway.provider.requests.slice(baseline).filter(({ method }) => method !== 'GET');
+  assert.equal(mutations.length, 2);
+  assert.ok(mutations.every(({ method, pathname }) => method === 'PUT' && /^\/client\/v4\/accounts\/[1]{32}\/access\/apps\/[ab]{32}\/policies\/[mn]{32}$/u.test(pathname)));
+  const saved = canonicalJson([...gateway.objects.values()].flatMap((entry) => entry.storage.writes));
+  assert.equal(saved.includes(SYNTHETIC_GRANT), false);
+  assert.equal(saved.includes(prepared.claim.actionKey), false);
+  const stale = await gateway.api('/api/team-actions', { method: 'POST', body: input });
+  assert.equal(stale.status, 409);
+}));
+
+test('an empty source audience becomes native deny-everyone without changing administrator ownership', async () => fixture(async (gateway) => {
+  const initial = await gateway.view();
+  const input = { schemaVersion: 1, expectedRevision: initial.revision,
+    members: initial.members.map(({ email }) => ({ email, sourceIds: [] })) };
+  const response = await gateway.apply(await gateway.prepare(input));
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.deepEqual(policy(gateway).include, [{ everyone: {} }]);
+  assert.equal(policy(gateway).decision, 'deny');
+  assert.deepEqual((await gateway.view()).adminEmails, [ADMIN, OWNER]);
+  assert.equal(gateway.env.ADMIN_EMAILS, `${ADMIN},${OWNER}`);
+}));
+
+const POLICY_DRIFT_CASES = [
+  ['extra Allow', (gateway) => gateway.provider.state.policies.get(app(gateway).id).push({ ...policy(gateway), id: 'x'.repeat(32) })],
+  ['extra Bypass', (gateway) => gateway.provider.state.policies.get(app(gateway).id).push({ ...policy(gateway), id: 'x'.repeat(32), decision: 'bypass', include: [{ everyone: {} }] })],
+  ['duplicate owned policy', (gateway) => gateway.provider.state.policies.get(app(gateway).id).push(structuredClone(policy(gateway)))],
+  ['group selector', (gateway) => { policy(gateway).include = [{ group: { id: 'synthetic-group' } }]; }],
+  ['allow everyone', (gateway) => { policy(gateway).include = [{ everyone: {} }]; }],
+  ['wrong policy ID', (gateway) => { policy(gateway).id = 'x'.repeat(32); }],
+  ['wrong policy UID', (gateway) => { policy(gateway).uid = 'x'.repeat(32); }],
+  ['reusable policy', (gateway) => { policy(gateway).reusable = true; }],
+  ['wrong policy marker', (gateway) => { policy(gateway).name = 'Unrelated policy'; }],
+  ['wrong policy parent', (gateway) => { policy(gateway).app_id = 'x'.repeat(32); }],
+  ['wrong policy account', (gateway) => { policy(gateway).account_id = '9'.repeat(32); }],
+  ['unexpected MFA requirement', (gateway) => { policy(gateway).require = [{ auth_method: { auth_method: 'mfa' } }]; }],
+  ['wrong application ID', (gateway) => { app(gateway).id = 'x'.repeat(32); }],
+  ['wrong application marker', (gateway) => { app(gateway).name = 'Unrelated application'; }],
+  ['wrong application account', (gateway) => { app(gateway).account_id = '9'.repeat(32); }],
+  ['wrong source destination', (gateway) => { app(gateway).destinations[0].mcp_server_id = 'foreign-source'; }],
+  ['wrong Portal destination', (gateway) => { app(gateway, 'mcp_portal').domain = 'foreign.example.com'; }],
+  ['competing source application', (gateway) => {
+    const extra = { ...structuredClone(app(gateway)), id: 'x'.repeat(32) };
+    gateway.provider.state.apps.set(extra.id, extra);
+    gateway.provider.state.policies.set(extra.id, [{ ...structuredClone(policy(gateway)), id: 'y'.repeat(32) }]);
+  }],
+];
+
+for (const [name, drift] of POLICY_DRIFT_CASES) {
+  test(`Team preflight rejects ${name} before any policy mutation`, async () => fixture(async (gateway) => {
+    const input = changedRequest(await gateway.view());
+    const prepared = await gateway.prepare(input);
+    drift(gateway);
+    const baseline = gateway.provider.requests.length;
+    const response = await gateway.apply(prepared);
+    assert.ok(response.status >= 400, await response.clone().text());
+    assertNoMutation(gateway.provider, baseline);
+    assert.equal(gateway.storage.snapshot().checksum, gateway.readyReceipt.checksum);
+  }));
+}
+
+test('complete application and policy listings reject duplicate provider list rows', async () => fixture(async (gateway) => {
+  const prepared = await gateway.prepare(changedRequest(await gateway.view()));
+  gateway.provider.hook(({ record, state }) => record.method === 'GET' && record.pathname === API_APPS
+    ? envelope([...state.apps.values(), structuredClone(app(gateway))]) : undefined);
+  const baseline = gateway.provider.requests.length;
+  const response = await gateway.apply(prepared);
+  assert.ok(response.status >= 400, await response.clone().text());
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('application preflight follows pagination before accepting an apparently unique owned application', async () => fixture(async (gateway) => {
+  const prepared = await gateway.prepare(changedRequest(await gateway.view()));
+  const visitedPages = [];
+  gateway.provider.hook(({ record, state }) => {
+    if (record.method !== 'GET' || record.pathname !== API_APPS) return undefined;
+    const page = Number(new URLSearchParams(record.search).get('page'));
+    visitedPages.push(page);
+    if (page === 1) return envelope([
+      ...state.apps.values(),
+      ...Array.from({ length: 98 }, (_value, index) => ({
+        id: `unrelated-app-${index}`, name: `Unrelated ${index}`, type: 'self_hosted',
+        domain: `other-${index}.example.com`,
+      })),
+    ]);
+    assert.equal(page, 2);
+    return envelope([{ ...structuredClone(app(gateway)), id: 'x'.repeat(32) }]);
+  });
+  const baseline = gateway.provider.requests.length;
+  const response = await gateway.apply(prepared);
+  assert.equal(response.status, 409, await response.clone().text());
+  assert.deepEqual(visitedPages, [1, 2]);
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('wrong relay account, actor, or action key cannot spend the signed grant', async () => fixture(async (gateway) => {
+  const prepared = await gateway.prepare(changedRequest(await gateway.view()));
+  const baseline = gateway.provider.requests.length;
+  for (const override of [
+    { accountId: '9'.repeat(32) }, { actorEmail: MEMBER }, { actionKey: 'A'.repeat(43) },
+    { action: 'install' }, { members: [{ email: NEW_PERSON, sourceIds: [] }] },
+  ]) {
+    const response = await gateway.apply(prepared, override);
+    assert.ok(response.status >= 400, await response.clone().text());
+  }
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('unknown provider write outcome is recovered from exact readback without repeating acknowledged PUTs', async () => fixture(async (gateway) => {
+  const input = changedRequest(await gateway.view());
+  const prepared = await gateway.prepare(input);
+  let lostPath;
+  gateway.provider.hook(({ record, state }) => {
+    if (record.method !== 'PUT' || !record.pathname.startsWith(`${API_APPS}/`) || lostPath) return undefined;
+    lostPath = record.pathname;
+    const [appId, , policyId] = record.pathname.slice(API_APPS.length + 1).split('/');
+    state.policies.set(appId, [{ id: policyId, ...structuredClone(record.body) }]);
+    throw new Error(`${SYNTHETIC_GRANT}: ${NEW_PERSON} synthetic private provider response`);
+  });
+  const logs = [];
+  const originals = Object.fromEntries(['log', 'warn', 'error', 'info', 'debug'].map((key) => [key, console[key]]));
+  let first;
+  try {
+    for (const key of Object.keys(originals)) console[key] = (...values) => { logs.push(values); };
+    first = await gateway.apply(prepared);
+  } finally {
+    for (const [key, value] of Object.entries(originals)) console[key] = value;
+  }
+  assert.equal(first.status, 409, await first.clone().text());
+  assert.doesNotMatch(await first.text(), /synthetic-team-action-grant|new-person@example\.com|synthetic private/u);
+  assert.deepEqual(logs, []);
+  assert.ok(lostPath);
+  assert.ok(gateway.managementStorage.snapshot(TEAM_KEY).pendingAction);
+  assert.equal((await gateway.view()).revision, input.expectedRevision);
+  gateway.provider.hook(undefined);
+  const recovered = await gateway.apply(await gateway.prepare(input));
+  assert.equal(recovered.status, 200, await recovered.clone().text());
+  assert.equal((await recovered.json()).status, 'succeeded');
+  assert.equal(gateway.provider.puts().filter(({ pathname }) => pathname === lostPath).length, 1);
+  assert.equal(gateway.provider.puts().length, 2);
+  assert.equal((await gateway.view()).revision, input.expectedRevision + 1);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).pendingAction.status, 'succeeded');
+  assert.equal(gateway.storage.snapshot().checksum, gateway.readyReceipt.checksum);
+  assert.equal(canonicalJson(gateway.managementStorage.writes).includes(SYNTHETIC_GRANT), false);
+}));
+
+test('partial policy updates block conflicting changes and teardown until exact recovery finishes', async () => fixture(async (gateway) => {
+  const input = changedRequest(await gateway.view());
+  const prepared = await gateway.prepare(input);
+  let sends = 0;
+  gateway.provider.hook(({ record }) => {
+    if (record.method === 'PUT' && record.pathname.startsWith(`${API_APPS}/`) && ++sends === 2) {
+      return envelope(null, 503);
+    }
+    return undefined;
+  });
+  const first = await gateway.apply(prepared);
+  assert.equal(first.status, 409, await first.clone().text());
+  const current = await gateway.view();
+  assert.equal(current.revision, input.expectedRevision);
+  assert.ok(current.pendingAction);
+  const replacement = { ...input, members: input.members.map(({ email }) => ({ email, sourceIds: [] })) };
+  const conflict = await gateway.api('/api/team-actions', { method: 'POST', body: replacement });
+  assert.equal(conflict.status, 409);
+  const teardown = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 } });
+  assert.equal(teardown.status, 409);
+  assert.equal(gateway.provider.deletes().length, 0);
+  const firstPath = gateway.provider.puts()[0].pathname;
+  gateway.provider.hook(undefined);
+  const recovered = await gateway.apply(await gateway.prepare(input));
+  assert.equal(recovered.status, 200, await recovered.clone().text());
+  assert.equal(gateway.provider.puts().filter(({ pathname }) => pathname === firstPath).length, 1);
+  assert.equal((await gateway.view()).revision, input.expectedRevision + 1);
+}));
+
+test('recovery rejects a third-party audience instead of overwriting it as before or after', async () => fixture(async (gateway) => {
+  const input = changedRequest(await gateway.view());
+  const prepared = await gateway.prepare(input);
+  let lost = false;
+  gateway.provider.hook(({ record, state }) => {
+    if (record.method !== 'PUT' || !record.pathname.startsWith(`${API_APPS}/`) || lost) return undefined;
+    lost = true;
+    const [appId, , policyId] = record.pathname.slice(API_APPS.length + 1).split('/');
+    state.policies.set(appId, [{ id: policyId, ...structuredClone(record.body), include: [{ email: { email: 'unrelated@example.com' } }] }]);
+    throw new Error('synthetic unknown outcome');
+  });
+  assert.equal((await gateway.apply(prepared)).status, 409);
+  gateway.provider.hook(undefined);
+  const baseline = gateway.provider.requests.length;
+  const recovered = await gateway.apply(await gateway.prepare(input));
+  assert.equal(recovered.status, 409, await recovered.clone().text());
+  assertNoMutation(gateway.provider, baseline);
+  assert.equal((await gateway.view()).revision, input.expectedRevision);
+}));
+
+test('pristine legacy teardown keeps its existing exact receipt-backed path', async () => fixture(async (gateway) => {
+  const send = await gateway.teardown();
+  const proof = await send('prove');
+  assert.equal(proof.status, 200, await proof.clone().text());
+  const authority = await proof.json();
+  assert.equal(canonicalJson(authority.authority.root.receipt), canonicalJson(gateway.readyReceipt));
+  const removed = await send('apply', 'T'.repeat(22));
+  assert.equal(removed.status, 200, await removed.clone().text());
+  assert.equal(gateway.provider.liveResourceCount(), 0);
+}));
+
+test('native Team changes block teardown handoff without broadening legacy ownership checks', async () => fixture(async (gateway) => {
+  const originalReceipt = canonicalJson(gateway.readyReceipt);
+  const applied = await gateway.apply(await gateway.prepare(changedRequest(await gateway.view())));
+  assert.equal(applied.status, 200, await applied.clone().text());
+  const baseline = gateway.provider.requests.length;
+  const prepared = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 } });
+  assert.equal(prepared.status, 409, await prepared.clone().text());
+  const result = await prepared.json();
+  assert.equal(Object.hasOwn(result, 'handoffUrl'), false);
+  assertNoMutation(gateway.provider, baseline);
+  assert.equal(gateway.provider.deletes().length, 0);
+  assert.equal(gateway.provider.liveResourceCount(), 7);
+  assert.equal(canonicalJson(gateway.storage.snapshot()), originalReceipt);
+}));
+
+test('historical day-two ownership cannot alias another source application or policy parent during teardown', async () => fixture(async (gateway) => {
+  await addHistoricalInstalledSource(gateway);
+  await addHistoricalInstalledSource(gateway, { label: 'Other historical source', url: 'https://other.example.net/mcp' });
+  const key = 'ankka-mcp-gateway/management-control/v1';
+  const originalReceipt = canonicalJson(gateway.storage.snapshot());
+  const control = gateway.managementStorage.snapshot(key);
+  const [first, second] = control.sourceOwnership.slice(-2);
+  second.resources[1].provider.id = first.resources[1].provider.id;
+  second.resources[2].provider.parentId = first.resources[1].provider.id;
+  await gateway.managementStorage.put(key, control);
+  const baseline = gateway.provider.requests.length;
+  const response = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 } });
+  assert.equal(response.status, 409);
+  assertNoMutation(gateway.provider, baseline);
+  assert.equal(gateway.provider.deletes().length, 0);
+  assert.equal(canonicalJson(gateway.storage.snapshot()), originalReceipt);
+}));
+
+test('historical day-two policy drift blocks every teardown deletion in the primary runtime', async () => fixture(async (gateway) => {
+  const added = await addHistoricalInstalledSource(gateway);
+  const send = await gateway.teardown();
+  added.policy.include = [{ email: { email: 'unowned@example.com' } }];
+  const proof = await send('prove');
+  assert.equal(proof.status, 200, await proof.clone().text());
+  const baseline = gateway.provider.requests.length;
+  const result = await send('apply', 'Q'.repeat(22));
+  assert.equal(result.status, 409);
+  assertNoMutation(gateway.provider, baseline);
+  assert.equal(gateway.provider.deletes().length, 0);
+  assert.equal(gateway.provider.liveResourceCount(), 10);
+}));
+
+for (const drift of ['root Portal application alias', 'desired hash mismatch']) {
+  test(`historical day-two ${drift} invalidates previously prepared primary teardown authority`, async () => fixture(async (gateway) => {
+    const added = await addHistoricalInstalledSource(gateway);
+    const send = await gateway.teardown();
+    const valid = await send('prove');
+    assert.equal(valid.status, 200, await valid.clone().text());
+    const key = 'ankka-mcp-gateway/management-control/v1';
+    const control = gateway.managementStorage.snapshot(key);
+    const owned = control.sourceOwnership.find(({ sourceId }) => sourceId === added.source.id);
+    if (drift === 'root Portal application alias') {
+      const portalApplicationId = app(gateway, 'mcp_portal').id;
+      owned.resources[1].provider.id = portalApplicationId;
+      owned.resources[2].provider.parentId = portalApplicationId;
+    } else {
+      owned.resources[0].desiredHash = `sha256:${'0'.repeat(64)}`;
+    }
+    await gateway.managementStorage.put(key, control);
+    const baseline = gateway.provider.requests.length;
+    const proof = await send('prove');
+    assert.equal(proof.status, 409);
+    const result = await send('apply', 'Q'.repeat(22));
+    assert.equal(result.status, 409);
+    assertNoMutation(gateway.provider, baseline);
+    assert.equal(gateway.provider.deletes().length, 0);
+    assert.equal(gateway.provider.liveResourceCount(), 10);
+  }));
+}
+
+test('pristine historical two-source additions retain exact primary-runtime teardown order without native Team state', async () => fixture(async (gateway) => {
+  const first = await addHistoricalInstalledSource(gateway);
+  const second = await addHistoricalInstalledSource(gateway, {
+    label: 'Historical shared OAuth source', url: 'https://other.example.net/mcp', authMode: 'oauth',
+  });
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY), undefined);
+  assert.equal(gateway.provider.liveResourceCount(), 13);
+  const send = await gateway.teardown();
+  const proof = await send('prove');
+  assert.equal(proof.status, 200, await proof.clone().text());
+  const response = await send('apply', 'Q'.repeat(22));
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal((await response.json()).removedResourceCount, 13);
+  assert.equal(gateway.provider.liveResourceCount(), 0);
+  const expectedExtraIds = [first, second].sort((left, right) => right.source.id.localeCompare(left.source.id))
+    .flatMap(({ resources }) => [...resources].reverse().map(({ provider }) => provider.id));
+  assert.deepEqual(gateway.provider.deletes().slice(0, 6).map(({ pathname }) => pathname.split('/').at(-1)), expectedExtraIds);
+}));
+
+// Temporary release boundary: existing-source permissions are supported, but
+// source installation is paused until first-policy default-deny ships. These
+// assertions deliberately prove denial, not an implemented new-source default.
+for (const initialState of ['before first Team view', 'after Team view', 'after a no-op', 'after a Team mutation']) {
+  test(`source creation and handoff are paused ${initialState} without changing the existing authorization graph`, async () => fixture(async (gateway) => {
+    assert.equal(gateway.managementStorage.snapshot(TEAM_KEY), undefined);
+    if (initialState !== 'before first Team view') {
+      const team = await gateway.view();
+      if (initialState === 'after a no-op' || initialState === 'after a Team mutation') {
+        const input = initialState === 'after a no-op'
+          ? { schemaVersion: 1, expectedRevision: team.revision, members: team.members }
+          : changedRequest(team);
+        const result = await gateway.apply(await gateway.prepare(input));
+        assert.equal(result.status, 200, await result.clone().text());
+      }
+    }
+    const publicSources = await (await gateway.api('/api/sources')).json();
+    assert.equal(publicSources.installationEnabled, false);
+    const originalSources = canonicalJson(gateway.managementStorage.snapshot(SOURCES_KEY));
+    assert.equal(Object.hasOwn(gateway.managementStorage.snapshot(SOURCES_KEY), 'installationEnabled'), false);
+    const originalPolicies = new Map([...gateway.provider.state.policies].map(([id, policies]) => [id, canonicalJson(policies)]));
+    const originalMappings = structuredClone(gateway.provider.state.portal.servers);
+    const originalReceipt = canonicalJson(gateway.storage.snapshot());
+    const originalTeam = gateway.managementStorage.snapshot(TEAM_KEY);
+    const baseline = gateway.provider.requests.length;
+    const storageWrites = gateway.managementStorage.writes.length;
+    const sourceInput = { schemaVersion: 1, revision: publicSources.revision,
+      source: { label: 'Additional source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] } };
+    await assertSourcePaused(await gateway.api('/api/sources', { method: 'PUT', body: sourceInput }));
+    await assertSourcePaused(await gateway.api('/api/source-actions', { method: 'POST', body: {
+      schemaVersion: 1, revision: publicSources.revision, sourceId: 'source-4444444444444444',
+    } }));
+    const management = gateway.env.ADMIN_STATE.get('v1:management');
+    await assertSourcePaused(await management.fetch(new Request('https://admin-state.invalid/sources', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: canonicalJson(sourceInput),
+    })));
+    await assertSourcePaused(await management.fetch(new Request('https://admin-state.invalid/source-actions', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: canonicalJson({ schemaVersion: 1 }),
+    })));
+    assert.equal(gateway.managementStorage.writes.length, storageWrites);
+    assert.equal(gateway.provider.requests.length, baseline);
+    assert.equal(canonicalJson(gateway.managementStorage.snapshot(SOURCES_KEY)), originalSources);
+    assert.deepEqual(gateway.managementStorage.snapshot(TEAM_KEY), originalTeam);
+    for (const [id, policies] of originalPolicies) assert.equal(canonicalJson(gateway.provider.state.policies.get(id)), policies);
+    assert.deepEqual(gateway.provider.state.portal.servers, originalMappings);
+    assert.equal(canonicalJson(gateway.storage.snapshot()), originalReceipt);
+    assert.equal(gateway.provider.liveResourceCount(), 7);
+  }));
+}
+
+for (const status of ['authorization_required', 'recovery_required']) {
+  test(`a previously signed source handoff with ${status} history cannot discover, create, or resume a source while additions are paused`, async () => fixture(async (gateway) => {
+    const originalReceipt = canonicalJson(gateway.storage.snapshot());
+    const prepared = await historicalPreparedSource(gateway, status);
+    const originalPolicies = canonicalJson([...gateway.provider.state.policies]);
+    const originalMappings = canonicalJson(gateway.provider.state.portal.servers);
+    const baseline = gateway.provider.requests.length;
+    const storageWrites = gateway.managementStorage.writes.length;
+    const originalActions = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+    const originalSources = gateway.managementStorage.snapshot(SOURCES_KEY);
+    const sourceInput = { schemaVersion: 1, revision: prepared.sources.revision, source: {
+      label: 'Changed draft label', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'],
+    } };
+    await assertSourcePaused(await gateway.api('/api/sources', { method: 'PUT', body: sourceInput }));
+    await assertSourcePaused(await gateway.api('/api/source-actions', { method: 'POST', body: {
+      schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id,
+    } }));
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await assertSourcePaused(await gateway.apply(prepared, {}, null));
+    }
+    const wrongKey = await gateway.apply({ ...prepared, claim: { ...prepared.claim, actionKey: 'Z'.repeat(43) } }, {}, null);
+    assert.equal(wrongKey.status, 400);
+    assert.equal(gateway.provider.requests.length, baseline);
+    assert.equal(gateway.managementStorage.writes.length, storageWrites);
+    assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), originalActions);
+    assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY), originalSources);
+    assert.equal(canonicalJson([...gateway.provider.state.policies]), originalPolicies);
+    assert.equal(canonicalJson(gateway.provider.state.portal.servers), originalMappings);
+    assert.equal(canonicalJson(gateway.storage.snapshot()), originalReceipt);
+    assert.equal(canonicalJson(gateway.managementStorage.writes).includes(SYNTHETIC_GRANT), false);
+  }));
+}
+
+test('source installation pause preserves authorization and origin checks rather than exposing mutation status anonymously', async () => fixture(async (gateway) => {
+  const baseline = gateway.provider.requests.length;
+  const sources = await (await gateway.api('/api/sources')).json();
+  for (const path of ['/api/sources', '/api/source-actions']) {
+    const method = path === '/api/sources' ? 'PUT' : 'POST';
+    const body = { schemaVersion: 1, revision: sources.revision };
+    const anonymous = await worker.fetch(new Request(`${MANAGEMENT_ORIGIN}${path}`, {
+      method, headers: { 'content-type': 'application/json', origin: MANAGEMENT_ORIGIN }, body: canonicalJson(body),
+    }), gateway.env);
+    assert.equal(anonymous.status, 401);
+    assert.equal((await gateway.api(path, { method, body, email: MEMBER })).status, 401);
+    assert.equal((await gateway.api(path, { method, body, extraHeaders: { origin: 'https://other.example.com' } })).status, 403);
+  }
+  assert.equal(gateway.provider.requests.length, baseline);
+}));
+
+test('inspection, preparation and no-op application do not disable pristine teardown or create a rollback floor', async () => fixture(async (gateway) => {
+  const initial = await gateway.view();
+  const assertPristine = () => {
+    const state = gateway.managementStorage.snapshot(TEAM_KEY);
+    assert.equal(state.minimumRuntimeRelease, null);
+    assert.equal(state.teardownDisabled, false);
+  };
+  assertPristine();
+  const prepared = await gateway.prepare({ schemaVersion: 1, expectedRevision: initial.revision, members: initial.members });
+  assertPristine();
+  const baseline = gateway.provider.requests.length;
+  const response = await gateway.apply(prepared);
+  assert.equal(response.status, 200, await response.clone().text());
+  assertNoMutation(gateway.provider, baseline);
+  assertPristine();
+  const send = await gateway.teardown();
+  const proof = await send('prove');
+  assert.equal(proof.status, 200, await proof.clone().text());
+}));
+
+test('preflight failure before any PUT leaves teardown and rollback floor pristine', async () => fixture(async (gateway) => {
+  const prepared = await gateway.prepare(changedRequest(await gateway.view()));
+  policy(gateway).include = [{ group: { id: 'synthetic-group' } }];
+  const baseline = gateway.provider.requests.length;
+  const response = await gateway.apply(prepared);
+  assert.equal(response.status, 409, await response.clone().text());
+  assertNoMutation(gateway.provider, baseline);
+  const state = gateway.managementStorage.snapshot(TEAM_KEY);
+  assert.equal(state.minimumRuntimeRelease, null);
+  assert.equal(state.teardownDisabled, false);
+}));
+
+test('rollback floor and teardown exclusion are durable before the first native policy write is sent', async () => fixture(async (gateway) => {
+  const prepared = await gateway.prepare(changedRequest(await gateway.view()));
+  let inspected = false;
+  gateway.provider.hook(({ record }) => {
+    if (record.method !== 'PUT' || !record.pathname.startsWith(`${API_APPS}/`)) return undefined;
+    const state = gateway.managementStorage.snapshot(TEAM_KEY);
+    assert.equal(state.minimumRuntimeRelease, gateway.env.ANKKA_GATEWAY_RELEASE);
+    assert.equal(state.teardownDisabled, true);
+    assert.ok(state.pendingAction.journal.some((entry) => entry.phase === 'send_armed'));
+    inspected = true;
+    return envelope(null, 503);
+  });
+  const response = await gateway.apply(prepared);
+  assert.equal(response.status, 409, await response.clone().text());
+  assert.equal(inspected, true);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).teardownDisabled, true);
+}));
+
+test('a previously authorized teardown cannot prove or execute after native permission exclusion is recorded', async () => fixture(async (gateway) => {
+  const send = await gateway.teardown();
+  await gateway.view();
+  const originalReceipt = canonicalJson(gateway.readyReceipt);
+  // Model a retained authorization presented after a separately durable native
+  // mutation boundary. The exclusion must be enforced at execution, not just
+  // by hiding or disabling the fresh handoff UI.
+  await gateway.managementStorage.put(TEAM_KEY, {
+    ...gateway.managementStorage.snapshot(TEAM_KEY),
+    minimumRuntimeRelease: gateway.env.ANKKA_GATEWAY_RELEASE, teardownDisabled: true,
+  });
+  const baseline = gateway.provider.requests.length;
+  for (const [command, requestId] of [['prove', undefined], ['apply', 'U'.repeat(22)]]) {
+    const response = await send(command, requestId);
+    assert.equal(response.status, 409, await response.clone().text());
+  }
+  assertNoMutation(gateway.provider, baseline);
+  assert.equal(gateway.provider.deletes().length, 0);
+  assert.equal(canonicalJson(gateway.storage.snapshot()), originalReceipt);
+}));
+
+test('concurrent conflicting preparations reserve one reviewed action and concurrent application cannot repeat it', async () => fixture(async (gateway) => {
+  const input = changedRequest(await gateway.view());
+  const conflicting = { ...input, members: input.members.map(({ email }) => ({ email, sourceIds: [] })) };
+  const results = await Promise.all([
+    gateway.api('/api/team-actions', { method: 'POST', body: input }),
+    gateway.api('/api/team-actions', { method: 'POST', body: conflicting }),
+  ]);
+  assert.deepEqual(results.map((response) => response.status).sort(), [200, 409]);
+  const prepared = await results.find((response) => response.status === 200).json();
+  const claim = JSON.parse(Buffer.from(new URL(prepared.handoffUrl).hash.slice(1), 'base64url').toString('utf8'));
+  const applied = await Promise.all([gateway.apply({ claim }), gateway.apply({ claim })]);
+  assert.equal(applied.filter((response) => response.status === 200).length, 1);
+  assert.ok(applied.some((response) => [400, 409].includes(response.status)));
+  assert.equal(gateway.provider.puts().length, 2);
+  assert.equal((await gateway.view()).revision, input.expectedRevision + 1);
+}));
+
+test('a newly added person receives no source permission without an explicit assignment', async () => fixture(async (gateway) => {
+  const initial = await gateway.view();
+  const originalSourcePolicy = canonicalJson(policy(gateway));
+  const input = { schemaVersion: 1, expectedRevision: initial.revision,
+    members: [...initial.members, { email: NEW_PERSON, sourceIds: [] }] };
+  const response = await gateway.apply(await gateway.prepare(input));
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal(canonicalJson(policy(gateway)), originalSourcePolicy);
+  assert.deepEqual((await gateway.view()).members.find(({ email }) => email === NEW_PERSON).sourceIds, []);
+  assert.equal(gateway.provider.puts().length, 1);
+  assert.ok(policy(gateway, 'mcp_portal').include.some(({ email }) => email.email === NEW_PERSON));
+}));
+
+test('a successful PUT echo does not substitute for exact complete-policy readback', async () => fixture(async (gateway) => {
+  const prepared = await gateway.prepare(changedRequest(await gateway.view()));
+  gateway.provider.hook(({ record }) => {
+    if (record.method !== 'PUT' || !record.pathname.startsWith(`${API_APPS}/`)) return undefined;
+    const policyId = record.pathname.split('/').at(-1);
+    return envelope({ id: policyId, ...record.body });
+  });
+  const response = await gateway.apply(prepared);
+  assert.equal(response.status, 409, await response.clone().text());
+  assert.equal(gateway.provider.puts().length, 1);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).revision, 1);
+}));
+
+test('a competing Bypass introduced during a partial update stops remaining policy writes', async () => fixture(async (gateway) => {
+  const input = changedRequest(await gateway.view());
+  const prepared = await gateway.prepare(input);
+  let introduced = false;
+  gateway.provider.hook(({ record, state }) => {
+    if (introduced || record.method !== 'GET' || !record.pathname.endsWith('/policies') || gateway.provider.puts().length === 0) return undefined;
+    const appId = record.pathname.split('/').at(-2);
+    state.policies.get(appId).push({
+      id: 'x'.repeat(32), name: 'Unrelated access', decision: 'bypass',
+      include: [{ everyone: {} }], exclude: [], require: [],
+    });
+    introduced = true;
+    return undefined;
+  });
+  const response = await gateway.apply(prepared);
+  assert.equal(response.status, 409, await response.clone().text());
+  assert.equal(introduced, true);
+  assert.equal(gateway.provider.puts().length, 1);
+  assert.equal((await gateway.view()).revision, input.expectedRevision);
+  gateway.provider.hook(undefined);
+  const baseline = gateway.provider.requests.length;
+  const recovery = await gateway.apply(await gateway.prepare(input));
+  assert.equal(recovery.status, 409, await recovery.clone().text());
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('a storage interruption after provider success recovers the armed journal without repeating that policy write', async () => fixture(async (gateway) => {
+  const input = changedRequest(await gateway.view());
+  const prepared = await gateway.prepare(input);
+  const originalPut = gateway.managementStorage.put;
+  let interrupted = false;
+  gateway.managementStorage.put = async (key, value) => {
+    if (!interrupted && key === TEAM_KEY && value.pendingAction?.journal.some((entry) => entry.phase === 'verified')) {
+      interrupted = true;
+      throw new Error(`${NEW_PERSON}: synthetic private storage failure`);
+    }
+    return originalPut(key, value);
+  };
+  const first = await gateway.apply(prepared);
+  assert.ok(first.status >= 400, await first.clone().text());
+  assert.doesNotMatch(await first.text(), /new-person@example\.com|synthetic private/u);
+  assert.equal(interrupted, true);
+  const firstPath = gateway.provider.puts()[0].pathname;
+  gateway.managementStorage.put = originalPut;
+  const recovered = await gateway.apply(await gateway.prepare(input));
+  assert.equal(recovered.status, 200, await recovered.clone().text());
+  assert.equal(gateway.provider.puts().filter(({ pathname }) => pathname === firstPath).length, 1);
+  assert.equal((await gateway.view()).revision, input.expectedRevision + 1);
+}));
+
+test('an unspent authorization can be cancelled but an armed policy journal cannot be discarded', async () => fixture(async (gateway) => {
+  const input = changedRequest(await gateway.view());
+  const first = await gateway.prepare(input);
+  const firstPath = `/api/team-actions/${first.authorization.actionId}`;
+  const status = await gateway.api(firstPath);
+  assert.equal((await status.json()).canCancel, true);
+  const foreignActor = await gateway.api(firstPath, { method: 'DELETE', body: {}, email: OWNER });
+  assert.equal(foreignActor.status, 409);
+  const cancelled = await gateway.api(firstPath, { method: 'DELETE', body: {} });
+  assert.equal(cancelled.status, 200, await cancelled.clone().text());
+  assert.equal((await cancelled.json()).status, 'failed');
+  const stale = await gateway.apply(first);
+  assert.ok([400, 409].includes(stale.status));
+  assert.equal(gateway.provider.puts().length, 0);
+  const second = await gateway.prepare(input);
+  gateway.provider.hook(({ record }) => record.method === 'PUT' ? envelope(null, 503) : undefined);
+  const interrupted = await gateway.apply(second);
+  assert.equal(interrupted.status, 409);
+  const secondPath = `/api/team-actions/${second.authorization.actionId}`;
+  const pending = await gateway.api(secondPath);
+  assert.equal((await pending.json()).canCancel, false);
+  const before = canonicalJson(gateway.managementStorage.snapshot(TEAM_KEY));
+  const rejected = await gateway.api(secondPath, { method: 'DELETE', body: {} });
+  assert.equal(rejected.status, 409);
+  assert.equal(canonicalJson(gateway.managementStorage.snapshot(TEAM_KEY)), before);
+}));
+
+test('matching policy UID and neutral non-reusable metadata do not prevent an exact permission update', async () => fixture(async (gateway) => {
+  for (const policies of gateway.provider.state.policies.values()) {
+    for (const value of policies) Object.assign(value, { uid: value.id, reusable: false, precedence: 1, account_id: ACCOUNT_ID });
+  }
+  const applied = await gateway.apply(await gateway.prepare(changedRequest(await gateway.view())));
+  assert.equal(applied.status, 200, await applied.clone().text());
+  assert.equal(gateway.provider.puts().length, 2);
+}));
+
+test('a real native policy mutation prevents preparing rollback to a release below its durable floor', async () => fixture(async (gateway) => {
+  const applied = await gateway.apply(await gateway.prepare(changedRequest(await gateway.view())));
+  assert.equal(applied.status, 200, await applied.clone().text());
+  const rollback = await runtimeAction(gateway);
+  const before = canonicalJson(gateway.managementStorage.snapshot(UPDATES_KEY));
+  const result = await rollback.prepare();
+  assert.equal(result.status, 409, await result.clone().text());
+  assert.equal(canonicalJson(gateway.managementStorage.snapshot(UPDATES_KEY)), before);
+}));
+
+test('rollback authorized before a native mutation cannot begin below the subsequently recorded floor', async () => fixture(async (gateway) => {
+  await gateway.view();
+  const rollback = await runtimeAction(gateway);
+  const prepared = await rollback.prepare();
+  assert.equal(prepared.status, 200, await prepared.clone().text());
+  await gateway.managementStorage.put(TEAM_KEY, {
+    ...gateway.managementStorage.snapshot(TEAM_KEY),
+    minimumRuntimeRelease: gateway.env.ANKKA_GATEWAY_RELEASE, teardownDisabled: true,
+  });
+  const before = canonicalJson(gateway.managementStorage.snapshot(UPDATES_KEY));
+  const begun = await rollback.begin();
+  assert.equal(begun.status, 409, await begun.clone().text());
+  assert.equal(canonicalJson(gateway.managementStorage.snapshot(UPDATES_KEY)), before);
+}));
+
+test('the native permission floor still permits a valid newer runtime to prepare and begin', async () => fixture(async (gateway) => {
+  const applied = await gateway.apply(await gateway.prepare(changedRequest(await gateway.view())));
+  assert.equal(applied.status, 200, await applied.clone().text());
+  const update = await runtimeAction(gateway, { operation: 'update', release: 'gateway-v0.1.1' });
+  const prepared = await update.prepare();
+  assert.equal(prepared.status, 200, await prepared.clone().text());
+  const begun = await update.begin();
+  assert.equal(begun.status, 200, await begun.clone().text());
+  assert.equal((await begun.json()).status, 'applying');
+}));
+
+test('Team grant expiry bounds a hung provider fetch before any policy mutation', async () => fixture(async (gateway) => {
+  const prepared = await gateway.prepare(changedRequest(await gateway.view()));
+  let sawAbort = false;
+  gateway.provider.hook(({ request }) => new Promise((_resolve, reject) => {
+    const abort = () => {
+      sawAbort = true;
+      reject(new Error(`${SYNTHETIC_GRANT}: ${NEW_PERSON} synthetic hung fetch`));
+    };
+    if (request.signal.aborted) abort();
+    else request.signal.addEventListener('abort', abort, { once: true });
+  }));
+  const baseline = gateway.provider.requests.length;
+  const { result, requested } = await shortenedTeamDeadline(prepared, () => gateway.apply(prepared), 25);
+  assert.deepEqual(requested, [25]);
+  assert.equal(result.status, 409);
+  assert.doesNotMatch(await result.text(), /synthetic-team-action-grant|new-person@example\.com|synthetic hung/u);
+  assert.equal(sawAbort, true);
+  assertNoMutation(gateway.provider, baseline);
+  assert.equal(gateway.provider.requests.length - baseline, 1);
+  const state = gateway.managementStorage.snapshot(TEAM_KEY);
+  assert.equal(state.pendingAction.status, 'recovery_required');
+  assert.equal(state.pendingAction.journal.length, 0);
+  assert.equal(state.teardownDisabled, false);
+  assert.equal(canonicalJson(gateway.managementStorage.writes).includes(SYNTHETIC_GRANT), false);
+}));
+
+test('Team timeout cancels a hung PUT response body and recovers without blindly repeating the armed write', async () => fixture(async (gateway) => {
+  const input = changedRequest(await gateway.view());
+  const prepared = await gateway.prepare(input);
+  let cancelled = false;
+  let armedPath;
+  gateway.provider.hook(({ record, state }) => {
+    if (record.method !== 'PUT' || !record.pathname.startsWith(`${API_APPS}/`)) return undefined;
+    armedPath = record.pathname;
+    const [appId, , policyId] = record.pathname.slice(API_APPS.length + 1).split('/');
+    state.policies.set(appId, [{ id: policyId, ...structuredClone(record.body) }]);
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`{"success":true,"private":"${SYNTHETIC_GRANT}","result":`));
+      },
+      cancel() { cancelled = true; },
+    });
+    return new Response(stream, { headers: { 'content-type': 'application/json' } });
+  });
+  const { result, requested } = await shortenedTeamDeadline(prepared, () => gateway.apply(prepared));
+  assert.deepEqual(requested, [60_000]);
+  assert.equal(result.status, 409);
+  assert.doesNotMatch(await result.text(), /synthetic-team-action-grant|new-person@example\.com/u);
+  assert.equal(cancelled, true);
+  assert.ok(armedPath);
+  assert.equal(gateway.provider.puts().length, 1);
+  assert.equal(gateway.provider.requests.at(-1).pathname, armedPath);
+  const state = gateway.managementStorage.snapshot(TEAM_KEY);
+  assert.equal(state.pendingAction.status, 'recovery_required');
+  assert.equal(state.pendingAction.journal.at(-1).phase, 'send_armed');
+  assert.equal(state.teardownDisabled, true);
+  assert.equal(canonicalJson(gateway.managementStorage.writes).includes(SYNTHETIC_GRANT), false);
+  gateway.provider.hook(undefined);
+  const recovered = await gateway.apply(await gateway.prepare(input));
+  assert.equal(recovered.status, 200, await recovered.clone().text());
+  assert.equal(gateway.provider.puts().filter(({ pathname }) => pathname === armedPath).length, 1);
+  assert.equal(gateway.provider.puts().length, 2);
+}));
+
+test('partial Team recovery rejects source draft edits and installation without changing the reviewed source revision', async () => fixture(async (gateway) => {
+  const historical = await historicalPreparedSource(gateway, null);
+  const sources = historical.sources;
+  const draft = historical.source;
+  const draftInput = {
+    schemaVersion: 1, revision: sources.revision,
+    source: { label: 'Additional source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] },
+  };
+  const input = changedRequest(await gateway.view());
+  const prepared = await gateway.prepare(input);
+  let writes = 0;
+  gateway.provider.hook(({ record }) => record.method === 'PUT' && ++writes === 2 ? envelope(null, 503) : undefined);
+  const interrupted = await gateway.apply(prepared);
+  assert.equal(interrupted.status, 409);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).pendingAction.status, 'recovery_required');
+  const revisionBefore = canonicalJson(await (await gateway.api('/api/sources')).json());
+  const edited = await gateway.api('/api/sources', { method: 'PUT', body: {
+    ...draftInput, revision: sources.revision, source: { ...draftInput.source, label: 'Changed draft label' },
+  } });
+  await assertSourcePaused(edited);
+  const install = await gateway.api('/api/source-actions', { method: 'POST', body: {
+    schemaVersion: 1, revision: sources.revision, sourceId: draft.id,
+  } });
+  await assertSourcePaused(install);
+  const providerBaseline = gateway.provider.requests.length;
+  const staleExecution = await gateway.apply(historical, {}, null);
+  assert.equal(staleExecution.status, 409, await staleExecution.clone().text());
+  assertNoMutation(gateway.provider, providerBaseline);
+  assert.equal(canonicalJson(await (await gateway.api('/api/sources')).json()), revisionBefore);
+  gateway.provider.hook(undefined);
+  const recovered = await gateway.apply(await gateway.prepare(input));
+  assert.equal(recovered.status, 200, await recovered.clone().text());
+  assert.equal((await gateway.view()).revision, input.expectedRevision + 1);
+}));
+
+test('Team transport accepts a bounded maximum-size roster and rejects a body above its 96 KiB ceiling', async () => fixture(async (gateway) => {
+  const initial = await gateway.view();
+  const sourceIds = Array.from({ length: 32 }, (_value, index) => `source-${String(index).padStart(25, '0')}`);
+  const members = [ADMIN, OWNER, ...Array.from({ length: 49 }, (_value, index) => (
+    `${`person-${index}`.padEnd(64, 'x')}@${'d'.repeat(185)}.com`
+  ))].map((email) => ({ email, sourceIds }));
+  const input = { schemaVersion: 1, expectedRevision: initial.revision, members };
+  const inputBytes = Buffer.byteLength(canonicalJson(input));
+  assert.ok(inputBytes > 32 * 1024 && inputBytes < 96 * 1024);
+  const namespace = gateway.env.ADMIN_STATE;
+  const received = [];
+  // Stub only the public-route/DO transport seam. Actual identity, planner,
+  // policy authorization and application tests elsewhere use the real DO.
+  gateway.env.ADMIN_STATE = {
+    ...namespace,
+    get(name) {
+      const original = namespace.get(name);
+      return { async fetch(request) {
+        if (name !== 'v1:management' || request.method !== 'POST' || new URL(request.url).pathname !== '/team-actions') {
+          return original.fetch(request);
+        }
+        const wrapper = await request.json();
+        received.push(wrapper.request);
+        return Response.json({ schemaVersion: 1, error: 'synthetic_transport_inspected' }, { status: 400 });
+      } };
+    },
+  };
+  const accepted = await gateway.api('/api/team-actions', { method: 'POST', body: input });
+  assert.equal(accepted.status, 400);
+  assert.deepEqual(received, [input]);
+  const oversized = { ...input, padding: '' };
+  oversized.padding = 'x'.repeat(96 * 1024 + 1 - Buffer.byteLength(canonicalJson(oversized)));
+  assert.equal(Buffer.byteLength(canonicalJson(oversized)), 96 * 1024 + 1);
+  const rejected = await gateway.api('/api/team-actions', { method: 'POST', body: oversized });
+  assert.equal(rejected.status, 400);
+  assert.equal(received[1], null);
+  assert.equal(gateway.provider.puts().length, 0);
+}));
+
+test('a later policy changed during the first PUT is re-read and never overwritten from stale preflight', async () => fixture(async (gateway) => {
+  const prepared = await gateway.prepare(changedRequest(await gateway.view()));
+  let changed = false;
+  gateway.provider.hook(({ record }) => {
+    if (record.method === 'PUT' && !changed) {
+      policy(gateway).include = [{ email: { email: 'unrelated@example.com' } }];
+      changed = true;
+    }
+    return undefined;
+  });
+  const result = await gateway.apply(prepared);
+  assert.equal(result.status, 409, await result.clone().text());
+  assert.equal(changed, true);
+  assert.equal(gateway.provider.puts().length, 1);
+  assert.deepEqual(policy(gateway).include, [{ email: { email: 'unrelated@example.com' } }]);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).pendingAction.status, 'recovery_required');
+}));
+
+test('an unchanged unspent proposal gets a fresh handoff immediately and invalidates its old signed handoff', async () => fixture(async (gateway) => {
+  const input = changedRequest(await gateway.view());
+  const first = await gateway.prepare(input);
+  const replacement = await gateway.prepare(input);
+  assert.notEqual(first.authorization.actionId, replacement.authorization.actionId);
+  assert.notEqual(first.claim.actionKey, replacement.claim.actionKey);
+  const baseline = gateway.provider.requests.length;
+  const stale = await gateway.apply(first);
+  assert.ok([400, 409].includes(stale.status), await stale.clone().text());
+  assertNoMutation(gateway.provider, baseline);
+  const conflict = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    ...input, members: input.members.map(({ email }) => ({ email, sourceIds: [] })),
+  } });
+  assert.equal(conflict.status, 409);
+  const applied = await gateway.apply(replacement);
+  assert.equal(applied.status, 200, await applied.clone().text());
+  assert.equal(gateway.provider.puts().length, 2);
+}));
