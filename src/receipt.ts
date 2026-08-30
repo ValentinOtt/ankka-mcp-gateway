@@ -219,6 +219,11 @@ export async function updateInstallationReceipt(
   const nextAccessPolicy = accessPolicy ?? inferAccessPolicy(plan);
   const errors: string[] = [];
   const normalizedAccessPolicy = normalizeAccessPolicy(nextAccessPolicy, 'accessPolicy', errors);
+  if ((current.accessPolicy.identityType === 'service_token'
+    || normalizedAccessPolicy.identityType === 'service_token')
+    && !sameAccessPolicy(current.accessPolicy, normalizedAccessPolicy)) {
+    errors.push('canary service identity cannot change within an installation receipt');
+  }
   if (errors.length > 0) throw new ReceiptValidationError(unique(errors));
   if (!isString(plan.release) || !RELEASE.test(plan.release)) {
     errors.push('plan.release must be a safe identifier of at most 80 characters');
@@ -498,6 +503,11 @@ function normalizeReceipt(
   validateStateConsistency(input.state, pending, resources, errors);
   validatePendingOwnership(pending, resources, errors);
   for (const [index, resource] of resources.entries()) {
+    if (accessPolicy.identityType === 'service_token'
+      && (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy')
+      && resource.identityHash !== accessPolicy.identitiesHash) {
+      errors.push(`resources[${index}].identityHash must match the canary service identity`);
+    }
     if (
       resource.marker !== undefined &&
       isString(input.installationId) &&
@@ -579,7 +589,12 @@ function normalizeAccessPolicy(
     return { identityType: '', identityCount: -1, identitiesHash: '' };
   }
   rejectUnknownKeys(input, path, ['identityType', 'identityCount', 'identitiesHash'], errors);
-  if (input.identityType !== 'email') errors.push(`${path}.identityType must be email`);
+  if (input.identityType !== 'email' && input.identityType !== 'service_token') {
+    errors.push(`${path}.identityType must be email or service_token`);
+  }
+  if (input.identityType === 'service_token' && input.identityCount !== 1) {
+    errors.push(`${path}.identityCount must be 1 for a canary service identity`);
+  }
   if (!v.is(numberSchema, input.identityCount)
     || !Number.isSafeInteger(input.identityCount)
     || input.identityCount < 1
@@ -894,7 +909,7 @@ function inferAccessPolicy(plan: BoundaryValue): BoundaryValue {
     const allow = isObject(change) && isObject(change.desired) ? change.desired.allow : undefined;
     if (
       isObject(allow) &&
-      allow.identityType === 'email' &&
+      (allow.identityType === 'email' || allow.identityType === 'service_token') &&
       v.is(numberSchema, allow.identityCount) &&
       Number.isSafeInteger(allow.identityCount) &&
       isString(allow.identitiesHash)

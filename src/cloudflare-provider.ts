@@ -2,6 +2,13 @@ import * as v from 'valibot';
 
 import { resolveAccessGroupByDigest } from './access-groups.ts';
 import {
+  assertCanaryServiceIdentityConfig,
+  canaryServiceIdentityDigest,
+  canaryServiceTokenId,
+  exactServiceTokenPolicyRule,
+  serviceTokenPolicyMatchesDigest,
+} from './canary-service-identity.ts';
+import {
   createCloudflareClient,
   type CloudflareClient,
   type CloudflareFetch,
@@ -229,7 +236,7 @@ type SourceAccessApplicationDesired = {
 };
 
 type PolicyBody = {
-  readonly decision: 'allow';
+  readonly decision: 'allow' | 'non_identity';
   readonly exclude: readonly JsonValue[];
   readonly include: readonly PolicyIncludeRule[];
   readonly name: string;
@@ -238,7 +245,8 @@ type PolicyBody = {
 
 type PolicyIncludeRule =
   | { readonly email: { readonly email: string } }
-  | { readonly group: { readonly id: string } };
+  | { readonly group: { readonly id: string } }
+  | { readonly service_token: { readonly token_id: string } };
 /** A value-free error suitable for installer output and receipt recovery. */
 export class CloudflareGatewayProviderError extends Error {
   readonly code: string;
@@ -735,6 +743,22 @@ async function normalizeMutationInput(
   if (config.gateway.hostname !== receipt.target.hostname) {
     fail('invalid_input');
   }
+  let serviceId: string | null;
+  try {
+    serviceId = canaryServiceTokenId(access);
+    if (serviceId !== null || receipt.accessPolicy.identityType === 'service_token') {
+      assertCanaryServiceIdentityConfig(config);
+    }
+  } catch {
+    fail('access_identity_mismatch');
+  }
+  if (serviceId !== null || receipt.accessPolicy.identityType === 'service_token') {
+    if (serviceId === null
+      || receipt.accessPolicy.identityType !== 'service_token'
+      || await canaryServiceIdentityDigest(serviceId) !== receipt.accessPolicy.identitiesHash) {
+      fail('access_identity_mismatch');
+    }
+  }
   if (!isObject(rawChange)) {
     fail('unsupported_change');
   }
@@ -1128,6 +1152,7 @@ async function mutatePolicy(
     );
     if (live === null) fail('ownership_conflict');
     assertMarker(live.name, marker);
+    await assertCanaryPolicyIdentity(live, mutation);
     const confirmedParent = await assertPolicyParent(
       cloudflare,
       mutation,
@@ -1135,8 +1160,9 @@ async function mutatePolicy(
     );
     if (POLICY_KINDS.has(change.kind)) {
       const confirmedPolicies = await cloudflare.listAppPolicies(parentId);
-      assertExpectedPolicySet(confirmedPolicies, change.provider.id, marker);
+      const confirmedPolicy = assertExpectedPolicySet(confirmedPolicies, change.provider.id, marker);
       assertInlinePolicySet(confirmedParent, confirmedPolicies);
+      await assertCanaryPolicyIdentity(confirmedPolicy, mutation);
     }
     await cloudflare.deleteAppPolicy(parentId, change.provider.id);
     return;
@@ -1172,11 +1198,13 @@ async function mutatePolicy(
   );
   if (live === null) fail('ownership_conflict');
   assertMarker(live.name, marker);
+  await assertCanaryPolicyIdentity(live, mutation);
   parent = await assertPolicyParent(cloudflare, mutation, parentId);
   if (POLICY_KINDS.has(change.kind)) {
     const confirmedPolicies = await cloudflare.listAppPolicies(parentId);
-    assertExpectedPolicySet(confirmedPolicies, change.provider.id, marker);
+    const confirmedPolicy = assertExpectedPolicySet(confirmedPolicies, change.provider.id, marker);
     assertInlinePolicySet(parent, confirmedPolicies);
+    await assertCanaryPolicyIdentity(confirmedPolicy, mutation);
   }
   await cloudflare.updateAppPolicy(parentId, change.provider.id, body);
 }
@@ -1204,12 +1232,27 @@ async function assertPolicyDesiredMatchesConfig(mutation: GatewayMutation): Prom
     fail('access_identity_mismatch');
   }
   if (desiredState.blockers.length > 0) fail('invalid_input');
+  if ((desiredState.accessPolicy.identityType === 'service_token'
+    || mutation.receipt.accessPolicy.identityType === 'service_token')
+    && canonicalJson(desiredState.accessPolicy) !== canonicalJson(mutation.receipt.accessPolicy)) {
+    fail('access_identity_mismatch');
+  }
   const expected = desiredState.resources.find((resource) =>
     resource.kind === mutation.change.kind && resource.key === mutation.change.key);
   if (expected === undefined
     || expected.desiredHash !== mutation.change.desiredHash
     || canonicalJson(expected.desired) !== canonicalJson(mutation.change.desired)) {
     fail('invalid_input');
+  }
+}
+
+async function assertCanaryPolicyIdentity(
+  live: BoundaryValue,
+  mutation: GatewayMutation,
+): Promise<void> {
+  if (mutation.receipt.accessPolicy.identityType !== 'service_token') return;
+  if (!await serviceTokenPolicyMatchesDigest(live, mutation.receipt.accessPolicy.identitiesHash)) {
+    fail('ownership_conflict');
   }
 }
 
@@ -1391,6 +1434,12 @@ function accessPolicyMatches(live: BoundaryObject, expected: PolicyBody): boolea
     || !Array.isArray(live.include) || live.include.length !== expected.include.length) {
     return false;
   }
+  if (expected.decision === 'non_identity') {
+    return expected.include.length === 1
+      && exactServiceTokenPolicyRule(expected.include[0]) !== null
+      && exactServiceTokenPolicyRule(live.include[0])
+        === exactServiceTokenPolicyRule(expected.include[0]);
+  }
   const expectedGroup = expected.include.length === 1
     ? extractPolicyGroup(expected.include[0])
     : null;
@@ -1542,6 +1591,7 @@ async function normalizePolicyDesired(
     || !v.is(stringSchema, value.allow.identitiesHash)) fail('access_identity_mismatch');
 
   let include: PolicyIncludeRule[];
+  let decision: PolicyBody['decision'] = 'allow';
   if (value.allow.identitiesRef === 'access.allowedEmails'
     && value.allow.identityType === 'email') {
     const emails = normalizeEmails(access);
@@ -1558,12 +1608,26 @@ async function normalizePolicyDesired(
     );
     if (group === null) fail('access_identity_mismatch');
     include = [{ group: { id: group.id } }];
+  } else if (value.allow.identitiesRef === 'access.canaryServiceTokenId'
+    && value.allow.identityType === 'service_token') {
+    let id: string | null;
+    try {
+      id = canaryServiceTokenId(access);
+    } catch {
+      fail('access_identity_mismatch');
+    }
+    if (id === null || value.allow.identityCount !== 1
+      || await canaryServiceIdentityDigest(id) !== value.allow.identitiesHash) {
+      fail('access_identity_mismatch');
+    }
+    decision = 'non_identity';
+    include = [{ service_token: { token_id: id } }];
   } else {
     fail('invalid_input');
   }
   return {
     name: marker,
-    decision: 'allow',
+    decision,
     include,
     exclude: [],
     require: [],

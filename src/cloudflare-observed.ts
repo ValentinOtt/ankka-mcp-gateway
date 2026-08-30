@@ -1,6 +1,11 @@
 import * as v from 'valibot';
 
 import { resolveAccessGroupByDigest } from './access-groups.ts';
+import {
+  canaryServiceIdentityDigest,
+  canaryServiceTokenId,
+  serviceTokenPolicyMatchesDigest,
+} from './canary-service-identity.ts';
 import type { CloudflareQuery } from './cloudflare-client.ts';
 import { validateGatewayConfig } from './config.ts';
 import {
@@ -694,9 +699,19 @@ function makeObserved({
   const markerlessPortalApplication = kind === 'portal_access_application';
   const pendingApplicationNeedsProvenance = markerlessPortalApplication
     || kind === 'source_access_application';
+  const allow = desired && isObject(desired.desired.allow) ? desired.desired.allow : null;
+  const machinePolicy = POLICY_KINDS.has(kind)
+    && (allow?.identityType === 'service_token' || receipt?.accessPolicy.identityType === 'service_token');
+  const machineIdentityProven = !machinePolicy || Boolean(
+    liveMatchesDesired
+    && allow?.identityType === 'service_token'
+    && receipt?.accessPolicy.identityType === 'service_token'
+    && allow.identitiesHash === receipt.accessPolicy.identitiesHash
+    && (receiptResource?.identityHash === allow.identitiesHash || pendingMatches),
+  );
   const owned = markerlessPortalApplication
     ? Boolean(receiptResource)
-    : markerMatches && Boolean(receiptResource
+    : machineIdentityProven && markerMatches && Boolean(receiptResource
       || (pendingMatches && (!pendingApplicationNeedsProvenance || pendingCreateProvenance)));
   const observed: CloudflareObservedResource = {
     kind,
@@ -821,12 +836,20 @@ async function policyMatches(
   access: BoundaryValue,
 ): Promise<boolean> {
   if (!isObject(policy)) return false;
-  if (policy.decision !== 'allow') return false;
   if (!emptyRules(policy.exclude) || !emptyRules(policy.require)) return false;
   if (!Array.isArray(policy.include) || !isObject(desired.allow)) return false;
   const allow = desired.allow;
   if (!isString(allow.identitiesHash)
     || !v.is(v.number(), allow.identityCount)) return false;
+
+  if (allow.identitiesRef === 'access.canaryServiceTokenId'
+    && allow.identityType === 'service_token') {
+    const id = canaryServiceTokenId(access);
+    return id !== null && allow.identityCount === 1
+      && await canaryServiceIdentityDigest(id) === allow.identitiesHash
+      && await serviceTokenPolicyMatchesDigest(policy, allow.identitiesHash);
+  }
+  if (policy.decision !== 'allow') return false;
 
   if (allow.identitiesRef === 'access.allowedEmails' && allow.identityType === 'email') {
     const allowedEmails = normalizeAllowedEmails(access);

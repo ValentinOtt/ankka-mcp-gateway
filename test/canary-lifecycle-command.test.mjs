@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { handleSyntheticMcpRequest } from '../fixtures/synthetic-mcp/worker.mjs';
 import {
   CanaryLockCommandError,
   CanaryLifecycleCommandError,
@@ -222,7 +223,8 @@ class LifecycleProvider {
     return { status: 'submitted' };
   }
 
-  async inspectCanaryResidue() {
+  async inspectCanaryResidue(input) {
+    this.lastResidueInput = input;
     return { ownedResourceCount: this.resources.length };
   }
 }
@@ -332,7 +334,7 @@ test('normalizes uppercase Cloudflare IDs before constructing clients and the ru
   assert.equal(result.exitCode, 0);
 });
 
-test('an injected inspection hold is forwarded only to run and remains outside CLI input', async () => {
+test('inspection hooks preserve live AbortSignals and remain outside CLI input', async () => {
   const provider = new LifecycleProvider();
   let releaseHold;
   let reachedHold;
@@ -387,6 +389,14 @@ test('an injected inspection hold is forwarded only to run and remains outside C
   assert.equal(result.report.status, 'complete');
   assert.equal(result.exitCode, 0);
   assert.equal(provider.resources.length, 0);
+  assert.deepEqual(Object.keys(provider.lastResidueInput).sort(), [
+    'config',
+    'receipt',
+    'signal',
+    'target',
+  ]);
+  assert.ok(provider.lastResidueInput.signal instanceof AbortSignal);
+  assert.equal(provider.lastResidueInput.signal.aborted, false);
   assert.deepEqual(
     provider.mutations.filter(({ action }) => action === 'delete').map(({ kind }) => kind),
     [...RESOURCE_ORDER].reverse(),
@@ -510,6 +520,74 @@ test('a fully verified and removed lifecycle exits zero', () => {
   };
   assert.equal(lifecycleResultExitCode(complete), 0);
   assert.match(renderLifecycleResult(complete), /: COMPLETE/);
+});
+
+test('machine verification can pass without claiming interactive OAuth', () => {
+  const report = {
+    schemaVersion: 1,
+    kind: 'cloudflare_canary_lifecycle_result',
+    status: 'complete',
+    authentication: 'service_token',
+    resourceLifecycle: 'removed',
+    interactiveVerification: 'not_run',
+    installedStateVerified: true,
+    portalToolCallVerified: true,
+    idempotentApplyVerified: true,
+    cleanup: { status: 'removed', ownedResourceCount: 0 },
+  };
+  assert.equal(lifecycleResultExitCode(report), 0);
+  const output = renderLifecycleResult(report);
+  assert.match(output, /Machine-authenticated Portal tool call: verified/);
+  assert.match(output, /Human OAuth login was not tested/);
+  assert.equal(lifecycleResultExitCode({ ...report, portalToolCallVerified: false }), 3);
+  assert.equal(lifecycleResultExitCode({ ...report, interactiveVerification: 'verified' }), 3);
+});
+
+test('explicit machine mode reads separate credentials and never the allowed email', async () => {
+  let portalRequests = 0;
+  const runtimeOptions = runtime({
+    provider: new LifecycleProvider(),
+    verifyInstalledGateway: undefined,
+    portalFetchImpl: async (url, init) => {
+      portalRequests += 1;
+      assert.equal(url, `https://${HOSTNAME}/mcp`);
+      assert.equal(init.redirect, 'manual');
+      const headers = new Headers(init.headers);
+      assert.equal(headers.get('Authorization'), null);
+      assert.equal(headers.get('CF-Access-Client-Id'), 'synthetic.access.example.com');
+      assert.equal(headers.get('CF-Access-Client-Secret'), 'synthetic-client-secret');
+      return handleSyntheticMcpRequest(new Request(url, init));
+    },
+    readAllowedEmail: () => { throw new Error('must not read email'); },
+    readServiceTokenId: () => 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    readServiceClientId: () => 'synthetic.access.example.com',
+    readServiceClientSecret: () => 'synthetic-client-secret',
+  });
+  const preview = await executeCanaryLifecycleCommand(invocation({ authentication: 'service_token' }), runtimeOptions);
+  const result = await executeCanaryLifecycleCommand(invocation({
+    authentication: 'service_token',
+    mode: 'run',
+    approvalId: preview.report.approvalId,
+    targetConfirmationId: preview.report.targetConfirmationId,
+  }), runtimeOptions);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.report.authentication, 'service_token');
+  assert.equal(result.report.interactiveVerification, 'not_run');
+  assert.equal(portalRequests, 2);
+  assert.doesNotMatch(JSON.stringify(result), /synthetic-client-secret|synthetic\.access/);
+});
+
+test('machine credentials missing or malformed fail closed before provider creation', async () => {
+  for (const bad of [undefined, '', 'unsafe\nsecret']) {
+    const deps = runtime({
+      readServiceTokenId: () => 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      readServiceClientId: () => 'synthetic.access.example.com',
+      readServiceClientSecret: () => bad,
+      providerFactory: () => { assert.fail('provider must not be created'); },
+    });
+    await assert.rejects(executeCanaryLifecycleCommand(invocation({ authentication: 'service_token' }), deps),
+      (error) => error.code === 'secret_unavailable');
+  }
 });
 
 test('pending Portal rollback preview and result render as a bounded recovery, not a completed canary', () => {

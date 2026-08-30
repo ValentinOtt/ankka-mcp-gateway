@@ -6,6 +6,11 @@ import {
   normalizeAccessGroups,
   type AccessGroupObservation,
 } from './access-groups.ts';
+import {
+  assertCanaryServiceIdentityConfig,
+  canaryServiceIdentityDigest,
+  canaryServiceTokenId,
+} from './canary-service-identity.ts';
 import { validateGatewayConfig, type GatewayConfig } from './config.ts';
 import {
   boundaryObjectSchema,
@@ -93,6 +98,7 @@ interface NormalizedAccess {
   readonly accessGroupsProvided: boolean;
   readonly allowedEmails: readonly string[];
   readonly allowedEmailsProvided: boolean;
+  readonly canaryServiceIdentity: boolean;
   readonly identitiesHash: string;
   readonly invalidAccessGroupCount: number;
   readonly invalidEmailCount: number;
@@ -157,7 +163,7 @@ export interface GatewayDesiredState {
   readonly accessPolicy: {
     readonly identitiesHash: string;
     readonly identityCount: number;
-    readonly identityType: 'email';
+    readonly identityType: 'email' | 'service_token';
   };
   readonly blockers: readonly PlanBlocker[];
   readonly desiredHash: string;
@@ -231,6 +237,7 @@ export async function buildGatewayDesiredState(
 
   const target = normalizeTarget(input.target);
   const access = await normalizeAccess(input.access);
+  if (access.canaryServiceIdentity) assertCanaryServiceIdentityConfig(config);
   const blockers = buildBlockers(config, target, access);
   const installationId = await stableInstallationId(config.gateway.hostname, target);
   const resources = await buildDesiredResources(config, access, installationId);
@@ -247,8 +254,8 @@ export async function buildGatewayDesiredState(
     blockers,
     resources,
     accessPolicy: {
-      identityType: 'email',
-      identityCount: access.allowedEmails.length,
+      identityType: access.canaryServiceIdentity ? 'service_token' : 'email',
+      identityCount: access.canaryServiceIdentity ? 1 : access.allowedEmails.length,
       identitiesHash: access.identitiesHash,
     },
   };
@@ -277,11 +284,12 @@ function normalizeTarget(value: BoundaryValue): DeploymentTarget {
 async function normalizeAccess(value: BoundaryValue): Promise<NormalizedAccess> {
   const rawAccess = isObject(value) ? value : {};
   const unsupportedKeys = Object.keys(rawAccess)
-    .filter((key) => key !== 'allowedEmails' && key !== 'groups');
+    .filter((key) => key !== 'allowedEmails' && key !== 'groups' && key !== 'canaryServiceTokenId');
   if (unsupportedKeys.length > 0) {
     throw new TypeError('access input contains unsupported fields');
   }
   const normalizedGroups = normalizeAccessGroups(rawAccess);
+  const serviceTokenId = canaryServiceTokenId(rawAccess);
 
   const rawEmails = Array.isArray(rawAccess.allowedEmails) ? rawAccess.allowedEmails : [];
   const validEmails: string[] = [];
@@ -305,7 +313,10 @@ async function normalizeAccess(value: BoundaryValue): Promise<NormalizedAccess> 
     accessGroups: normalizedGroups.groups,
     accessGroupsProvided: normalizedGroups.provided,
     allowedEmails,
-    identitiesHash: await hashCanonical({ emails: allowedEmails }),
+    canaryServiceIdentity: serviceTokenId !== null,
+    identitiesHash: serviceTokenId === null
+      ? await hashCanonical({ emails: allowedEmails })
+      : await canaryServiceIdentityDigest(serviceTokenId),
     allowedEmailsProvided: Array.isArray(rawAccess.allowedEmails),
     invalidAccessGroupCount: normalizedGroups.invalidCount,
     invalidEmailCount,
@@ -348,7 +359,8 @@ function buildBlockers(
       message: 'Complete Cloudflare Zero Trust setup before deployment.',
     });
   }
-  if (!access.allowedEmailsProvided || access.allowedEmails.length === 0) {
+  if (!access.canaryServiceIdentity
+    && (!access.allowedEmailsProvided || access.allowedEmails.length === 0)) {
     blockers.push({
       code: 'allowed_emails_required',
       message: 'Provide at least one valid email identity for the Access allow policy.',
@@ -411,10 +423,10 @@ async function buildDesiredResources(
     .map((source) => ({ ...source, enabledTools: [...source.enabledTools].sort(compareText) }))
     .sort((left, right) => compareText(left.id, right.id));
   const metadata = { manager: MANAGER, installationId };
-  const emailAllowPolicy: JsonObject = {
-    identitiesRef: 'access.allowedEmails',
-    identityType: 'email',
-    identityCount: access.allowedEmails.length,
+  const defaultAllowPolicy: JsonObject = {
+    identitiesRef: access.canaryServiceIdentity ? 'access.canaryServiceTokenId' : 'access.allowedEmails',
+    identityType: access.canaryServiceIdentity ? 'service_token' : 'email',
+    identityCount: access.canaryServiceIdentity ? 1 : access.allowedEmails.length,
     identitiesHash: access.identitiesHash,
   };
   const resourceSpecs: ResourceSpec[] = [];
@@ -425,7 +437,7 @@ async function buildDesiredResources(
     const applicationKey = await stableResourceKey('source-app', installationId, source.id);
     const accessKey = await stableResourceKey('source-access', installationId, source.id);
     const sourceAllowPolicy = source.accessGroup === undefined
-      ? emailAllowPolicy
+      ? defaultAllowPolicy
       : await groupAllowPolicy(source.accessGroup, access);
     sourceMappings.push({
       sourceResourceKey: mcpKey,
@@ -536,7 +548,7 @@ async function buildDesiredResources(
       metadata,
       portalApplicationResourceKey: portalApplicationKey,
       defaultAction: 'deny',
-      allow: emailAllowPolicy,
+      allow: defaultAllowPolicy,
     },
   });
   resourceSpecs.push({

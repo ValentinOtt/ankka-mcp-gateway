@@ -100,7 +100,7 @@ export class CanaryPreflightInputError extends Error {
 /**
  * Compose the CLI-facing preflight while keeping the token out of argv and all
  * returned values. A caller may inject a token closure and client factory for
- * tests or a future customer-owned runtime.
+ * tests or a future self-hosted runtime.
  */
 const defaultCloudflareFetch: CloudflareFetch = async (url, init) =>
   globalThis.fetch(url, init);
@@ -140,12 +140,12 @@ export async function executeCanaryPreflightCommand(
     token = await readToken();
   } catch {
     throw new CanaryPreflightInputError(
-      'CLOUDFLARE_API_TOKEN could not be read from the customer-controlled environment.',
+      'CLOUDFLARE_API_TOKEN could not be read from the operator-controlled environment.',
     );
   }
   if (!v.is(stringSchema, token) || token.length === 0 || hasControlCharacters(token)) {
     throw new CanaryPreflightInputError(
-      'CLOUDFLARE_API_TOKEN is required in the customer-controlled environment.',
+      'CLOUDFLARE_API_TOKEN is required in the operator-controlled environment.',
     );
   }
 
