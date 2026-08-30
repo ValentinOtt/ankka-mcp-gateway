@@ -201,10 +201,11 @@ test('real synthetic fixture stays old in the DO while a new outer is staged at 
   assert.equal(result.failure, null);
   assert.deepEqual(result.observations.map(({ label, status, outer, durableObject, ready, passed }) => ({ label, status, outer, durableObject, ready, passed })), [
     { label: 'candidate_immediate', status: 204, outer: 'new', durableObject: 'old', ready: true, passed: true },
+    { label: 'candidate_strip_override', status: 204, outer: 'new', durableObject: 'old', ready: true, passed: true },
     { label: 'old_baseline', status: 204, outer: 'old', durableObject: 'old', ready: true, passed: true },
     { label: 'candidate_after_ready', status: 204, outer: 'new', durableObject: 'old', ready: true, passed: true },
   ]);
-  assert.equal(subject.state.stateWrites, 4, 'three probes add no synthetic state writes');
+  assert.equal(subject.state.stateWrites, 4, 'four probes add no synthetic state writes');
   assert.equal(subject.state.present, false);
   assert.equal(subject.state.namespace, false);
   assert.equal(subject.state.enabled, false);
@@ -277,7 +278,7 @@ test('even an exact self-reference must be absent after class retirement before 
     }
   } });
   const result = await subject.run();
-  assert.equal(result.observations.length, 3);
+  assert.equal(result.observations.length, 4);
   assert.equal(result.passed, false);
   assert.equal(result.cleanup, 'resources_may_remain');
   assert.equal(retirement(subject).length, 1);
@@ -305,7 +306,7 @@ test('unknown secrets, plaintext, mistyped or additional bindings after retireme
       if (request.path.endsWith('/settings') && retirement({ state }).length) response.result.bindings = bindings;
     } });
     const result = await subject.run();
-    assert.equal(result.observations.length, 3);
+    assert.equal(result.observations.length, 4);
     assert.equal(retirement(subject).length, 1);
     assert.equal(result.passed, false);
     assert.equal(result.cleanup, 'resources_may_remain');
@@ -343,7 +344,7 @@ test('cleanup refuses changed Worker identity, marker, references, binding or na
     });
     const result = await subject.run();
     assert.equal(reachedProbe, true, 'ownership drift is injected only after successful setup');
-    assert.equal(result.observations.length, 3);
+    assert.equal(result.observations.length, 4);
     assert.equal(result.passed, false, change);
     assert.equal(result.cleanup, 'resources_may_remain', change);
     assert.equal(retirement(subject).length, 0, change);
@@ -404,12 +405,28 @@ test('failed cleanup never reports success, retries destructive calls or erases 
       },
     });
     const result = await subject.run();
-    assert.equal(result.observations.length, 3, 'cleanup faults must follow successful probes');
+    assert.equal(result.observations.length, 4, 'cleanup faults must follow successful probes');
     assert.equal(result.passed, false, phase);
     assert.equal(result.cleanup, 'resources_may_remain', phase);
     assert.equal(subject.calls.filter((call) => call.method === 'DELETE').length, ['delete', 'worker_remains'].includes(phase) ? 1 : 0, phase);
     assertPrivate(subject, result);
   }
+});
+
+test('successful strip diagnostic does not mask the observed default-forwarding failure', async () => {
+  const subject = fixture({ probeResponse({ command }) {
+    if (command?.command === 'probe' && command.targetRevision === 'new' && !command.forwarding) {
+      return Response.json({ schemaVersion: 1, error: 'exception', stage: 'stub_fetch' }, {
+        status: 503, headers: { 'x-canary-outer-revision': 'new', 'x-canary-do-revision': 'unknown' },
+      });
+    }
+  } });
+  const result = await subject.run();
+  assert.deepEqual(result.observations.map((item) => item.passed), [false, true, true, false]);
+  assert.equal(result.passed, false);
+  assert.equal(result.cleanup, 'verified_removed');
+  assert.equal(subject.state.stateWrites, 4);
+  assertPrivate(subject, result);
 });
 
 test('fixed fixture failure labels survive without arbitrary exception, body or credential details', async () => {
@@ -423,11 +440,11 @@ test('fixed fixture failure labels survive without arbitrary exception, body or 
   const result = await subject.run();
   assert.equal(result.passed, false);
   assert.equal(result.cleanup, 'verified_removed');
-  for (const observation of [result.observations[0], result.observations[2]]) {
+  for (const observation of [result.observations[0], result.observations[1], result.observations[3]]) {
     assert.equal(observation.error, 'exception');
     assert.equal(observation.stage, 'stub_fetch');
   }
-  assert.equal(result.observations[1].passed, true);
+  assert.equal(result.observations[2].passed, true);
   assertPrivate(subject, result);
 });
 
@@ -442,7 +459,7 @@ test('private, malformed, oversized or thrown probe responses remain bounded and
     const result = await subject.run();
     assert.equal(result.passed, false);
     assert.equal(result.cleanup, 'verified_removed');
-    assert.equal(result.observations.length, 3);
+    assert.equal(result.observations.length, 4);
     assertPrivate(subject, result);
   }
 });
@@ -459,7 +476,7 @@ test('only exact schema-one fixture errors contribute diagnostic labels', async 
     } });
     const result = await subject.run();
     assert.equal(result.cleanup, 'verified_removed');
-    assert.equal(result.observations.length, 3);
+    assert.equal(result.observations.length, 4);
     for (const observation of result.observations) {
       assert.equal(observation.error, null);
       assert.equal(observation.stage, null);

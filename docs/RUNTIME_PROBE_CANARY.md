@@ -55,13 +55,28 @@ has no provider calls or application logging.
 | Observation | Expected outer Worker | Expected Durable Object |
 | --- | --- | --- |
 | `candidate_immediate` | `new`, via version override | `old` |
+| `candidate_strip_override` | `new`, removing only the override before DO dispatch | `old` |
 | `old_baseline` | `old`, without override | `old` |
 | `candidate_after_ready` | `new`, after bounded readiness polling | `old` |
+
+The strip variant isolates header forwarding inside the synthetic fixture; it
+does not change gateway code, remove authentication, or turn an earlier failure
+into a pass. A comparison is meaningful only when both candidate requests
+actually report outer revision `new`.
 
 Successful probes return HTTP 204 and the fixture's readiness marker without
 changing the fake state. Cloudflare documents that [version overrides can take a
 few seconds to propagate](https://developers.cloudflare.com/workers/versions-and-deployments/version-overrides/).
 The old DO expectation follows its [deployment-version assignment](https://developers.cloudflare.com/workers/versions-and-deployments/gradual-deployments/with-durable-objects/).
+
+A live synthetic run on 2026-08-30 reproduced HTTP 503 at `stub_fetch` on both
+candidate probes that preserved the override. The diagnostic strip probe reached
+the same old DO from the new outer Worker and returned 204, as did the old
+baseline. Cleanup was independently verified by the runner. This isolates the
+forwarded-header failure in the synthetic path; it does not certify a gateway
+fix or reveal Cloudflare's internal reason for rejecting the call. The overall
+canary correctly remained failed. Keep that result until the original path
+passes; do not change the success criterion to accept only the diagnostic variant.
 
 Readiness confirms one request reached `new`, not that propagation has completed
 everywhere. The immediate result is retained even if the later probe succeeds. It is not
@@ -70,7 +85,7 @@ keeps the overall result failed. Each observation contains bounded status/revisi
 fields and, when recognized, fixed error/stage labels—not response bodies or
 exception text. Status `0` means no usable probe response was obtained.
 
-Exit status 0 requires all three observations to pass **and** cleanup to be
+Exit status 0 requires all four observations to pass **and** cleanup to be
 verified. Inspect `observations`, `failure`/`reason`, `controlFailure`, and
 `cleanup`/`cleanupReason` separately; a failed probe can still have clean removal.
 

@@ -11,7 +11,7 @@ export const RUNTIME_PROBE_PLAN = Object.freeze([
   'Create one randomly named Worker and its own SQLite Durable Object namespace.',
   'Expose only authenticated synthetic fixture requests on its temporary workers.dev address.',
   'Seed fake state on old; upload new; stage old 100%, new 0%.',
-  'Compare old, immediate candidate, and candidate-after-readiness probes.',
+  'Compare old and candidate probes; isolate forwarding of the version override header.',
   'Disable the temporary address; delete the synthetic class and all its data; delete the Worker.',
   'Verify Worker and namespace absence. Never modify an existing gateway.',
 ]);
@@ -243,15 +243,20 @@ export async function runRuntimeProbeCanary({ accountId, fixtureSource, api, pro
     if (!Array.isArray(active) || active.length !== 2 || !versions.every((expected) => active.some((entry) => entry.version_id === expected.version_id && entry.percentage === expected.percentage))) fail('stage_mismatch');
     await control({ command: 'progress', stage: 'candidate_staged' });
     stage = 'probe';
-    const observe = async (label, targetRevision, version) => {
+    const observe = async (label, targetRevision, version, forwarding) => {
       let result;
-      try { result = await call({ command: 'probe', targetRevision }, version); }
+      try {
+        const command = { command: 'probe', targetRevision };
+        if (forwarding) command.forwarding = forwarding;
+        result = await call(command, version);
+      }
       catch { result = { status: 0, outer: 'unknown', durableObject: 'unknown', ready: false }; }
       const observation = { label, ...result, passed: result.status === 204 && result.ready && result.outer === targetRevision && result.durableObject === 'old' };
       observations.push(observation);
       event(observation);
     };
     await observe('candidate_immediate', 'new', candidate.id);
+    await observe('candidate_strip_override', 'new', candidate.id, 'strip_override');
     await observe('old_baseline', 'old');
     await waitReady('new', candidate.id);
     await observe('candidate_after_ready', 'new', candidate.id);
@@ -281,5 +286,5 @@ export async function runRuntimeProbeCanary({ accountId, fixtureSource, api, pro
       }
     }
   }
-  return { schemaVersion: 1, workerName: name, passed: failure === null && observations.length === 3 && observations.every((item) => item.passed) && cleanup === 'verified_removed', failure, reason, controlFailure, observations, cleanup, cleanupReason };
+  return { schemaVersion: 1, workerName: name, passed: failure === null && observations.length === 4 && observations.every((item) => item.passed) && cleanup === 'verified_removed', failure, reason, controlFailure, observations, cleanup, cleanupReason };
 }

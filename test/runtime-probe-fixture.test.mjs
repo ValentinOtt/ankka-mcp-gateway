@@ -20,6 +20,7 @@ function request(value, { key = KEY, path = '/control', headers = {} } = {}) {
 function fixture() {
   const values = new Map();
   const calls = [];
+  const headerSnapshots = [];
   let writes = 0;
   const env = { CANARY_KEY: KEY, CANARY_REVISION: 'old' };
   const storage = {
@@ -32,6 +33,7 @@ function fixture() {
     get(id) {
       assert.equal(id, 'v1:management');
       return { async fetch(forwarded) {
+        headerSnapshots.push(new Headers(forwarded.headers));
         calls.push({
           url: forwarded.url, method: forwarded.method,
           marker: forwarded.headers.get('x-ankka-runtime-probe-version'),
@@ -43,7 +45,7 @@ function fixture() {
     },
   };
   return {
-    env: { ...env, ADMIN_STATE: namespace }, object, storage, calls,
+    env: { ...env, ADMIN_STATE: namespace }, object, storage, calls, headerSnapshots,
     writes: () => writes,
   };
 }
@@ -73,6 +75,53 @@ test('synthetic old and new outer revisions reach the same old DO through exact 
     });
   }
   assert.equal(subject.writes(), 4, 'both probes are read-only');
+});
+
+test('explicit strip-override diagnostic changes only that forwarded header and never synthetic state', async () => {
+  const subject = fixture();
+  await staged(subject);
+  for (const outerRevision of ['old', 'new']) {
+    for (const forwarding of [undefined, 'strip_override']) {
+      const command = { command: 'probe', targetRevision: outerRevision };
+      if (forwarding) command.forwarding = forwarding;
+      const incoming = request(command, { headers: {
+        'Cloudflare-Workers-Version-Overrides': OVERRIDE,
+        'x-canary-preserve': 'synthetic-unchanged-value',
+      } });
+      const expectedHeaders = new Headers(incoming.headers);
+      expectedHeaders.set('x-ankka-runtime-probe-version', 'verified');
+      if (forwarding) expectedHeaders.delete('Cloudflare-Workers-Version-Overrides');
+      const response = await worker.fetch(incoming, { ...subject.env, CANARY_REVISION: outerRevision });
+      assert.equal(response.status, 204);
+      assert.equal(response.headers.get(OUTER), outerRevision);
+      assert.equal(response.headers.get(INNER), 'old');
+      assert.deepEqual(Object.fromEntries(subject.headerSnapshots.at(-1)), Object.fromEntries(expectedHeaders));
+      assert.equal(subject.calls.at(-1).key, KEY);
+      assert.equal(subject.calls.at(-1).marker, 'verified');
+      assert.equal(subject.calls.at(-1).override, forwarding ? null : OVERRIDE);
+      assert.equal(incoming.headers.get('Cloudflare-Workers-Version-Overrides'), OVERRIDE, 'incoming headers are never mutated');
+      assert.equal(subject.writes(), 4, 'diagnostic probes are read-only');
+    }
+  }
+});
+
+test('forwarding accepts only the explicit probe diagnostic enum and does not broaden other commands', async () => {
+  const subject = fixture();
+  const invalid = [
+    ...['preserve_override', '', null, true, [], {}, 'strip_override '].map((forwarding) => ({
+      command: 'probe', targetRevision: 'old', forwarding,
+    })),
+    { command: 'probe', targetRevision: 'old', forwarding: 'strip_override', extra: true },
+    { command: 'begin', forwarding: 'strip_override' },
+    { command: 'progress', stage: 'current_verified', forwarding: 'strip_override' },
+  ];
+  for (const command of invalid) {
+    const response = await worker.fetch(request(command), subject.env);
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'invalid_command', stage: 'request_read' });
+  }
+  assert.equal(subject.calls.length, 0);
+  assert.equal(subject.writes(), 0);
 });
 
 test('all public requests, including readiness, require the ephemeral gate before DO access', async () => {

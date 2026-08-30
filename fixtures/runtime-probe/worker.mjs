@@ -96,7 +96,8 @@ function parseCommand(raw) {
   if (value.command === 'begin' && keys === 'command,schemaVersion') return value;
   if (value.command === 'progress' && keys === 'command,schemaVersion,stage' &&
       STAGES.slice(1).includes(value.stage)) return value;
-  if (value.command === 'probe' && keys === 'command,schemaVersion,targetRevision' &&
+  if (value.command === 'probe' && (keys === 'command,schemaVersion,targetRevision' ||
+      (keys === 'command,forwarding,schemaVersion,targetRevision' && value.forwarding === 'strip_override')) &&
       ['old', 'new'].includes(value.targetRevision)) return value;
   return null;
 }
@@ -181,6 +182,8 @@ export default {
         stage = 'probe_headers';
         const headers = new Headers(request.headers);
         headers.set('x-ankka-runtime-probe-version', 'verified');
+        // Explicit diagnostic variant only; the default preserves the live path.
+        if (control.forwarding === 'strip_override') headers.delete('Cloudflare-Workers-Version-Overrides');
         stage = 'probe_request';
         internal = new Request(request, { headers });
       }
