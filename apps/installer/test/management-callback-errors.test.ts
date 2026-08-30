@@ -2,6 +2,7 @@ import * as v from 'valibot';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import * as cloudflareTarget from '../src/cloudflare-target';
+import { CloudflareDirectUploadError } from '../src/cloudflare-worker-direct-upload';
 import { OAUTH_COOKIE, PUBLIC_ORIGIN, REQUIRED_OAUTH_SCOPES, SESSION_COOKIE } from '../src/constants';
 import { base64UrlEncode, deriveCsrfToken, openOauthCookie, sha256 } from '../src/crypto';
 import { DeployError } from '../src/errors';
@@ -178,9 +179,7 @@ describe.each(['source', 'runtime'] as const)('%s management callback with a ret
     expect(response.status).toBe(409);
     expect(response.headers.get('location')).toBeNull();
     expect(response.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
-    expect(await response.json()).toEqual(flow === 'source'
-      ? { code: 'session_conflict', reason: 'source_action_relay' }
-      : { code: 'session_conflict' });
+    expect(await response.json()).toEqual({ code: 'session_conflict', reason: `${flow}_action_relay` });
     expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
     expect(relay).toHaveBeenCalledTimes(1);
     current.assertRetained(response);
@@ -196,9 +195,7 @@ describe.each(['source', 'runtime'] as const)('%s management callback with a ret
     expect(response.status).toBe(500);
     expect(response.headers.get('location')).toBeNull();
     expect(response.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
-    expect(await response.json()).toEqual(flow === 'source'
-      ? { code: 'internal_error', reason: 'source_callback_shell' }
-      : { code: 'internal_error' });
+    expect(await response.json()).toEqual({ code: 'internal_error', reason: `${flow}_callback_shell` });
     expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
     expect(flow === 'source' ? current.source : current.update).toHaveBeenCalledTimes(1);
     current.assertRetained(response);
@@ -233,47 +230,139 @@ describe.each(['source', 'runtime'] as const)('%s management callback with a ret
   });
 });
 
-describe('fixed source callback phase diagnostics', () => {
+describe.each(['source', 'runtime'] as const)('fixed %s callback phase diagnostics', (flow) => {
   it('reports release verification without exchanging or relaying a grant', async () => {
-    const current = await fixture('source', {
+    const failRelease = async () => { throw new DeployError(409, 'session_conflict'); };
+    const current = await fixture(flow, flow === 'source' ? {
       exactReleaseProvider: {
-        loadVerifiedReleaseBundleForIdentity: async () => { throw new DeployError(409, 'session_conflict'); },
+        loadVerifiedReleaseBundleForIdentity: failRelease,
       },
+    } : {
+      releaseProvider: { loadVerifiedRelease: async () => runtime.bundle, loadVerifiedReleaseBundle: failRelease },
     });
     const response = await current.callback();
-    expect(await response.json()).toEqual({ code: 'session_conflict', reason: 'source_release_verification' });
+    expect(response.status).toBe(409);
+    expect(response.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
+    expect(await response.json()).toEqual({ code: 'session_conflict', reason: `${flow}_release_verification` });
     expect(current.calls).toEqual({ exchanged: 0, revoked: 0 });
     expect(current.source).not.toHaveBeenCalled();
+    expect(current.update).not.toHaveBeenCalled();
     current.assertRetained(response);
   });
 
   it('reports grant exchange without using exception text', async () => {
-    const current = await fixture('source');
+    const current = await fixture(flow);
     vi.spyOn(oauthModule, 'exchangeAuthorizationCode').mockRejectedValue(new Error(ACCESS_TOKEN));
     const response = await current.callback();
-    expect(await response.json()).toEqual({ code: 'internal_error', reason: 'source_grant_exchange' });
+    expect(response.status).toBe(500);
+    expect(response.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
+    expect(await response.json()).toEqual({ code: 'internal_error', reason: `${flow}_grant_exchange` });
     expect(current.calls).toEqual({ exchanged: 0, revoked: 0 });
     expect(current.source).not.toHaveBeenCalled();
+    expect(current.update).not.toHaveBeenCalled();
     current.assertRetained(response);
   });
 
   it('reports account authorization and revokes the exchanged grant', async () => {
-    const current = await fixture('source');
+    const current = await fixture(flow);
     vi.spyOn(cloudflareTarget, 'resolveAuthorizedAccount').mockRejectedValue(new DeployError(403, 'oauth_grant_invalid'));
     const response = await current.callback();
-    expect(await response.json()).toEqual({ code: 'oauth_grant_invalid', reason: 'source_account_authorization' });
+    expect(response.status).toBe(403);
+    expect(response.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
+    expect(await response.json()).toEqual({ code: 'oauth_grant_invalid', reason: `${flow}_account_authorization` });
     expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
     expect(current.source).not.toHaveBeenCalled();
+    expect(current.update).not.toHaveBeenCalled();
     current.assertRetained(response);
   });
 
   it('preserves an existing bounded diagnostic instead of replacing it with the phase', async () => {
-    const current = await fixture('source');
-    current.source.mockRejectedValue(new DeployError(504, 'oauth_exchange_failed', 'customer_action_route_timeout'));
+    const current = await fixture(flow);
+    const relay = flow === 'source' ? current.source : current.update;
+    relay.mockRejectedValue(new DeployError(504, 'oauth_exchange_failed', 'customer_action_route_timeout'));
     const response = await current.callback();
     expect(response.status).toBe(504);
+    expect(response.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
     expect(await response.json()).toEqual({ code: 'oauth_exchange_failed', reason: 'customer_action_route_timeout' });
     expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
+    expect(relay).toHaveBeenCalledTimes(1);
+    current.assertRetained(response);
+  });
+});
+
+function uploadError() {
+  const error = new CloudflareDirectUploadError('provider_rejected', 'worker_version', 'rejected', {
+    workerCreated: false,
+    workerVerified: false,
+    assetSessionCreated: true,
+    assetBucketsCompleted: 1,
+    assetBucketCount: 1,
+    versionCreated: false,
+    deploymentVerified: false,
+  }, [{ kind: 'worker', accountId: ACCOUNT_ID, workerName: 'synthetic-private-worker', workerId: 'd'.repeat(32) }]);
+  error.message = 'synthetic-private-provider-body:' + ACCESS_TOKEN;
+  return error;
+}
+
+describe('closed runtime upload diagnostics', () => {
+  it.each([
+    ['invalid_input', 'validate', 'not_sent'],
+    ['provider_unknown', 'asset_session', 'unknown'],
+    ['provider_rejected', 'asset_bucket', 'rejected'],
+    ['provider_rejected', 'worker_version', 'rejected'],
+    ['provider_mismatch', 'version_verify', 'submitted'],
+  ] as const)('reports only the reviewed upload vocabulary (%s/%s/%s)', async (code, stage, outcome) => {
+    const current = await fixture('runtime');
+    const error = uploadError();
+    Object.assign(error, { code, stage, outcome });
+    current.update.mockRejectedValue(error);
+    const response = await current.callback();
+    expect(response.status).toBe(500);
+    expect(response.headers.get('location')).toBeNull();
+    expect(response.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
+    expect(await response.json()).toEqual({
+      code: 'internal_error', reason: `runtime_upload_${code}_${stage}_${outcome}`,
+    });
+    expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
+    expect(current.update).toHaveBeenCalledTimes(1);
+    expect(current.source).not.toHaveBeenCalled();
+    current.assertRetained(response);
+  });
+
+  it.each(['code', 'stage', 'outcome'] as const)('refuses an unreviewed upload %s', async (field) => {
+    const current = await fixture('runtime');
+    const error = uploadError();
+    // Valid diagnostic syntax is not enough: only the reviewed enum is public.
+    Object.assign(error, { [field]: 'synthetic_private_value' });
+    current.update.mockRejectedValue(error);
+    const response = await current.callback();
+    expect(response.status).toBe(500);
+    expect(response.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
+    expect(await response.json()).toEqual({ code: 'internal_error', reason: 'runtime_action_relay' });
+    expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
+    expect(current.update).toHaveBeenCalledTimes(1);
+    current.assertRetained(response);
+  });
+
+  it('does not trust diagnostic-looking properties on an ordinary error', async () => {
+    const current = await fixture('runtime');
+    current.update.mockRejectedValue(Object.assign(new Error(ACCESS_TOKEN), {
+      code: 'provider_rejected', stage: 'worker_version', outcome: 'rejected',
+    }));
+    const response = await current.callback();
+    expect(await response.json()).toEqual({ code: 'internal_error', reason: 'runtime_action_relay' });
+    expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
+    expect(current.update).toHaveBeenCalledTimes(1);
+    current.assertRetained(response);
+  });
+
+  it('leaves source callback diagnostics unchanged for the same upload error', async () => {
+    const current = await fixture('source');
+    current.source.mockRejectedValue(uploadError());
+    const response = await current.callback();
+    expect(await response.json()).toEqual({ code: 'internal_error', reason: 'source_action_relay' });
+    expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
+    expect(current.source).toHaveBeenCalledTimes(1);
     current.assertRetained(response);
   });
 });
