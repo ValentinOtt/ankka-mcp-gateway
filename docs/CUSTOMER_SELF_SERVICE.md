@@ -249,18 +249,21 @@ Installer tools are `begin_cloudflare_discovery`, `configure_gateway`,
 `create_review_plan`, `get_installer_status`, `begin_authorization`,
 `create_removal_plan`, and `begin_removal`.
 
-Dashboard tools are `list_mcp_sources`, `discover_mcp_source`,
-`save_mcp_source_draft`, `apply_mcp_source`, `check_gateway_update`,
-`review_gateway_update`, `apply_gateway_update`,
-`rollback_gateway_update`, and `review_gateway_teardown`.
+Dashboard tools cover Gateway capabilities and status, sources, Team
+read/save/recovery, signed update review and handoffs, and recorded action
+status. See [the complete WebMCP tool contract](WEBMCP.md) for exact names,
+inputs, safe recovery, and browser-test instructions. No separate management
+MCP connection is required.
 
 The source draft/apply tools obey the same temporary installation pause as the
 dashboard and cannot add a source in this release.
 
 These tools call the same same-origin APIs as the visible interface. They add
-no independent mutation authority. A mutation tool can prepare a short-lived
-handoff URL, but the user must review the action and approve Cloudflare consent;
-an agent must not request, receive, or approve the user's token.
+no independent mutation authority. Team Save applies the complete reviewed
+change directly through your Gateway's management credential; it is not a
+preview. Install/update/removal tools retain their reviewed short-lived
+authorization handoffs. An agent must not request or receive the user's token
+or substitute tool metadata for required consent.
 
 ## Troubleshooting safely
 

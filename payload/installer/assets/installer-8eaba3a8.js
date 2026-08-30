@@ -17,6 +17,9 @@ const state = {
   pollFailures: 0,
   callbackStreamActive: callbackStream,
   agentToolsRegistered: false,
+  agentToolsController: null,
+  agentToolsRegistration: null,
+  agentPageActive: true,
 };
 
 const byId = (id) => document.getElementById(id);
@@ -49,6 +52,10 @@ const SELECTION_ERROR_MESSAGES = Object.freeze({
 });
 
 const LOCAL_AGENT_ERRORS = Object.freeze({
+  invalid_arguments: 'The tool arguments do not match its declared input schema.',
+  action_unavailable: 'This action is not available in the current installer session.',
+  page_inactive: 'This installer page is no longer active. Reopen it before continuing.',
+  action_cancelled: 'The action was cancelled before it started.',
   installer_busy: 'Another installer action is still running.',
   cloudflare_discovery_required: 'Connect Cloudflare and choose a discovered account and zone first.',
   plan_unavailable: 'Create and review a fresh plan first.',
@@ -75,6 +82,14 @@ const DISCOVERY_FAILURE_MESSAGES = Object.freeze({
   session_invalid: 'The installer session could not be validated. Reload the installer before creating another link.',
   internal_error: 'The installer encountered an internal error while completing Cloudflare discovery.',
 });
+
+const AGENT_API_ERROR_CODES = new Set([
+  ...Object.keys(DISCOVERY_FAILURE_MESSAGES),
+  ...Object.keys(API_ERROR_MESSAGES),
+  'bad_request', 'csrf_invalid', 'existing_gateway_detected', 'install_mutations_disabled',
+  'uninstall_mutations_disabled', 'origin_invalid', 'release_invalid', 'release_unavailable',
+  'session_conflict',
+]);
 
 function discoveryFailureMessage(code) {
   const detail = DISCOVERY_FAILURE_MESSAGES[code] ?? 'Cloudflare discovery did not complete.';
@@ -165,25 +180,27 @@ function apiErrorMessage(error, fallback) {
 
 function agentError(error) {
   if (error instanceof ApiError) {
+    const code = AGENT_API_ERROR_CODES.has(error.code) ? error.code : 'internal_error';
+    const reason = Object.hasOwn(SELECTION_ERROR_MESSAGES, error.reason) ? error.reason : null;
     return {
-      code: error.code,
-      reason: error.reason,
-      message: API_ERROR_MESSAGES[error.code] ?? (
-        error.reason && SELECTION_ERROR_MESSAGES[error.reason]
-          ? SELECTION_ERROR_MESSAGES[error.reason]
+      code,
+      reason,
+      message: API_ERROR_MESSAGES[code] ?? (
+        reason
+          ? SELECTION_ERROR_MESSAGES[reason]
           : 'The installer request was rejected.'
       ),
       retryable: error.code === 'rate_limited' || error.status >= 500,
     };
   }
-  const code = error instanceof Error && LOCAL_AGENT_ERRORS[error.message]
+  const code = error instanceof Error && Object.hasOwn(LOCAL_AGENT_ERRORS, error.message)
     ? error.message
     : 'internal_error';
   return {
     code,
     reason: null,
     message: LOCAL_AGENT_ERRORS[code] ?? 'The installer action could not complete.',
-    retryable: code === 'installer_busy' || code === 'internal_error',
+    retryable: code === 'installer_busy',
   };
 }
 
@@ -331,6 +348,12 @@ function planSummary(plan = state.session?.plan) {
       label: text(group.label),
       operations: [...(group.operations ?? [])].map(String),
     })),
+    blockers: (plan.blockers ?? []).map((blocker) => ({
+      code: text(blocker.code),
+      title: text(blocker.title),
+      detail: text(blocker.detail),
+      severity: text(blocker.severity),
+    })),
   };
 }
 
@@ -352,10 +375,20 @@ function installerStatus() {
   const removal = state.session?.removal;
   return {
     route: state.route,
+    capabilities: Object.fromEntries(['selection', 'plan', 'deploy', 'uninstall', 'events', 'signedRelease']
+      .map((name) => [name, state.session?.capabilities?.[name] === true])),
+    recovery: state.session?.recovery ? {
+      status: text(state.session.recovery.status),
+      expiresAt: text(state.session.recovery.expiresAt),
+    } : null,
     cloudflare: state.discovery ? {
       status: state.discovery.status,
       actorEmail: state.discovery.actorEmail,
-      targets: [...(state.discovery.targets ?? [])],
+      targets: (state.discovery.targets ?? []).map((target) => ({
+        targetIdHash: text(target.targetIdHash),
+        accountName: text(target.accountName),
+        zoneName: text(target.zoneName),
+      })),
       selectedTargetIdHash: state.selectedTargetIdHash,
       grantRevocation: state.discovery.grantRevocation,
       failureCode: state.discovery.failureCode,
@@ -395,7 +428,56 @@ function installerStatus() {
         expiresAt: text(removal.recovery.expiresAt),
       } : null,
       plan: removalPlanSummary(),
+      failure: removal.failure ? {
+        code: text(removal.failure.code),
+        title: text(removal.failure.title),
+        detail: text(removal.failure.detail),
+      } : null,
+      receipt: removal.receipt ? {
+        removedAt: text(removal.receipt.removedAt),
+        grantRevocation: text(removal.receipt.grantRevocation),
+        providerNotice: text(removal.receipt.providerNotice),
+      } : null,
     } : null,
+  };
+}
+
+function installerContinuation() {
+  if (state.discovery?.grantRevocation === 'unconfirmed' ||
+      state.session?.deployment?.receipt?.grantRevocation === 'unconfirmed' ||
+      state.session?.removal?.receipt?.grantRevocation === 'unconfirmed') {
+    return { status: 'manual_action_required', tool: null, reason: 'grant_revocation_unconfirmed' };
+  }
+  if (shouldPoll()) return { status: 'in_progress', tool: 'get_installer_status' };
+  const removal = state.session?.removal;
+  if (removal) {
+    if (removal.status === 'removed') return { status: 'complete', tool: null };
+    if (removal.recovery && state.session.capabilities?.uninstall === true) {
+      return { status: 'review_required', tool: 'create_removal_plan' };
+    }
+    if (removal.status === 'planned' && state.session.capabilities?.uninstall === true) {
+      return { status: 'review_required', tool: 'begin_removal', arguments: { planHash: removal.plan.planHash } };
+    }
+    return { status: 'review_required', tool: null, route: '/result' };
+  }
+  if (state.session?.deployment?.status === 'succeeded') return { status: 'complete', tool: null };
+  if (state.session?.deployment?.status === 'failed' || state.session?.recovery) {
+    return { status: 'review_required', tool: null, route: '/result' };
+  }
+  if (state.discovery?.status !== 'ready') return { status: 'configuration_required', tool: 'begin_cloudflare_discovery' };
+  if (!state.discovery.targets?.length) {
+    return { status: 'manual_action_required', tool: 'begin_cloudflare_discovery', reason: 'active_zone_required' };
+  }
+  if (!state.session?.selection) {
+    return { status: 'configuration_required', tool: state.session?.capabilities?.selection === true ? 'configure_gateway' : null };
+  }
+  if (!state.session.plan) {
+    return { status: 'review_required', tool: state.session.capabilities?.plan === true ? 'create_review_plan' : null };
+  }
+  return {
+    status: 'review_required',
+    tool: state.session.capabilities?.deploy === true ? 'begin_authorization' : null,
+    arguments: { planHash: state.session.plan.planHash },
   };
 }
 
@@ -917,7 +999,11 @@ async function runAgentAction(message, action) {
   setBusy(true);
   showNotice(message);
   try {
-    return JSON.stringify({ ok: true, result: await action() });
+    const result = await action();
+    const continuation = result.status === 'user_authorization_required'
+      ? { status: 'user_authorization_required', tool: 'get_installer_status', requiresUserConsent: true }
+      : installerContinuation();
+    return JSON.stringify({ ok: true, result: { ...result, continuation } });
   } catch (error) {
     const detail = agentError(error);
     showNotice(detail.message, 'error');
@@ -930,12 +1016,54 @@ async function runAgentAction(message, action) {
 
 const STRING_ARRAY_SCHEMA = Object.freeze({
   type: 'array',
-  items: { type: 'string' },
+  items: { type: 'string', minLength: 1, maxLength: 254 },
 });
+
+const AGENT_TOOL_CAPABILITIES = Object.freeze({
+  configure_gateway: 'selection',
+  create_review_plan: 'plan',
+  begin_authorization: 'deploy',
+  create_removal_plan: 'uninstall',
+  begin_removal: 'uninstall',
+});
+
+// These seven tools use only closed objects of bounded strings/string arrays.
+// Validate that small declared vocabulary before invoking shared UI handlers.
+function validAgentValue(schema, value) {
+  if (schema.type === 'string') {
+    return isText(value) && value.length >= (schema.minLength ?? 0) &&
+      value.length <= (schema.maxLength ?? 1024);
+  }
+  return schema.type === 'array' && Array.isArray(value) &&
+    value.length <= schema.maxItems && Array.from(value).every((entry) => validAgentValue(schema.items, entry)) &&
+    (!schema.uniqueItems || new Set(value).size === value.length);
+}
+
+function validAgentInput(schema, input) {
+  if (!input || OBJECT_TAG.call(input) !== '[object Object]') return false;
+  const entries = Object.getOwnPropertyDescriptors(input);
+  const keys = Reflect.ownKeys(entries);
+  return keys.every((key) => Object.hasOwn(schema.properties, key) &&
+    Object.hasOwn(entries[key], 'value') && validAgentValue(schema.properties[key], entries[key].value)) &&
+    (schema.required ?? []).every((key) => Object.hasOwn(entries, key));
+}
+
+function unregisterAgentTools() {
+  state.agentToolsController?.abort();
+  state.agentToolsController = null;
+  state.agentToolsRegistered = false;
+}
 
 async function registerAgentTools() {
   const modelContext = document.modelContext;
-  if (state.agentToolsRegistered || !modelContext || !isCallable(modelContext.registerTool)) return;
+  if (!state.agentPageActive || state.agentToolsRegistered || !modelContext || !isCallable(modelContext.registerTool)) return;
+  if (state.agentToolsRegistration) {
+    await state.agentToolsRegistration;
+    if (state.agentPageActive && !state.agentToolsRegistered) return registerAgentTools();
+    return;
+  }
+  const controller = new AbortController();
+  state.agentToolsController = controller;
   const tools = [
     {
       name: 'begin_cloudflare_discovery',
@@ -959,16 +1087,16 @@ async function registerAgentTools() {
     },
     {
       name: 'configure_gateway',
-      description: 'Save an empty Ankka MCP Portal configuration for a target returned by Cloudflare discovery. The actor email and zone are derived from that target. Sources are added later from the gateway dashboard. Performs no Cloudflare writes.',
+      description: 'Save an empty Ankka MCP Portal configuration for a target returned by Cloudflare discovery. The actor email and zone are derived from that target. Performs no Cloudflare writes and does not enable source creation.',
       inputSchema: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          gatewayName: { type: 'string', description: 'Human-readable gateway name.' },
-          targetIdHash: { type: 'string', description: 'Opaque targetIdHash returned in cloudflare.targets by get_installer_status.' },
+          gatewayName: { type: 'string', minLength: 2, maxLength: 80, description: 'Human-readable gateway name.' },
+          targetIdHash: { type: 'string', minLength: 1, maxLength: 128, description: 'Opaque targetIdHash returned in cloudflare.targets by get_installer_status.' },
           additionalAdminEmails: { ...STRING_ARRAY_SCHEMA, maxItems: 19, uniqueItems: true, description: 'Optional additional administrator emails.' },
-          managementHostname: { type: 'string', description: 'Unused management hostname beneath the active zone.' },
-          portalHostname: { type: 'string', description: 'Unused MCP Portal hostname beneath the active zone.' },
+          managementHostname: { type: 'string', minLength: 1, maxLength: 253, description: 'Unused management hostname beneath the active zone.' },
+          portalHostname: { type: 'string', minLength: 1, maxLength: 253, description: 'Unused MCP Portal hostname beneath the active zone.' },
         },
         required: [
           'gatewayName', 'targetIdHash', 'managementHostname', 'portalHostname',
@@ -1023,7 +1151,7 @@ async function registerAgentTools() {
         type: 'object',
         additionalProperties: false,
         properties: {
-          planHash: { type: 'string', description: 'Exact plan hash returned by create_review_plan.' },
+          planHash: { type: 'string', minLength: 1, maxLength: 128, description: 'Exact plan hash returned by create_review_plan.' },
         },
         required: ['planHash'],
       },
@@ -1068,7 +1196,7 @@ async function registerAgentTools() {
         type: 'object',
         additionalProperties: false,
         properties: {
-          planHash: { type: 'string', description: 'Exact removal plan hash returned by create_removal_plan.' },
+          planHash: { type: 'string', minLength: 1, maxLength: 128, description: 'Exact removal plan hash returned by create_removal_plan.' },
         },
         required: ['planHash'],
       },
@@ -1099,8 +1227,50 @@ async function registerAgentTools() {
       }),
     },
   ];
-  for (const tool of tools) await modelContext.registerTool(tool);
-  state.agentToolsRegistered = true;
+  const registration = (async () => {
+    try {
+      for (const tool of tools) {
+        if (controller.signal.aborted) return;
+        await modelContext.registerTool({
+          ...tool,
+          execute: async (input, options = {}) => {
+            try {
+              if (controller.signal.aborted) throw new Error('page_inactive');
+              if (options.signal?.aborted) throw new Error('action_cancelled');
+              if (!validAgentInput(tool.inputSchema, input)) throw new Error('invalid_arguments');
+              const capability = AGENT_TOOL_CAPABILITIES[tool.name];
+              if (capability && state.session?.capabilities?.[capability] !== true) {
+                throw new Error('action_unavailable');
+              }
+              // A later abort does not undo an accepted server operation.
+              return await tool.execute(input);
+            } catch (error) {
+              return JSON.stringify({ ok: false, error: agentError(error) });
+            }
+          },
+        }, { signal: controller.signal });
+      }
+      if (!controller.signal.aborted) state.agentToolsRegistered = true;
+    } catch {
+      controller.abort();
+      if (state.agentToolsController === controller) state.agentToolsController = null;
+    }
+  })();
+  state.agentToolsRegistration = registration;
+  try { await registration; } finally { state.agentToolsRegistration = null; }
+}
+
+window.addEventListener('pagehide', () => {
+  state.agentPageActive = false;
+  unregisterAgentTools();
+});
+for (const event of ['pageshow', 'focus']) {
+  window.addEventListener(event, () => {
+    if (event === 'pageshow') state.agentPageActive = true;
+    if (state.session && !state.callbackStreamActive) {
+      void registerAgentTools().catch(() => { /* The existing UI remains available. */ });
+    }
+  });
 }
 
 document.addEventListener('click', (event) => {

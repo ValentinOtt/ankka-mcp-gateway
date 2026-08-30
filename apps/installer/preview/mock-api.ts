@@ -1,3 +1,4 @@
+import type { ServerResponse } from 'node:http'
 import type { Connect } from 'vite'
 
 type InstallerScenario =
@@ -78,14 +79,15 @@ const operationCopy = [
   ['revoke', 'Revoking the short-lived Cloudflare grant'],
 ] as const
 
-function scenarioFromRequest(request: Connect.IncomingMessage): InstallerScenario {
-  const referer = request.headers.referer
-  let location: URL
+function previewLocation(value: string | undefined): URL {
   try {
-    location = new URL(referer ?? '/', 'http://127.0.0.1:5731')
+    return new URL(value ?? '/', 'http://127.0.0.1:5731')
   } catch {
-    return 'start'
+    return new URL('http://127.0.0.1:5731/')
   }
+}
+
+function requestedScenario(location: URL): InstallerScenario | null {
   const requested = location.searchParams.get('preview')
   if (
     requested === 'start' ||
@@ -98,6 +100,12 @@ function scenarioFromRequest(request: Connect.IncomingMessage): InstallerScenari
     requested === 'failed' ||
     requested === 'removal'
   ) return requested
+  return null
+}
+
+function scenarioFromLocation(location: URL): InstallerScenario {
+  const requested = requestedScenario(location)
+  if (requested) return requested
 
   if (location.pathname === '/gateway') return 'connected'
   if (location.pathname === '/review') return 'configured'
@@ -204,8 +212,8 @@ function session(scenario: InstallerScenario) {
   }
 }
 
-function discovery(scenario: InstallerScenario, forcedReady: boolean) {
-  const ready = forcedReady || scenario !== 'start'
+function discovery(scenario: InstallerScenario) {
+  const ready = scenario !== 'start'
   const withTargets = ready && scenario !== 'no-zones'
   return {
     schemaVersion: 1,
@@ -223,16 +231,7 @@ function discovery(scenario: InstallerScenario, forcedReady: boolean) {
   }
 }
 
-function authorization() {
-  return {
-    schemaVersion: 1,
-    csrf: previewCsrf,
-    authorizationUrl: 'https://dash.cloudflare.com/oauth2/auth?client_id=local-preview',
-    handoffUrl: `https://deploy.ankka.ai/oauth/handoff#${'a'.repeat(48)}`,
-  }
-}
-
-function sendJson<Body>(response: Connect.ServerResponse, status: number, body: Body): void {
+function sendJson<Body>(response: ServerResponse, status: number, body: Body): void {
   const bytes = JSON.stringify(body)
   response.statusCode = status
   response.setHeader('cache-control', 'no-store')
@@ -242,15 +241,28 @@ function sendJson<Body>(response: Connect.ServerResponse, status: number, body: 
 }
 
 export function installerPreviewApi(): Connect.NextHandleFunction {
-  let forcedDiscoveryReady = false
+  let retainedScenario: InstallerScenario | null = null
+  let activeFixture: InstallerScenario | null = null
 
   return (request, response, next) => {
+    const url = previewLocation(request.url)
     if (!request.url?.startsWith('/api/')) {
+      const requested = requestedScenario(url)
+      if (requested) {
+        // Explicit fixture navigation starts over, including the same scenario.
+        retainedScenario = requested
+        activeFixture = requested
+      }
       next()
       return
     }
-    const scenario = scenarioFromRequest(request)
-    const url = new URL(request.url, 'http://127.0.0.1:5731')
+    const location = previewLocation(request.headers.referer)
+    const requested = requestedScenario(location)
+    if (retainedScenario === null || (requested !== null && requested !== activeFixture)) {
+      retainedScenario = scenarioFromLocation(location)
+      activeFixture = requested
+    }
+    const scenario = retainedScenario
 
     if (request.method === 'GET' && url.pathname === '/api/session') {
       sendJson(response, 200, session(scenario))
@@ -258,30 +270,32 @@ export function installerPreviewApi(): Connect.NextHandleFunction {
     }
     if (url.pathname === '/api/discovery') {
       if (request.method === 'POST') {
-        forcedDiscoveryReady = true
-        sendJson(response, 200, authorization())
+        sendJson(response, 409, { schemaVersion: 1, code: 'preview_authorization_unavailable' })
       } else {
-        sendJson(response, 200, discovery(scenario, forcedDiscoveryReady))
+        sendJson(response, 200, discovery(scenario))
       }
       return
     }
     if (request.method === 'PUT' && url.pathname === '/api/selection') {
-      sendJson(response, 200, { ...session('configured'), selection })
+      retainedScenario = 'configured'
+      sendJson(response, 200, session(retainedScenario))
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/plan') {
-      sendJson(response, 200, session('planned'))
+      retainedScenario = 'planned'
+      sendJson(response, 200, session(retainedScenario))
       return
     }
     if (request.method === 'POST' && (
       url.pathname === '/api/deploy' ||
       url.pathname === '/api/uninstall'
     )) {
-      sendJson(response, 200, authorization())
+      sendJson(response, 409, { schemaVersion: 1, code: 'preview_authorization_unavailable' })
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/uninstall/plan') {
-      sendJson(response, 200, session('removal'))
+      retainedScenario = 'removal'
+      sendJson(response, 200, session(retainedScenario))
       return
     }
     sendJson(response, 404, { schemaVersion: 1, code: 'preview_route_not_found' })

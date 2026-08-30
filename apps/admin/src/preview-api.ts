@@ -7,6 +7,7 @@ import type {
   RuntimeAction,
   RuntimeOperation,
   RuntimeUpdate,
+  RuntimeVersion,
   SourceAction,
   SourceDiscovery,
   SourceDraftInput,
@@ -81,10 +82,10 @@ function update(available: boolean): RuntimeUpdate {
     schemaVersion: 1,
     channel: 'stable',
     status: available ? 'available' : 'up_to_date',
-    current: { release: 'gateway-v0.1.12', artifactSha256: '1'.repeat(64) },
+    current: { release: 'gateway-v0.1.12', artifactSha256: `sha256:${'1'.repeat(64)}` },
     available: available ? {
       release: 'gateway-v0.1.13',
-      artifactSha256: '2'.repeat(64),
+      artifactSha256: `sha256:${'2'.repeat(64)}`,
       sourceCommit: '3'.repeat(40),
       classification: {
         kind: 'normal',
@@ -102,7 +103,7 @@ function update(available: boolean): RuntimeUpdate {
       },
       notes: ['Updates the signed management interface.', 'Preserves your configuration and Durable Object state.'],
     } : null,
-    rollback: { available: true, release: 'gateway-v0.1.11', artifactSha256: '4'.repeat(64), dataRollback: false },
+    rollback: { available: true, release: 'gateway-v0.1.11', artifactSha256: `sha256:${'4'.repeat(64)}`, dataRollback: false },
   }
 }
 
@@ -219,7 +220,10 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
 
   async cancelSourceAction(actionId: string): Promise<SourceAction> { return this.getSourceAction(actionId) }
 
-  async prepareRuntimeAction(operation: RuntimeOperation): Promise<PreparedAction & { operation: RuntimeOperation }> {
+  async prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }> {
+    const current = await this.getUpdate()
+    const target = operation === 'update' ? current.available : current.rollback.available ? current.rollback : null
+    if (expectedTarget && (!target || target.release !== expectedTarget.release || target.artifactSha256 !== expectedTarget.artifactSha256)) throw new GatewayApiError(409, 'runtime_action_conflict')
     return { schemaVersion: 1, actionId: ACTION_ID, operation, status: 'authorization_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), handoffUrl: HANDOFF }
   }
 
@@ -230,8 +234,8 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       operation: 'update',
       status: 'succeeded',
       stage: 'activated',
-      from: { release: 'gateway-v0.1.12', artifactSha256: '1'.repeat(64) },
-      to: { release: 'gateway-v0.1.13', artifactSha256: '2'.repeat(64) },
+      from: { release: 'gateway-v0.1.12', artifactSha256: `sha256:${'1'.repeat(64)}` },
+      to: { release: 'gateway-v0.1.13', artifactSha256: `sha256:${'2'.repeat(64)}` },
       expiresAt: new Date(Date.now() + 600_000).toISOString(),
       failureCode: null,
     }

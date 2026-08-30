@@ -224,7 +224,7 @@ export interface GatewayAdminApi {
   prepareSourceAction(revision: number, sourceId: string): Promise<PreparedAction>
   getSourceAction(actionId: string): Promise<SourceAction>
   cancelSourceAction(actionId: string): Promise<SourceAction>
-  prepareRuntimeAction(operation: RuntimeOperation): Promise<PreparedAction & { operation: RuntimeOperation }>
+  prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }>
   getRuntimeAction(actionId: string): Promise<RuntimeAction>
   prepareTeardownAction(): Promise<PreparedAction>
   getTeardownAction(actionId: string): Promise<TeardownAction>
@@ -234,6 +234,9 @@ export const SOURCE_ADDITION_PAUSED_MESSAGE = 'New-source installation is tempor
 export const GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE = 'BigQuery requires a manually registered Google OAuth client. Cloudflare currently documents manual OAuth without an admin credential flow, so one operator connection for your team is not supported. No credentials have been requested. Keep Require user auth off; see the BigQuery setup guide.'
 
 const ERROR_MESSAGES = new Map([
+  ['webmcp_input_invalid', 'The tool arguments do not match the declared schema. Review the tool inputs before retrying.'],
+  ['webmcp_call_cancelled', 'The call was canceled before the operation started.'],
+  ['webmcp_handoff_invalid', 'The authorization handoff could not be verified. Check the recorded action before retrying.'],
   ['access_required', 'Your Cloudflare Access session is no longer active. Sign in again and refresh.'],
   ['origin_required', 'Reload this management page before making changes.'],
   ['team_conflict', 'Team access changed in another tab. Refresh before preparing another change.'],
@@ -288,6 +291,10 @@ export class GatewayApiError extends Error {
     this.status = status
     this.code = code
   }
+}
+
+export function safeGatewayErrorCode(code: string): string {
+  return ERROR_MESSAGES.has(code) ? code : 'request_failed'
 }
 
 function validControlPlaneOrigin(value: string): boolean {
@@ -370,9 +377,9 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     })
   }
 
-  prepareRuntimeAction(operation: RuntimeOperation): Promise<PreparedAction & { operation: RuntimeOperation }> {
+  prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }> {
     return this.#request('/api/update-actions', runtimePreparedActionSchema, {
-      method: 'POST', body: JSON.stringify({ schemaVersion: 1, operation }),
+      method: 'POST', body: JSON.stringify({ schemaVersion: 1, operation, expectedTarget }),
     })
   }
 

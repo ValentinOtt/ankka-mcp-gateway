@@ -82,6 +82,26 @@ describe('HttpGatewayAdminApi', () => {
     )
   })
 
+  it('sends the exact reviewed runtime target without changing legacy request shape', async () => {
+    const action = {
+      schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, status: 'authorization_required',
+      expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: `https://deploy.ankka.ai/manage#${'a'.repeat(40)}`, operation: 'update',
+    }
+    const fetch = vi.fn(async () => Response.json(action))
+    vi.stubGlobal('fetch', fetch)
+    const api = new HttpGatewayAdminApi()
+    const expectedTarget = { release: 'gateway-v1.2.3', artifactSha256: `sha256:${'b'.repeat(64)}` }
+    await api.prepareRuntimeAction('update', expectedTarget)
+    expect(fetch).toHaveBeenLastCalledWith('/api/update-actions', expect.objectContaining({
+      body: JSON.stringify({ schemaVersion: 1, operation: 'update', expectedTarget }),
+      credentials: 'same-origin', redirect: 'error',
+    }))
+    await api.prepareRuntimeAction('update')
+    expect(fetch).toHaveBeenLastCalledWith('/api/update-actions', expect.objectContaining({
+      body: JSON.stringify({ schemaVersion: 1, operation: 'update' }),
+    }))
+  })
+
   it('requires explicit source-install availability and defaults an older response to disabled', async () => {
     const base = { schemaVersion: 1, revision: 4, applyMode: 'oauth_per_action', sources: [] }
     for (const installationEnabled of [undefined, false, true]) {

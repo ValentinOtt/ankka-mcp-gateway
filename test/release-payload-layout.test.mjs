@@ -10,14 +10,14 @@ const ROOT = new URL('../payload/', import.meta.url);
 const ADMIN_ROOT = new URL('../apps/admin/dist/', import.meta.url);
 const COMPONENTS = Object.freeze({
   admin: null,
-  installer: ['assets/installer-8f3e8eab.js', 'assets/installer-b89856ad.css', 'index.html'],
+  installer: ['assets/installer-8eaba3a8.js', 'assets/installer-b89856ad.css', 'index.html'],
   worker: ['index.js'],
   'worker-cleanup': ['index.js'],
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: 'e3d4d101537f0acf5f170fb8e24fc220cc75fbc120f6540117b6f5629db29be3',
-  worker: '337780c991231c490bf6907dd5fa5c7c4c41d0e000db7885882bd0c286ec149c',
+  installer: 'c7426a67a997744503a30237decab8b66b8744e153615a1edbf1492a89cf32da',
+  worker: 'fb05a95f482ce5a5109016a9ff86e47d5b6aa40d546076e3c5258cbba1684aca',
   'worker-cleanup': '294518970598816944bae9e5e6f6411d3aa7ce00238e81e6b5abebb6b449e46f',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
@@ -191,7 +191,7 @@ test('admin and installer HTML use external same-origin assets without inline ex
 
 test('installer assets cover the exact hosted session, plan, deploy, result, and removal contract', async () => {
   const html = await readFile(new URL('installer/index.html', ROOT), 'utf8');
-  const script = await readFile(new URL('installer/assets/installer-8f3e8eab.js', ROOT), 'utf8');
+  const script = await readFile(new URL('installer/assets/installer-8eaba3a8.js', ROOT), 'utf8');
   assert.doesNotMatch(`${html}\n${script}`, /\bcustomers?\b/iu);
   for (const route of ['/', '/gateway', '/review', '/deploy', '/manage', '/oauth/handoff', '/oauth/callback', '/result']) {
     if (route !== '/') assert.match(`${html}\n${script}`, new RegExp(route.replace('/', '\\/'), 'u'));
@@ -265,6 +265,10 @@ test('admin assets provide safe source discovery, signed updates, one-time apply
   for (const tool of [
     'list_mcp_sources', 'discover_mcp_source', 'save_mcp_source_draft', 'apply_mcp_source',
     'check_gateway_update', 'review_gateway_update', 'apply_gateway_update', 'rollback_gateway_update',
+    'get_gateway_status', 'get_gateway_capabilities', 'get_gateway_team', 'save_gateway_team',
+    'get_gateway_team_action', 'cancel_gateway_team_action', 'get_mcp_source_action',
+    'cancel_mcp_source_action', 'get_gateway_runtime_action', 'review_gateway_teardown',
+    'get_gateway_teardown_action',
   ]) {
     assert.ok(script.includes(tool));
   }
@@ -273,6 +277,8 @@ test('admin assets provide safe source discovery, signed updates, one-time apply
   assert.match(script, /release channel/u);
   assert.match(script, /untrustedContentHint/u);
   assert.match(script, /document\.modelContext/u);
+  assert.match(script, /approvedArtifactSha256/u);
+  assert.match(script, /expectedTarget/u);
   const sourceFiles = (await readdir(new URL('../apps/admin/src/', import.meta.url), { recursive: true }))
     .filter((file) => /\.(?:ts|tsx)$/u.test(file));
   const source = (await Promise.all(sourceFiles.map((file) => readFile(new URL(`../apps/admin/src/${file}`, import.meta.url), 'utf8')))).join('\n');
