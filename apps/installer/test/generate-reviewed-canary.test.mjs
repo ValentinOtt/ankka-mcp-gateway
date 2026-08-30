@@ -223,8 +223,21 @@ describe('offline reviewed canary artifact generator', () => {
           schemaVersion: 1,
           toolchain: {
             schemaVersion: 1,
-            bundler: { name: 'esbuild', version: '0.28.1' },
-            wrangler: { name: 'wrangler', version: '4.125.0' },
+            packageLock: { path: 'package-lock.json' },
+            bundler: {
+              name: 'esbuild', version: '0.28.1',
+              packageFile: { path: 'node_modules/esbuild/package.json' },
+              runtimeFile: { path: 'node_modules/esbuild/lib/main.js' },
+              launcherFile: { path: 'node_modules/esbuild/bin/esbuild' },
+              nativeBinaryFile: { path: `node_modules/@esbuild/${process.platform}-${process.arch}/bin/esbuild` },
+            },
+            wrangler: {
+              name: 'wrangler', version: '4.127.0',
+              packageFile: { path: 'node_modules/wrangler/package.json' },
+              cliFile: { path: 'node_modules/wrangler/bin/wrangler.js' },
+              runtimeFile: { path: 'node_modules/wrangler/wrangler-dist/cli.js' },
+              schemaFile: { path: 'node_modules/wrangler/config-schema.json' },
+            },
           },
         },
       });

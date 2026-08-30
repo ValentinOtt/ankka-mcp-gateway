@@ -217,7 +217,6 @@ export function TeamPage() {
   return (
     <div>
       <PageHeader
-        eyebrow="Gateway access"
         title="Team"
         description={team?.editingEnabled ? 'Choose which MCP sources each person can use. Save applies the whole change through your gateway in your Cloudflare account.' : 'Inspect the source access saved for your team and the tools each source shares.'}
         action={<Button variant="secondary" className="pressable inline-flex items-center gap-2" loading={loading} disabled={isBusy || saving || (!needsRefresh && !recorded && changed)} onClick={() => void refresh()}><ArrowsClockwise size={16} /> Refresh</Button>}

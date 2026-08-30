@@ -22,9 +22,7 @@ export function OverviewPage() {
   return (
     <div>
       <PageHeader
-        eyebrow="Your gateway"
         title={status.gateway.name}
-        description="Manage approved MCP sources and software updates from the Worker running inside your Cloudflare account. MCP source credentials stay in Cloudflare, and the gateway sends no telemetry to Ankka."
         action={
           <Button variant="secondary" className="pressable" loading={isLoading} onClick={() => void reload()}>
             Refresh
