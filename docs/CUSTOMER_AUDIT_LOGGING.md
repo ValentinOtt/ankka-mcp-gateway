@@ -1,4 +1,6 @@
-# Customer-owned portal audit logging
+# Portal audit logging in your account
+
+<a id="customer-owned-portal-audit-logging"></a>
 
 This is optional reference material, not a founding-team deployment gate. The
 initial BLS deployment relies on Cloudflare Access, a shared `readonly` origin
@@ -7,7 +9,7 @@ Logpush, exact Portal-user-to-BLS correlation, or new audit infrastructure.
 
 Cloudflare's account-scoped `mcp_portal_logs` Logpush dataset is the current
 source of per-user MCP Portal audit events. It is configured and retained by
-the customer. Ankka MCP Gateway does not receive a copy and the customer
+your team. Ankka MCP Gateway does not receive a copy and the gateway
 runtime sends no telemetry to Ankka.
 
 > **Availability:** Cloudflare currently documents MCP Portal Logpush as an
@@ -30,25 +32,25 @@ Cloudflare documents enough fields for portal-level actor/tool attribution in
 principle: who used which Portal tool, against which source, at what time, and
 whether the Portal observed success. Qualify the actual fields and values in
 the target account before relying on them. This remains useful when the
-upstream MCP source uses one customer-owned, least-privilege shared service
+upstream MCP source uses one operator-owned, least-privilege shared service
 credential, because Portal authentication and upstream authentication are
 separate layers.
 
 The current dashboard source workflow supports public MCP endpoints and
 standard OAuth-protected endpoints. It fixes **Require user auth** off: one
-customer operator connects the source and Cloudflare Portal stores that source
+gateway operator connects the source and Cloudflare Portal stores that source
 credential; team members still authenticate individually to the Portal. The
 dashboard does not accept a bearer token or custom headers. For a source Worker
 that calls a private origin with a separate shared credential, keep that
-credential in the source Worker's customer-owned secret binding and make the
+credential in the source Worker's operator-owned secret binding and make the
 source independently enforce its read-only operation boundary. Never put the
 origin credential in gateway configuration, a URL, a tool result, or an
 Ankka-hosted request.
 
 ## Minimal source-Worker record without Portal Logpush
 
-When `mcp_portal_logs` is unavailable on the customer's plan, a
-customer-owned source Worker can emit content-free operation evidence to its
+When `mcp_portal_logs` is unavailable on your Cloudflare plan, a
+self-hosted source Worker can emit content-free operation evidence to its
 own Workers log destination. This is a source outcome record, not a substitute
 for Portal actor attribution. Its exact JSON payload has five keys:
 
@@ -82,7 +84,7 @@ The record must never contain arguments, results, response bodies, free-form
 errors, URLs, headers, cookies, tokens, credentials, IP addresses, user-agent
 text, email, user ID, Access identity, session ID, or a client-supplied request
 or correlation identifier. Configure retention and any export entirely in the
-customer's Cloudflare account and confirm Workers log availability for that
+your Cloudflare account and confirm Workers log availability for that
 plan. Ankka receives no copy.
 
 This source record can prove that one allowlisted operation reached the source
@@ -93,7 +95,7 @@ remains heuristic. Do not present it as exact end-to-end attribution.
 ## Minimal export profile
 
 Create an account-scoped Logpush job for `mcp_portal_logs` to a
-customer-controlled destination. Start with only:
+operator-controlled destination. Start with only:
 
 ```text
 Datetime,PortalID,PortalAUD,ServerID,ServerAUD,Method,ToolCallName,
@@ -130,7 +132,7 @@ The published `mcp_portal_logs` field set has no request identifier documented
 as being forwarded to the upstream MCP server. `SessionID` identifies a
 stateful MCP session; it is not documented as an upstream request header and
 may be absent for stateless protocol requests. The gateway also does not proxy
-ordinary MCP traffic, so its customer Worker cannot inject a correlation
+ordinary MCP traffic, so its gateway Worker cannot inject a correlation
 header.
 
 Consequently, joining a Portal event to one exact upstream request by timestamp,
@@ -141,14 +143,14 @@ Close this gap only after a live, documented provider contract supplies a
 shared request identifier, or after a separately reviewed source protocol
 carries a cryptographically authenticated actor/request assertion. An arbitrary
 client-supplied identity or correlation header is not trustworthy. Any future
-identifier must stay customer-owned, contain no credential or request content,
+identifier must stay operator-owned, contain no credential or request content,
 and appear in both Portal and source logs without transiting Ankka.
 
 ## Qualification checklist
 
 Before relying on the export:
 
-1. Verify the Logpush job targets only the customer's sink and selects the
+1. Verify the Logpush job targets only your team's sink and selects the
    reviewed fields.
 2. Call a synthetic read-only tool as two test identities and confirm the
    Portal records distinguish them.

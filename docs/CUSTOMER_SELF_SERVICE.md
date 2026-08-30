@@ -1,23 +1,31 @@
-# Customer self-service
+# Self-service deployment
+
+<a id="customer-self-service"></a>
 
 Ankka MCP Gateway is designed to install into and operate from your Cloudflare
 account. Your MCP Portal, management Worker, Access policies, logs, source
 configuration, and upstream credentials remain under your control.
 
-> **Availability:** customer self-service is not yet open for general use.
-> `https://deploy.ankka.ai` may show an unavailable preview while the first
-> signed public release is prepared. Do not use the current service for a
-> production account.
+> **Availability:** canary preview. Signed [canary releases](https://github.com/ValentinOtt/ankka-mcp-gateway/releases)
+> are available, with a hosted evaluation flow at [deploy.ankka.ai](https://deploy.ankka.ai).
+> Review the exact release before authorizing changes to your account; this is
+> not a stable, production-supported release. If the installer reports that
+> deployment is unavailable, do not bypass its activation checks.
+
+The source installer's disabled default activation is separate from the reviewed
+canary build. Public source does not include live deployment authority or
+signing keys. The [local UI preview](../README.md#run-locally) uses synthetic
+data and cannot deploy a gateway.
 
 ## What you will need
 
-When the public preview opens, installation will require:
+Installation requires:
 
 - a Cloudflare account with an active zone;
 - Cloudflare Zero Trust configured for that account;
 - permission to create Workers, Durable Objects, DNS, Access applications and
   policies, and MCP Portal resources;
-- one hostname for the employee MCP Portal;
+- one hostname for the team's MCP Portal;
 - a different hostname for the management dashboard; and
 - the initial administrators, who also form the initial Portal audience.
 
@@ -66,11 +74,11 @@ The public installer is designed to:
 3. collect the gateway name, two hostnames, and initial administrators;
 4. show the complete secret-free deployment plan;
 5. request a short-lived Cloudflare grant only after you approve that plan;
-6. create and verify the customer management surface and empty MCP Portal; and
+6. create and verify the gateway management surface and empty MCP Portal; and
 7. return the MCP URL and management URL.
 
 Installation does not add an upstream MCP source. Add the first source from the
-customer dashboard after the gateway is ready.
+gateway dashboard after the gateway is ready.
 
 If discovery finds an existing or conflicting installation, the installer
 stops instead of adopting or overwriting it.
@@ -95,15 +103,17 @@ through the dashboard or source-action API until a compatible release restores
 source installation.
 
 - **Overview** shows gateway status, the MCP URL, current release, audience,
-  source state, and the removal entry point.
+  and source state.
 - **Sources** shows existing sources and their selected tools. Adding a source
   is temporarily unavailable in the native-permissions release, including from
   previously prepared installation links. Existing connections are unchanged.
 - **Team** manages who may connect and which existing sources each person can
   use. Administrator rights remain fixed; tool allowlists are shared per source.
   See [Team access](TEAM_ACCESS.md) for verification and recovery limits.
-- **Updates** checks the installed signed release channel and prepares an
-  update or rollback.
+- **Settings** checks the installed signed release channel, prepares an
+  update or rollback, and contains the removal entry point. Older canary
+  versions may label the update screen **Updates**; the current source keeps
+  `/updates` as a redirect to `/settings`.
 
 Permission changes, updates, rollback, and removal require a new short-lived
 Cloudflare authorization. Source draft saves and installation actions are
@@ -113,8 +123,8 @@ bound in its worst-case installed projection is rejected before Durable Object
 storage is changed.
 
 For a protected source, the Portal mapping sets **Require user auth** off. A
-customer operator connects the source once, the credential stays in the
-customer's Cloudflare account, and team members authenticate only to the
+gateway operator connects the source once, the credential stays in your
+Cloudflare account, and team members authenticate only to the
 Gateway Portal. The current dashboard does not offer per-user upstream
 authentication. Ankka does not receive the upstream token.
 
@@ -125,24 +135,38 @@ events. It prefers MCP protocol `2026-07-28` and falls back to the compatible
 `2025-06-18` initialize and session flow. Tool pagination is bounded, and the
 Worker retains no upstream MCP session after discovery.
 
-A protected source is recognized only from the standard Bearer
+A protected source is normally recognized from the standard Bearer
 `WWW-Authenticate` challenge with a public HTTPS `resource_metadata` URL.
+The exact Google BigQuery MCP endpoint is also recognized as protected even
+though its tool catalogue is public. Its shared operator connection is currently
+blocked: Cloudflare's documented manual OAuth flow has no admin credential
+flow. The dashboard shows the public tools and the reason for the block; it does
+not accept Google secrets or offer per-user Google authentication as a fallback.
+See [BigQuery Google authentication](BIGQUERY_GOOGLE_AUTH.md) for current
+compatibility evidence, least-privilege setup, cost-control gaps and acceptance
+gates.
+
 Credential-bearing URLs, private-network endpoints, custom credential headers,
 and manually supplied bearer tokens are rejected.
 
 ## Connecting an MCP client
 
-Use the employee-facing MCP Portal URL returned after installation. The client
-must support the MCP transport exposed by Cloudflare and complete the
-customer's Cloudflare Access flow.
+Use the team-facing MCP Portal URL returned after installation. The client
+must support the MCP transport exposed by Cloudflare and complete your
+Cloudflare Access flow.
 
-Only sources and exact tools approved by the customer are exposed. An MCP tool
+Only sources and exact tools approved by the operator are exposed. An MCP tool
 name or description is not proof that the operation is safe; upstream
 authorization remains authoritative.
 
+Qualify the client and source together using the
+[connection review checklist](README.md#before-sharing-a-gateway). A successful
+catalogue discovery or local preview is not proof of live authentication,
+execution, or compatibility with every MCP client.
+
 ## Updates and rollback
 
-Updates are never automatic. A customer administrator reviews the signed
+Updates are never automatic. A gateway administrator reviews the signed
 release and approves a new Cloudflare authorization.
 
 An ordinary update persists only Worker code and management asset changes. It
@@ -159,9 +183,9 @@ blocked. Rolling back code would not undo saved permissions or Access policies.
 The original successful installer session can prepare a same-session removal
 plan until the deadline shown by the installer. The initial session lasts 30
 minutes; interrupted-operation recovery may be retained for at most 24
-additional hours. A returning customer instead starts with fresh, read-only
+additional hours. An operator returning to an existing gateway starts with fresh, read-only
 existing-gateway detection and then opens a receipt-bound handoff from the
-customer dashboard.
+gateway dashboard.
 
 Both paths show the exact teardown plan and require a new Cloudflare
 authorization before any deletion.
@@ -171,7 +195,7 @@ including for older prepared removal links. The original ownership receipt is
 preserved; a later compatible release is required to support changed audiences.
 
 Deletion authority comes from the checksum-valid receipt stored by the
-customer gateway, not from a hostname, resource name, or provider identifier.
+gateway, not from a hostname, resource name, or provider identifier.
 The flow removes only resources proven to belong to that installation and
 stops on drift or ambiguity.
 
@@ -185,7 +209,7 @@ gateway may need separate revocation.
 
 ## Experimental browser tools
 
-When a browser provides `document.modelContext`, the installer and customer
+When a browser provides `document.modelContext`, the installer and gateway
 dashboard register WebMCP tools as a progressive enhancement. Browsers without
 that API keep the normal interface.
 

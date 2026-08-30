@@ -81,7 +81,19 @@ differ, do not use this tool to guess the transformation.
 
 Neither the OpenAPI document nor any source credential is copied into the
 gateway configuration. Gateway config files must remain secret-free; source
-credentials stay in the customer's Cloudflare account.
+credentials stay in the team's Cloudflare account.
+
+### OpenAPI Code Mode adapters
+
+This generator does not define the authorization boundary for Cloudflare's
+`openApiMcpServer()`. That helper exposes the generic MCP tools `search` and
+`execute`, not one MCP tool per OpenAPI `operationId`. A Code Mode adapter must
+bundle a reduced reviewed spec and independently dispatch every host request
+through an exact method/path-to-fixed-origin table. Its Portal tool selection
+is exactly `search` and `execute`; the host table and upstream read-only scope
+are the operation boundary. See the experimental Search Console adapter for
+the isolated pattern. Portal Code Mode must be `off` for that already-Code-Mode
+upstream.
 
 ## Explicit reviewed non-GET selections
 

@@ -4,16 +4,24 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Add documentation-only native provider setup guides to the Sources dashboard,
+  with explicit compatibility, read-only grant, and release prerequisites.
+  These guides do not create source drafts or approve catalog entries.
+- Add an experimental self-hosted MCP v2 reader runtime with fixed provider
+  operations, Cloudflare Access JWT validation, bounded outbound reads, and
+  credentials held only in the deployment account. Initial API readers cover
+  Notion, HubSpot, Zendesk, Gorgias, Search Console domain properties, and GA4;
+  live provider and lifecycle qualification remain separate release gates.
 - Prepare the initial public preview source for Ankka MCP Gateway.
 - Add secret-free configuration validation and deterministic offline planning.
-- Add the customer-owned Cloudflare runtime and management dashboard.
+- Add the self-hosted Cloudflare runtime and management dashboard.
 - Add the optional fail-closed hosted installer and operation-scoped OAuth
   flow.
 - Add signed release, update, rollback, recovery, and receipt-owned removal
   contracts.
 - Add exact read-only source allowlists and synthetic end-to-end fixtures.
 - Keep the Portal as the single employee authentication layer: newly added
-  OAuth-protected sources are connected once by a customer operator and mapped
+  OAuth-protected sources are connected once by a gateway operator and mapped
   with `on_behalf: false`, while legacy source records remain readable for safe
   lifecycle handling.
 - Raise repository-local contracts to a 500-tool bound and add a reproducible
@@ -27,11 +35,11 @@ Notable public product and repository changes are recorded here.
   first-party Cloudflare dogfood runbook covering two create-only releases,
   install, update, rollback, recovery, receipt-bound removal, and exact cleanup;
   live qualification remains pending.
-- Document customer-owned audit logging with a minimal source-Worker fallback,
+- Document operator-owned audit logging with a minimal source-Worker fallback,
   large-source Code Mode qualification with an exact live-catalogue gate,
   per-source Access groups, a bounded live canary, and the post-preview
   governance roadmap.
-- Document the customer credential boundary, no-telemetry runtime, and
+- Document the source-credential custody boundary, no-telemetry runtime, and
   identifier-free hosted-installer analytics.
 - Add public-source, license, history, and clean-build checks.
 - Scope the public-history check to the publishable surface (checked-out

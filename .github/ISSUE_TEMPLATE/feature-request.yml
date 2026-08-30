@@ -1,5 +1,5 @@
 name: Feature request
-description: Propose a change within the customer-owned gateway boundary.
+description: Propose a change within the self-hosted gateway boundary.
 title: "[Feature]: "
 labels: [enhancement]
 body:
@@ -7,7 +7,7 @@ body:
     id: problem
     attributes:
       label: Problem
-      description: What customer or operator problem should this solve?
+      description: What user or gateway operator problem should this solve?
     validations:
       required: true
   - type: textarea

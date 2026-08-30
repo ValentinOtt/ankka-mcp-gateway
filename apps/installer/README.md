@@ -24,22 +24,22 @@ repository.
 The installer implements:
 
 - Cloudflare OAuth discovery and operation-specific authorization;
-- secret-free customer configuration and plan review;
+- secret-free gateway configuration and plan review;
 - signed release verification;
 - bounded installation, progress, recovery, and removal coordination; and
 - fixed session-scoped hosted analytics.
 
-The customer's management Worker, Durable Object, MCP Portal, Access policies,
-DNS, logs, and upstream credentials remain in the customer's account.
+Your management Worker, Durable Object, MCP Portal, Access policies,
+DNS, logs, and upstream credentials remain in your Cloudflare account.
 
 MCP source-provider credentials never enter the installer. The separate
 Cloudflare deployment grant is request-local, is used only for the
-customer-approved operation, is subject to a bounded revocation attempt, and
+operator-approved operation, is subject to a bounded revocation attempt, and
 is then discarded locally.
 
 See:
 
-- [Customer self-service](../../docs/CUSTOMER_SELF_SERVICE.md)
+- [Self-service deployment](../../docs/CUSTOMER_SELF_SERVICE.md)
 - [Architecture](../../docs/ARCHITECTURE.md)
 - [Security model](../../docs/SECURITY_MODEL.md)
 - [Hosted installer analytics](../../docs/HOSTED_INSTALLER_ANALYTICS.md)

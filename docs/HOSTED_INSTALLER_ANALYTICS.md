@@ -3,7 +3,7 @@
 An active, maintainer-approved Ankka-hosted installer records a session-scoped
 product funnel by default. The checked-in disabled and rollback builds have no
 analytics binding and emit no events. Running this source yourself does not
-send events to Ankka, and customer-deployed gateways never receive the
+send events to Ankka, and self-hosted gateways never receive the
 binding. Preferring no analytics is a supported choice: deploy from this
 repository instead of the hosted installer.
 
@@ -14,7 +14,7 @@ The installer shows this notice:
 > browser family, and, for page views, the referring site—for three months in
 > Cloudflare Analytics Engine. Analytics set no cookies and store no IP
 > address, raw user agent, or identifier that outlives the session. Cloudflare
-> separately processes hosted-zone reliability data. Customer gateways do not
+> separately processes hosted-zone reliability data. Self-hosted gateways do not
 > report usage to Ankka. Prefer no analytics? Deploy from the public source
 > repository instead.
 
@@ -30,7 +30,7 @@ Cloudflare documents Analytics Engine retention as three months. See
 
 Writes are best-effort and non-authoritative. A missing binding, invalid build
 label, quota issue, or provider failure drops the event and cannot delay,
-approve, retry, fail, or change a customer operation.
+approve, retry, fail, or change a gateway operation.
 
 ## Exact schema
 
@@ -93,7 +93,7 @@ from the request the installer is already handling.
 The dataset has no field for:
 
 - IP address, colo, raw user agent, or referrer path or query;
-- user, visitor, email, or customer identifier, or any identifier that
+- user, visitor, email, or account identifier, or any identifier that
   outlives the installer session, including hashed forms of those;
 - Cloudflare account, zone, hostname, gateway, installation, plan, or provider
   resource;
@@ -128,5 +128,5 @@ immediate disposal of the client IP address, but the cited page does not state a
 retention period for the remaining NEL data; that processing is governed by
 Cloudflare's service and policies.
 
-NEL is not configured in customer gateway code. A customer's own Cloudflare
+NEL is not configured in gateway code. A team's own Cloudflare
 zone may independently apply its own reporting policy.

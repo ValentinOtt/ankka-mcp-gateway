@@ -102,7 +102,7 @@ export function WebMcpTools() {
       const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
       await modelContext.registerTool({
         name: 'list_mcp_sources',
-        description: 'List installed and saved-draft MCP sources from customer-owned gateway state. Performs no provider writes.',
+        description: 'List installed and saved-draft MCP sources from gateway state. Performs no provider writes.',
         inputSchema: { type: 'object', properties: {}, additionalProperties: false },
         annotations: readOnly,
         execute: () => response(refreshSources),
@@ -123,7 +123,7 @@ export function WebMcpTools() {
       if (sources.installationEnabled === true) {
         await modelContext.registerTool({
           name: 'save_mcp_source_draft',
-          description: 'Recheck an MCP endpoint and save its exact tool allowlist in customer-owned state. OAuth-protected sources use one operator connection; this does not change the live Cloudflare Portal.',
+          description: 'Recheck an MCP endpoint and save its exact tool allowlist in gateway state. OAuth-protected sources use one operator connection; this does not change the live Cloudflare Portal.',
           inputSchema: {
             type: 'object', additionalProperties: false,
             properties: {
@@ -161,7 +161,7 @@ export function WebMcpTools() {
       }
       await modelContext.registerTool({
         name: 'check_gateway_update',
-        description: 'Check the anonymous signed release channel against this customer-owned gateway. Performs no provider writes.',
+        description: 'Check the anonymous signed release channel against your gateway. Performs no provider writes.',
         inputSchema: { type: 'object', properties: {}, additionalProperties: false },
         annotations: { ...readOnly, openWorldHint: true },
         execute: () => response(refreshUpdate),
@@ -221,7 +221,7 @@ export function WebMcpTools() {
       })
       await modelContext.registerTool({
         name: 'review_gateway_teardown',
-        description: 'Prepare a one-time customer-receipt handoff for review in the hosted installer. This does not delete resources or approve Cloudflare consent.',
+        description: 'Prepare a one-time installation-receipt handoff for review in the hosted installer. This does not delete resources or approve Cloudflare consent.',
         inputSchema: { type: 'object', properties: {}, additionalProperties: false },
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true, untrustedContentHint: false },
         execute: () => response(async () => {

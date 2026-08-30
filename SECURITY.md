@@ -8,7 +8,7 @@ credential. Use GitHub's
 
 If private reporting is unavailable, open the detail-free
 [Private reporting unavailable issue form](https://github.com/ValentinOtt/ankka-mcp-gateway/issues/new?template=private-reporting-unavailable.yml).
-Do not include technical details, credentials, customer information, private
+Do not include technical details, credentials, private information, private
 hostnames, or provider identifiers. Maintainers will restore a private channel
 before requesting more information.
 
@@ -24,17 +24,17 @@ visibility or a signed preview artifact does not imply production support.
 ## Security boundary
 
 - Upstream provider credentials must be authorized and stored in the
-  customer's Cloudflare account.
+  team's Cloudflare account.
 - MCP source credentials must not be submitted to an Ankka API, committed to
   this repository, placed in configuration, or emitted in logs, errors,
   analytics, tests, or support material.
 - The hosted installer uses a short-lived, operation-scoped Cloudflare OAuth
   grant. The grant exists only in request-local memory for the
-  customer-approved operation and is not persisted or reused.
-- Customer gateway sources are read-only and use exact tool allowlists.
-- Customer-deployed gateways send no telemetry to Ankka.
-- Updates require signed release evidence and explicit customer approval.
-  Removal additionally requires customer-owned, receipt-bound authority.
+  operator-approved operation and is not persisted or reused.
+- Gateway sources are read-only and use exact tool allowlists.
+- Self-hosted gateways send no telemetry to Ankka.
+- Updates require signed release evidence and explicit operator approval.
+  Removal additionally requires operator-owned, receipt-bound authority.
 
 See [the security model](docs/SECURITY_MODEL.md) for the complete trust and
 authorization design.
