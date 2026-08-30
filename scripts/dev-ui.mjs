@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 
 const previews = [
   {
-    label: 'Customer dashboard',
+    label: 'Gateway dashboard',
     command: ['run', 'dev', '--workspace', '@ankka/gateway-admin'],
     env: { VITE_GATEWAY_UI_PREVIEW: '1' },
   },
@@ -29,11 +29,11 @@ Deployment wizard
   Removal     http://127.0.0.1:5731/result?preview=removal
   Source auth http://127.0.0.1:5731/manage
 
-Customer dashboard
+Gateway dashboard
   Overview    http://127.0.0.1:5730/?preview=ready
   Sources     http://127.0.0.1:5730/sources?preview=ready
-  Updates     http://127.0.0.1:5730/updates?preview=ready
-  Update      http://127.0.0.1:5730/updates?preview=update
+  Settings    http://127.0.0.1:5730/settings?preview=ready
+  Update      http://127.0.0.1:5730/settings?preview=update
   Empty       http://127.0.0.1:5730/?preview=empty
   Error       http://127.0.0.1:5730/?preview=error
 

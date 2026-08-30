@@ -51,7 +51,7 @@ function api(): GatewayAdminApi {
   }
 }
 
-describe('OverviewPage teardown entry', () => {
+describe('SettingsPage danger zone', () => {
   const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
   afterEach(() => {
     window.history.replaceState(null, '', '/')
@@ -65,7 +65,9 @@ describe('OverviewPage teardown entry', () => {
 
     render(<GatewayProvider api={api()}><RouterProvider router={router} /></GatewayProvider>)
 
-    const button = await screen.findByRole('button', { name: 'Review teardown plan' })
+    expect(await screen.findByRole('heading', { name: 'Settings' })).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/settings')
+    const button = screen.getByRole('button', { name: 'Review teardown plan' })
     const section = button.closest('section')
     await waitFor(() => expect(section).toHaveFocus())
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' })
