@@ -1,7 +1,7 @@
 # Team access: native source audiences
 
 Status: implementation candidate, not yet deployed or live-qualified. The
-Worker includes native permission preparation, policy updates, verification,
+Worker includes customer-local permission saves, policy updates, verification,
 and recovery. Do not treat local tests as proof of Cloudflare enforcement.
 This release deliberately pauses adding sources to an installed Gateway. Its
 native permissions apply only to existing sources. Release and live acceptance
@@ -12,6 +12,13 @@ to add its first source in this release. Do not use it for new-source onboarding
 or publish getting-started instructions that promise that workflow. Existing
 installed sources continue to work while their team permissions are managed.
 
+An administrator edits the complete roster and source assignments, then clicks
+**Save** once. The dashboard sends the batch to its own Worker; the Worker
+updates and verifies the receipt-owned Cloudflare Access policies. Team saves
+do not contact `deploy.ankka.ai`, request installer OAuth, or enable a temporary
+`workers.dev` route. Cloudflare continues enforcing access at the Portal and
+source boundary.
+
 The read-only view reports saved installation configuration, not a fresh
 Cloudflare policy read. It uses the runtime administrator list separately from
 the saved source audience. Changes made directly in Cloudflare are not reflected
@@ -20,9 +27,9 @@ in this view.
 ## Try the local preview
 
 Run `VITE_GATEWAY_UI_PREVIEW=1 npm run dev:admin`, then open `/team`.
-The preview uses synthetic identities only and never follows the permission
-authorization link to the real installer. Use `/team?preview=team-readonly` to
-inspect the release-gated state and `/team?preview=team-recovery` to inspect a
+The preview uses synthetic identities only and never changes Cloudflare.
+Use `/team?preview=team-readonly` to inspect the unavailable state and
+`/team?preview=team-recovery` to inspect a
 recorded partial change. Production requests cannot enable editing with an
 environment variable or request field.
 
@@ -40,6 +47,8 @@ environment variable or request field.
 - Pass the full repository checks and the two-person live acceptance checks
   below before enabling permission editing. No live permissions are changed by
   this draft.
+- Review and approve the new standing credential separately. A normal update
+  cannot create it. Follow the migration steps below before provisioning it.
 
 The native-permissions slice manages who may connect to your Gateway
 and which installed MCP sources each person may use. It projects exact email
@@ -67,6 +76,81 @@ Source Access policies apply to the human Portal identity independently of
 `on_behalf: false`. The Portal may continue using its stored operator credential;
 the source credential is not an administrator identity for this dashboard.
 Sources must remain protected against direct URL access outside the Portal.
+
+## Customer-owned management credential
+
+The optional Worker secret is named `ANKKA_TEAM_MANAGEMENT_TOKEN`. It must be a
+distinct Cloudflare API token created by your administrator for this purpose.
+Never use an installer OAuth grant, a source credential, or an inbound Access
+token. An Access login authenticates the administrator; it is not authority to
+write Cloudflare policies.
+
+The minimum documented permissions for the current implementation, reviewed
+against Cloudflare's API reference on 2026-08-30, are:
+
+| Account permission | Required calls |
+| --- | --- |
+| **Access: Apps and Policies — Edit** (API name **Write**) | List Access applications, read each owned application, list its complete policy set, and update its exact owned policy. Write also authorizes those reads; a separate Read grant is unnecessary. |
+| **MCP Portals — Read** | Read the exact Portal and its configured source mappings before and after policy changes. Portal Write is unnecessary. |
+
+Restrict both account permissions to **one specific account: your gateway's
+account**. No Workers, DNS, account-settings, memberships, user-details,
+source-OAuth, token-management, or session-revocation permission is needed by
+Team execution. The administrator's separate ability to configure a Worker
+secret is not permission to add to this runtime token.
+
+Cloudflare documents token resource scopes at the account, zone, and user level;
+it does not document per-Access-policy isolation for this permission. Treat this
+token as broader authority to administer Access applications and policies in
+the selected account, including unrelated applications. The Worker's exact
+receipt and policy checks narrow its use in this implementation; they do not
+narrow what a stolen token could do. Do not create the token unless you accept
+that standing authority. The documented minimum still requires live validation;
+do not silently add broader permissions if a provider call fails.
+
+Sources: [policy update](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/subresources/policies/methods/update/),
+[application list](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/methods/list/),
+[application detail](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/methods/get/),
+[complete policy list](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/subresources/policies/methods/list/),
+[Portal detail](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/ai_controls/subresources/mcp/subresources/portals/methods/read/),
+[permission groups](https://developers.cloudflare.com/fundamentals/api/reference/permissions/),
+[token resource scopes](https://developers.cloudflare.com/fundamentals/api/how-to/create-via-api/).
+
+### Provision, rotate, and revoke directly in Cloudflare
+
+Perform these steps yourself in Cloudflare after approving the compatible
+release and standing authority. Do not give the token to Ankka, an assistant,
+the installer, a support ticket, or the gateway dashboard.
+
+1. In Cloudflare's API Tokens page, create a custom API token with only the two
+   permissions above and only the gateway's account. Choose an appropriate
+   expiry and keep any recovery copy in your own secret manager. Do not use a
+   Global API key or place the value in a repository, shell argument, URL,
+   environment file, screenshot, or deployment output.
+2. In **Workers & Pages**, select the exact gateway Worker, then **Settings →
+   Variables and Secrets → Add**. Choose **Secret**, name it
+   `ANKKA_TEAM_MANAGEMENT_TOKEN`, and paste the value directly into Cloudflare.
+   Select **Deploy**. This changes the Worker version and is a separate,
+   explicitly approved customer operation.
+3. Reopen Team. Its configuration status does not prove that the token is valid;
+   Save performs the required provider verification. A missing, expired, revoked,
+   or under-permissioned token stops the operation and retains recovery state.
+   There is no fallback to hosted OAuth.
+4. To rotate, create a replacement with the same minimum permissions, replace
+   this one Secret in Cloudflare, verify the deployed secret binding and a
+   reviewed Team operation, then revoke the old token in Cloudflare. If exposure
+   is suspected, revoke first and accept a temporary Team editing outage. Never
+   restore an older Worker version to restore a token.
+5. To disable standing management authority, revoke/delete the token in
+   Cloudflare's API Tokens page and remove this Secret from the Worker. Removing
+   only the binding does not revoke the token or erase it from historical Worker
+   versions. Revocation stops further Team writes; it does not undo already saved
+   policies, terminate Portal sessions, or clear an uncertain operation.
+
+The gateway returns only fixed status and error codes, never the credential or
+raw provider errors. Do not use token-printing diagnostic commands or share raw
+provider responses. See Cloudflare's [token creation](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)
+and [Worker secret instructions](https://developers.cloudflare.com/workers/configuration/secrets/).
 
 ## Pure module contract
 
@@ -117,8 +201,8 @@ The Worker records the exact proposed roster and a per-policy write intent in
 your Durable Object before sending a policy update. A failed or uncertain
 request retains that proposal for fresh readback and recovery; it does not
 claim that Cloudflare rolled changes back. Only a definitely unstarted action
-can be canceled. Grants remain request-local and the roster is not included in
-the hosted installer's handoff.
+can be canceled. The management credential remains in the Worker environment
+and request-local execution; neither it nor the roster is sent to Ankka.
 
 Automatic teardown becomes unavailable after the first policy write is armed.
 It stays unavailable until a later compatible release explicitly supports the
@@ -131,6 +215,88 @@ actions, existing policies, credentials, tool allowlists, or ownership receipts.
 Read/status and safe cancellation remain available. Previously interrupted
 source installations may need a later compatible release to resume; this
 release does not discard their recovery records or claim they were rolled back.
+
+## Migration from the v16 OAuth flow
+
+`gateway-v0.1.16` does not have this credential contract. Its code-only updater
+cannot silently add a secret, and its exact release-contract validation does
+not accept this changed binding contract. A retained Team proposal also blocks
+ordinary lifecycle operations. Do not bypass those checks or delete pending
+state to make an update proceed.
+
+Before live work, approve a maintenance deployment built from the reviewed
+current source with the new contract, preserving the existing Durable Object,
+source configuration, ownership receipts, credentials, and exact pending Team
+proposal and journal. Verify the current v16 bytes, current policies, and
+whether the proposal is unstarted or has uncertain writes; a previously blocked
+callback is not proof that nothing changed. Reconcile any uncertain provider
+state before proceeding. Keep unrelated dashboard and connector work out of an
+older maintenance checkout.
+
+The maintenance plan must also explicitly reconcile the release bookkeeping in
+the same customer Durable Object. Deploying new code alone leaves
+`ankka-mcp-gateway/runtime-updates/v1` at v16; `prepareRuntimeAction` deliberately
+refuses future updates when its `current.release` or `current.artifactSha256`
+differs from the deployed environment. Do not delete this key or add an
+automatic reset to make that check pass. This candidate provides no maintenance
+migration endpoint or command; the following narrow state transition still
+requires a reviewed customer-local migration mechanism before live migration:
+
+1. Capture and validate the existing update record and its revision. Resolve
+   any pending or uncertain runtime operation first; preserve the action
+   history without fabricating a successful update. Keep the Team proposal,
+   its journal, and all source/lifecycle records unchanged.
+2. Verify the maintenance release signature, exact deployed Worker bytes,
+   bindings, and sole active deployment at 100%. The new record's `current`
+   must contain that release identifier, its `sha256:`-prefixed aggregate
+   artifact digest, and the provider-verified active Worker version ID. Its
+   release and digest must equal `ANKKA_GATEWAY_RELEASE` and
+   `ANKKA_GATEWAY_RELEASE_SHA256`; neither the v16 digest nor a module-only
+   digest is valid.
+3. In a guarded storage transaction requiring the captured update record to
+   remain unchanged, preserve `schemaVersion: 1` and `actions`, advance
+   `revision` by one, and replace only `current` and the incompatible rollback
+   pointer. Set `previous: null`: v16's earlier binding contract is not a
+   supported rollback target. Preserve the old record in customer-controlled
+   migration evidence. If the update key is genuinely absent, explicitly
+   initialize the same verified current tuple with revision 1, no actions, and
+   no previous version; absence must not be manufactured by deleting it.
+4. Update only `release` and `updatedAt` in
+   `ankka-mcp-gateway/public-status/v1` to the verified release and verification
+   time. Re-read both records and the active deployment. Do not rewrite the
+   original ownership receipt, credentials, roster, source state,
+   `teardownDisabled`, or any recovery journal. Drift or ambiguous storage or
+   deployment outcomes require review, not a claimed completed migration.
+
+Deploy the compatible code without a token first, complete the reviewed
+bookkeeping transition, verify that Team fails closed,
+and check that the pending proposal is still visible. Provision the separate
+secret only after the standing authority is approved. Resume the same proposal
+locally with fresh before/after verification; never submit its old OAuth link.
+Only an administrator may explicitly cancel a provably unstarted proposal.
+In-flight or uncertain proposals must remain available for recovery.
+
+The hosted installer rejects both new and already-issued legacy Team OAuth
+handoffs before exchanging a code; the relay and new Worker reject legacy Team
+grant submissions too. No old installer grant is retained or converted into the
+new secret. Existing installer grants from other actions keep their bounded
+revocation and discard behavior. Callback redirect/load-listener fixes for
+installation and updates are separate work.
+
+After migration, compatible forward code updates preserve the optional secret
+without reading its value or provisioning it. Rollback is refused when either
+the current or target version carries this secret, so it cannot resurrect old
+authority. Existing exact-binding teardown restrictions remain; deleting the
+secret or revoking the token does not restore automatic teardown after an armed
+Team write. Any removal or broader migration needs its own review.
+
+Do not rotate or remove the secret, or change Worker deployments directly,
+while an update is running. The updater rechecks the deployment before staging
+and activation and after its final health probe, and refuses automatic
+compensation over an observed unrelated
+deployment. The provider deployment calls used here have no atomic
+compare-and-swap guard: a change between the last read and write can still race.
+Coordinate these customer operations and review uncertain outcomes before retrying.
 
 ## Revocation and acceptance
 
@@ -153,6 +319,12 @@ Before releasing native permission editing, verify with two synthetic identities
    Existing shared tool allowlists and `on_behalf: false` remain unchanged.
 5. Conflicting revisions, extra policies, groups, and unrecognized provider
    settings fail closed without overwriting Cloudflare configuration.
+6. One Save applies the whole batch using only the customer dashboard and
+   Cloudflare API. Record sanitized network evidence that no Team-save request
+   reaches Ankka and no temporary `workers.dev` route is enabled.
+7. Missing/revoked credentials and partial provider failures retain the exact
+   proposal and safe recovery journal without exposing secrets. Compatible
+   updates preserve the secret; unreviewed rollback and teardown remain blocked.
 
 This work does not activate BLS write authority or change its approval gate.
 

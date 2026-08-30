@@ -84,6 +84,8 @@ function transportFixture(options: Readonly<{
   initialSubdomain?: boolean;
   managementDomainService?: string;
   workerTags?: readonly string[];
+  currentBindings?: readonly BoundaryObject[];
+  targetBindings?: readonly BoundaryObject[];
   controlResponse?: ControlResponse;
 }> = {}): TransportFixture {
   let active: readonly DeploymentTarget[] = [{ percentage: 100, version_id: OLD_VERSION }];
@@ -147,7 +149,18 @@ function transportFixture(options: Readonly<{
           id: OLD_VERSION,
           main_module: 'index.js',
           compatibility_date: '2026-08-08',
-          bindings: bindings(),
+          bindings: options.currentBindings ?? bindings(),
+        });
+      }
+      if (path.endsWith(`/workers/workers/${WORKER_ID}/versions/${TARGET_VERSION}`)) {
+        return json({
+          id: TARGET_VERSION,
+          main_module: 'index.js',
+          compatibility_date: '2026-08-08',
+          bindings: options.targetBindings ?? bindings().map((binding) => (
+            binding.name === 'ANKKA_GATEWAY_RELEASE' ? { ...binding, text: 'gateway-v1.0.0' } :
+            binding.name === 'ANKKA_GATEWAY_RELEASE_SHA256' ? { ...binding, text: `sha256:${'0'.repeat(64)}` } : binding
+          )),
         });
       }
       if (path.endsWith(`/workers/scripts/${WORKER_NAME}/deployments`)) {
@@ -190,15 +203,18 @@ function input(transport: (input: RequestInfo | URL, init?: RequestInit) => Prom
 async function updateTransportFixture(
   failure?: 'asset_session' | 'worker_version' | 'version_verify',
   controlResponse?: ControlResponse,
+  teamManagementBinding = false,
 ) {
-  const runtime = await sourceActionRuntimeFixture({
+  const runtimeInput = {
     accountId: ACCOUNT_ID,
     actorEmail: 'owner@example.com',
     managementHostname: 'manage.example.com',
     workerId: WORKER_ID,
     workerName: WORKER_NAME,
     workersSubdomain: 'tenant',
-  });
+  };
+  const runtime = await sourceActionRuntimeFixture(teamManagementBinding
+    ? { ...runtimeInput, inheritTeamManagementFromVersion: OLD_VERSION } : runtimeInput);
   const fixture = transportFixture(controlResponse ? { controlResponse } : {});
   const events: string[] = [];
   const controls: Array<Readonly<{ body: BoundaryObject; versionOverride: string | null }>> = [];
@@ -239,6 +255,7 @@ async function updateTransportFixture(
         bindings: [
           { name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' },
           { name: 'ASSETS', type: 'assets' },
+          ...(teamManagementBinding ? [{ name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'secret_text' }] : []),
           ...Object.entries(oldBindings).map(([name, text]) => ({ name, text, type: 'plain_text' })),
         ],
       });
@@ -277,6 +294,8 @@ async function updateTransportFixture(
           jwt: ASSET_COMPLETION_JWT,
         },
         bindings: v.parse(v.array(v.looseObject({ name: v.string() })), expectedVersion.bindings)
+          .map((binding) => binding.name === 'ANKKA_TEAM_MANAGEMENT_TOKEN'
+            ? { name: binding.name, type: 'inherit', version_id: OLD_VERSION } : binding)
           .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0),
         compatibility_date: expectedVersion.compatibility_date,
         compatibility_flags: [],
@@ -361,6 +380,129 @@ function expectSafeControlError(error: Error, reason: string) {
     expect(JSON.stringify(error)).not.toContain(privateValue);
   }
 }
+
+describe('customer-owned Team management binding', () => {
+  const management = { name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'secret_text' };
+
+  it('preserves only the known secret from the exact active version during a code update', async () => {
+    const fixture = await updateTransportFixture(undefined, undefined, true);
+    await expect(relayRuntimeUpdate(fixture.relayInput)).resolves.toMatchObject({ status: 'succeeded' });
+    expect(fixture.deployments.at(-1)).toEqual([{ version_id: TARGET_VERSION, percentage: 100 }]);
+    expect(fixture.commands).toContain('complete');
+    expect(fixture.subdomainStates).toEqual([true, false]);
+  });
+
+  it('does not stage a candidate when the provider drops the inherited secret', async () => {
+    const fixture = await updateTransportFixture(undefined, undefined, true);
+    const transport = async (requestInput: RequestInfo | URL, init?: RequestInit) => {
+      const response = await fixture.relayInput.transport(requestInput, init);
+      const url = new URL(requestInput instanceof Request ? requestInput.url : requestInput.toString());
+      if (url.pathname.endsWith(`/versions/${TARGET_VERSION}`)) {
+        const envelope = v.parse(v.object({ result: v.looseObject({ bindings: v.array(boundaryObjectSchema) }) }), await response.json());
+        return json({
+          ...envelope.result,
+          bindings: envelope.result.bindings.filter((binding) => binding.name !== management.name),
+        });
+      }
+      return response;
+    };
+    await expect(relayRuntimeUpdate({ ...fixture.relayInput, transport })).rejects.toThrow();
+    expect(fixture.deployments).toEqual([]);
+    expect(fixture.subdomainStates).toEqual([true, false]);
+  });
+
+  it.each([
+    ['unknown secret', [...bindings(), { name: 'UNKNOWN_CREDENTIAL', type: 'secret_text' }]],
+    ['plaintext management credential', [...bindings(), { ...management, type: 'plain_text', text: 'unsafe' }]],
+    ['exposed secret value', [...bindings(), { ...management, text: 'unsafe' }]],
+    ['duplicate binding', [...bindings(), management, management]],
+    ['missing required binding', [...bindings().filter((binding) => binding.name !== 'ADMIN_EMAILS'), management]],
+  ] as const)('rejects %s before any provider write', async (_label, currentBindings) => {
+    const fixture = transportFixture({ currentBindings });
+    await expect(relayRuntimeUpdate(input(fixture.transport))).rejects.toThrow();
+    expect(fixture.deployments).toEqual([]);
+    expect(fixture.subdomainStates).toEqual([]);
+  });
+
+  it.each(['current', 'target'] as const)('blocks rollback with a management secret on the %s version', async (side) => {
+    const fixture = transportFixture(side === 'current'
+      ? { currentBindings: [...bindings(), management] }
+      : { targetBindings: [...bindings(), management] });
+    await expect(relayRuntimeUpdate(input(fixture.transport))).rejects.toThrow();
+    expect(fixture.deployments).toEqual([]);
+    expect(fixture.subdomainStates).toEqual([]);
+  });
+
+  it('refuses to overwrite a concurrent customer secret rotation deployment', async () => {
+    const fixture = await updateTransportFixture(undefined, undefined, true);
+    let deploymentReads = 0;
+    const transport = async (requestInput: RequestInfo | URL, init?: RequestInit) => {
+      const request = requestInput instanceof Request ? requestInput : new Request(requestInput, init);
+      if (new URL(request.url).pathname.endsWith('/deployments') && request.method === 'GET') {
+        deploymentReads += 1;
+        if (deploymentReads > 1) return json({ deployments: [{
+          id: COMPENSATION_DEPLOYMENT, versions: [{ percentage: 100, version_id: TARGET_VERSION }],
+        }] });
+      }
+      return fixture.relayInput.transport(request);
+    };
+    await expect(relayRuntimeUpdate({ ...fixture.relayInput, transport })).rejects.toThrow();
+    expect(fixture.deployments).toEqual([]);
+    expect(fixture.commands).not.toContain('complete');
+  });
+
+  it.each(['candidate_success', 'candidate_failure', 'active_failure', 'active_success'] as const)(
+    'does not activate or compensate over a customer rotation during %s', async (moment) => {
+      let rotated = false;
+      const fixture = await updateTransportFixture(undefined, async (request) => {
+        const body = await requestJson(request.clone(), commandSchema);
+        const candidate = request.headers.has('Cloudflare-Workers-Version-Overrides');
+        const activeProbe = moment === 'active_failure' || moment === 'active_success';
+        if (body.command !== 'probe' || candidate === activeProbe) return null;
+        rotated = true;
+        return moment === 'candidate_success' || moment === 'active_success'
+          ? new Response(null, { status: 204, headers: { 'x-ankka-runtime-action': 'ready' } })
+          : Response.json({ schemaVersion: 1, error: 'runtime_action_conflict' }, { status: 409 });
+      }, true);
+      const transport = async (requestInput: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestInput instanceof Request ? requestInput : new Request(requestInput, init);
+        if (rotated && new URL(request.url).pathname.endsWith('/deployments') && request.method === 'GET') {
+          return json({ deployments: [{
+            id: COMPENSATION_DEPLOYMENT,
+            versions: [{ percentage: 100, version_id: COMPENSATION_DEPLOYMENT }],
+          }] });
+        }
+        return fixture.relayInput.transport(request);
+      };
+      await expect(relayRuntimeUpdate({ ...fixture.relayInput, transport })).rejects.toThrow();
+      expect(fixture.deployments).toHaveLength(moment === 'active_failure' || moment === 'active_success' ? 2 : 1);
+      expect(fixture.deployments).not.toContainEqual([{ version_id: OLD_VERSION, percentage: 100 }]);
+      expect(fixture.controls.at(-1)?.body).toMatchObject({
+        command: 'fail', failureCode: 'runtime_action_recovery_required', recoveryRequired: true,
+      });
+      expect(fixture.subdomainStates).toEqual([true, false]);
+      expect(fixture.commands).not.toContain('complete');
+    },
+  );
+
+  it('leaves an unacknowledged activation for recovery instead of guessing compensation authority', async () => {
+    const fixture = await updateTransportFixture(undefined, undefined, true);
+    const transport = async (requestInput: RequestInfo | URL, init?: RequestInit) => {
+      const request = requestInput instanceof Request ? requestInput : new Request(requestInput, init);
+      if (new URL(request.url).pathname.endsWith('/deployments') && request.method === 'POST') {
+        const body = await requestJson(request.clone(), deploymentBodySchema);
+        if (body.versions.length === 1 && body.versions[0]?.version_id === TARGET_VERSION) {
+          await fixture.relayInput.transport(request);
+          return Response.json({ success: false }, { status: 503 });
+        }
+      }
+      return fixture.relayInput.transport(request);
+    };
+    await expect(relayRuntimeUpdate({ ...fixture.relayInput, transport })).rejects.toThrow();
+    expect(fixture.deployments).toHaveLength(2);
+    expect(fixture.controls.at(-1)?.body).toMatchObject({ command: 'fail', recoveryRequired: true });
+  });
+});
 
 describe('bounded runtime control diagnostics', () => {
   it.each([

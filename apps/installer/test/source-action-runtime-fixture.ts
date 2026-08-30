@@ -54,6 +54,7 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
   workerId: string;
   workerName: string;
   workersSubdomain: string;
+  inheritTeamManagementFromVersion?: string;
 }>): Promise<SourceActionRuntimeFixture> {
   const encoder = new TextEncoder();
   const files: readonly FileInput[] = [
@@ -165,7 +166,7 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
     accountId: input.accountId,
     workerName: input.workerName,
     workerId: input.workerId,
-  }), 'clean');
+  }), 'clean', input.inheritTeamManagementFromVersion);
   const workerModule = direct.worker.modules.find((module) => module.name === 'index.js');
   if (!workerModule) throw new TypeError('source_action_runtime_fixture');
 
@@ -184,6 +185,9 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
       bindings: Object.freeze([
         Object.freeze({ name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' }),
         Object.freeze({ name: 'ASSETS', type: 'assets' }),
+        ...(input.inheritTeamManagementFromVersion === undefined ? [] : [
+          Object.freeze({ name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'secret_text' }),
+        ]),
         ...Object.entries(bindings).map(([name, text]) => Object.freeze({ name, text, type: 'plain_text' })),
       ]),
       compatibility_date: '2026-08-08',

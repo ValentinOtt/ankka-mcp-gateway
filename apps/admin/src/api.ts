@@ -140,6 +140,13 @@ const teamActionSchema = v.strictObject({
   action: v.optional(v.literal('access')),
   canCancel: v.optional(v.boolean(), false),
 })
+const teamActionResultSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  action: v.strictObject({
+    ...teamActionSchema.entries,
+    status: v.picklist(['applying', 'succeeded', 'failed', 'recovery_required']),
+  }),
+})
 export const TEAM_MAX_PEOPLE = 51
 const TEAM_MAX_SOURCES = 32
 const teamEmailSchema = v.pipe(v.string(), v.minLength(1), v.maxLength(254))
@@ -154,6 +161,7 @@ const teamSchema = v.strictObject({
   revision: v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(Number.MAX_SAFE_INTEGER - 1)),
   editingEnabled: v.boolean(),
   editingDisabledReason: v.nullable(v.picklist(['release_review_required', 'lifecycle_action_pending'])),
+  managementCredentialConfigured: v.boolean(),
   members: teamMembersSchema,
   adminEmails: v.pipe(v.array(teamEmailSchema), v.minLength(1), v.maxLength(TEAM_MAX_PEOPLE)),
   sources: v.pipe(v.array(v.strictObject({
@@ -201,12 +209,13 @@ export type TeardownAction = v.InferOutput<typeof teardownActionSchema>
 export type TeamMember = v.InferOutput<typeof teamMemberSchema>
 export type Team = v.InferOutput<typeof teamSchema>
 export type TeamAction = v.InferOutput<typeof teamActionSchema>
+export type TeamActionResult = v.InferOutput<typeof teamActionResultSchema>
 
 export interface GatewayAdminApi {
   getStatus(): Promise<GatewayStatus>
   getSources(): Promise<ManagedSources>
   getTeam(): Promise<Team>
-  prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<PreparedAction>
+  prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult>
   getTeamAction(actionId: string): Promise<TeamAction>
   cancelTeamAction(actionId: string): Promise<TeamAction>
   getUpdate(): Promise<RuntimeUpdate>
@@ -240,7 +249,8 @@ const ERROR_MESSAGES = new Map([
   ['team_action_recovery_required', 'Some access policies may already have changed. Resume the recorded change before editing access again.'],
   ['team_policy_drift', 'Cloudflare access policies no longer match the saved configuration. Review the Cloudflare policies before trying again. This page will not reset them automatically.'],
   ['team_release_review_required', 'Team access editing is not available in this gateway release.'],
-  ['team_handoff_invalid', 'The authorization link could not be verified.'],
+  ['team_management_credential_missing', 'Add a dedicated Cloudflare management API token directly to your gateway Worker as the encrypted secret ANKKA_TEAM_MANAGEMENT_TOKEN, then refresh. Never paste the token into this dashboard or send it to Ankka.'],
+  ['team_management_credential_invalid', 'Cloudflare rejected the gateway’s management credential. Check its expiry, account, and Access permissions, or replace ANKKA_TEAM_MANAGEMENT_TOKEN directly in your Worker’s secrets, then refresh and resume the recorded change. Do not send the token to Ankka.'],
   ['team_prepare_failed', 'The team access request could not be confirmed. Refresh to check whether a change was recorded before trying again.'],
   ['team_cancel_failed', 'Cancellation could not be confirmed. Refresh to check the recorded change before trying again.'],
   ['team_teardown_requires_compatible_release', 'Teardown is paused because this release cannot safely verify the edited team permissions. Update to a compatible release before removing the gateway.'],
@@ -309,8 +319,8 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
   getSources(): Promise<ManagedSources> { return this.#request('/api/sources', managedSourcesSchema) }
   getTeam(): Promise<Team> { return this.#request('/api/team', teamSchema) }
 
-  prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<PreparedAction> {
-    return this.#request('/api/team-actions', preparedActionSchema, {
+  prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult> {
+    return this.#request('/api/team-actions', teamActionResultSchema, {
       method: 'POST',
       body: JSON.stringify({ schemaVersion: 1, expectedRevision, members }),
     })

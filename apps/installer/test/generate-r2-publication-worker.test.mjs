@@ -63,6 +63,7 @@ const CLOUDFLARE = Object.freeze({
   publicBindings: Object.freeze({
     secrets: Object.freeze([
       Object.freeze({ lifecycle: 'bootstrap-only', name: 'ANKKA_BOOTSTRAP_NONCE' }),
+      Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_TEAM_MANAGEMENT_TOKEN' }),
     ]),
     variables: Object.freeze([
       'ADMIN_EMAILS',

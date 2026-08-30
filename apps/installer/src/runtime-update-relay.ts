@@ -104,6 +104,10 @@ const plainTextBindingSchema = v.strictObject({
   text: v.string(),
   type: v.string(),
 });
+const teamManagementBindingSchema = v.strictObject({
+  name: v.literal('ANKKA_TEAM_MANAGEMENT_TOKEN'),
+  type: v.literal('secret_text'),
+});
 const subdomainStateSchema = v.strictObject({
   enabled: v.boolean(),
   previews_enabled: v.literal(false),
@@ -173,6 +177,7 @@ interface CurrentRuntime {
   readonly versionId: string;
   readonly deploymentId: string;
   readonly bindings: GatewayWorkerPlainTextBindings;
+  readonly hasTeamManagementBinding: boolean;
 }
 
 interface ActiveDeployment {
@@ -261,9 +266,12 @@ function activeDeployment(value: BoundaryValue): ActiveDeployment {
   return { deploymentId: active.id, versionId: version.version_id };
 }
 
-function exactCurrentBindings(value: BoundaryValue): GatewayWorkerPlainTextBindings {
+function exactCurrentBindings(value: BoundaryValue): Readonly<{
+  bindings: GatewayWorkerPlainTextBindings;
+  hasTeamManagementBinding: boolean;
+}> {
   const result = v.safeParse(currentBindingsSchema, value);
-  if (!result.success || result.output.bindings.length !== BINDING_NAMES.length + 2 ||
+  if (!result.success || ![BINDING_NAMES.length + 2, BINDING_NAMES.length + 3].includes(result.output.bindings.length) ||
       result.output.main_module !== 'index.js' || result.output.compatibility_date !== '2026-08-08' ||
       Object.hasOwn(result.output, 'migrations') || Object.hasOwn(result.output, 'migration_tag')) {
     invalid('session_conflict');
@@ -273,6 +281,12 @@ function exactCurrentBindings(value: BoundaryValue): GatewayWorkerPlainTextBindi
     const named = v.safeParse(namedBindingSchema, binding);
     if (!named.success || bindings.has(named.output.name)) invalid('session_conflict');
     bindings.set(named.output.name, binding);
+  }
+  const management = bindings.get('ANKKA_TEAM_MANAGEMENT_TOKEN');
+  const hasTeamManagementBinding = management !== undefined;
+  if ((hasTeamManagementBinding && !v.safeParse(teamManagementBindingSchema, management).success) ||
+      bindings.size !== BINDING_NAMES.length + 2 + Number(hasTeamManagementBinding)) {
+    invalid('session_conflict');
   }
   const admin = v.safeParse(adminStateBindingSchema, bindings.get('ADMIN_STATE'));
   const assets = v.safeParse(assetsBindingSchema, bindings.get('ASSETS'));
@@ -289,7 +303,7 @@ function exactCurrentBindings(value: BoundaryValue): GatewayWorkerPlainTextBindi
     }
     return parsed.output.text;
   };
-  return Object.freeze({
+  const plainTextBindings = Object.freeze({
     ADMIN_EMAILS: bindingText('ADMIN_EMAILS'),
     ANKKA_GATEWAY_RELEASE: bindingText('ANKKA_GATEWAY_RELEASE'),
     ANKKA_GATEWAY_RELEASE_SHA256: bindingText('ANKKA_GATEWAY_RELEASE_SHA256'),
@@ -306,6 +320,7 @@ function exactCurrentBindings(value: BoundaryValue): GatewayWorkerPlainTextBindi
     CLOUDFLARE_ZONE_NAME: bindingText('CLOUDFLARE_ZONE_NAME'),
     ZERO_TRUST_READY: bindingText('ZERO_TRUST_READY'),
   });
+  return Object.freeze({ bindings: plainTextBindings, hasTeamManagementBinding });
 }
 
 async function inspectCurrent(input: RuntimeUpdateRelayInput): Promise<CurrentRuntime> {
@@ -327,7 +342,7 @@ async function inspectCurrent(input: RuntimeUpdateRelayInput): Promise<CurrentRu
   if (!versionResult.success || versionResult.output.id !== deployment.versionId) {
     invalid('session_conflict');
   }
-  const bindings = exactCurrentBindings(version);
+  const { bindings, hasTeamManagementBinding } = exactCurrentBindings(version);
   if (bindings.ANKKA_GATEWAY_RELEASE !== input.from.release ||
       bindings.ANKKA_GATEWAY_RELEASE_SHA256 !== input.from.artifactSha256 ||
       bindings.CLOUDFLARE_ACCOUNT_ID !== input.accountId ||
@@ -344,7 +359,25 @@ async function inspectCurrent(input: RuntimeUpdateRelayInput): Promise<CurrentRu
     versionId: deployment.versionId,
     deploymentId: deployment.deploymentId,
     bindings,
+    hasTeamManagementBinding,
   });
+}
+
+async function verifyRollbackBindings(input: RuntimeUpdateRelayInput, current: CurrentRuntime): Promise<void> {
+  // Deploying an older version can restore a rotated/removed credential or drop
+  // current standing authority. Neither is part of the code-only rollback.
+  if (current.hasTeamManagementBinding || !input.to.versionId) invalid('session_conflict');
+  const version = await providerResult(
+    input, `/workers/workers/${current.worker.workerId}/versions/${input.to.versionId}`,
+  );
+  const parsed = v.safeParse(currentVersionSchema, version);
+  const target = exactCurrentBindings(version);
+  if (!parsed.success || parsed.output.id !== input.to.versionId || target.hasTeamManagementBinding ||
+      canonicalJson(target.bindings) !== canonicalJson({
+        ...current.bindings,
+        ANKKA_GATEWAY_RELEASE: input.to.release,
+        ANKKA_GATEWAY_RELEASE_SHA256: input.to.artifactSha256,
+      })) invalid('session_conflict');
 }
 
 function subdomainState(value: BoundaryValue, expected: boolean): void {
@@ -590,7 +623,10 @@ async function createCandidate(
     if (submitted.isFinal) completionJwt = submitted.completionJwt;
   }
   await progress(input, 'assets_uploaded', current.versionId, null);
-  const mutation = await prepareWorkerVersionMutation(prepared, current.worker, completionJwt, 'clean');
+  const mutation = await prepareWorkerVersionMutation(
+    prepared, current.worker, completionJwt, 'clean',
+    current.hasTeamManagementBinding ? current.versionId : undefined,
+  );
   const submitted = await submitWorkerVersionMutation(mutation.ephemeral, mutation.recovery, {
     ...call,
     timeoutMs: VERSION_CREATE_TIMEOUT_MS,
@@ -609,6 +645,10 @@ export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promis
   let oldVersionId: string | null = null;
   let targetVersionId: string | null = null;
   let staged = false;
+  let ownedDeployment: Readonly<{
+    id: string;
+    versions: readonly { readonly version_id: string; readonly percentage: number }[];
+  }> | null = null;
   let controlMayBeStarted = false;
   let operationError: Error | null = null;
   let compensationConfirmed = false;
@@ -618,6 +658,7 @@ export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promis
     await verifyManagementDomain(input, management);
     await readSubdomain(input, false);
     const current = await inspectCurrent(input);
+    if (input.operation === 'rollback') await verifyRollbackBindings(input, current);
     // Set before the mutating call: an ambiguous provider response may mean the
     // route changed and therefore still requires the compensating disable.
     routeMayBeEnabled = true;
@@ -638,6 +679,9 @@ export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promis
       targetVersionId = input.to.versionId;
     }
     if (!targetVersionId || targetVersionId === oldVersionId) invalid('session_conflict');
+    // A customer secret rotation/removal creates a new deployment. Do not
+    // overwrite it with the previously inspected credential version.
+    await verifyRawActive(input, current.deploymentId, [{ version_id: current.versionId, percentage: 100 }]);
     const stageVersions = [
       { version_id: oldVersionId, percentage: 100 },
       { version_id: targetVersionId, percentage: 0 },
@@ -645,6 +689,7 @@ export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promis
     phase = 'candidate_stage';
     const stagedId = await rawDeployment(input, stageVersions, `ankka-runtime-stage:${input.actionId}`);
     staged = true;
+    ownedDeployment = { id: stagedId, versions: stageVersions };
     phase = 'candidate_stage_verify';
     await verifyRawActive(input, stagedId, stageVersions);
     await progress(input, 'candidate_staged', oldVersionId, targetVersionId);
@@ -652,12 +697,15 @@ export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promis
     await progress(input, 'candidate_verified', oldVersionId, targetVersionId);
     const activeVersions = [{ version_id: targetVersionId, percentage: 100 }] as const;
     phase = 'candidate_activate';
+    await verifyRawActive(input, stagedId, stageVersions);
     const activeId = await rawDeployment(input, activeVersions, `ankka-runtime-activate:${input.actionId}`);
+    ownedDeployment = { id: activeId, versions: activeVersions };
     phase = 'candidate_active_verify';
     await verifyRawActive(input, activeId, activeVersions);
     await progress(input, 'activated', oldVersionId, targetVersionId);
     await probe(input);
     await progress(input, 'health_verified', oldVersionId, targetVersionId);
+    await verifyRawActive(input, activeId, activeVersions);
     await requireControl(input, { command: 'complete', fromVersionId: oldVersionId, toVersionId: targetVersionId }, 'complete');
   } catch (error) {
     operationError = error instanceof Error
@@ -668,6 +716,10 @@ export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promis
     }
     if (staged && oldVersionId) {
       try {
+        // Never rewind another deployment (including customer credential
+        // rotation/removal), or an unacknowledged write whose outcome is unknown.
+        if (!ownedDeployment) invalid('session_conflict');
+        await verifyRawActive(input, ownedDeployment.id, ownedDeployment.versions);
         const versions = [{ version_id: oldVersionId, percentage: 100 }] as const;
         const deploymentId = await rawDeployment(input, versions, `ankka-runtime-compensate:${input.actionId}`);
         await verifyRawActive(input, deploymentId, versions);
