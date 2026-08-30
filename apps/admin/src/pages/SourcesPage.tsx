@@ -165,7 +165,6 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   return (
     <div>
       <PageHeader
-        eyebrow="Your sources"
         title="Sources"
         description={installationEnabled ? 'Discover MCP tool catalogues, save deny-by-default allowlists, and apply each draft with a fresh one-time Cloudflare authorization.' : 'Review your existing MCP sources and their exact tool allowlists. New-source installation is paused in this release.'}
         action={

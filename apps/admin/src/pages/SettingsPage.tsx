@@ -55,7 +55,6 @@ export function SettingsPage() {
   return (
     <div>
       <PageHeader
-        eyebrow="Gateway administration"
         title="Settings"
         description="Manage the signed runtime and lifecycle of your gateway. Sources, credentials, Access policies, DNS, and Durable Object data remain separately controlled."
       />
