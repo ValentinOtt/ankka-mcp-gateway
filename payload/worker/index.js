@@ -357,7 +357,6 @@ const APPROVED_UPDATE_CLOUDFLARE_CONTRACT = Object.freeze({
   publicBindings: Object.freeze({
     secrets: Object.freeze([
       Object.freeze({ lifecycle: 'bootstrap-only', name: 'ANKKA_BOOTSTRAP_NONCE' }),
-      Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_TEAM_MANAGEMENT_TOKEN' }),
     ]),
     variables: Object.freeze([
       'ADMIN_EMAILS', 'ANKKA_GATEWAY_RELEASE', 'ANKKA_GATEWAY_RELEASE_SHA256',
@@ -399,6 +398,17 @@ const APPROVED_UPDATE_CLOUDFLARE_CONTRACT = Object.freeze({
       publicBindings: Object.freeze({ secrets: Object.freeze([]), variables: Object.freeze([]) }),
       sendMetrics: false, workersDev: false,
     }),
+  }),
+});
+// Recognize only the two reviewed contracts. Declaring a secret never provisions it.
+const REVIEWED_TEAM_UPDATE_CLOUDFLARE_CONTRACT = Object.freeze({
+  ...APPROVED_UPDATE_CLOUDFLARE_CONTRACT,
+  publicBindings: Object.freeze({
+    ...APPROVED_UPDATE_CLOUDFLARE_CONTRACT.publicBindings,
+    secrets: Object.freeze([
+      ...APPROVED_UPDATE_CLOUDFLARE_CONTRACT.publicBindings.secrets,
+      Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_TEAM_MANAGEMENT_TOKEN' }),
+    ]),
   }),
 });
 const HASH = /^sha256:[a-f0-9]{64}$/u;
@@ -1205,7 +1215,8 @@ async function parseSignedUpdateManifest(serialized) {
   ]) || value.schemaVersion !== 1 || !updateSemver(value.release) ||
       value.controlPlaneOrigin !== CONTROL_PLANE_ORIGIN ||
       !isText(value.sourceCommit) || !/^[a-f0-9]{40}$/u.test(value.sourceCommit) ||
-      canonicalJson(value.cloudflare) !== canonicalJson(APPROVED_UPDATE_CLOUDFLARE_CONTRACT) ||
+      (canonicalJson(value.cloudflare) !== canonicalJson(APPROVED_UPDATE_CLOUDFLARE_CONTRACT) &&
+       canonicalJson(value.cloudflare) !== canonicalJson(REVIEWED_TEAM_UPDATE_CLOUDFLARE_CONTRACT)) ||
       canonicalJson(value.oauthScopeIds) !== canonicalJson(UPDATE_OAUTH_SCOPES) ||
       !exactKeys(value.artifact, ['byteSize', 'fileCount', 'treeSha256']) ||
       !Number.isSafeInteger(value.artifact.byteSize) || value.artifact.byteSize < 1 ||

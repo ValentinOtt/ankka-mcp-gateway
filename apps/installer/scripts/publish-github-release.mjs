@@ -248,15 +248,20 @@ function releaseTitle(release, channel) {
 export function releaseNotes(repository, manifest, receipt) {
   const commitUrl = `https://github.com/${repository}/commit/${manifest.sourceCommit}`;
   const channelLabel = receipt.channel === 'canary' ? 'Canary pre-release' : 'Stable release';
-  const teamReleaseNotes = ['gateway-v0.1.15', 'gateway-v0.1.16'].includes(manifest.release)
+  const teamReleaseNotes = ['gateway-v0.1.15', 'gateway-v0.1.16', 'gateway-v0.1.17'].includes(manifest.release)
     ? `## ${manifest.release.slice('gateway-'.length)} scope and limits\n\n` +
       '- Team permissions apply only to MCP sources already installed in your gateway.\n' +
       '- New-source creation is unavailable in this release, including first-source onboarding for fresh empty gateways.\n' +
       '- Administrators remain fixed; source write tools are not activated and existing read-only boundaries are unchanged.\n' +
       '- Once a permission-policy write is armed, automatic teardown and rollback to older runtimes are blocked, including when the write outcome is uncertain.\n\n'
     : '';
+  const bridgeReleaseNotes = manifest.release === 'gateway-v0.1.17'
+    ? '- Compatibility bridge: accepts the reviewed next Team release contract and fixes the installer return to your gateway after completion.\n' +
+      '- This update does not create a Team credential or enable customer-local Team management; a separate second update is required.\n\n'
+    : '';
   return `${channelLabel} of Ankka MCP Gateway. This GitHub Release mirrors the exact signed artifact already committed to the customer update channel.\n\n` +
     teamReleaseNotes +
+    bridgeReleaseNotes +
     `- Source commit: [\`${manifest.sourceCommit.slice(0, 12)}\`](${commitUrl})\n` +
     `- Artifact SHA-256: \`${receipt.artifactSha256}\`\n` +
     `- Signature: Ed25519 (key ID \`${receipt.keyId}\`)\n` +
