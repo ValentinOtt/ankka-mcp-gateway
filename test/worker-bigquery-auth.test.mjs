@@ -80,6 +80,12 @@ test('BigQuery public discovery is OAuth protected and never approves its connec
     assert.equal(discovery.connectionBlock, BLOCK);
     assert.deepEqual(discovery.tools.map((t) => t.name), TOOL_NAMES);
     assert.equal(discovery.tools.find((t) => t.name === 'execute_sql').defaultSelected, false);
+    // The release-wide installation pause answers before the endpoint-specific
+    // gate; when a release lifts the pause, the Google block must answer next.
+    const managed = await (await request('/api/sources', 'GET')).json();
+    const expectedRefusal = managed.installationEnabled === true
+      ? { schemaVersion: 1, error: BLOCK }
+      : { schemaVersion: 1, error: 'source_addition_paused', retryable: false };
     const before = structuredClone(storage.writes);
     const discoveredCalls = calls.length;
     for (const authMode of ['none', 'oauth']) {
@@ -88,7 +94,7 @@ test('BigQuery public discovery is OAuth protected and never approves its connec
         source: { label: 'GA4 example', url: ENDPOINT, authMode, enabledTools: ['execute_sql_readonly'] },
       });
       assert.equal(saved.status, 409);
-      assert.deepEqual(await saved.json(), { schemaVersion: 1, error: BLOCK });
+      assert.deepEqual(await saved.json(), expectedRefusal);
     }
     assert.deepEqual(storage.writes, before, 'no draft or credential storage');
     assert.equal(calls.length, discoveredCalls, 'save rejection happens before upstream requests');
@@ -101,12 +107,16 @@ test('BigQuery legacy drafts cannot start a Cloudflare authorization or provider
       const source = { id: 'source-0123456789abcdef', label: 'GA4 example', url: ENDPOINT,
         authMode, onBehalfOfUser: false, enabledTools: ['execute_sql_readonly'], status: 'draft' };
       await storage.put(SOURCE_KEY, { schemaVersion: 1, revision: 1, applyMode: 'oauth_per_action', sources: [source] });
+      const managed = await (await request('/api/sources', 'GET')).json();
+      const expectedRefusal = managed.installationEnabled === true
+        ? { schemaVersion: 1, error: BLOCK }
+        : { schemaVersion: 1, error: 'source_addition_paused', retryable: false };
       const before = structuredClone(storage.writes);
       const response = await request('/api/source-actions', 'POST', {
         schemaVersion: 1, revision: 1, sourceId: source.id,
       });
       assert.equal(response.status, 409);
-      assert.deepEqual(await response.json(), { schemaVersion: 1, error: BLOCK });
+      assert.deepEqual(await response.json(), expectedRefusal);
       assert.deepEqual(storage.writes, before);
       assert.equal(calls.length, 0);
     }
