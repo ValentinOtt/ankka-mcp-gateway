@@ -5076,8 +5076,16 @@ async function handleRuntimeActions(request, env) {
   }
   if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
   const input = await readJsonInput(request);
-  if (!exactKeys(input, ['operation', 'schemaVersion']) || input.schemaVersion !== 1 ||
+  if (!(exactKeys(input, ['operation', 'schemaVersion']) ||
+        exactKeys(input, ['expectedTarget', 'operation', 'schemaVersion'])) || input.schemaVersion !== 1 ||
       !['update', 'rollback'].includes(input.operation)) {
+    return fixedJson(400, { schemaVersion: 1, error: 'runtime_action_invalid' });
+  }
+  if (Object.hasOwn(input, 'expectedTarget') &&
+      (!exactKeys(input.expectedTarget, ['artifactSha256', 'release']) ||
+       !isText(input.expectedTarget.release) || !updateSemver(input.expectedTarget.release) ||
+       !isText(input.expectedTarget.artifactSha256) ||
+       !HASH.test(input.expectedTarget.artifactSha256))) {
     return fixedJson(400, { schemaVersion: 1, error: 'runtime_action_invalid' });
   }
   let updateState;
@@ -5099,6 +5107,10 @@ async function handleRuntimeActions(request, env) {
     });
   }
   if (!current || !to) return fixedJson(409, { schemaVersion: 1, error: 'runtime_action_conflict' });
+  if (input.expectedTarget && (input.expectedTarget.release !== to.release ||
+      input.expectedTarget.artifactSha256 !== to.artifactSha256)) {
+    return fixedJson(409, { schemaVersion: 1, error: 'runtime_action_conflict' });
+  }
   const now = Date.now();
   const expiresAt = now + 10 * 60 * 1000;
   const actionId = `action_${randomBase64Url(24)}`;

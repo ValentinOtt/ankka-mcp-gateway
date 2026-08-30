@@ -1041,7 +1041,7 @@ test('management teardown handoff is actor-bound, same-origin, receipt-backed, a
   }
 });
 
-test('signed runtime updates require explicit authorization, journal progress in customer storage, and retain rollback', async () => {
+async function exerciseSignedRuntimeUpdate(bindExpectedTarget) {
   const { env, provider: cloudflare } = await installReadyGateway();
   const channel = await signedUpdateChannel();
   env.ANKKA_UPDATE_CHANNEL = channel.body.channel;
@@ -1169,10 +1169,78 @@ test('signed runtime updates require explicit authorization, journal progress in
       status: 'available', current: 'gateway-v0.1.0', next: 'gateway-v0.1.1', kind: 'normal', rollback: false,
     });
 
+    const expectedTarget = {
+      release: available.available.release,
+      artifactSha256: available.available.artifactSha256,
+    };
+    const actionHeaders = {
+      ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json',
+    };
+    const assertPreparationRejected = async (body, statusCode, error, headers = actionHeaders) => {
+      const storageWrites = () => [...env.ADMIN_STATE.objects].map(([name, entry]) => ({
+        name, writes: entry.storage.writes,
+      }));
+      const before = structuredClone(storageWrites());
+      const providerRequests = cloudflare.requests.length;
+      const response = await worker.fetch(new Request('https://manage.example.com/api/update-actions', {
+        method: 'POST', headers, body: JSON.stringify(body),
+      }), env);
+      assert.equal(response.status, statusCode);
+      assert.deepEqual(await response.json(), { schemaVersion: 1, error });
+      assert.deepEqual(storageWrites(), before, 'rejected target preparation must not persist an action');
+      assert.equal(cloudflare.requests.length, providerRequests, 'rejected target preparation must not call the provider');
+    };
+    if (bindExpectedTarget) {
+      const requestBody = { schemaVersion: 1, operation: 'update', expectedTarget };
+      for (const malformed of [
+        null,
+        'gateway-v0.1.1',
+        [],
+        {},
+        { release: expectedTarget.release },
+        { artifactSha256: expectedTarget.artifactSha256 },
+        { ...expectedTarget, versionId: null },
+        { ...expectedTarget, unexpected: true },
+        { ...expectedTarget, release: 1 },
+        { ...expectedTarget, release: [expectedTarget.release] },
+        { ...expectedTarget, release: { toString: null } },
+        { ...expectedTarget, release: 'latest' },
+        { ...expectedTarget, artifactSha256: null },
+        { ...expectedTarget, artifactSha256: 'sha256:abc' },
+        { ...expectedTarget, artifactSha256: `sha256:${'A'.repeat(64)}` },
+      ]) {
+        const fetchesBefore = updateFetches;
+        await assertPreparationRejected(
+          { ...requestBody, expectedTarget: malformed }, 400, 'runtime_action_invalid',
+        );
+        assert.equal(updateFetches, fetchesBefore, 'malformed intent is rejected before release discovery');
+      }
+      await assertPreparationRejected(
+        { schemaVersion: 1, operation: 'update', unexpected: true }, 400, 'runtime_action_invalid',
+      );
+      await assertPreparationRejected(
+        { ...requestBody, unexpected: true }, 400, 'runtime_action_invalid',
+      );
+      await assertPreparationRejected(requestBody, 401, 'access_required', {
+        origin: 'https://manage.example.com', 'content-type': 'application/json',
+      });
+      await assertPreparationRejected(requestBody, 403, 'origin_required', {
+        ...actionHeaders, origin: 'https://foreign-control.example',
+      });
+      await assertPreparationRejected({
+        ...requestBody, expectedTarget: { ...expectedTarget, release: 'gateway-v0.1.2' },
+      }, 409, 'runtime_action_conflict');
+      await assertPreparationRejected({
+        ...requestBody, expectedTarget: { ...expectedTarget, artifactSha256: `sha256:${'0'.repeat(64)}` },
+      }, 409, 'runtime_action_conflict');
+    }
+
+    const updateBody = { schemaVersion: 1, operation: 'update' };
+    if (bindExpectedTarget) updateBody.expectedTarget = expectedTarget;
     const preparedResponse = await worker.fetch(new Request('https://manage.example.com/api/update-actions', {
       method: 'POST',
       headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
-      body: JSON.stringify({ schemaVersion: 1, operation: 'update' }),
+      body: JSON.stringify(updateBody),
     }), env);
     assert.equal(preparedResponse.status, 200, await preparedResponse.clone().text());
     const prepared = await preparedResponse.json();
@@ -1201,6 +1269,7 @@ test('signed runtime updates require explicit authorization, journal progress in
       from: 'gateway-v0.1.0',
       to: 'gateway-v0.1.1',
     });
+    assert.equal(action.to.artifactSha256, expectedTarget.artifactSha256);
 
     const controlRequest = (command, headers = {}) => {
       const body = canonicalJson({
@@ -1340,16 +1409,34 @@ test('signed runtime updates require explicit authorization, journal progress in
       dataRollback: false,
     });
 
+    const expectedRollbackTarget = {
+      release: status.rollback.release,
+      artifactSha256: status.rollback.artifactSha256,
+    };
+    if (bindExpectedTarget) {
+      for (const mismatched of [
+        expectedTarget,
+        { ...expectedRollbackTarget, release: 'gateway-v0.0.9' },
+        { ...expectedRollbackTarget, artifactSha256: `sha256:${'0'.repeat(64)}` },
+      ]) {
+        await assertPreparationRejected({
+          schemaVersion: 1, operation: 'rollback', expectedTarget: mismatched,
+        }, 409, 'runtime_action_conflict');
+      }
+    }
+    const rollbackBody = { schemaVersion: 1, operation: 'rollback' };
+    if (bindExpectedTarget) rollbackBody.expectedTarget = expectedRollbackTarget;
     const rollbackResponse = await worker.fetch(new Request('https://manage.example.com/api/update-actions', {
       method: 'POST',
       headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
-      body: JSON.stringify({ schemaVersion: 1, operation: 'rollback' }),
+      body: JSON.stringify(rollbackBody),
     }), env);
     assert.equal(rollbackResponse.status, 200, await rollbackResponse.clone().text());
     const rollback = await rollbackResponse.json();
     const rollbackClaim = JSON.parse(Buffer.from(new URL(rollback.handoffUrl).hash.slice(1), 'base64url').toString('utf8'));
     assert.equal(rollbackClaim.operation, 'rollback');
     assert.equal(rollbackClaim.to.release, 'gateway-v0.1.0');
+    assert.equal(rollbackClaim.to.artifactSha256, RELEASE_SHA256);
     assert.equal(rollbackClaim.to.versionId, oldVersionId);
 
     const writes = JSON.stringify(env.ADMIN_STATE.objects.get('v1:management').storage.writes);
@@ -1358,7 +1445,15 @@ test('signed runtime updates require explicit authorization, journal progress in
   } finally {
     globalThis.fetch = originalFetch;
   }
-});
+}
+
+test('signed runtime updates require explicit authorization, journal progress in customer storage, and retain rollback', () => (
+  exerciseSignedRuntimeUpdate(false)
+));
+
+test('runtime action expected targets reject malformed or stale intent and preserve authorization and rollback', () => (
+  exerciseSignedRuntimeUpdate(true)
+));
 
 test('management API preserves bounded discovery and existing sources while new installation is paused', async () => {
   const { env, provider: cloudflare, readyReceipt } = await installReadyGateway();

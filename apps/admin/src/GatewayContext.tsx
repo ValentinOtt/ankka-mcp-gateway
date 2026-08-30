@@ -31,6 +31,7 @@ import {
 type Notice = { tone: 'neutral' | 'success' | 'error'; message: string } | null
 
 interface GatewayContextValue {
+  api: GatewayAdminApi
   status: GatewayStatus | null
   sources: ManagedSources | null
   update: RuntimeUpdate | null
@@ -243,6 +244,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
   }, [reload])
 
   const value = useMemo<GatewayContextValue>(() => ({
+    api: apiRef.current,
     status,
     sources,
     update,

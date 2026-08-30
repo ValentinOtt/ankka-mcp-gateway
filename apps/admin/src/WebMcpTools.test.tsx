@@ -1,8 +1,10 @@
-import { render, waitFor } from '@testing-library/react'
+import { cleanup, render, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GatewayAdminApi, GatewayStatus, ManagedSources, RuntimeUpdate } from './api'
 import { GatewayProvider } from './GatewayContext'
 import { WebMcpTools, type WebMcpTool } from './WebMcpTools'
+import { registerGatewayWebMcpTools, type WebMcpModelContext } from './webmcp'
 
 const status: GatewayStatus = {
   schemaVersion: 1,
@@ -36,8 +38,34 @@ const update: RuntimeUpdate = {
   rollback: { available: false },
 }
 
+function fixtureApi(): GatewayAdminApi {
+  return {
+    getStatus: vi.fn(async () => status), getSources: vi.fn(async () => sources), getUpdate: vi.fn(async () => update),
+    getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
+    discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(),
+    getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), prepareRuntimeAction: vi.fn(),
+    getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+  }
+}
+
+function modelContextFixture() {
+  const registered = new Map<string, WebMcpTool>()
+  const signals: AbortSignal[] = []
+  const modelContext: WebMcpModelContext = {
+    registerTool: vi.fn(async (tool, options) => {
+      const signal = options?.signal
+      if (!signal || signal.aborted) return
+      if (registered.has(tool.name)) throw new Error('duplicate registration')
+      registered.set(tool.name, tool)
+      signals.push(signal)
+      signal.addEventListener('abort', () => { registered.delete(tool.name) }, { once: true })
+    }),
+  }
+  return { registered, signals, modelContext }
+}
+
 describe('WebMcpTools', () => {
-  afterEach(() => { delete document.modelContext })
+  afterEach(() => { cleanup(); delete document.modelContext })
 
   it('registers teardown as a destructive review handoff without accepting credentials', async () => {
     const prepared = {
@@ -99,5 +127,53 @@ describe('WebMcpTools', () => {
       },
     })
     expect(prepareTeardownAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the ordinary UI usable when WebMCP is absent', async () => {
+    const api = fixtureApi()
+    const screen = render(<GatewayProvider api={api}><WebMcpTools /><p>Ordinary dashboard</p></GatewayProvider>)
+    await waitFor(() => expect(api.getSources).toHaveBeenCalled())
+    expect(screen.getByText('Ordinary dashboard')).toBeVisible()
+  })
+
+  it('registers exactly one live batch through StrictMode, page restoration, and remounting', async () => {
+    const api = fixtureApi()
+    const { registered, signals, modelContext } = modelContextFixture()
+    document.modelContext = modelContext
+    const mounted = render(<StrictMode><GatewayProvider api={api}><WebMcpTools /></GatewayProvider></StrictMode>)
+    await waitFor(() => expect(registered.size).toBe(17))
+    window.dispatchEvent(new Event('pagehide'))
+    expect(registered.size).toBe(0)
+    expect(signals.every((signal) => signal.aborted)).toBe(true)
+    window.dispatchEvent(new Event('pageshow'))
+    await waitFor(() => expect(registered.size).toBe(17))
+    mounted.unmount()
+    expect(registered.size).toBe(0)
+    const remounted = render(<GatewayProvider api={api}><WebMcpTools /></GatewayProvider>)
+    await waitFor(() => expect(registered.size).toBe(17))
+    remounted.unmount()
+    expect(registered.size).toBe(0)
+  })
+
+  it('removes a partially registered batch and can register it on the next attempt', async () => {
+    const { registered, modelContext } = modelContextFixture()
+    const tools: WebMcpTool[] = ['first', 'second'].map((name) => ({
+      name, description: 'Synthetic read', inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      execute: async () => '{}',
+    }))
+    const register = modelContext.registerTool
+    const broken: WebMcpModelContext = {
+      registerTool: async (tool, options) => {
+        if (tool.name === 'second') throw new Error('synthetic registration failure')
+        await register(tool, options)
+      },
+    }
+    const controller = new AbortController()
+    await registerGatewayWebMcpTools(broken, tools, controller)
+    expect(controller.signal.aborted).toBe(true)
+    expect(registered.size).toBe(0)
+    await registerGatewayWebMcpTools(modelContext, tools, new AbortController())
+    expect([...registered.keys()]).toEqual(['first', 'second'])
   })
 })
