@@ -370,6 +370,7 @@ const returnedVersionBindingSchema = v.union([
   }),
   v.strictObject({ name: v.literal('ASSETS'), type: v.literal('assets') }),
   v.strictObject({ name: v.literal('ANKKA_BOOTSTRAP_NONCE'), type: v.literal('secret_text') }),
+  v.strictObject({ name: v.literal('ANKKA_TEAM_MANAGEMENT_TOKEN'), type: v.literal('secret_text') }),
   v.strictObject({
     name: v.picklist(EXACT_PLAIN_TEXT_BINDINGS),
     type: v.literal('plain_text'),
@@ -414,6 +415,7 @@ const versionReleaseContractSchema = v.strictObject({
     runWorkerFirst: exactRunWorkerFirstSchema,
   }),
   bootstrapBinding: v.picklist(['present', 'absent']),
+  teamManagementBinding: v.exactOptional(v.strictObject({ fromVersionId: v.pipe(v.string(), v.regex(UUID_PATTERN)) })),
   compatibilityDate: v.literal(EXACT_COMPATIBILITY_DATE),
   compatibilityFlags: v.tuple([]),
   durableObject: v.strictObject({
@@ -453,6 +455,11 @@ const versionRecoveryRecordSchema = v.strictObject({
   })), v.minLength(1)),
 });
 const submitVersionBindingSchema = v.union([
+  v.strictObject({
+    name: v.literal('ANKKA_TEAM_MANAGEMENT_TOKEN'),
+    type: v.literal('inherit'),
+    version_id: v.pipe(v.string(), v.regex(UUID_PATTERN)),
+  }),
   v.strictObject({
     name: v.literal('ADMIN_STATE'),
     type: v.literal('durable_object_namespace'),
@@ -2029,11 +2036,13 @@ export type WorkerVersionBinding =
   | { readonly name: 'ADMIN_STATE'; readonly type: 'durable_object_namespace'; readonly class_name: 'AdminState' }
   | { readonly name: 'ASSETS'; readonly type: 'assets' }
   | { readonly name: GatewayWorkerPlainTextBindingName; readonly type: 'plain_text'; readonly text: string }
-  | { readonly name: 'ANKKA_BOOTSTRAP_NONCE'; readonly type: 'secret_text'; readonly text: string };
+  | { readonly name: 'ANKKA_BOOTSTRAP_NONCE'; readonly type: 'secret_text'; readonly text: string }
+  | { readonly name: 'ANKKA_TEAM_MANAGEMENT_TOKEN'; readonly type: 'inherit'; readonly version_id: string };
 
 function versionBindings(
   prepared: PreparedVerifiedWorkerRelease,
   phase: WorkerVersionPhase,
+  inheritTeamManagementFromVersion?: string,
 ): readonly WorkerVersionBinding[] {
   const bindings: WorkerVersionBinding[] = phase === 'provision'
     ? []
@@ -2046,6 +2055,9 @@ function versionBindings(
   }
   if (phase === 'bootstrap') {
     bindings.push({ name: 'ANKKA_BOOTSTRAP_NONCE', type: 'secret_text', text: prepared.bootstrapNonce });
+  }
+  if (inheritTeamManagementFromVersion !== undefined) {
+    bindings.push({ name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'inherit', version_id: inheritTeamManagementFromVersion });
   }
   return bindings.sort((left, right) => lexicalCompare(left.name, right.name));
 }
@@ -2066,6 +2078,8 @@ export interface WorkerVersionRecoveryRecord {
     };
     /** `phase` determines which value is valid; no credential value is persisted. */
     readonly bootstrapBinding: 'present' | 'absent';
+    /** Explicit existing version only; never carries or provisions a credential. */
+    readonly teamManagementBinding?: { readonly fromVersionId: string };
     readonly compatibilityDate: '2026-08-08';
     readonly compatibilityFlags: readonly [];
     readonly durableObject: {
@@ -2148,7 +2162,8 @@ async function exactVersionResult(
       ? result.assets !== undefined
       : result.assets === undefined) ||
     result.bindings.length !== recovery.plainTextBindingHashes.length +
-      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) ||
+      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) +
+      (recovery.releaseContract.teamManagementBinding === undefined ? 0 : 1) ||
     result.modules.length !== recovery.modules.length ||
     !exactVersionAnnotations(result.annotations, recovery.correlationTag) ||
     !exactExports(result.exports) ||
@@ -2179,6 +2194,9 @@ async function exactVersionResult(
   if (recovery.phase === 'bootstrap') {
     if (redactedBinding?.name !== 'ANKKA_BOOTSTRAP_NONCE') return false;
   } else if (redactedBinding !== undefined) return false;
+  const managementBinding = returnedBindings.get('ANKKA_TEAM_MANAGEMENT_TOKEN');
+  if ((recovery.releaseContract.teamManagementBinding !== undefined) !==
+      (managementBinding?.name === 'ANKKA_TEAM_MANAGEMENT_TOKEN')) return false;
   for (const expected of recovery.plainTextBindingHashes) {
     const binding = returnedBindings.get(expected.name);
     if (
@@ -2230,6 +2248,14 @@ type WorkerVersionSemanticInput = Pick<
 >;
 
 function versionSemanticCommitment(input: WorkerVersionSemanticInput) {
+  const baseBindings = {
+    bootstrap: input.releaseContract.bootstrapBinding,
+    durableObject: input.releaseContract.durableObject,
+    plainText: input.plainTextBindingHashes.map((binding) => ({ ...binding })),
+  };
+  const bindings = input.releaseContract.teamManagementBinding === undefined ? baseBindings : {
+    ...baseBindings, teamManagement: input.releaseContract.teamManagementBinding,
+  };
   return {
     accountId: input.accountId,
     assets: {
@@ -2245,11 +2271,7 @@ function versionSemanticCommitment(input: WorkerVersionSemanticInput) {
         byteLength: asset.byteLength,
       })),
     },
-    bindings: {
-      bootstrap: input.releaseContract.bootstrapBinding,
-      durableObject: input.releaseContract.durableObject,
-      plainText: input.plainTextBindingHashes.map((binding) => ({ ...binding })),
-    },
+    bindings,
     compatibilityDate: input.releaseContract.compatibilityDate,
     compatibilityFlags: [...input.releaseContract.compatibilityFlags],
     exports: input.releaseContract.exports,
@@ -2265,6 +2287,35 @@ async function versionSemanticHash(input: WorkerVersionSemanticInput): Promise<s
   return sha256(canonicalJson(versionSemanticCommitment(input)));
 }
 
+function versionReleaseContract(
+  phase: WorkerVersionPhase,
+  inheritTeamManagementFromVersion?: string,
+): WorkerVersionRecoveryRecord['releaseContract'] {
+  const compatibilityFlags: readonly [] = Object.freeze([]);
+  const base = Object.freeze({
+    assetBinding: 'ASSETS' as const,
+    assetConfig: Object.freeze({
+      notFoundHandling: 'single-page-application' as const,
+      runWorkerFirst: EXACT_RUN_WORKER_FIRST,
+    }),
+    bootstrapBinding: phase === 'bootstrap' ? 'present' as const : 'absent' as const,
+    compatibilityDate: EXACT_COMPATIBILITY_DATE,
+    compatibilityFlags,
+    durableObject: Object.freeze({
+      binding: 'ADMIN_STATE' as const,
+      className: 'AdminState' as const,
+      storage: 'sqlite' as const,
+    }),
+    exports: Object.freeze({
+      AdminState: Object.freeze({ type: 'durable-object' as const, storage: 'sqlite' as const }),
+    }),
+    mainModule: 'index.js' as const,
+  });
+  return inheritTeamManagementFromVersion === undefined ? base : Object.freeze({
+    ...base, teamManagementBinding: Object.freeze({ fromVersionId: inheritTeamManagementFromVersion }),
+  });
+}
+
 /**
  * Derive the complete journal-safe version recovery record before creating an
  * asset session. No provider credential, completion JWT, or nonce value is
@@ -2274,6 +2325,7 @@ export async function prepareWorkerVersionRecoveryRecord(
   prepared: PreparedVerifiedWorkerRelease,
   worker: WorkerSubmission,
   phase: WorkerVersionPhase,
+  inheritTeamManagementFromVersion?: string,
 ): Promise<WorkerVersionRecoveryRecord> {
   const progress = initialProgress();
   if (
@@ -2287,6 +2339,8 @@ export async function prepareWorkerVersionRecoveryRecord(
     !WORKER_NAME_PATTERN.test(worker.workerName) ||
     !WORKER_ID_PATTERN.test(worker.workerId) ||
     (phase !== 'provision' && phase !== 'bootstrap' && phase !== 'clean') ||
+    (inheritTeamManagementFromVersion !== undefined &&
+      (phase !== 'clean' || !UUID_PATTERN.test(inheritTeamManagementFromVersion))) ||
     !Array.isArray(prepared.assets) ||
     !Array.isArray(prepared.modules) ||
     !isRecord(prepared.plainTextBindings)
@@ -2307,26 +2361,7 @@ export async function prepareWorkerVersionRecoveryRecord(
     contentType: asset.contentType,
     byteLength: asset.bytes.byteLength,
   })));
-  const compatibilityFlags: readonly [] = Object.freeze([]);
-  const releaseContract = Object.freeze({
-    assetBinding: 'ASSETS' as const,
-    assetConfig: Object.freeze({
-      notFoundHandling: 'single-page-application' as const,
-      runWorkerFirst: EXACT_RUN_WORKER_FIRST,
-    }),
-    bootstrapBinding: phase === 'bootstrap' ? 'present' as const : 'absent' as const,
-    compatibilityDate: EXACT_COMPATIBILITY_DATE,
-    compatibilityFlags,
-    durableObject: Object.freeze({
-      binding: 'ADMIN_STATE' as const,
-      className: 'AdminState' as const,
-      storage: 'sqlite' as const,
-    }),
-    exports: Object.freeze({
-      AdminState: Object.freeze({ type: 'durable-object' as const, storage: 'sqlite' as const }),
-    }),
-    mainModule: 'index.js' as const,
-  });
+  const releaseContract = versionReleaseContract(phase, inheritTeamManagementFromVersion);
   const semanticInput: WorkerVersionSemanticInput = {
     phase,
     accountId: prepared.accountId,
@@ -2363,6 +2398,7 @@ export async function prepareWorkerVersionMutation(
   worker: WorkerSubmission,
   completionJwt: string | null,
   phase: WorkerVersionPhase,
+  inheritTeamManagementFromVersion?: string,
 ): Promise<WorkerVersionMutationPlan> {
   const progress = initialProgress();
   // The provision version carries no ASSETS binding and therefore no asset
@@ -2370,8 +2406,8 @@ export async function prepareWorkerVersionMutation(
   if (phase === 'provision' ? completionJwt !== null : !safeToken(completionJwt)) {
     fail('invalid_input', 'validate', 'not_sent', progress);
   }
-  const recovery = await prepareWorkerVersionRecoveryRecord(prepared, worker, phase);
-  const bindings = versionBindings(prepared, phase);
+  const recovery = await prepareWorkerVersionRecoveryRecord(prepared, worker, phase, inheritTeamManagementFromVersion);
+  const bindings = versionBindings(prepared, phase, inheritTeamManagementFromVersion);
   const semanticCommitment = Object.freeze(versionSemanticCommitment(recovery));
   const versionBodyCore = {
     bindings,
@@ -2436,7 +2472,8 @@ function validVersionReleaseContract(
 ): value is WorkerVersionRecoveryRecord['releaseContract'] {
   const candidate = v.safeParse(versionReleaseContractSchema, value);
   return candidate.success &&
-    candidate.output.bootstrapBinding === (phase === 'bootstrap' ? 'present' : 'absent');
+    candidate.output.bootstrapBinding === (phase === 'bootstrap' ? 'present' : 'absent') &&
+    (candidate.output.teamManagementBinding === undefined || phase === 'clean');
 }
 
 async function validVersionRecoveryRecord(recovery: WorkerVersionRecoveryRecord): Promise<boolean> {
@@ -2507,7 +2544,6 @@ export async function parseWorkerVersionRecoveryRecord<Input>(
     if (!candidate.success || !await validVersionRecoveryRecord(candidate.output)) return null;
     const input = candidate.output;
     const phase = input.phase;
-    const compatibilityFlags: readonly [] = Object.freeze([]);
     const parsed: WorkerVersionRecoveryRecord = Object.freeze({
       kind: 'version_recovery',
       phase,
@@ -2516,25 +2552,7 @@ export async function parseWorkerVersionRecoveryRecord<Input>(
       workerId: input.workerId,
       requestHash: input.requestHash,
       correlationTag: input.correlationTag,
-      releaseContract: Object.freeze({
-        assetBinding: 'ASSETS',
-        assetConfig: Object.freeze({
-          notFoundHandling: 'single-page-application',
-          runWorkerFirst: EXACT_RUN_WORKER_FIRST,
-        }),
-        bootstrapBinding: phase === 'bootstrap' ? 'present' : 'absent',
-        compatibilityDate: EXACT_COMPATIBILITY_DATE,
-        compatibilityFlags,
-        durableObject: Object.freeze({
-          binding: 'ADMIN_STATE',
-          className: 'AdminState',
-          storage: 'sqlite',
-        }),
-        exports: Object.freeze({
-          AdminState: Object.freeze({ type: 'durable-object', storage: 'sqlite' }),
-        }),
-        mainModule: 'index.js',
-      }),
+      releaseContract: versionReleaseContract(phase, input.releaseContract.teamManagementBinding?.fromVersionId),
       assets: Object.freeze(input.assets.map((asset) => Object.freeze({
         path: asset.path,
         uploadHash: asset.uploadHash,
@@ -2572,7 +2590,8 @@ async function validVersionSubmitIntent(
     !canonicalEqual(parsedIntent.semanticCommitment, versionSemanticCommitment(recovery)) ||
     parsedIntent.body.annotations['workers/tag'] !== parsedIntent.correlationTag ||
     parsedIntent.body.bindings.length !== recovery.plainTextBindingHashes.length +
-      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) ||
+      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) +
+      (recovery.releaseContract.teamManagementBinding === undefined ? 0 : 1) ||
     parsedIntent.body.modules.length !== recovery.modules.length ||
     !canonicalEqual(parsedIntent.body.exports, recovery.releaseContract.exports) ||
     // The provision version carries no ASSETS binding and no asset session.
@@ -2597,6 +2616,11 @@ async function validVersionSubmitIntent(
   if (recovery.phase === 'bootstrap') {
     if (redactedBinding?.name !== 'ANKKA_BOOTSTRAP_NONCE') return false;
   } else if (redactedBinding !== undefined) return false;
+  const managementBinding = bindings.get('ANKKA_TEAM_MANAGEMENT_TOKEN');
+  const inherited = recovery.releaseContract.teamManagementBinding;
+  if (inherited === undefined ? managementBinding !== undefined : !canonicalEqual(managementBinding, {
+    name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'inherit', version_id: inherited.fromVersionId,
+  })) return false;
   for (const expected of recovery.plainTextBindingHashes) {
     const binding = bindings.get(expected.name);
     if (

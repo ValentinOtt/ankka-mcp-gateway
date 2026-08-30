@@ -41,7 +41,7 @@ describe('Team preview', () => {
     expect((await api.getTeam()).editingEnabled).toBe(true)
   })
 
-  it('retains a locked recovery proposal through reauthorization and never offers cancellation', async () => {
+  it('resumes only the exact locked recovery proposal through a local Save', async () => {
     vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
     window.history.replaceState(null, '', '/team?preview=team-recovery')
     const api = previewApi()
@@ -50,21 +50,30 @@ describe('Team preview', () => {
     await expect(api.prepareTeamAction(saved.revision, saved.members)).rejects.toThrow()
     if (!saved.proposedMembers) throw new Error('Expected a recorded synthetic proposal')
     const prepared = await api.prepareTeamAction(saved.revision, saved.proposedMembers)
-    expect(await api.getTeamAction(prepared.actionId)).toEqual(expect.objectContaining({ status: 'authorization_required', canCancel: false }))
-    await expect(api.cancelTeamAction(prepared.actionId)).rejects.toThrow()
-    expect((await api.getTeam()).members).toEqual(saved.members)
+    expect(await api.getTeamAction(prepared.action.actionId)).toEqual(expect.objectContaining({ status: 'succeeded', canCancel: false }))
+    await expect(api.cancelTeamAction(prepared.action.actionId)).rejects.toThrow()
+    expect(await api.getTeam()).toEqual(expect.objectContaining({ members: saved.proposedMembers, proposedMembers: null, revision: saved.revision + 1 }))
   })
 
   it('simulates canceling an unstarted recorded change without changing saved permissions', async () => {
     vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
-    window.history.replaceState(null, '', '/team?preview=ready')
+    window.history.replaceState(null, '', '/team?preview=team-legacy')
     const api = previewApi()
     const saved = await api.getTeam()
-    const proposal = saved.members.map((member) => ({ ...member, sourceIds: [] }))
-    const prepared = await api.prepareTeamAction(saved.revision, proposal)
-    expect(await api.getTeamAction(prepared.actionId)).toEqual(expect.objectContaining({ canCancel: true }))
-    expect(await api.cancelTeamAction(prepared.actionId)).toEqual(expect.objectContaining({ status: 'failed', failureCode: 'team_action_cancelled', canCancel: false }))
+    if (!saved.pendingAction) throw new Error('Expected a retained legacy proposal')
+    expect(await api.getTeamAction(saved.pendingAction.actionId)).toEqual(expect.objectContaining({ canCancel: true }))
+    expect(await api.cancelTeamAction(saved.pendingAction.actionId)).toEqual(expect.objectContaining({ status: 'failed', failureCode: 'team_action_cancelled', canCancel: false }))
     expect(await api.getTeam()).toEqual(expect.objectContaining({ members: saved.members, proposedMembers: null, revision: saved.revision }))
+  })
+
+  it('fails closed without the customer-local management credential', async () => {
+    vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
+    window.history.replaceState(null, '', '/team?preview=team-no-credential')
+    const api = previewApi()
+    const saved = await api.getTeam()
+    expect(saved.managementCredentialConfigured).toBe(false)
+    await expect(api.prepareTeamAction(saved.revision, saved.members)).rejects.toEqual(expect.objectContaining({ code: 'team_management_credential_missing' }))
+    expect(await api.getTeam()).toEqual(saved)
   })
 
   it('rejects attempts to write through release-gated and lifecycle-paused preview contracts', async () => {

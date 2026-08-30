@@ -12,10 +12,11 @@ import type {
   SourceDraftInput,
   Team,
   TeamAction,
+  TeamActionResult,
   TeamMember,
 } from './api'
 
-type PreviewScenario = 'empty' | 'ready' | 'update' | 'error' | 'team-recovery' | 'team-readonly' | 'team-lifecycle'
+type PreviewScenario = 'empty' | 'ready' | 'update' | 'error' | 'team-recovery' | 'team-readonly' | 'team-lifecycle' | 'team-legacy' | 'team-no-credential'
 const PREVIEW_STORAGE_KEY = 'ankka-gateway-ui-preview-scenario'
 const ACTION_ID = `action_${'a'.repeat(32)}`
 const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai'
@@ -67,12 +68,12 @@ const installedSources: ManagedSources = {
 
 function scenarioFromLocation(): PreviewScenario {
   const requested = new URLSearchParams(window.location.search).get('preview')
-  if (requested === 'empty' || requested === 'ready' || requested === 'update' || requested === 'error' || requested === 'team-recovery' || requested === 'team-readonly' || requested === 'team-lifecycle') {
+  if (requested === 'empty' || requested === 'ready' || requested === 'update' || requested === 'error' || requested === 'team-recovery' || requested === 'team-readonly' || requested === 'team-lifecycle' || requested === 'team-legacy' || requested === 'team-no-credential') {
     window.sessionStorage.setItem(PREVIEW_STORAGE_KEY, requested)
     return requested
   }
   const retained = window.sessionStorage.getItem(PREVIEW_STORAGE_KEY)
-  return retained === 'empty' || retained === 'update' || retained === 'error' || retained === 'team-recovery' || retained === 'team-readonly' || retained === 'team-lifecycle' ? retained : 'ready'
+  return retained === 'empty' || retained === 'update' || retained === 'error' || retained === 'team-recovery' || retained === 'team-readonly' || retained === 'team-lifecycle' || retained === 'team-legacy' || retained === 'team-no-credential' ? retained : 'ready'
 }
 
 function update(available: boolean): RuntimeUpdate {
@@ -118,6 +119,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       revision: 2,
       editingEnabled: scenario !== 'team-readonly' && scenario !== 'team-lifecycle',
       editingDisabledReason: scenario === 'team-readonly' ? 'release_review_required' : scenario === 'team-lifecycle' ? 'lifecycle_action_pending' : null,
+      managementCredentialConfigured: scenario !== 'team-no-credential',
       adminEmails: ['admin@example.com'],
       members: [
         { email: 'admin@example.com', sourceIds: scenario === 'empty' ? [] : ['source-1111111111111111'] },
@@ -127,8 +129,8 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       pendingAction: null,
       proposedMembers: null,
     }
-    if (scenario === 'team-recovery') {
-      this.#team.pendingAction = { schemaVersion: 1, actionId: ACTION_ID, status: 'recovery_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: 'team_action_recovery_required', canCancel: false }
+    if (scenario === 'team-recovery' || scenario === 'team-legacy') {
+      this.#team.pendingAction = { schemaVersion: 1, actionId: ACTION_ID, status: scenario === 'team-recovery' ? 'recovery_required' : 'authorization_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: scenario === 'team-recovery' ? 'team_action_recovery_required' : null, canCancel: scenario === 'team-legacy' }
       this.#team.proposedMembers = [
         { email: 'admin@example.com', sourceIds: ['source-1111111111111111'] },
         { email: 'analyst@example.com', sourceIds: ['source-1111111111111111'] },
@@ -147,16 +149,20 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return structuredClone({ ...this.#team, sources: this.#sources.sources.map(({ id, label, enabledTools, status: sourceStatus }) => ({ id, label, enabledTools, status: sourceStatus })) })
   }
 
-  async prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<PreparedAction> {
+  async prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult> {
     if (!this.#team.editingEnabled) throw new GatewayApiError(403, this.#team.editingDisabledReason === 'release_review_required' ? 'team_release_review_required' : 'team_action_conflict')
+    if (!this.#team.managementCredentialConfigured) throw new GatewayApiError(409, 'team_management_credential_missing')
     if (expectedRevision !== this.#team.revision) throw new GatewayApiError(409, 'team_access_revision_conflict')
     const pending = this.#team.pendingAction
     const continuing = pending && ['authorization_required', 'applying', 'recovery_required'].includes(pending.status)
     if (continuing && (pending.status === 'applying' || JSON.stringify(members) !== JSON.stringify(this.#team.proposedMembers))) throw new GatewayApiError(409, 'team_action_conflict')
     const expiresAt = new Date(Date.now() + 600_000).toISOString()
-    this.#team.proposedMembers = structuredClone(members)
-    this.#team.pendingAction = { schemaVersion: 1, actionId: ACTION_ID, status: 'authorization_required', expiresAt, failureCode: null, canCancel: continuing ? pending.canCancel : true }
-    return { schemaVersion: 1, actionId: ACTION_ID, status: 'authorization_required', expiresAt, handoffUrl: HANDOFF }
+    const action: TeamActionResult['action'] = { schemaVersion: 1, actionId: ACTION_ID, status: 'succeeded', expiresAt, failureCode: null, canCancel: false }
+    this.#team.members = structuredClone(members)
+    this.#team.revision += 1
+    this.#team.proposedMembers = null
+    this.#team.pendingAction = action
+    return { schemaVersion: 1, action: structuredClone(action) }
   }
 
   async getTeamAction(_actionId: string): Promise<TeamAction> {

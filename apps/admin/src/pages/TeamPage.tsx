@@ -1,5 +1,5 @@
 import { Button, Input } from '@cloudflare/kumo'
-import { ArrowsClockwise, ArrowSquareOut, Plus, ShieldCheck, Trash, X } from '@phosphor-icons/react'
+import { ArrowsClockwise, Check, Plus, ShieldCheck, Trash, X } from '@phosphor-icons/react'
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GatewayApiError, SOURCE_ADDITION_PAUSED_MESSAGE, TEAM_MAX_PEOPLE, type Team, type TeamAction, type TeamMember } from '../api'
 import { PageHeader } from '../components/PageHeader'
@@ -32,14 +32,15 @@ function isRecordedChange(action: TeamAction | null): boolean {
 function actionMessage(action: TeamAction | null): string | null {
   if (!action) return null
   if (action.status === 'succeeded') return 'The last recorded team access change was applied and verified in Cloudflare. Unsaved selections have not been applied.'
-  if (action.status === 'recovery_required') return 'Some access policies may already have changed. Resume the exact recorded change below. Nothing was automatically restored.'
+  const failure = action.failureCode && ['team_management_credential_missing', 'team_management_credential_invalid', 'team_policy_drift'].includes(action.failureCode)
+    ? `${new GatewayApiError(409, action.failureCode).message} `
+    : ''
+  if (action.status === 'recovery_required') return `${failure}Some access policies may already have changed. Resume the exact recorded change below. Nothing was automatically restored.`
   if (action.status === 'applying') return 'Applying and verifying team access. Some policies may already have changed; the saved configuration below is not a live check.'
   if (action.status === 'failed') return action.failureCode === 'team_action_cancelled'
     ? 'The recorded change was canceled before any access policy was changed.'
-    : 'The recorded team access change did not complete. Review the saved configuration before trying again.'
-  return Date.parse(action.expiresAt) <= Date.now()
-    ? 'Cloudflare authorization expired. Continue with the same recorded change to get a fresh authorization.'
-    : 'The recorded change is waiting for Cloudflare authorization. Preparing it does not grant or remove access.'
+    : `${failure}The recorded team access change did not complete. Review the saved configuration before trying again.`
+  return 'This proposal is retained in your gateway. Save the exact recorded change here to apply and verify it in your Cloudflare account. Hosted authorization is no longer used.'
 }
 
 export function TeamPage() {
@@ -49,6 +50,7 @@ export function TeamPage() {
   const [draft, setDraft] = useState<TeamMember[]>([])
   const [action, setAction] = useState<TeamAction | null>(null)
   const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [email, setEmail] = useState('')
   const [formError, setFormError] = useState<string | null>(null)
@@ -106,7 +108,7 @@ export function TeamPage() {
   }, [acceptTeam, getTeam])
 
   const actionId = action?.actionId ?? callbackId
-  const shouldPoll = team !== null && !loading && !isBusy && !needsRefresh && action?.status !== 'succeeded' && action?.status !== 'failed' && action?.status !== 'recovery_required'
+  const shouldPoll = team !== null && !loading && !saving && !isBusy && !needsRefresh && (action?.status === 'applying' || callbackId !== null)
 
   useEffect(() => {
     if (!actionId || !shouldPoll) return
@@ -127,7 +129,7 @@ export function TeamPage() {
         }
         setAction(next)
         clearCallback()
-        if (next.status === 'authorization_required' && Date.parse(next.expiresAt) <= Date.now()) return
+        if (next.status === 'authorization_required') return
         timer = window.setTimeout(() => { void poll() }, 1500)
       } catch {
         if (active) {
@@ -147,9 +149,9 @@ export function TeamPage() {
   const changed = JSON.stringify(canonicalMembers(draft)) !== JSON.stringify(effectiveMembers)
   const installed = team?.sources.filter((source) => source.status === 'installed') ?? []
   const message = actionMessage(action)
-  const disabled = isBusy || loading || needsRefresh || callbackId !== null || recorded || team?.editingEnabled !== true
+  const disabled = isBusy || saving || loading || needsRefresh || callbackId !== null || recorded || team?.editingEnabled !== true
   const atCapacity = draft.length >= TEAM_MAX_PEOPLE
-  const canCancel = team?.editingEnabled === true && action?.status === 'authorization_required' && action.canCancel === true
+  const canCancel = team?.editingEnabled === true && (action?.status === 'authorization_required' || action?.status === 'recovery_required') && action.canCancel === true
 
   const addPerson = (event: FormEvent) => {
     event.preventDefault()
@@ -172,22 +174,26 @@ export function TeamPage() {
     setFormError(null)
   }
 
-  const authorize = async () => {
-    if (!team?.editingEnabled || loading || isBusy || needsRefresh || callbackId !== null || actionInFlight.current || action?.status === 'applying' || (!recorded && !changed)) return
+  const save = async () => {
+    if (!team?.editingEnabled || !team.managementCredentialConfigured || loading || isBusy || needsRefresh || callbackId !== null || actionInFlight.current || action?.status === 'applying' || (!recorded && !changed)) return
     const members = recorded ? team.proposedMembers : canonicalMembers(draft)
     if (!members) return
     actionInFlight.current = true
+    setSaving(true)
     setError(null)
     try {
-      const prepared = await prepareTeamAction(team.revision, members)
-      const pendingAction: TeamAction = { schemaVersion: 1, actionId: prepared.actionId, status: prepared.status, expiresAt: prepared.expiresAt, failureCode: null, canCancel: false }
+      const { action: pendingAction } = await prepareTeamAction(team.revision, members)
+      if (!ACTION_ID.test(pendingAction.actionId) || (recorded && pendingAction.actionId !== action?.actionId)) {
+        throw new GatewayApiError(502, 'team_action_invalid')
+      }
       setAction(pendingAction)
       setTeam((current) => current ? { ...current, pendingAction, proposedMembers: members } : current)
-      if (!preview) window.location.assign(prepared.handoffUrl)
+      acceptTeam(await getTeam())
+      clearCallback()
     } catch (cause) {
       setNeedsRefresh(true)
       setError(cause instanceof GatewayApiError ? cause.message : 'The team access change could not be confirmed. Refresh to check the recorded state before trying again.')
-    } finally { actionInFlight.current = false }
+    } finally { actionInFlight.current = false; setSaving(false) }
   }
 
   const cancelRecordedChange = async () => {
@@ -213,16 +219,17 @@ export function TeamPage() {
       <PageHeader
         eyebrow="Gateway access"
         title="Team"
-        description={team?.editingEnabled ? 'Choose which MCP sources each person can use. Changes require your confirmation in Cloudflare.' : 'Inspect the source access saved for your team and the tools each source shares.'}
-        action={<Button variant="secondary" className="pressable inline-flex items-center gap-2" loading={loading} disabled={isBusy || (!needsRefresh && !recorded && changed)} onClick={() => void refresh()}><ArrowsClockwise size={16} /> Refresh</Button>}
+        description={team?.editingEnabled ? 'Choose which MCP sources each person can use. Save applies the whole change through your gateway in your Cloudflare account.' : 'Inspect the source access saved for your team and the tools each source shares.'}
+        action={<Button variant="secondary" className="pressable inline-flex items-center gap-2" loading={loading} disabled={isBusy || saving || (!needsRefresh && !recorded && changed)} onClick={() => void refresh()}><ArrowsClockwise size={16} /> Refresh</Button>}
       />
 
-      {preview ? <p role="status" className="notice-banner notice-neutral mt-6">Local preview — synthetic people; no Cloudflare changes. Authorization is simulated and stays on this page.</p> : null}
+      {preview ? <p role="status" className="notice-banner notice-neutral mt-6">Local preview — synthetic people; no Cloudflare changes. Saving is simulated and stays on this page.</p> : null}
       {error ? <p role="alert" className="notice-banner notice-error mt-6">{error}</p> : null}
       {message ? <p role="status" className={`notice-banner mt-6 notice-${action?.status === 'succeeded' ? 'success' : action?.status === 'failed' || action?.status === 'recovery_required' ? 'error' : 'neutral'}`}>{message}</p> : null}
       {!team ? <p className="mt-8 text-sm text-kumo-subtle">{loading ? 'Loading team access…' : 'No team access information is available.'}</p> : (
         <>
           {!team.editingEnabled ? <p role="status" className="notice-banner notice-neutral mt-6">{team.editingDisabledReason === 'lifecycle_action_pending' ? 'Another source, update, or teardown action is in progress. Finish or safely cancel that action, then refresh to edit team access.' : 'Team access changes are disabled until this gateway release is reviewed and approved.'} You can still inspect the saved access configuration and shared tools.</p> : null}
+          {!team.managementCredentialConfigured ? <p role="status" className="notice-banner notice-neutral mt-6">Team saves need a dedicated Cloudflare management API token. Its Access permission can administer other applications and policies in the same account. Follow the <a href="https://github.com/ValentinOtt/ankka-mcp-gateway/blob/main/docs/TEAM_ACCESS.md" target="_blank" rel="noreferrer" className="underline underline-offset-4">Team credential setup guide</a> for required permissions, rotation, and revocation. In your Cloudflare account, open this gateway Worker’s Settings → Variables and Secrets and add it as the encrypted secret <code>ANKKA_TEAM_MANAGEMENT_TOKEN</code>, then refresh. Never paste the token into this dashboard or send it to Ankka. Adding the secret does not apply a recorded change; review it here before saving.</p> : null}
           {sources && sources.installationEnabled !== true ? <p role="status" className="notice-banner notice-neutral mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} {team.editingEnabled ? 'You can grant or revoke access to the installed sources below.' : 'This restriction does not change saved access.'}</p> : null}
           {needsRefresh ? <p role="status" className="notice-banner notice-neutral mt-6">Editing is paused until the recorded state can be checked. Refresh reloads the saved configuration and discards unsaved selections.</p> : null}
           <section className="surface-card mt-7 p-5 sm:p-6" aria-labelledby="team-admins-title">
@@ -254,7 +261,7 @@ export function TeamPage() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h2 id="edit-access-title" className="text-base font-semibold text-kumo-strong">{recorded ? 'Recorded change' : team.editingEnabled ? 'Edit source access' : 'Source access'}</h2>
-                <p className="mt-1 text-sm leading-6 text-kumo-subtle">{recorded ? canCancel ? 'This proposal is retained by your gateway. Continue with this exact change, or cancel it before any policy is changed.' : 'This proposal is retained by your gateway. It must be completed exactly before another change can be made.' : team.editingEnabled ? 'New people start with no sources. Selecting an installed source grants its shared enabled tools, not administrator access.' : 'Each source grants its shared enabled tools. Source grants do not change administrator roles.'}</p>
+                <p className="mt-1 text-sm leading-6 text-kumo-subtle">{recorded ? canCancel ? 'This proposal is retained by your gateway. Save this exact change, or cancel it before any policy is changed.' : 'This proposal is retained by your gateway. It must be completed exactly before another change can be made.' : team.editingEnabled ? 'New people start with no sources. Selecting an installed source grants its shared enabled tools, not administrator access.' : 'Each source grants its shared enabled tools. Source grants do not change administrator roles.'}</p>
               </div>
               <StatusPill tone={recorded || changed ? 'attention' : 'waiting'}>{recorded ? 'Not fully verified' : changed ? 'Unsaved changes' : 'No unsaved changes'}</StatusPill>
             </div>
@@ -296,11 +303,11 @@ export function TeamPage() {
             {formError ? <p role="alert" className="field-error">{formError}</p> : null}
 
             <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-kumo-line pt-5">
-              <Button variant="primary" className="pressable inline-flex items-center gap-2" loading={isBusy} disabled={!team.editingEnabled || loading || isBusy || needsRefresh || callbackId !== null || action?.status === 'applying' || (recorded ? team.proposedMembers === null : !changed)} onClick={() => void authorize()}>
-                <ArrowSquareOut size={16} /> {action?.status === 'recovery_required' ? 'Resume change in Cloudflare' : recorded ? 'Continue in Cloudflare' : 'Review in Cloudflare'}
+              <Button variant="primary" className="pressable inline-flex items-center gap-2" loading={isBusy || saving} disabled={!team.editingEnabled || !team.managementCredentialConfigured || loading || saving || isBusy || needsRefresh || callbackId !== null || action?.status === 'applying' || (recorded ? team.proposedMembers === null : !changed)} onClick={() => void save()}>
+                <Check size={16} /> {action?.status === 'recovery_required' ? 'Resume recorded change' : recorded ? 'Save recorded change' : 'Save'}
               </Button>
-              {canCancel ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || loading || needsRefresh || callbackId !== null} onClick={() => void cancelRecordedChange()}><X size={16} /> Cancel recorded change</Button> : null}
-              {!recorded && changed ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy} onClick={() => { setDraft(effectiveMembers); setFormError(null) }}>Discard unsaved changes</Button> : null}
+              {canCancel ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving || loading || needsRefresh || callbackId !== null} onClick={() => void cancelRecordedChange()}><X size={16} /> Cancel recorded change</Button> : null}
+              {!recorded && changed ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving} onClick={() => { setDraft(effectiveMembers); setFormError(null) }}>Discard unsaved changes</Button> : null}
               <p className="max-w-[65ch] text-xs leading-5 text-kumo-subtle">Access is not confirmed until Cloudflare applies and verifies the change. Existing cached sessions may remain valid until they expire or are revoked in Cloudflare Access.</p>
             </div>
             <p className="mt-3 max-w-[75ch] text-xs leading-5 text-kumo-subtle">After the first permission-policy change, automatic teardown is unavailable until a compatible gateway release supports it.</p>

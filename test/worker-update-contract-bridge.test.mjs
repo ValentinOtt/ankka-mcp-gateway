@@ -143,11 +143,10 @@ test('an alternate reviewed contract cannot replace the signed contract without 
   }
 });
 
-test('bridge declares compatibility without provisioning or activating the Team credential', () => {
-  assert.equal(workerSource.split('ANKKA_TEAM_MANAGEMENT_TOKEN').length, 2);
-  assert.match(workerSource, /lifecycle: 'customer-managed-optional', name: 'ANKKA_TEAM_MANAGEMENT_TOKEN'/u);
-  assert.doesNotMatch(workerSource, /env(?:\.|\[['"])ANKKA_TEAM_MANAGEMENT_TOKEN/u);
+test('the Team signer declares exactly the reviewed optional customer-managed binding', () => {
+  assert.deepEqual(APPROVED_CLOUDFLARE_CONTRACT, teamContract);
   assert.deepEqual(APPROVED_CLOUDFLARE_CONTRACT.publicBindings.secrets, [
     { lifecycle: 'bootstrap-only', name: 'ANKKA_BOOTSTRAP_NONCE' },
+    { lifecycle: 'customer-managed-optional', name: 'ANKKA_TEAM_MANAGEMENT_TOKEN' },
   ]);
 });

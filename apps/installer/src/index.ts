@@ -1018,6 +1018,11 @@ async function readManagementActionHandoff(request: Request, now: number): Promi
   const claimResult = v.safeParse(managementActionHandoffSchema, claimInput);
   if (!claimResult.success) throw new DeployError(400, 'bad_request');
   const claim = claimResult.output;
+  // Team saves now run entirely in the customer Worker. Reject even an old
+  // exact-release handoff before creating another installer OAuth attempt.
+  if (claim.schemaVersion === 1 && claim.action === 'access') {
+    throw new DeployError(409, 'session_conflict');
+  }
   if (claim.controlPlaneOrigin !== PUBLIC_ORIGIN) throw new DeployError(400, 'bad_request');
   if (claim.schemaVersion === 1 && claim.releaseIdentity.controlPlaneOrigin !== claim.controlPlaneOrigin) {
     throw new DeployError(400, 'bad_request');
@@ -1138,9 +1143,6 @@ async function authorizeManagementAction(
     managementOrigin: claim.managementOrigin,
     releaseIdentity: claim.releaseIdentity,
   };
-  if (claim.schemaVersion === 1 && claim.action === 'access' && sealedPayload.schemaVersion === 4) {
-    sealedPayload.action = 'access';
-  }
   const sealed = await sealOauthCookie(env.DEPLOY_SESSION_ENCRYPTION_KEY, sealedPayload);
   const authorizationUrl = buildAuthorizationUrl({
     clientId: env.CLOUDFLARE_OAUTH_CLIENT_ID,
@@ -1885,6 +1887,9 @@ async function sourceActionOauthCallback(
   if (sealed.purpose !== 'source_apply' || sealed.expiresAt <= now) {
     throw new DeployError(400, 'session_invalid');
   }
+  // Retire already-issued Team attempts too. Do not exchange the authorization
+  // code, load a release, enable workers.dev, or forward a grant to old code.
+  if (sealed.action === 'access') return errorResponse(new DeployError(409, 'session_conflict'), true);
   if (callback.denied) return errorResponse(new DeployError(400, 'oauth_denied'), true);
   let phase: ManagementCallbackPhase = 'source_release_verification';
   let execution: Promise<void> | null = null;
@@ -1931,7 +1936,7 @@ async function sourceActionOauthCallback(
             transport,
             now: () => now,
           };
-          await relaySourceAction(sealed.action === 'access' ? { ...relayInput, action: 'access' } : relayInput);
+          await relaySourceAction(relayInput);
         });
       } finally {
         if (grant) {
