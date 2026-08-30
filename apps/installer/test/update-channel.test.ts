@@ -40,7 +40,7 @@ describe('public update channel', () => {
     const channel = buildPublicUpdateChannel(bundleForRelease('gateway-v0.1.15'));
     expect(channel.notes).toEqual([
       'Signed gateway-v0.1.15 gateway runtime and management application.',
-      'Normal update: customer configuration, credentials, Access, DNS, MCP sources, and tool allowlists are unchanged.',
+      'Normal update: your configuration, credentials, Access, DNS, MCP sources, and tool allowlists are unchanged.',
       'Team permissions apply only to MCP sources already installed in your gateway.',
       'New-source creation is unavailable in this release, including first-source onboarding for fresh empty gateways.',
       'Administrators remain fixed; source write tools are not activated and existing read-only boundaries are unchanged.',
@@ -53,7 +53,7 @@ describe('public update channel', () => {
     'preserves generic release notes for %s', (release) => {
       expect(buildPublicUpdateChannel(bundleForRelease(release)).notes).toEqual([
         `Signed ${release} gateway runtime and management application.`,
-        'Normal update: customer configuration, credentials, Access, DNS, MCP sources, and tool allowlists are unchanged.',
+        'Normal update: your configuration, credentials, Access, DNS, MCP sources, and tool allowlists are unchanged.',
       ]);
     },
   );
