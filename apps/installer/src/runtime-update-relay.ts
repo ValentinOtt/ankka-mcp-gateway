@@ -10,6 +10,7 @@ import {
 import { CLOUDFLARE_API_ORIGIN, PUBLIC_ORIGIN } from './constants';
 import { base64UrlDecode, base64UrlEncode } from './crypto';
 import { DeployError } from './errors';
+import { readBoundedText, withDeadline } from './http';
 import {
   prepareAssetBucketMutation,
   prepareAssetUploadSessionMutation,
@@ -38,6 +39,7 @@ const WORKER_ID = /^[a-f0-9]{32}$/u;
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const RELEASE = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_CONTROL_ERROR_BYTES = 1_024;
 // Version creation includes provider-side compilation. Give this one POST a
 // bounded allowance beyond the shared 10s request limit; never retry it here.
 const VERSION_CREATE_TIMEOUT_MS = 30_000;
@@ -113,6 +115,27 @@ const workerDomainsSchema = v.array(v.looseObject({
   service: v.string(),
 }));
 const deploymentResultSchema = v.looseObject({ id: v.string() });
+const controlErrorSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  error: v.picklist([
+    'runtime_action_rejected', 'runtime_action_conflict', 'runtime_updates_unavailable',
+    'runtime_probe_version_mismatch', 'team_action_conflict',
+  ]),
+});
+const CONTROL_ERROR_DETAILS = Object.freeze({
+  runtime_action_rejected: 'action_rejected',
+  runtime_action_conflict: 'action_conflict',
+  runtime_updates_unavailable: 'updates_unavailable',
+  runtime_probe_version_mismatch: 'version_mismatch',
+  team_action_conflict: 'team_conflict',
+} as const);
+type RuntimeProgressStage =
+  | 'current_verified' | 'assets_uploaded' | 'candidate_created' | 'candidate_staged'
+  | 'candidate_verified' | 'activated' | 'health_verified' | 'rolled_back';
+type ControlPhase = 'begin' | 'complete' | 'fail' | 'candidate_probe' | 'active_probe'
+  | `progress_${RuntimeProgressStage}`;
+type RelayPhase = 'preflight' | 'route_enable' | 'route_wait' | 'candidate_upload'
+  | 'candidate_stage' | 'candidate_stage_verify' | 'candidate_activate' | 'candidate_active_verify';
 
 type RuntimeVersion = Readonly<{
   release: string;
@@ -409,6 +432,7 @@ async function hmac(actionKey: string, body: string): Promise<string> {
 async function control(
   input: RuntimeUpdateRelayInput,
   command: JsonObject,
+  signal: AbortSignal,
   versionOverride?: string,
 ): Promise<Response> {
   const body = canonicalJson({
@@ -428,35 +452,72 @@ async function control(
   if (versionOverride) {
     headers.set('Cloudflare-Workers-Version-Overrides', `${input.workerName}="${versionOverride}"`);
   }
-  return input.transport(runtimeUrl(input), { method: 'POST', headers, body, redirect: 'manual' });
+  return input.transport(runtimeUrl(input), { method: 'POST', headers, body, redirect: 'manual', signal });
 }
 
-async function requireControl(input: RuntimeUpdateRelayInput, command: JsonObject): Promise<void> {
-  const response = await control(input, command);
-  if (response.status !== 200 || response.redirected) {
+async function controlFailure(response: Response, phase: ControlPhase): Promise<never> {
+  let detail: string = 'rejected';
+  if (response.redirected || response.status >= 300 && response.status < 400) {
+    detail = 'redirect';
     await response.body?.cancel();
-    invalid('session_conflict');
+  } else if (response.status >= 400 && response.status < 600 &&
+      response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() === 'application/json') {
+    try {
+      const text = await readBoundedText(response, 'session_conflict', MAX_CONTROL_ERROR_BYTES);
+      const parsed = v.safeParse(controlErrorSchema, JSON.parse(text));
+      if (parsed.success) detail = CONTROL_ERROR_DETAILS[parsed.output.error];
+    } catch { /* Only the exact reviewed vocabulary may leave this request. */ }
+  } else {
+    await response.body?.cancel();
   }
-  await response.body?.cancel();
+  throw new DeployError(409, 'session_conflict', `runtime_${phase}_${detail}`);
+}
+
+async function checkedControl(
+  input: RuntimeUpdateRelayInput,
+  command: JsonObject,
+  phase: ControlPhase,
+  probeResponse = false,
+  versionOverride?: string,
+): Promise<void> {
+  try {
+    await withDeadline(async (signal) => {
+      const response = await control(input, command, signal, versionOverride);
+      const expected = probeResponse ? 204 : 200;
+      if (response.status !== expected || response.redirected ||
+          probeResponse && response.headers.get('x-ankka-runtime-action') !== 'ready') {
+        await controlFailure(response, phase);
+      }
+      await response.body?.cancel();
+    }, 'session_conflict');
+  } catch (error) {
+    if (error instanceof DeployError && error.reason !== null) throw error;
+    const detail = error instanceof DeployError && error.status === 504 ? 'timeout' : 'request_failed';
+    throw new DeployError(409, 'session_conflict', `runtime_${phase}_${detail}`);
+  }
+}
+
+async function requireControl(
+  input: RuntimeUpdateRelayInput,
+  command: JsonObject,
+  phase: ControlPhase,
+): Promise<void> {
+  await checkedControl(input, command, phase);
 }
 
 async function progress(
   input: RuntimeUpdateRelayInput,
-  stage: string,
+  stage: RuntimeProgressStage,
   fromVersionId: string | null,
   toVersionId: string | null,
 ): Promise<void> {
-  await requireControl(input, { command: 'progress', stage, fromVersionId, toVersionId });
+  await requireControl(input, { command: 'progress', stage, fromVersionId, toVersionId }, `progress_${stage}`);
 }
 
 async function probe(input: RuntimeUpdateRelayInput, versionId?: string): Promise<void> {
-  const response = await control(input, {
+  await checkedControl(input, {
     command: 'probe', targetRelease: input.to.release, targetArtifactSha256: input.to.artifactSha256,
-  }, versionId);
-  if (response.status !== 204 || response.redirected || response.headers.get('x-ankka-runtime-action') !== 'ready') {
-    await response.body?.cancel();
-    invalid('session_conflict');
-  }
+  }, versionId ? 'candidate_probe' : 'active_probe', true, versionId);
 }
 
 async function rawDeployment(
@@ -551,6 +612,7 @@ export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promis
   let controlMayBeStarted = false;
   let operationError: Error | null = null;
   let compensationConfirmed = false;
+  let phase: RelayPhase = 'preflight';
   try {
     await verifyAccountSubdomain(input);
     await verifyManagementDomain(input, management);
@@ -559,13 +621,16 @@ export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promis
     // Set before the mutating call: an ambiguous provider response may mean the
     // route changed and therefore still requires the compensating disable.
     routeMayBeEnabled = true;
+    phase = 'route_enable';
     await setSubdomain(input, true);
+    phase = 'route_wait';
     await awaitRuntimeRoute(input);
     controlMayBeStarted = true;
-    await requireControl(input, { command: 'begin' });
+    await requireControl(input, { command: 'begin' }, 'begin');
     oldVersionId = current.versionId;
     await progress(input, 'current_verified', oldVersionId, input.to.versionId);
     if (input.operation === 'update') {
+      phase = 'candidate_upload';
       const candidate = await createCandidate(input, current);
       targetVersionId = candidate.versionId;
       await progress(input, 'candidate_created', oldVersionId, targetVersionId);
@@ -577,23 +642,30 @@ export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promis
       { version_id: oldVersionId, percentage: 100 },
       { version_id: targetVersionId, percentage: 0 },
     ] as const;
+    phase = 'candidate_stage';
     const stagedId = await rawDeployment(input, stageVersions, `ankka-runtime-stage:${input.actionId}`);
     staged = true;
+    phase = 'candidate_stage_verify';
     await verifyRawActive(input, stagedId, stageVersions);
     await progress(input, 'candidate_staged', oldVersionId, targetVersionId);
     await probe(input, targetVersionId);
     await progress(input, 'candidate_verified', oldVersionId, targetVersionId);
     const activeVersions = [{ version_id: targetVersionId, percentage: 100 }] as const;
+    phase = 'candidate_activate';
     const activeId = await rawDeployment(input, activeVersions, `ankka-runtime-activate:${input.actionId}`);
+    phase = 'candidate_active_verify';
     await verifyRawActive(input, activeId, activeVersions);
     await progress(input, 'activated', oldVersionId, targetVersionId);
     await probe(input);
     await progress(input, 'health_verified', oldVersionId, targetVersionId);
-    await requireControl(input, { command: 'complete', fromVersionId: oldVersionId, toVersionId: targetVersionId });
+    await requireControl(input, { command: 'complete', fromVersionId: oldVersionId, toVersionId: targetVersionId }, 'complete');
   } catch (error) {
     operationError = error instanceof Error
       ? error
       : new DeployError(409, 'session_conflict');
+    if (operationError instanceof DeployError && operationError.reason === null) {
+      operationError = new DeployError(operationError.status, operationError.code, `runtime_${phase}`);
+    }
     if (staged && oldVersionId) {
       try {
         const versions = [{ version_id: oldVersionId, percentage: 100 }] as const;
@@ -613,13 +685,13 @@ export async function relayRuntimeUpdate(input: RuntimeUpdateRelayInput): Promis
           command: 'fail',
           failureCode: compensationConfirmed ? 'runtime_action_failed' : 'runtime_action_recovery_required',
           recoveryRequired: !compensationConfirmed,
-        });
+        }, 'fail');
       } catch { /* Preserve the provider failure. */ }
     }
   } finally {
     if (routeMayBeEnabled) {
       try { await setSubdomain(input, false); } catch {
-        operationError = new DeployError(409, 'session_conflict');
+        operationError = new DeployError(409, 'session_conflict', 'runtime_route_disable_failed');
       }
     }
   }
