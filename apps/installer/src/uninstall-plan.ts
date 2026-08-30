@@ -101,9 +101,10 @@ export const STATIC_UNINSTALL_RESIDUE_SCOPE = Object.freeze([
 export const STATIC_UNINSTALL_PROVIDER_NOTICE =
   'Cloudflare retains the Advanced Certificate after the Custom Domain is removed. It is outside Ankka\'s reviewed OAuth scope and must be reviewed or removed manually in Cloudflare.' as const;
 
+// Schema-v1 hash/parser values, not display-only copy; preserve published plans.
 export const STATIC_UNINSTALL_STEP_SUMMARIES = Object.freeze({
   gateway_resources_remove:
-    'Remove the gateway resources while the reviewed temporary cleanup bridge is active.',
+    'Remove the customer gateway resources while the reviewed temporary cleanup bridge is active.',
   temporary_cleanup_workers_dev_bridge:
     'Create and deploy the reviewed cleanup Worker version, enable workers.dev with preview URLs disabled only as a bridge enclosing gateway removal, disable workers.dev, then restore the clean deployment before management resource removal.',
   management_custom_domain_remove:

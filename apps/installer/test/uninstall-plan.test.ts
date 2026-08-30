@@ -638,6 +638,36 @@ const completed = await completedInstallJournal(selectionInput);
 const CREATED_AT = completed.updatedAt;
 
 describe('provider-ID-free reviewed static uninstall plan', () => {
+  it('preserves the published schema-v1 static plan identity across display-copy updates', async () => {
+    const current = await buildStaticUninstallPlan(completed, CREATED_AT, CREATED_AT + 60_000);
+    const semantic = {
+      schemaVersion: current.schemaVersion,
+      writesPerformed: current.writesPerformed,
+      installationId: current.installationId,
+      authorityHash: current.authorityHash,
+      requiredScopes: current.requiredScopes,
+      gateway: current.gateway,
+      source: current.source,
+      release: current.release,
+      steps: current.steps.map((step) => step.kind === 'gateway_resources_remove' ? {
+        ...step,
+        summary: 'Remove the customer gateway resources while the reviewed temporary cleanup bridge is active.',
+      } : step),
+      providerNotice: current.providerNotice,
+    };
+    const digest = await hash(semantic);
+    const legacy = {
+      ...semantic,
+      planId: `uninstall-plan-${digest.slice(0, 24)}`,
+      planHash: `sha256:${digest}`,
+      createdAt: current.createdAt,
+      expiresAt: current.expiresAt,
+    };
+    expect(current).toEqual(legacy);
+    await expect(parseStaticUninstallPlan(structuredClone(legacy))).resolves.toEqual(current);
+    await expect(isRecoveryEquivalentUninstallPlan(legacy, current)).resolves.toBe(true);
+  });
+
   it('projects a complete journal into the exact ordered public no-write contract', async () => {
     const plan = await buildStaticUninstallPlan(
       completed,
