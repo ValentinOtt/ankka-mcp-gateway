@@ -24,9 +24,9 @@ candidate and all signed or publishable output stay outside the repository.
 
 The release contains five components:
 
-- the primary customer Worker;
-- the generated customer dashboard;
-- the hosted installer assets used by the customer-approved flow;
+- the primary gateway Worker;
+- the generated gateway dashboard;
+- the hosted installer assets used by the operator-approved flow;
 - the receipt-authorized cleanup Worker; and
 - the inert retirement Worker.
 
@@ -34,7 +34,7 @@ The canonical manifest records the release identifier, public source commit,
 release channel, one canonical HTTPS control-plane origin, required OAuth
 scopes, Cloudflare deployment contract, every file's path, media type, size and
 SHA-256 digest, component digests, and the aggregate artifact digest. Candidate
-generation compiles that origin into the customer Worker before computing any
+generation compiles that origin into the gateway Worker before computing any
 file, component, or aggregate hash.
 
 The release builder also produces the project license, exact production
@@ -72,7 +72,7 @@ production third-party license bundle. GitHub Releases are immutable.
 
 The hosted release endpoint serves only the exact maintainer-approved release
 pinned into that build. Publishing a release does not activate the installer,
-promote a channel, or update a customer gateway.
+promote a channel, or update a gateway.
 
 Signing, publication, installer deployment, public activation, rollback, and
 stable promotion are separate maintainer-approved operations.

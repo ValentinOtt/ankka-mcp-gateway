@@ -6,15 +6,15 @@ body:
   - type: markdown
     attributes:
       value: |
-        Do not include credentials, OAuth codes, cookies, customer data, Cloudflare account/resource IDs, private hostnames, or unredacted provider responses. Use private vulnerability reporting for security issues.
+        Do not include credentials, OAuth codes, cookies, private data, Cloudflare account/resource IDs, private hostnames, or unredacted provider responses. Use private vulnerability reporting for security issues.
   - type: dropdown
     id: surface
     attributes:
       label: Surface
       options:
         - Hosted installer
-        - Customer management portal
-        - Customer gateway Worker
+        - Gateway dashboard
+        - Gateway Worker
         - Offline CLI or canary tooling
         - Release or update tooling
     validations:
@@ -50,5 +50,5 @@ body:
     attributes:
       label: Public-data confirmation
       options:
-        - label: I removed credentials, customer data, private hostnames, account/resource IDs, OAuth material, cookies, and unredacted provider output.
+        - label: I removed credentials, private data, private hostnames, account/resource IDs, OAuth material, cookies, and unredacted provider output.
           required: true

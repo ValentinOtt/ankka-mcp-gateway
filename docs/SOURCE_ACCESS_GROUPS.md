@@ -3,7 +3,7 @@
 This is an optional generic capability. The founding-team BLS deployment uses
 one reviewed Access group and does not need multiple sensitivity partitions.
 
-Each source may optionally name one customer-chosen Cloudflare Access group:
+Each source may optionally name one operator-chosen Cloudflare Access group:
 
 ```json
 {
@@ -27,7 +27,7 @@ authenticate to the Portal before source-specific policies narrow visibility.
 
 ## Fresh resolution input
 
-Immediately before each plan, provider readback, and apply, the customer-side
+Immediately before each plan, provider readback, and apply, the gateway-side
 caller must freshly list the account's Cloudflare Access groups with an
 appropriately scoped grant and pass only `{id,name}` observations in the
 ephemeral access input. `groups` is a provider-observation snapshot, not stored
@@ -43,7 +43,7 @@ configuration:
 ```
 
 The checked-in example is synthetic. Do not commit a live access-input file:
-Cloudflare account and resource IDs belong to the customer environment. This
+Cloudflare account and resource IDs belong to the deployment environment. This
 repository consumes the observations but does not itself obtain authority to
 list groups.
 

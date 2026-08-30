@@ -69,6 +69,9 @@ describe('installer UI/server cross-contract', () => {
     expect(response.authorization).toEqual({ status: 'anonymous', email: null, expiresAt: null });
     expect(response.recovery).toBeNull();
     expect(response.deployment).toBeNull();
+    expect(response.plan?.resourceGroups.find(({ id }) => id === 'runtime')?.label)
+      .toBe('Runtime in your account');
+    expect(JSON.stringify(response.plan?.resourceGroups)).not.toMatch(/\bcustomers?\b/iu);
   });
 
   it('shows the portal-only wizard plan without source operations', async () => {
@@ -137,6 +140,7 @@ describe('installer UI/server cross-contract', () => {
       failure: {
         code: 'install_mutations_disabled',
         title: 'Installer writes are not enabled',
+        detail: 'This build is intentionally running in zero-write mode.',
       },
       receipt: null,
     });
@@ -260,6 +264,9 @@ describe('installer UI/server cross-contract', () => {
       }),
       expect.objectContaining({ id: 'management_admin_policy_create', status: 'pending' }),
     ]);
+    expect(response.deployment?.operations.find(({ id }) => id === 'customer_bootstrap_submit'))
+      .toMatchObject({ label: 'Initializing your gateway state', status: 'pending' });
+    expect(JSON.stringify(response.deployment?.operations)).not.toMatch(/\bcustomers?\b/iu);
     expect(JSON.stringify(response)).not.toMatch(
       /accountId|applicationId|bindingHash|locator|requestHash|token/iu,
     );

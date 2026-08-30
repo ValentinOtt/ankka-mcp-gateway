@@ -5,14 +5,14 @@ revision must be publishable.
 
 ## Product boundary
 
-Ankka MCP Gateway is the customer-owned edge for a company's MCP sources.
+Ankka MCP Gateway is the self-hosted edge for a team's MCP sources.
 The first deployment target is Cloudflare. Runtime resources, access policies,
-logs, and upstream credentials belong to the customer's Cloudflare account.
+logs, and upstream credentials belong to the team's Cloudflare account.
 
 This repository may contain deployment tooling, the source for Ankka's hosted
-installer, declarative configuration, customer-resident runtime code, public
+installer, declarative configuration, gateway runtime code, public
 protocol contracts, and synthetic examples. Public source does not carry
-deployment authority: it must not contain private product code, customer data,
+deployment authority: it must not contain private product code, private data,
 internal semantic content, Cloudflare account or resource IDs, credentials,
 private signing material, generated release output, or private repository
 history. Public service hostnames and OAuth client identifiers are allowed when
@@ -23,16 +23,16 @@ they are explicitly documented as non-secret.
 - MCP source-provider credentials must never transit or be stored by Ankka.
   The distinct Cloudflare installer grant is operation-scoped: it exists only
   in the connected callback's request-local memory and, where a reviewed relay
-  requires it, is forwarded once to the exact HMAC-authenticated customer
+  requires it, is forwarded once to the exact HMAC-authenticated gateway
   Worker. It is never persisted, logged, exposed to any other destination, or
   reused for another action.
 - Secrets must not appear in configuration files, logs, exceptions, telemetry,
   tests, snapshots, or deployment output.
-- Customer-deployed gateways send no telemetry to Ankka. The Ankka-hosted
+- Self-hosted gateways send no telemetry to Ankka. The Ankka-hosted
   installer may collect documented, server-authored, session-scoped funnel
   events by default. Its exact fields, destination, retention, and user-facing
-  notice must remain public; it must not add cookies, cross-session or
-  customer identifiers, IP or raw user-agent storage, provider-resource,
+  notice must remain public; it must not add cookies, cross-session identifiers,
+  account or user identifiers, IP or raw user-agent storage, provider-resource,
   credential, or free-form dimensions.
 - The initial capability boundary is read-only with explicit tool allowlists.
 - Prompts and tool names are not authorization boundaries; upstreams must also
@@ -47,6 +47,16 @@ they are explicitly documented as non-secret.
 - Do not add generalized IAM, fine-grained RBAC, policy engines, approval
   workflows, or elaborate audit infrastructure without a current product need
   or demonstrated risk. Record a follow-up or narrow extension point instead.
+
+## Product language
+
+- Address people as "you" and "your team" in product copy. Use "users" for
+  people connecting through the gateway and "gateway operators" or
+  "administrators" for the people managing it.
+- Describe the deployment as "self-hosted" or "in your Cloudflare account";
+  do not imply a commercial relationship with Ankka.
+- Keep existing protocol fields, configuration values, routes, and published
+  document paths stable when changing copy.
 
 ## Development
 

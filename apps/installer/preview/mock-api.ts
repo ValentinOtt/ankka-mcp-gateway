@@ -36,7 +36,7 @@ const plan = {
   resourceGroups: [
     {
       id: 'runtime',
-      label: 'Customer-owned runtime',
+      label: 'Runtime in your account',
       detail: 'Management Worker, dashboard assets, and SQLite durable state.',
       operations: ['Management Worker', 'SQLite Durable Object', 'Dashboard assets'],
     },
@@ -69,7 +69,7 @@ const operationCopy = [
   ['bootstrap_worker_version_create', 'Uploading the bootstrap Worker version'],
   ['bootstrap_worker_deployment_create', 'Deploying the bootstrap Worker'],
   ['bootstrap_subdomain_enable', 'Enabling the temporary bootstrap URL'],
-  ['customer_bootstrap_submit', 'Bootstrapping customer-owned gateway state'],
+  ['customer_bootstrap_submit', 'Initializing your gateway state'],
   ['bootstrap_subdomain_disable', 'Disabling the temporary bootstrap URL'],
   ['clean_worker_version_create', 'Uploading the final Worker version'],
   ['clean_worker_deployment_create', 'Deploying the final Worker version'],
@@ -120,7 +120,7 @@ function operations(scenario: InstallerScenario) {
     id,
     label,
     detail: index === runningIndex
-      ? 'Creates the initial Portal, Access, and DNS configuration in the customer account.'
+      ? 'Creates the initial Portal, Access, and DNS configuration in your Cloudflare account.'
       : null,
     status: scenario === 'success' || scenario === 'removal'
       ? 'succeeded'

@@ -1,8 +1,8 @@
 # Source visibility and live canaries
 
 This document records the boundary for two optional post-preview capabilities.
-The customer-operated live Portal runner described below is implemented, but
-no customer deployment or live result is part of this repository. The only
+The operator-run live Portal runner described below is implemented, but
+no gateway deployment or live result is part of this repository. The only
 implemented gateway capability mode remains `read_only`, with exact tool
 allowlists and independent upstream enforcement.
 
@@ -17,7 +17,7 @@ execution are deferred until a present product need justifies them.
 | --- | --- | --- |
 | Per-source Access groups | Implemented and optional; one group is enough for current dogfood | Live qualification only when a deployment actually needs more than one visibility audience |
 | Write tools | Parked; rejected by the schema-level capability boundary | A future user need and a new threat-model review; no current implementation plan |
-| Scheduled live-source canary | Optional standalone bounded runner implemented; synthetic transport tests pass | Customer-owned scheduling and sink only if manual qualification stops being sufficient |
+| Scheduled live-source canary | Optional standalone bounded runner implemented; synthetic transport tests pass | Operator-owned scheduling and sink only if manual qualification stops being sufficient |
 
 ## Per-source Access groups
 
@@ -29,9 +29,9 @@ Cloudflare enforces Access selectors, including Groups, on MCP server
 applications reached through a Portal. The implemented contract is documented
 in [Per-source Cloudflare Access groups](SOURCE_ACCESS_GROUPS.md).
 
-An optional source `accessGroup` carries a customer-chosen exact logical name.
+An optional source `accessGroup` carries an operator-chosen exact logical name.
 Immediately before plan, readback, and apply, the caller must freshly enumerate
-Cloudflare groups with customer-owned authority and supply an ephemeral
+Cloudflare groups with operator-owned authority and supply an ephemeral
 `groups: [{id,name}]` observation snapshot. The offline planner does not fetch
 that snapshot. It binds the logical name only when exactly one observation
 matches and blocks missing, malformed, or ambiguous mappings without falling
@@ -48,7 +48,7 @@ as drift.
 
 Synthetic config, planner, receipt, provider-mutation, and drift tests cover
 the contract. This repository does not claim a live Cloudflare qualification:
-the customer must still verify multiple groups, one user in each relevant
+the operator must still verify multiple groups, one user in each relevant
 group, and a user in no group in its own account. Caller-side group enumeration
 and any hosted UI that constructs the snapshot remain external integrations.
 
@@ -67,17 +67,22 @@ If a real write use case arrives, start a new design from that operation, its
 current users, and its demonstrated failure modes. Never widen the `bls-read`
 credential or catalogue as a shortcut.
 
-## Customer-owned live canary
+## Operator-run live canary
+
+<a id="customer-owned-live-canary"></a>
 
 A live canary must not sample arbitrary business tools. Each source should
 expose one dedicated read-only health tool with fixed synthetic output, no
-arguments that select customer records, and no provider credential or response
+arguments that select private records, and no provider credential or response
 content. The same operation must be safe to repeat.
 
-The scheduled runner should live in the customer's account or monitoring
+The scheduled runner should live in the team's account or monitoring
 system and use a dedicated machine identity. Its Portal and every target source
-need matching least-privilege Access Service Auth policies. The current gateway
-does not declaratively create those machine-identity policies.
+need matching least-privilege Access Service Auth policies. The gateway
+does not expose general machine-identity policy configuration. The separate
+[operator disposable canary](CANARY_PROFILES.md) can create exact Service Auth
+policies only for its fixed synthetic source; it is not this gateway monitoring
+runner and does not qualify Code Mode or human OAuth.
 
 The standalone runner is implemented in
 [`tools/live-portal-canary.mjs`](../tools/live-portal-canary.mjs). It makes three
@@ -85,7 +90,7 @@ stateless MCP `2026-07-28` JSON-RPC operations: list the Portal surface, search
 for one exact sanitized Code Mode identifier, and execute that identifier with
 an empty object. It does not create a service token, change an Access policy,
 inspect Portal logs, schedule itself, or export to a monitoring sink. Those
-customer operations and the first live result remain external qualification.
+gateway operations and the first live result remain external qualification.
 
 The JSON configuration can live inside or outside this repository and has one
 strict, secret-free shape:
@@ -115,7 +120,7 @@ node --input-type=module -e 'import { canonicalResultSha256 } from "./tools/live
 ```
 
 Replace only the `value` literal with the exact constant returned by the
-customer's health tool. This command does not make a network request.
+team's health tool. This command does not make a network request.
 
 The exact Portal URL must end at `/mcp` without a query or fragment. Therefore,
 configure the Portal's Code Mode policy as `default_on` or `enforced`; the
@@ -146,7 +151,7 @@ exception text. A successful shape is:
 ```
 
 Any non-`ok` fixed code exits nonzero. Send this content-free record only to a
-customer-owned monitoring sink.
+operator-owned monitoring sink.
 
 One run should verify:
 
@@ -159,12 +164,12 @@ One run should verify:
    the configured SHA-256.
 5. Portal logs contain the expected identity, source, tool, success, and
    duration fields.
-6. The result is exported only to the customer's monitoring sink.
+6. The result is exported only to the team's monitoring sink.
 
 Store only the runner's bounded JSON record. Do not store tool arguments,
-results, tokens, cookies, raw provider errors, user emails, customer data, or
+results, tokens, cookies, raw provider errors, user emails, private data, or
 source credentials in the dashboard canary record. A failure should alert the
-customer; it must not send telemetry to Ankka.
+operator; it must not send telemetry to Ankka.
 
 Canary execution stays read-only. Update and rollback drills remain separate,
 explicitly approved lifecycle operations.

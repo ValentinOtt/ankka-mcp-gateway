@@ -1,12 +1,12 @@
 # Code of conduct
 
 Ankka MCP Gateway welcomes constructive participation in secure,
-customer-owned MCP infrastructure.
+self-hosted MCP infrastructure.
 
 Be respectful, specific, and patient. Critique ideas and implementations rather
 than people. Harassment, discrimination, threats, sexualized conduct,
 deliberate disruption, doxxing, or publishing another person's credentials,
-customer data, private infrastructure details, or security findings are not
+private data, private infrastructure details, or security findings are not
 acceptable.
 
 Report ordinary project problems through the repository's issue forms. Report

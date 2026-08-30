@@ -70,6 +70,7 @@ describe('WebMcpTools', () => {
 
     render(<GatewayProvider api={api}><WebMcpTools /></GatewayProvider>)
     await waitFor(() => expect(tools.some((tool) => tool.name === 'review_gateway_teardown')).toBe(true))
+    for (const tool of tools) expect(tool.description).not.toMatch(/\bcustomers?\b/iu)
 
     expect(tools.map((tool) => tool.name)).not.toContain('save_mcp_source_draft')
     expect(tools.map((tool) => tool.name)).not.toContain('apply_mcp_source')

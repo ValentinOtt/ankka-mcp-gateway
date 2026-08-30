@@ -19,28 +19,28 @@ authority.
 ## Non-negotiable boundaries
 
 - The installer hostname is one canonical HTTPS origin. Candidate generation
-  compiles that origin into the customer Worker before hashing it; the signed
+  compiles that origin into the gateway Worker before hashing it; the signed
   manifest, release pin, publication receipt, generated installer, browser
   handoffs, update discovery, and management handoffs must all agree. A request,
   environment variable, or gateway configuration cannot select another origin.
 - Both drill releases use the same origin, `canary` channel, key identifier,
-  Ed25519 key, R2 bucket, customer account, OAuth client, and isolated Worker.
+  Ed25519 key, R2 bucket, deployment account, OAuth client, and isolated Worker.
   Changing any of them is a different trust or deployment exercise.
 - A production signing pipeline is not required. A valid local development
   Ed25519 signature is required. Never disable or patch signature verification.
 - Every Cloudflare resource, grant, log, source credential, and generated
-  artifact belongs to the customer. The customer gateway sends no telemetry to
+  artifact belongs to the operator. The gateway sends no telemetry to
   Ankka. The isolated installer retains the fixed installer funnel in the
-  customer's own Analytics Engine dataset.
+  team's own Analytics Engine dataset.
 - Generated candidates, signed output, keys, pins, publication receipts,
   target files, Wrangler state, live identifiers, and command output stay in an
   operator-controlled directory outside this repository.
 - Never put an upstream MCP credential in gateway configuration or send it to
-  the installer. A shared BLS bearer belongs only in the customer-owned
+  the installer. A shared BLS bearer belongs only in the operator-owned
   `bls-read` source Worker's secret binding. Because that workload handles
   personal data, its MCP ingress must remain private behind standards-compliant
   OAuth. Configure the Portal mapping with **Require user auth** off
-  (`onBehalfOfUser: false`): one customer operator connects the source during
+  (`onBehalfOfUser: false`): one gateway operator connects the source during
   setup, while team members authenticate only to the Gateway Portal.
   `authentication.mode: none` is not acceptable for this protected endpoint.
   Generic bearer and custom-header source credentials are deliberately outside
@@ -73,7 +73,7 @@ The full gate must pass and `git status --short` must be empty. Record the
 40-character commit outside the repository. Use only the Node, npm, Wrangler,
 and dependency versions pinned by that checkout.
 
-Choose these customer-owned values:
+Choose these deployment-specific values:
 
 - an isolated hostname with at least three DNS labels, for example
   `installer.dogfood.example.com`;
@@ -138,7 +138,7 @@ node apps/installer/scripts/edge-gate/apply-isolated-access.mjs \
   --dry-run
 ```
 
-Then pipe a least-privilege, customer-owned Cloudflare token directly from an
+Then pipe a least-privilege Cloudflare token for your account directly from an
 approved secret tool. The token needs only the exact account-level Access
 application and identity-provider reads/writes used by this one operation:
 
@@ -198,7 +198,7 @@ checked-out version differs from this document.
 
 ## 3. Publish release A create-only
 
-Create the dedicated empty R2 bucket in the exact customer account. Generate a
+Create the dedicated empty R2 bucket in the exact deployment account. Generate a
 single-release local publisher:
 
 ```sh
@@ -270,7 +270,7 @@ The last two are distinct, independently random 32-byte values encoded as
 canonical base64 or unpadded base64url. Do not reuse the release signing key.
 Deploy only `wrangler.canary.toml` with the pinned Wrangler. Verify the exact
 custom hostname, Worker, Durable Object migration, R2 binding, disabled
-observability, and customer-owned installer analytics dataset in Cloudflare
+observability, and operator-owned installer analytics dataset in Cloudflare
 before opening the installer.
 
 Finally prove both the complete Access configuration and anonymous edge
@@ -295,7 +295,7 @@ review the deterministic plan, and install an empty gateway. Record the MCP and
 management URLs privately. Confirm the management status reports the same
 `controlPlaneOrigin` used above.
 
-From the customer dashboard:
+From the gateway dashboard:
 
 1. Discover each source and inspect its catalogue. The dashboard's discovery
    challenge must identify standards-compliant OAuth for `bls-read`; a public
@@ -310,7 +310,7 @@ From the customer dashboard:
    Access groups and follow
    [Per-source Cloudflare Access groups](../../docs/SOURCE_ACCESS_GROUPS.md).
 5. In Cloudflare Zero Trust **AI Controls**, open the created MCP server, choose
-   **Authenticate**, complete the source OAuth flow as the customer operator,
+   **Authenticate**, complete the source OAuth flow as the gateway operator,
    and confirm the server reports **Ready**. Treat the synchronized catalogue
    shown by AI Controls as an exact gate: its tool names and count must equal
    the reviewed configuration. Any addition, omission, or duplicate blocks
@@ -324,13 +324,13 @@ From the customer dashboard:
    business response as the health fixture.
 8. Connect without `?codemode=off` and run the Code Mode search/execute canary
    against that same health tool as described in
-   [Live provider acceptance](../../docs/GOVERNANCE_ROADMAP.md#live-provider-acceptance).
+   [Operator-run live canary](../../docs/GOVERNANCE_ROADMAP.md#operator-run-live-canary).
 
 The raw-token catalogue verifier is optional. Use it only when an approved
-customer-owned client already supplies a bounded operator OAuth access token:
+operator-owned client already supplies a bounded operator OAuth access token:
 
 ```sh
-<approved-customer-oauth-token-source> | \
+<approved-operator-oauth-token-source> | \
   node tools/verify-live-source-catalogue.mjs \
     --config <outside-repository-dir>/gateway.config.json \
     --source bls-read \
@@ -378,7 +378,7 @@ In the installed gateway dashboard:
 5. Confirm the documented caveat: Worker rollback does not roll back Durable
    Object data or migrations.
 
-Do not use a direct Wrangler upload to the customer Worker as a substitute for
+Do not use a direct Wrangler upload to the gateway Worker as a substitute for
 the signed update or rollback workflow.
 
 ## 7. Exercise recovery and receipt-bound removal
@@ -392,7 +392,7 @@ delete a pending journal to make the UI appear healthy.
 Exercise both returning paths while the isolated installer is still deployed:
 
 - return an applied source-action receipt to the exact signed origin; then
-- initiate gateway removal from the customer dashboard, follow the
+- initiate gateway removal from the gateway dashboard, follow the
   same-origin receipt handoff, review the teardown plan, and authorize it with
   a fresh grant.
 
@@ -402,15 +402,17 @@ state and remove only receipt-owned gateway resources in reverse dependency
 order. A hostname, Worker name, or provider ID alone is never deletion
 authority.
 
-## 8. Capture evidence without customer data
+## 8. Capture evidence without private data
 
-Record only a private, customer-owned qualification checklist:
+<a id="8-capture-evidence-without-customer-data"></a>
+
+Record only a private, operator-owned qualification checklist:
 
 - exact source commit and release A/B identifiers;
 - pass/fail for install, source apply, Code Mode, update, rollback, recovery,
   returning handoff, and removal;
 - fixed application error codes and phase timings; and
-- confirmation that the expected Cloudflare resources and customer-owned logs
+- confirmation that the expected Cloudflare resources and operator-owned logs
   were inspected.
 
 Do not copy account or resource IDs, hostnames, user emails, access-group IDs,
@@ -421,7 +423,7 @@ issue. Report security findings through `SECURITY.md`.
 ## 9. Clean up the isolated control plane
 
 Keep the isolated installer available until receipt-bound gateway removal and
-any recovery work are complete. Then clean up using exact customer inventory:
+any recovery work are complete. Then clean up using the exact deployment inventory:
 
 1. Deploy `wrangler.rollback.toml` to the exact isolated Worker and verify the
    disabled shell with `verify-isolated-access.mjs --runtime disabled`, again
@@ -429,7 +431,7 @@ any recovery work are complete. Then clean up using exact customer inventory:
 2. From a fresh complete Access-application inventory, remove exactly the four
    canary applications for the target: the whole-host operator Allow app plus
    the OAuth callback and two release-channel Bypass apps. The checked-in apply
-   tool intentionally has no deletion capability; use the customer console or
+   tool intentionally has no deletion capability; use your Cloudflare console or
    a separately reviewed exact-ID operation and re-read the inventory.
 3. Delete the exact isolated Worker and its custom-domain attachment. Review
    the corresponding Durable Object namespace/storage and remove it only after
@@ -438,11 +440,11 @@ any recovery work are complete. Then clean up using exact customer inventory:
    prefixes are understood and no installed gateway or recovery path can use
    them.
 5. Delete the exact private OAuth client and its redirect registration.
-6. Review and remove any exact customer-created Analytics Engine dataset,
+6. Review and remove any exact operator-created Analytics Engine dataset,
    hostname DNS/custom-domain state, and Cloudflare certificate that remain.
    Certificate cleanup is outside the installer grant.
 7. Destroy the local development seed and its backup according to the
-   customer's key-handling policy, then remove external candidates, pins,
+   team's key-handling policy, then remove external candidates, pins,
    receipts, target files, generated installer directories, and Wrangler state.
 
 Do not use broad, wildcard, prefix-only, or name-only deletion. Unrelated

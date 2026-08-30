@@ -1,7 +1,7 @@
 # Synthetic MCP fixture
 
 This fixture is a deterministic, stateless MCP endpoint used by local tests. It
-contains no credentials, customer data, clock values, durable state, or
+contains no credentials, private data, clock values, durable state, or
 external network calls.
 
 It exposes one read-only tool: `ankka_canary_status`.
@@ -28,4 +28,4 @@ The server listens on `127.0.0.1:9610` and exposes Streamable HTTP at
 - does not support server-initiated SSE.
 
 The fixture is test infrastructure, not a production MCP source. Do not attach
-real credentials or customer data.
+real credentials or private data.

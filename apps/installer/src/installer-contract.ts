@@ -179,7 +179,7 @@ function publicPlan(plan: StaticDeployPlan | null): InstallerPlan | null {
     resourceGroups: [
       {
         id: 'runtime',
-        label: 'Customer-owned runtime',
+        label: 'Runtime in your account',
         detail: 'Management Worker, dashboard assets, and SQLite durable state.',
         operations: [
           'Management Worker',
@@ -232,10 +232,10 @@ const FAILURE_COPY: Readonly<Record<DeployErrorCode, {
   csrf_invalid: { title: 'Installer session expired', detail: 'Reload the installer and create a new plan.', repairTarget: null },
   existing_gateway_detected: {
     title: 'Ankka MCP Gateway already detected',
-    detail: 'No Cloudflare writes were performed. Open the customer-owned management page to prove the stored receipt before reviewing teardown.',
+    detail: 'No Cloudflare writes were performed. Open your gateway dashboard to prove the stored receipt before reviewing teardown.',
     repairTarget: null,
   },
-  install_mutations_disabled: { title: 'Installer writes are not enabled', detail: 'This private scaffold is intentionally running in zero-write mode.', repairTarget: null },
+  install_mutations_disabled: { title: 'Installer writes are not enabled', detail: 'This build is intentionally running in zero-write mode.', repairTarget: null },
   uninstall_mutations_disabled: { title: 'Removal writes are not enabled', detail: 'This build keeps the reviewed removal executors intentionally disabled.', repairTarget: null },
   internal_error: { title: 'Deployment could not finish', detail: 'Restart from a new static plan.', repairTarget: null },
   oauth_denied: { title: 'Cloudflare authorization was cancelled', detail: 'Authorize the exact plan when you are ready.', repairTarget: null },
@@ -246,7 +246,7 @@ const FAILURE_COPY: Readonly<Record<DeployErrorCode, {
   origin_invalid: { title: 'Installer request rejected', detail: 'Reload this page from the signed installer origin.', repairTarget: null },
   rate_limited: { title: 'Installer request limit reached', detail: 'Wait briefly, then retry the same reviewed action.', repairTarget: null },
   release_invalid: { title: 'Gateway release verification failed', detail: 'Wait for a verified gateway release before retrying.', repairTarget: null },
-  release_unavailable: { title: 'Verified gateway release unavailable', detail: 'The zero-write installer cannot deploy until release signing is enabled.', repairTarget: null },
+  release_unavailable: { title: 'Verified gateway release unavailable', detail: 'This installer cannot load a verified, pinned gateway release. Try again when the release is available.', repairTarget: null },
   session_conflict: { title: 'Static plan changed', detail: 'Review and approve a fresh plan.', repairTarget: null },
   session_expired: { title: 'Installer session expired', detail: 'Reload the installer and create a new plan.', repairTarget: null },
   session_invalid: { title: 'Installer session invalid', detail: 'Reload the installer and create a new plan.', repairTarget: null },
@@ -264,7 +264,7 @@ const INSTALL_ACTION_COPY: Readonly<Record<InstallActionName, {
   },
   worker_create: {
     label: 'Creating the management Worker',
-    detail: 'Creates the customer-owned Worker resource.',
+    detail: 'Creates the Worker in your Cloudflare account.',
   },
   management_access_application_create: {
     label: 'Creating the management Access application',
@@ -276,15 +276,15 @@ const INSTALL_ACTION_COPY: Readonly<Record<InstallActionName, {
   },
   provision_worker_version_create: {
     label: 'Uploading the provisioning Worker version',
-    detail: 'Uploads the reviewed customer-resident runtime and dashboard assets.',
+    detail: 'Uploads the reviewed gateway runtime and dashboard assets.',
   },
   provision_worker_deployment_create: {
     label: 'Deploying the provisioning Worker',
-    detail: 'Activates the provisioning version in the customer account.',
+    detail: 'Activates the provisioning version in your Cloudflare account.',
   },
   bootstrap_worker_version_create: {
     label: 'Uploading the bootstrap Worker version',
-    detail: 'Prepares the one-time customer-owned bootstrap endpoint.',
+    detail: 'Prepares the one-time bootstrap endpoint in your account.',
   },
   bootstrap_worker_deployment_create: {
     label: 'Deploying the bootstrap Worker',
@@ -295,7 +295,7 @@ const INSTALL_ACTION_COPY: Readonly<Record<InstallActionName, {
     detail: 'Temporarily enables workers.dev for the signed bootstrap request.',
   },
   customer_bootstrap_submit: {
-    label: 'Bootstrapping customer-owned gateway state',
+    label: 'Initializing your gateway state',
     detail: 'Creates the initial source, Portal, Access, and DNS configuration.',
   },
   bootstrap_subdomain_disable: {
@@ -316,7 +316,7 @@ const INSTALL_ACTION_COPY: Readonly<Record<InstallActionName, {
   },
   final_convergence: {
     label: 'Verifying final gateway convergence',
-    detail: 'Confirms the exact reviewed resources and customer-owned receipt.',
+    detail: 'Confirms the exact reviewed resources and the installation receipt in your account.',
   },
 });
 
@@ -513,7 +513,7 @@ type InstallerUninstallSession = Omit<PublicUninstallSession, 'plan'> & {
 };
 
 const RETURNING_REMOVAL_NOTICE =
-  'Removal is authorized by the checksum-verified receipt held in the customer-owned Worker. Cloudflare retains any Advanced Certificate for manual review.';
+  'Removal is authorized by the checksum-verified receipt held in your gateway Worker. Cloudflare retains any Advanced Certificate for manual review.';
 
 function returningRemoval(value: PublicReturningUninstall | null): InstallerRemoval | null {
   if (!value) return null;

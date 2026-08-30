@@ -16,7 +16,7 @@ const HASH = /^sha256:[a-f0-9]{64}$/u;
 export const MAX_RETURNING_UNINSTALL_PLAN_TTL_MS = 10 * 60 * 1_000;
 
 export const RETURNING_UNINSTALL_STEPS = Object.freeze([
-  'Prove the one-time action and exact root receipt in the customer-owned Worker.',
+  'Prove the one-time action and exact root receipt in your gateway Worker.',
   'Deploy the signed cleanup Worker and remove only receipt-owned gateway resources.',
   'Remove the exact management Custom Domain, Access policy, and Access application.',
   'Retire AdminState, remove the exact management Worker, and prove no managed residue remains.',

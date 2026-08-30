@@ -31,7 +31,7 @@ for SQLite-backed Durable Object storage.
 
 The fixture pairs an OpenAPI 3.1 document containing 228 synthetic GET
 operations with a one-source gateway config containing the 228 operation IDs.
-It sets Code Mode to `default_on` and contains no credentials or customer data.
+It sets Code Mode to `default_on` and contains no credentials or private data.
 The focused scale test verifies that:
 
 - all operations have summaries and descriptions and deterministically extract
@@ -88,7 +88,7 @@ for machines, so it is intentionally larger and should not replace the config
 diff during human review.
 
 The focused root test proves the configuration and planning path at 228 and
-224 tools. Separate synthetic tests exercise the customer Worker discovering
+224 tools. Separate synthetic tests exercise the gateway Worker discovering
 the fixture's 228
 read-shaped tools alongside one unselected destructive tool over ten 25-tool
 MCP pages, persisting the exact 228-name draft, recovering an ambiguous
@@ -168,12 +168,22 @@ without a special URL, while a client that already implements its own code
 execution can opt out with `?codemode=off` and avoid nested execution.
 
 Use `enforced` only after every supported client has been qualified and the
-customer intentionally wants to prohibit direct-tool sessions. Enforced mode
+operator intentionally wants to prohibit direct-tool sessions. Enforced mode
 ignores client overrides. `opt_in` is useful during a staged migration;
 `off` exposes the ordinary tool surface and removes the large-catalog benefit.
 
 Code Mode changes presentation and orchestration, not authorization. Exact
 Portal allowlists and upstream read-only enforcement remain required.
+
+### Upstream Code Mode servers
+
+An upstream built with Cloudflare's `openApiMcpServer()` already exposes
+Code Mode through its own `search` and `execute` tools. Cloudflare documents
+that Portal Code Mode cannot wrap such an upstream. For this source type the
+Portal policy must be exactly `off`; `opt_in`, `default_on`, and `enforced` are
+incompatible. Apply must block rather than silently changing an existing
+aggregate Portal. A dedicated Portal or a direct-operation MCP adapter is the
+alternative when other sources require Portal Code Mode.
 
 ## Live qualification for 228 and 224 tools
 
@@ -214,11 +224,11 @@ prove the complete paginated `tools/list` before install:
    ```
 
 For an OAuth source, the verifier's raw-token path is optional and may be used
-only when an approved customer-owned client already supplies a bounded operator
+only when an approved operator-owned client already supplies a bounded operator
 OAuth access token:
 
 ```sh
-<approved-customer-oauth-token-source> | \
+<approved-operator-oauth-token-source> | \
   node tools/verify-live-source-catalogue.mjs \
     --config <outside-repository-dir>/gateway.config.json \
     --source <oauth-source-id> \

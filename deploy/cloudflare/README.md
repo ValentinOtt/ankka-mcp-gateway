@@ -2,7 +2,7 @@
 
 Cloudflare is the first deployment target for Ankka MCP Gateway.
 
-The customer account owns the management Worker, Durable Object, MCP Portal,
+The deployment account owns the management Worker, Durable Object, MCP Portal,
 Access policies, DNS, logs, and upstream credentials. The management origin
 must be different from the employee-facing MCP Portal hostname.
 
@@ -12,20 +12,20 @@ The hosted installer configuration in `apps/installer` is deliberately
 non-deploying: it has no production route, no signed release pin, and no enabled
 mutation executor. The repository does not provide a general `deploy` script.
 
-Supported customer releases will be generated from a clean public commit,
+Supported gateway releases will be generated from a clean public commit,
 signed outside the repository, and deployed only through a separately
 maintainer-approved installer build. Do not treat source files, local digests,
 or Wrangler dry-run output as release or deployment authority.
 
 The repository does contain an isolated installer generator and a bounded,
 development-only self-deploy path for a consenting first party. Release
-generation compiles one exact HTTPS control-plane origin into the customer
+generation compiles one exact HTTPS control-plane origin into the gateway
 Worker and binds it through the signed manifest, release pin, publication
 receipt, installer, update discovery, and all returning management handoffs.
 It is not request- or configuration-selectable.
 
 That path is unsupported and has not been live-qualified. It requires a clean
-public commit, a local development signature, customer-owned Cloudflare
+public commit, a local development signature, team-controlled Cloudflare
 resources, two create-only releases, lifecycle drills, receipt-bound removal,
 and exact cleanup. It does not provide a general deploy script or production
 signing authority. Follow the complete

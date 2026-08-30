@@ -4,7 +4,7 @@
 operations, complete operation IDs, summaries, and descriptions.
 `gateway.config.json` is the corresponding one-source gateway configuration
 whose exact allowlist is generated from those operation IDs. The operations are
-grouped into twelve generic domains; they do not describe a customer or
+grouped into twelve generic domains; they do not describe a real organization or
 production API.
 
 The fixture is deliberately formatted with one sorted tool name per line so a

@@ -3413,5 +3413,5 @@ describe('durable uninstall journal authority and lease boundary', () => {
     }));
     expect(atBoundary.status).toBe(410);
     expect(await atBoundary.json()).toEqual({ error: { code: 'session_expired' } });
-  }, 30_000);
+  });
 });
