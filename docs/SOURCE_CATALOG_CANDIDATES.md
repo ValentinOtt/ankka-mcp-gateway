@@ -21,6 +21,15 @@ implementations, not approved native presets; provider grants, Cloudflare
 authentication, and adapter lifecycle still need live qualification. The native
 BigQuery and Ahrefs holds below are unchanged.
 
+**Second 2026-08-30 update:** the same Worker gained a `bigquery` reader that
+mirrors the hosted BigQuery MCP read-tool contract against Google's REST API
+with a deployment-owned service account, adding the per-query
+`maximumBytesBilled` budget and a mandatory dry-run `SELECT` gate the hosted
+tools lack. It satisfies the operator-connects-once requirement without any
+Google login for team members, and leaves the native hosted-endpoint hold and
+its manual-OAuth block unchanged. It carries the same experimental status and
+live-qualification gates as the other readers.
+
 | System | Provider-hosted remote | Provider record in official MCP Registry | Current result |
 | --- | --- | --- | --- |
 | BigQuery | Yes | No | Hold for authentication and discovery work |

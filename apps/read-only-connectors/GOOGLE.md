@@ -8,9 +8,9 @@ claiming a working connection.
 
 ## Setup in your accounts
 
-Enable the Search Console API or Google Analytics Data API in the service
-account's Google Cloud project. Use a dedicated service account with access only
-to the properties this deployment should read. Google's
+Enable the Search Console API, Google Analytics Data API, or BigQuery API in
+the service account's Google Cloud project. Use a dedicated service account with
+access only to the properties or datasets this deployment should read. Google's
 [service-account flow](https://developers.google.com/identity/protocols/oauth2/service-account)
 describes key creation and signing; the
 [GA4 service-account quickstart](https://developers.google.com/analytics/devguides/reporting/data/v1/quickstart?account_type=service#before_you_begin)
@@ -29,6 +29,15 @@ inherit into its properties; Cloud-project IAM access alone does not grant
 Analytics-property access. See
 [adding Analytics users](https://support.google.com/analytics/answer/9305788) and
 [Analytics roles](https://support.google.com/analytics/answer/9305587).
+
+For BigQuery, grant the service account `roles/bigquery.dataViewer` **on the
+intended export dataset only** and `roles/bigquery.jobUser` on the query
+project, nothing broader. This IAM boundary — not the connector — is what makes
+the identity unable to write; audit effective access including group and
+project inheritance. Do not grant dataset write roles, connection use, or
+unrelated datasets. See
+[BigQuery access control](https://docs.cloud.google.com/bigquery/docs/access-control)
+and [dataset-level grants](https://docs.cloud.google.com/bigquery/docs/control-access-to-resources-iam).
 
 Store the downloaded standard service-account JSON as your Worker's
 `PROVIDER_TOKEN` secret directly in your Cloudflare account. Never put it
@@ -49,6 +58,14 @@ provider's explicit read allowlist.
 | --- | --- |
 | `google-search-console` | `https://www.googleapis.com/auth/webmasters.readonly` |
 | `google-analytics` | `https://www.googleapis.com/auth/analytics.readonly` |
+| `bigquery` | `https://www.googleapis.com/auth/cloud-platform.read-only` |
+
+BigQuery's REST methods accept no `bigquery.readonly` scope for query or
+metadata calls; per Google's published discovery contract, the narrowest
+read-only-named scope all five used methods accept is
+`cloud-platform.read-only`. The scope is defense in depth, not the boundary:
+the dataset-scoped read-only IAM above and the connector's statement-type gate
+carry the read-only guarantee.
 
 After the exact read plan passes its provider allowlist, the Worker signs an
 RS256 assertion with the service-account email as `iss`, a five-minute lifetime,
@@ -148,6 +165,54 @@ be presented as a complete export. These calls consume your Google
 API quotas; there are no retries or automatic page follow-ups. See
 [report response fields](https://developers.google.com/analytics/devguides/reporting/data/v1/rest/v1beta/RunReportResponse)
 and [Data API quotas](https://developers.google.com/analytics/devguides/reporting/data/v1/quotas).
+
+## BigQuery (GA4 export)
+
+Set `CONNECTOR_PROVIDER` to `bigquery`. A synthetic configuration:
+
+```json
+{"allowedProjectIds":["synthetic-project"],"allowedDatasetIds":["analytics_123456"],"maximumBytesBilled":"104857600"}
+```
+
+Configure 1–4 unique project IDs, 1–16 unique dataset IDs (a GA4 export
+dataset is `analytics_<propertyId>`), and a per-query byte budget from 1 to
+1 TiB as a decimal string. The tool names and camelCase arguments mirror
+Google's hosted BigQuery MCP read tools, so the same clients work against a
+future native connection; the write-capable `execute_sql` tool is deliberately
+never implemented. All five tools use `https://bigquery.googleapis.com`:
+
+| MCP tool | Exact approved REST operation |
+| --- | --- |
+| `list_dataset_ids` | `GET /bigquery/v2/projects/{projectId}/datasets` with `maxResults` 1–50 and optional `pageToken`; listings are filtered to the configured dataset allowlist |
+| `get_dataset_info` | `GET /bigquery/v2/projects/{projectId}/datasets/{datasetId}` |
+| `list_table_ids` | `GET /bigquery/v2/projects/{projectId}/datasets/{datasetId}/tables` with `maxResults` 1–50 and optional `pageToken` |
+| `get_table_info` | `GET /bigquery/v2/projects/{projectId}/datasets/{datasetId}/tables/{tableId}` |
+| `execute_sql_readonly` | Two `POST /bigquery/v2/projects/{projectId}/queries` calls: a mandatory dry run, then the bounded execution |
+
+`execute_sql_readonly` accepts one GoogleSQL statement of at most 8 KiB with
+optional lowercase labels. Every call dry-runs first; execution proceeds only
+when BigQuery reports `statementType` `SELECT` and an estimated scan within the
+configured budget, so DML, DDL, scripts, and oversized scans are refused before
+any billable work. Setting `dryRun: true` returns only the statement type, byte
+estimate, and result schema. Execution always sends `maximumBytesBilled` (the
+hard cost cap the hosted MCP tools lack), a fixed 6.5-second `timeoutMs`, a
+200-row `maxResults`, `jobCreationMode: JOB_CREATION_OPTIONAL`, and
+`useLegacySql: false`. Queries that do not complete within the timeout, report
+provider errors, or return DML statistics fail closed; there is no result
+pagination, and `rowsTruncated` marks incomplete result sets. Dataset scoping
+inside SQL comes from the identity's IAM, not from parsing the statement. A dry
+run is an estimate; `maximumBytesBilled` is the enforcement at execution. See
+[jobs.query](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/jobs/query),
+[tables.get](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/tables/get),
+and [datasets.list](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/datasets/list).
+
+Result cells preserve BigQuery's string-encoded scalars and bounded nested
+record/repeated wrappers; table schemas are projected to name, type, mode,
+description, and nested fields within a fixed depth. Daily GA4 export tables
+appear through `list_table_ids` as dated ids such as `events_20260830`;
+partition decorators and wildcard table arguments are rejected. Queries consume
+your BigQuery on-demand quota and billing; consider Google's custom query
+quotas on the query project as an additional daily bound.
 
 ## Validation and remaining acceptance
 

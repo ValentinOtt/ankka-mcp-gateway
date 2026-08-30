@@ -188,6 +188,16 @@ requires new credential provisioning and auth-service scope, so it is proposed,
 BigQuery API adapter instead, because an auth bridge alone cannot add missing
 Google-hosted MCP controls.
 
+**2026-08-30 update:** that direct-API alternative now exists as the
+experimental `bigquery` reader in the
+[read-only connector Worker](../apps/read-only-connectors/GOOGLE.md). It
+mirrors the hosted read tools' names and arguments with a service-account
+identity, a mandatory dry-run `SELECT` gate, and a per-query
+`maximumBytesBilled` budget, closing the cost-control gap described below for
+that path. It is a local experimental implementation behind the Worker's own
+Cloudflare Access boundary — not a catalog preset and not a change to this
+document's hosted-endpoint analysis or block.
+
 ## Setup requiring your action
 
 Do not provision a client just to try the currently unsupported topology.

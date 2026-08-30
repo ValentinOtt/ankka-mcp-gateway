@@ -12,6 +12,11 @@ Notable public product and repository changes are recorded here.
   credentials held only in the deployment account. Initial API readers cover
   Notion, HubSpot, Zendesk, Gorgias, Search Console domain properties, and GA4;
   live provider and lifecycle qualification remain separate release gates.
+- Add an experimental BigQuery reader to that runtime, mirroring the hosted
+  BigQuery MCP read tools over Google's REST API with a read-only
+  service-account identity, a mandatory dry-run SELECT gate, and a per-query
+  maximumBytesBilled budget. The native hosted-endpoint manual-OAuth block is
+  unchanged.
 - Prepare the initial public preview source for Ankka MCP Gateway.
 - Add secret-free configuration validation and deterministic offline planning.
 - Add the self-hosted Cloudflare runtime and management dashboard.

@@ -22,16 +22,20 @@ support data as a canary.
 | `gorgias` | Ticket, ticket messages, customer tickets | Fixed tenant and named tickets/customers; `tickets:read` OAuth |
 | `google-search-console` | Domain property, final web-search performance, sitemap metadata | Named `sc-domain:` properties; service account with `webmasters.readonly` |
 | `google-analytics` | Daily traffic, realtime active users by device | Named GA4 properties; service account with `analytics.readonly` |
+| `bigquery` | Dataset/table listings, table schemas, one budget-capped read-only SQL query | Named projects and datasets; read-only IAM service account; mandatory dry-run statement gate and per-query byte budget |
 
 The ordinary MCP tools work with Portal Code Mode enabled. This is separate
 from the earlier [Search Console Code Mode experiment](../search-console-adapter/README.md),
 which has its own nested-Code-Mode limitations. No provider adapter is executed
 inside the gateway management Worker or hosted installer.
 
-The two ordinary Google readers mint short-lived tokens from a service-account
-JSON secret held in your Worker. Read the [Google setup and reporting limits](GOOGLE.md)
-before deployment. There is no browser-consent flow or domain-wide delegation.
-They do not remove the separate native BigQuery manual-OAuth block.
+The three ordinary Google readers mint short-lived tokens from a
+service-account JSON secret held in your Worker. Read the
+[Google setup and reporting limits](GOOGLE.md) before deployment. There is no
+browser-consent flow or domain-wide delegation. The `bigquery` reader speaks
+Google's REST API with the hosted MCP read tools' names and arguments; it does
+not remove the separate native BigQuery manual-OAuth block, which continues to
+gate Google's hosted endpoint.
 
 The API reference and scope review for Notion, HubSpot, and Zendesk is in
 [the API evidence record](../../docs/READ_CONNECTOR_API_EVIDENCE.md). Gorgias uses
@@ -52,7 +56,11 @@ It does not use the deprecated ticket-message-list endpoint.
 2. Each tool builds one exact provider request. Methods, paths, resources,
    parameters, and read-query bodies are checked before credential forwarding.
    POST is allowed only for the specific authored read operation; there is no
-   arbitrary query, method, URL, GraphQL, or SQL input.
+   arbitrary query, method, URL, or GraphQL input. The single deliberate SQL
+   surface is the BigQuery reader's `execute_sql_readonly`, and it is bounded:
+   a mandatory dry run must report a `SELECT` statement within the configured
+   per-query byte budget before the one budget-capped execution runs, and the
+   identity's dataset-scoped read-only IAM remains the access boundary.
 3. The shared HTTP boundary forbids redirects, private/local hosts, path
    traversal, and forwarding headers. Provider hosts are fixed by code; tenant
    configuration supplies a single validated label, not a URL. It performs no
@@ -133,7 +141,7 @@ the operator must rotate the Worker secret directly. Do not claim unattended
 Gorgias readiness until its native OAuth path or a reviewed refresh lifecycle
 is qualified.
 
-For the two Google readers, `PROVIDER_TOKEN` instead contains the complete
+For the Google readers, `PROVIDER_TOKEN` instead contains the complete
 dedicated service-account JSON key. Keep it exclusively in the Worker secret;
 never paste the key into the non-secret resource configuration. Each approved
 read mints one short-lived, fixed-scope token. Discovery and rejected resource
@@ -183,6 +191,16 @@ Gorgias (`gorgias`):
 Customer ticket lists exclude trashed tickets and do not grant message access
 to every listed ticket. Approve ticket IDs explicitly. Scope permission and
 tenant/resource selection are separate controls.
+
+BigQuery (`bigquery`):
+
+```json
+{"allowedProjectIds":["synthetic-project"],"allowedDatasetIds":["analytics_123456"],"maximumBytesBilled":"104857600"}
+```
+
+The byte budget applies per query at execution; dataset access inside SQL is
+enforced by the identity's IAM, not by statement parsing. See
+[GOOGLE.md](GOOGLE.md) for roles, the scope decision, and the exact tools.
 
 ## Remaining release work
 
