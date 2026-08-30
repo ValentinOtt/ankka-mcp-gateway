@@ -283,6 +283,6 @@ test('prints help without network access or accepting runtime origins', async ()
       '--registry-origin', 'https://registry.example.com',
     ], { cwd: ROOT }),
     (error) => error.code === 1 && /argument_invalid/u.test(error.stderr) &&
-      !error.stderr.includes('registry.example.com'),
+      !/registry\.example\.com/u.test(error.stderr),
   );
 });
