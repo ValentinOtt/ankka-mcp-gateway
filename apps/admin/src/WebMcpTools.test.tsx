@@ -1,10 +1,13 @@
-import { cleanup, render, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { GatewayAdminApi, GatewayStatus, ManagedSources, RuntimeUpdate } from './api'
+import type { GatewayAdminApi, GatewayStatus, ManagedSources, RuntimeUpdate, Team } from './api'
 import { GatewayProvider } from './GatewayContext'
 import { WebMcpTools, type WebMcpTool } from './WebMcpTools'
-import { registerGatewayWebMcpTools, type WebMcpModelContext } from './webmcp'
+import { registerGatewayWebMcpTools, type WebMcpInput, type WebMcpModelContext } from './webmcp'
+import { SourcesPage } from './pages/SourcesPage'
+import { TeamPage } from './pages/TeamPage'
 
 const status: GatewayStatus = {
   schemaVersion: 1,
@@ -64,8 +67,118 @@ function modelContextFixture() {
   return { registered, signals, modelContext }
 }
 
+async function executeTool(registered: Map<string, WebMcpTool>, name: string, input: WebMcpInput) {
+  const tool = registered.get(name)
+  if (!tool) throw new Error('Missing registered synthetic tool')
+  let result = ''
+  await act(async () => { result = await tool.execute(input) })
+  return JSON.parse(result)
+}
+
 describe('WebMcpTools', () => {
-  afterEach(() => { cleanup(); delete document.modelContext })
+  afterEach(() => { cleanup(); delete document.modelContext; window.history.replaceState(null, '', '/') })
+
+  it.each([false, true])('shows a source saved through WebMCP without reloading the page (uncertain response: %s)', async (uncertain) => {
+    let saved: ManagedSources = { ...sources, installationEnabled: true }
+    const api = fixtureApi()
+    api.getSources = vi.fn(async () => structuredClone(saved))
+    api.saveSourceDraft = vi.fn(async (revision, draft) => {
+      saved = { ...saved, revision: revision + 1, sources: [{ ...draft, id: 'source-1111111111111111', onBehalfOfUser: false, status: 'draft' }] }
+      if (uncertain) throw new Error('Synthetic response lost after save')
+      return structuredClone(saved)
+    })
+    const { registered, modelContext } = modelContextFixture()
+    document.modelContext = modelContext
+    render(<GatewayProvider api={api}><WebMcpTools /><SourcesPage /></GatewayProvider>)
+    await screen.findByText('No sources yet')
+    await waitFor(() => expect(registered.has('save_mcp_source_draft')).toBe(true))
+    const result = await executeTool(registered, 'save_mcp_source_draft', {
+      label: 'Saved by an agent', url: 'https://source.example.com/mcp', authMode: 'none', enabledTools: ['search'],
+    })
+    expect(result.ok).toBe(!uncertain)
+    expect(await screen.findByText('Saved by an agent')).toBeVisible()
+    expect(screen.queryByText('No sources yet')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeEnabled()
+    expect(api.saveSourceDraft).toHaveBeenCalledTimes(1)
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('synchronizes Team after an agent save while preserving a human draft (dirty: %s)', async (dirty) => {
+    const user = userEvent.setup()
+    const sourceId = 'source-1111111111111111'
+    let saved: Team = {
+      schemaVersion: 1, revision: 7, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
+      adminEmails: ['admin@example.com'], members: [{ email: 'admin@example.com', sourceIds: [] }],
+      sources: [{ id: sourceId, label: 'Company knowledge', enabledTools: ['search'], status: 'installed' }],
+      pendingAction: null, proposedMembers: null,
+    }
+    const action = { schemaVersion: 1 as const, actionId: `action_${'a'.repeat(32)}`, status: 'succeeded' as const,
+      expiresAt: '2030-01-01T00:00:00.000Z', failureCode: null, canCancel: false }
+    const api = fixtureApi()
+    api.getTeam = vi.fn(async () => structuredClone(saved))
+    api.prepareTeamAction = vi.fn(async (revision, members) => {
+      saved = { ...saved, revision: revision + 1, members, pendingAction: action }
+      return { schemaVersion: 1 as const, action }
+    })
+    const { registered, modelContext } = modelContextFixture()
+    document.modelContext = modelContext
+    render(<GatewayProvider api={api}><WebMcpTools /><TeamPage /></GatewayProvider>)
+    const administrator = await screen.findByRole('group', { name: 'admin@example.com' })
+    await waitFor(() => expect(registered.has('save_gateway_team')).toBe(true))
+    if (dirty) await user.click(within(administrator).getByRole('checkbox', { name: /Company knowledge/ }))
+    const members = [{ email: 'admin@example.com', sourceIds: [] }, { email: 'agent-added@example.com', sourceIds: [] }]
+    expect(await executeTool(registered, 'save_gateway_team', { expectedRevision: 7, members })).toMatchObject({ ok: true })
+    expect(api.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, members)
+    if (dirty) {
+      expect(screen.getByRole('alert')).toHaveTextContent('Your unsaved selections were preserved')
+      expect(within(administrator).getByRole('checkbox', { name: /Company knowledge/ })).toBeChecked()
+      expect(screen.getByText('Revision 7')).toBeVisible()
+      expect(screen.queryByRole('group', { name: 'agent-added@example.com' })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+      await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    }
+    expect(await screen.findByText('Revision 8')).toBeVisible()
+    expect(screen.getByRole('group', { name: 'agent-added@example.com' })).toBeVisible()
+    expect(within(screen.getByRole('group', { name: 'admin@example.com' })).getByRole('checkbox', { name: /Company knowledge/ })).not.toBeChecked()
+    expect(api.prepareTeamAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores a late mount Team read after a newer agent save and human selection', async () => {
+    const user = userEvent.setup()
+    const sourceId = 'source-1111111111111111'
+    const initial: Team = {
+      schemaVersion: 1, revision: 7, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
+      adminEmails: ['admin@example.com'], members: [{ email: 'admin@example.com', sourceIds: [] }],
+      sources: [{ id: sourceId, label: 'Company knowledge', enabledTools: ['search'], status: 'installed' }],
+      pendingAction: null, proposedMembers: null,
+    }
+    let saved = structuredClone(initial)
+    let resolveRead: (value: Team) => void = () => { throw new Error('Read not initialized') }
+    const staleRead = new Promise<Team>((resolve) => { resolveRead = resolve })
+    const api = fixtureApi()
+    api.getTeam = vi.fn<GatewayAdminApi['getTeam']>().mockImplementationOnce(() => staleRead).mockImplementation(async () => structuredClone(saved))
+    api.prepareTeamAction = vi.fn(async (revision, members) => {
+      const action = { schemaVersion: 1 as const, actionId: `action_${'a'.repeat(32)}`, status: 'succeeded' as const,
+        expiresAt: '2030-01-01T00:00:00.000Z', failureCode: null, canCancel: false }
+      saved = { ...saved, revision: revision + 1, members, pendingAction: action }
+      return { schemaVersion: 1 as const, action }
+    })
+    const { registered, modelContext } = modelContextFixture()
+    document.modelContext = modelContext
+    render(<GatewayProvider api={api}><WebMcpTools /><TeamPage /></GatewayProvider>)
+    await waitFor(() => expect(registered.has('save_gateway_team')).toBe(true))
+    expect(await executeTool(registered, 'save_gateway_team', { expectedRevision: 7,
+      members: [{ email: 'admin@example.com', sourceIds: [] }, { email: 'agent-added@example.com', sourceIds: [] }],
+    })).toMatchObject({ ok: true })
+    await screen.findByText('Revision 8')
+    const checkbox = within(screen.getByRole('group', { name: 'admin@example.com' })).getByRole('checkbox', { name: /Company knowledge/ })
+    await user.click(checkbox)
+    await act(async () => { resolveRead(initial) })
+    expect(screen.getByText('Revision 8')).toBeVisible()
+    expect(checkbox).toBeChecked()
+    expect(screen.getByRole('group', { name: 'agent-added@example.com' })).toBeVisible()
+    expect(api.prepareTeamAction).toHaveBeenCalledTimes(1)
+  })
 
   it('registers teardown as a destructive review handoff without accepting credentials', async () => {
     const prepared = {

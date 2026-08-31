@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -47,6 +47,11 @@ function SaveProbe() {
   return <div><span>{current?.revision ?? 'no revision'}</span><button type="button" onClick={() => void saveSourceDraft({ label: 'Knowledge', url: 'https://knowledge.example.com/mcp', authMode: 'none', enabledTools: ['search'] })}>Save</button></div>
 }
 
+function ExternalRefreshProbe() {
+  const { refreshAfterExternalChange, error } = useGateway()
+  return <div><button type="button" onClick={() => { void refreshAfterExternalChange() }}>External refresh</button><span>{error}</span></div>
+}
+
 function PausedSourceProbe() {
   const { saveSourceDraft, prepareSourceApply, sourceNotice, error, hasLoaded } = useGateway()
   return <div>
@@ -89,6 +94,33 @@ describe('GatewayProvider', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByText('8')).toBeInTheDocument()
     expect(saveSourceDraft).toHaveBeenCalledWith(7, expect.objectContaining({ label: 'Knowledge' }))
+  })
+
+  it('does not replace a newer saved source revision with an older delayed reload', async () => {
+    const user = userEvent.setup()
+    let resolveRead: (value: ManagedSources) => void = () => { throw new Error('Read not initialized') }
+    const staleRead = new Promise<ManagedSources>((resolve) => { resolveRead = resolve })
+    const getSources = vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(sources).mockImplementationOnce(() => staleRead)
+    const client = api({ getSources })
+    render(<GatewayProvider api={client}><SaveProbe /><ExternalRefreshProbe /></GatewayProvider>)
+    await screen.findByText('7')
+    await user.click(screen.getByRole('button', { name: 'External refresh' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await screen.findByText('8')
+    await act(async () => { resolveRead(sources) })
+    expect(screen.getByText('8')).toBeVisible()
+    expect(screen.queryByText('7')).not.toBeInTheDocument()
+    expect(client.saveSourceDraft).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces an observational refresh failure in the existing dashboard error state', async () => {
+    const user = userEvent.setup()
+    const client = api({ getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(sources).mockRejectedValueOnce(new Error('Saved sources could not be refreshed.')) })
+    render(<GatewayProvider api={client}><Probe /><ExternalRefreshProbe /></GatewayProvider>)
+    await screen.findByText('loaded')
+    await user.click(screen.getByRole('button', { name: 'External refresh' }))
+    expect(await screen.findByText('Saved sources could not be refreshed.')).toBeVisible()
+    expect(client.saveSourceDraft).not.toHaveBeenCalled()
   })
 
   it('saves Team locally without requiring a control-plane origin or hosted authorization', async () => {

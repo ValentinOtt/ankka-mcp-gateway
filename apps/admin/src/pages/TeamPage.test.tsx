@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GatewayApiError, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type TeamActionResult, type RuntimeUpdate, type Team, type TeamAction } from '../api'
@@ -333,6 +333,47 @@ describe('TeamPage', () => {
     await waitFor(() => expect(screen.getByLabelText('Person’s email')).toBeEnabled())
     expect(window.location.search).not.toContain('accessAction=')
     expect(client.getTeamAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('pauses terminal-action polling when the subsequent saved Team read fails', async () => {
+    window.history.replaceState(null, '', `/team?accessAction=${actionId}&accessActionResult=complete`)
+    const pendingAction: TeamAction = { schemaVersion: 1, actionId, status: 'applying', expiresAt, failureCode: null, canCancel: false }
+    let rejectRead!: (error: Error) => void
+    const terminalRead = new Promise<Team>((_resolve, reject) => { rejectRead = reject })
+    const getTeam = vi.fn<GatewayAdminApi['getTeam']>()
+      .mockResolvedValueOnce({ ...team, pendingAction, proposedMembers: team.members })
+      .mockReturnValueOnce(terminalRead)
+      .mockImplementation(() => new Promise<Team>(() => {}))
+    const getTeamAction = vi.fn(async (): Promise<TeamAction> => ({ ...pendingAction, status: 'succeeded' }))
+    const client = renderTeam(api({ getTeam, getTeamAction }))
+    await waitFor(() => expect(getTeam).toHaveBeenCalledTimes(2))
+    await act(async () => { rejectRead(new Error('private provider detail')) })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('action status is unavailable')
+    expect(screen.getByText(/Editing is paused until the recorded state can be checked/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save recorded change' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled()
+    expect(screen.queryByText(/private provider detail/)).not.toBeInTheDocument()
+    expect(getTeamAction).toHaveBeenCalledTimes(1)
+    expect(getTeam).toHaveBeenCalledTimes(2)
+    expect(client.prepareTeamAction).not.toHaveBeenCalled()
+  })
+
+  it('clears a terminal-action callback after reading a saved Team with no pending action', async () => {
+    window.history.replaceState(null, '', `/team?accessAction=${actionId}&accessActionResult=complete`)
+    const pendingAction: TeamAction = { schemaVersion: 1, actionId, status: 'applying', expiresAt, failureCode: null, canCancel: false }
+    const getTeam = vi.fn<GatewayAdminApi['getTeam']>()
+      .mockResolvedValueOnce({ ...team, pendingAction, proposedMembers: team.members })
+      .mockResolvedValue({ ...team, revision: 8 })
+    const getTeamAction = vi.fn(async (): Promise<TeamAction> => ({ ...pendingAction, status: 'succeeded' }))
+    const client = renderTeam(api({ getTeam, getTeamAction }))
+
+    expect(await screen.findByText('Revision 8')).toBeInTheDocument()
+    await waitFor(() => expect(window.location.search).not.toContain('accessAction='))
+    expect(screen.getByLabelText('Person’s email')).toBeEnabled()
+    expect(getTeamAction).toHaveBeenCalledTimes(1)
+    expect(getTeam).toHaveBeenCalledTimes(2)
+    expect(client.prepareTeamAction).not.toHaveBeenCalled()
   })
 
   it('only reports cancellation after the Worker confirms it and reloads the saved state', async () => {

@@ -53,7 +53,7 @@ const sourceDraft = {
   authMode: 'none', enabledTools: ['search'],
 }
 
-function fixture(installationEnabled = true) {
+function fixture(installationEnabled = true, onStateChange?: () => Promise<void>) {
   const status: GatewayStatus = {
     schemaVersion: 1, status: 'ready', controlPlaneOrigin: 'https://deploy.ankka.ai',
     release: 'gateway-v1.0.0',
@@ -129,7 +129,7 @@ function fixture(installationEnabled = true) {
     prepareTeardownAction: vi.fn(async () => prepared),
     getTeardownAction: vi.fn(async (_actionId: string) => teardownAction),
   } satisfies GatewayAdminApi
-  const tools = createGatewayWebMcpTools(api, installationEnabled)
+  const tools = createGatewayWebMcpTools(api, installationEnabled, onStateChange)
   const tool = (name: string) => {
     const found = tools.find((candidate) => candidate.name === name)
     if (!found) throw new Error(`Missing synthetic tool: ${name}`)
@@ -146,6 +146,60 @@ function expectNoApiCalls(api: ReturnType<typeof fixture>['api']) {
 }
 
 describe('Gateway WebMCP tool contracts', () => {
+  it('refreshes after a successful mutation exactly once without repeating the save', async () => {
+    const refresh = vi.fn(async () => {})
+    const { api, call, sources } = fixture(true, refresh)
+    expect(await call('save_mcp_source_draft', sourceDraft)).toEqual({ ok: true, result: sources })
+    expect(api.saveSourceDraft).toHaveBeenCalledTimes(1)
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes after an uncertain mutation without retrying it or replacing its error', async () => {
+    const refresh = vi.fn(async () => {})
+    const { api, call } = fixture(true, refresh)
+    api.saveSourceDraft.mockRejectedValue(new Error(syntheticSensitiveText))
+    expect(await call('save_mcp_source_draft', sourceDraft)).toMatchObject({ ok: false, error: { code: 'request_failed' } })
+    expect(api.saveSourceDraft).toHaveBeenCalledTimes(1)
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not turn a successful mutation into failure when the separate UI refresh fails', async () => {
+    const refresh = vi.fn(async () => { throw new Error(syntheticSensitiveText) })
+    const { api, call, sources } = fixture(true, refresh)
+    expect(await call('save_mcp_source_draft', sourceDraft)).toEqual({ ok: true, result: sources })
+    expect(api.saveSourceDraft).toHaveBeenCalledTimes(1)
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns the mutation result even when its observational refresh never settles', async () => {
+    const refresh = vi.fn(() => new Promise<void>(() => {}))
+    const { api, call, sources } = fixture(true, refresh)
+    expect(await call('save_mcp_source_draft', sourceDraft)).toEqual({ ok: true, result: sources })
+    expect(api.saveSourceDraft).toHaveBeenCalledTimes(1)
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not refresh or call the API for invalid or already-cancelled mutation input', async () => {
+    const refresh = vi.fn(async () => {})
+    const { api, call } = fixture(true, refresh)
+    expect(await call('save_mcp_source_draft', { token: syntheticSensitiveText })).toMatchObject({ ok: false, error: { code: 'webmcp_input_invalid' } })
+    const controller = new AbortController()
+    controller.abort()
+    expect(await call('save_mcp_source_draft', sourceDraft, controller.signal)).toMatchObject({ ok: false, error: { code: 'webmcp_call_cancelled' } })
+    expectNoApiCalls(api)
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it('does not invalidate a human draft for read-only state or action inspection', async () => {
+    const refresh = vi.fn(async () => {})
+    const { api, call } = fixture(true, refresh)
+    await call('get_gateway_team')
+    expect(refresh).not.toHaveBeenCalled()
+    await call('get_mcp_source_action', { actionId })
+    expect(api.getSourceAction).toHaveBeenCalledExactlyOnceWith(actionId)
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
   it('offers exactly nineteen non-generic tools when installation is enabled', () => {
     const { tools } = fixture()
     expect(tools.map((tool) => tool.name).sort()).toEqual([...names].sort())

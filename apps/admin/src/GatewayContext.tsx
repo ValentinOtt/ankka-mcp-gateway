@@ -41,7 +41,9 @@ interface GatewayContextValue {
   error: string | null
   sourceNotice: Notice
   updateNotice: Notice
+  externalChangeVersion: number
   reload(): Promise<void>
+  refreshAfterExternalChange(): Promise<void>
   refreshSources(): Promise<ManagedSources>
   refreshUpdate(): Promise<RuntimeUpdate>
   clearError(): void
@@ -97,6 +99,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
   const [error, setError] = useState<string | null>(null)
   const [sourceNotice, setSourceNotice] = useState<Notice>(null)
   const [updateNotice, setUpdateNotice] = useState<Notice>(null)
+  const [externalChangeVersion, setExternalChangeVersion] = useState(0)
 
   const runBusy = useCallback(async <T,>(operation: () => Promise<T>): Promise<T> => {
     setBusyCount((count) => count + 1)
@@ -111,7 +114,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
 
   const refreshSources = useCallback(async () => {
     const next = await apiRef.current.getSources()
-    setSources(next)
+    setSources((current) => current && current.revision > next.revision ? current : next)
     return next
   }, [])
 
@@ -139,7 +142,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
         apiRef.current.getSources(),
       ])
       setStatus(nextStatus)
-      setSources(nextSources)
+      setSources((current) => current && current.revision > nextSources.revision ? current : nextSources)
       setHasLoaded(true)
       await refreshUpdate()
     } catch (requestError) {
@@ -147,6 +150,11 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       setError(errorMessage(parsed.success ? parsed.output : null))
     } finally { setIsLoading(false) }
   }, [refreshUpdate])
+
+  const refreshAfterExternalChange = useCallback(async () => {
+    setExternalChangeVersion((version) => version + 1)
+    await reload()
+  }, [reload])
 
   useEffect(() => { void reload() }, [reload])
 
@@ -173,7 +181,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
           }
           const currentSources = await apiRef.current.getSources()
           if (!active) return
-          setSources(currentSources)
+          setSources((current) => current && current.revision > currentSources.revision ? current : currentSources)
           if (currentSources.installationEnabled !== true) {
             setSourceNotice({ tone: 'neutral', message: SOURCE_ADDITION_PAUSED_MESSAGE })
             return
@@ -254,7 +262,9 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     error,
     sourceNotice,
     updateNotice,
+    externalChangeVersion,
     reload,
+    refreshAfterExternalChange,
     refreshSources,
     refreshUpdate,
     clearError: () => setError(null),
@@ -265,7 +275,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       const current = sources ?? await refreshSources()
       if (current.installationEnabled !== true) throw new GatewayApiError(409, 'source_addition_paused')
       const next = await apiRef.current.saveSourceDraft(current.revision, source)
-      setSources(next)
+      setSources((current) => current && current.revision > next.revision ? current : next)
       setSourceNotice({ tone: 'success', message: 'Draft saved inside your gateway. The live Portal was not changed.' })
       return next
     }),
@@ -313,6 +323,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
   }), [
     busyCount, error, hasLoaded, isLoading, refreshSources, refreshUpdate, reload, runBusy,
     sourceNotice, sources, status, update, updateNotice, getTeam, getTeamAction,
+    externalChangeVersion, refreshAfterExternalChange,
   ])
 
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>
