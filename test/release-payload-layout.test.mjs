@@ -10,13 +10,13 @@ const ROOT = new URL('../payload/', import.meta.url);
 const ADMIN_ROOT = new URL('../apps/admin/dist/', import.meta.url);
 const COMPONENTS = Object.freeze({
   admin: null,
-  installer: ['assets/ankka-85bfe235.svg', 'assets/installer-b2899467.js', 'assets/installer-edf3d306.css', 'index.html'],
+  installer: ['assets/ankka-85bfe235.svg', 'assets/installer-953fc6de.css', 'assets/installer-b2899467.js', 'index.html'],
   worker: ['index.js'],
   'worker-cleanup': ['index.js'],
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: '1c0c032cdcaef8cb413a48e007a3b8e37b59ed89eca64def921005759c989684',
+  installer: '1b646d2db0275e2b4d801ff05ff3ea4957e5801b4cbcef1b6328db468bb708d3',
   worker: 'c24ad0424fc2fc5e7a1426eaba838aa3c594dd6241b3d3b9f22aece01275664e',
   'worker-cleanup': '417ff8beb85d4c7122d57052f873914173b9b37456bc0d134c69dd0dbdccdf1d',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
@@ -312,7 +312,7 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
   assert.match(adminCss, /--color-brand:#dedede/u);
   assert.match(adminCss, /--color-sidebar:#131313/u);
 
-  const installerCss = await readFile(new URL('installer/assets/installer-edf3d306.css', ROOT), 'utf8');
+  const installerCss = await readFile(new URL('installer/assets/installer-953fc6de.css', ROOT), 'utf8');
   {
     const css = installerCss;
     assert.match(css, /font-family:\s*Inter, ui-sans-serif, system-ui/u);

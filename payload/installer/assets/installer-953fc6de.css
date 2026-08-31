@@ -32,7 +32,6 @@
   --success: #78c894;
   --success-bg: rgb(120 200 148 / 0.11);
   --selection: rgb(255 255 255 / 0.2);
-  --shadow-card: 0 18px 48px rgb(0 0 0 / 0.22);
   --dur-state: 120ms;
   --dur-enter: 160ms;
   --font-size-body: 1rem;
@@ -79,7 +78,7 @@ textarea:focus-visible {
   position: relative;
   z-index: 2;
   display: flex;
-  width: min(52rem, calc(100% - 2.5rem));
+  width: min(44rem, calc(100% - 2.5rem));
   min-height: 0;
   align-items: center;
   justify-content: space-between;
@@ -105,14 +104,12 @@ textarea:focus-visible {
 }
 
 .layout {
-  width: min(52rem, calc(100% - 2.5rem));
+  width: min(44rem, calc(100% - 2.5rem));
   min-height: 34rem;
   margin-inline: auto;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 0.875rem;
   background: var(--canvas);
-  box-shadow: var(--shadow-card);
 }
 
 .step-indicators {
@@ -522,8 +519,8 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 [hidden] { display: none !important; }
 
 @media (max-width: 38rem) {
-  .site-header { width: min(52rem, calc(100% - 1rem)); }
-  .layout { width: min(52rem, calc(100% - 1rem)); border-radius: 0.875rem; }
+  .site-header { width: min(44rem, calc(100% - 1rem)); }
+  .layout { width: min(44rem, calc(100% - 1rem)); }
   main { padding: 1.5rem 1.1rem 2rem; }
   .step-indicators { width: min(20rem, calc(100% - 2rem)); }
   .field-grid { grid-template-columns: 1fr; }
