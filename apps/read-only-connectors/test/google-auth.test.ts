@@ -1,7 +1,7 @@
 import { exportPKCS8, generateKeyPair, jwtVerify } from 'jose';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
-  createGoogleAuthorization, GOOGLE_AUTH_LIMITS, GOOGLE_READONLY_SCOPES,
+  createGoogleAuthorization, GOOGLE_AUTH_LIMITS, GOOGLE_PROVIDER_SCOPES,
   GOOGLE_TOKEN_ENDPOINT, GoogleAuthorizationError,
 } from '../src/google-auth';
 import type { ConnectorJson } from '../src/request';
@@ -28,8 +28,12 @@ function tokenResponse(overrides: Record<string, ConnectorJson> = {}): Response 
 function createAuthorization() { return createGoogleAuthorization(secret(), 'search-console'); }
 
 describe('deployment-owned fixed-scope Google service-account authorization', () => {
-  it.each(['search-console', 'google-analytics'] as const)('signs only the fixed %s scope and posts once to the fixed token endpoint', async (provider) => {
-    const outbound = vi.fn<typeof globalThis.fetch>(async () => tokenResponse({ scope: GOOGLE_READONLY_SCOPES[provider] }));
+  it.each([
+    { provider: 'search-console', scope: 'https://www.googleapis.com/auth/webmasters.readonly' },
+    { provider: 'google-analytics', scope: 'https://www.googleapis.com/auth/analytics.readonly' },
+    { provider: 'bigquery', scope: 'https://www.googleapis.com/auth/bigquery' },
+  ] as const)('signs only the fixed $provider scope and posts once to the fixed token endpoint', async ({ provider, scope }) => {
+    const outbound = vi.fn<typeof globalThis.fetch>(async () => tokenResponse({ scope }));
     const authorize = createGoogleAuthorization(secret(), provider);
     expect(outbound).not.toHaveBeenCalled();
     expect(await authorize(outbound)).toEqual({ Authorization: 'Bearer synthetic-access-token' });
@@ -47,10 +51,22 @@ describe('deployment-owned fixed-scope Google service-account authorization', ()
     const jwt = await jwtVerify(form.get('assertion') ?? '', publicKey, { algorithms: ['RS256'], audience: GOOGLE_TOKEN_ENDPOINT });
     expect(jwt.protectedHeader).toEqual({ alg: 'RS256', typ: 'JWT', kid: 'a'.repeat(40) });
     expect(jwt.payload.iss).toBe('synthetic-reader@synthetic-project.iam.gserviceaccount.com');
-    expect(jwt.payload.scope).toBe(GOOGLE_READONLY_SCOPES[provider]);
+    expect(GOOGLE_PROVIDER_SCOPES[provider]).toBe(scope);
+    expect(jwt.payload.scope).toBe(scope);
     expect(Object.keys(jwt.payload).sort()).toEqual(['aud', 'exp', 'iat', 'iss', 'scope']);
     expect((jwt.payload.exp ?? 0) - (jwt.payload.iat ?? 0)).toBe(GOOGLE_AUTH_LIMITS.assertionSeconds);
     expect(String(init?.body)).not.toContain(privateKeyPem);
+  });
+
+  it.each([
+    'https://www.googleapis.com/auth/cloud-platform',
+    'https://www.googleapis.com/auth/cloud-platform.read-only',
+    'https://www.googleapis.com/auth/cloud-platform.read-only https://www.googleapis.com/auth/bigquery',
+  ])('rejects an unexpected BigQuery token scope %s', async (scope) => {
+    const outbound = vi.fn<typeof globalThis.fetch>(async () => tokenResponse({ scope }));
+    await expect(createGoogleAuthorization(secret(), 'bigquery')(outbound))
+      .rejects.toEqual(new GoogleAuthorizationError('GOOGLE_AUTH_FAILED'));
+    expect(outbound).toHaveBeenCalledOnce();
   });
 
   it('keeps each issued token request-local with no cache', async () => {

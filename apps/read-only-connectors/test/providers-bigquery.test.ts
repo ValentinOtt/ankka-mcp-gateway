@@ -8,9 +8,10 @@ import { createBigQueryConnector } from '../src/providers/bigquery';
 const projectId = 'synthetic-project';
 const datasetId = 'analytics_123456';
 const budget = '104857600';
-const config = JSON.stringify({
-  allowedProjectIds: [projectId], allowedDatasetIds: [datasetId], maximumBytesBilled: budget,
-});
+const location = 'europe-north1';
+const jobUuid = '00000000-0000-4000-8000-000000000001';
+const configured = { allowedProjectIds: [projectId], allowedDatasetIds: [datasetId], maximumBytesBilled: budget, location };
+const config = JSON.stringify(configured);
 // Deliberately not signing material; these tests never mint tokens or call Google.
 const secret = JSON.stringify({
   type: 'service_account', project_id: projectId, private_key_id: 'a'.repeat(40),
@@ -22,10 +23,11 @@ type ToolArguments = Readonly<Record<string, ConnectorJson>>;
 // Tool JSON is nested inside the JSON-RPC envelope, so quotes arrive escaped.
 const embedded = (fragment: string) => JSON.stringify(fragment).slice(1, -1);
 const isDryRunPlan = (plan: ReadRequestPlan) =>
-  z.object({ dryRun: z.literal(true) }).loose().safeParse(plan.body).success;
+  z.object({ configuration: z.object({ dryRun: z.literal(true) }) }).safeParse(plan.body).success;
 
 const base = `/bigquery/v2/projects/${projectId}`;
 const queriesPath = `${base}/queries`;
+const jobsPath = `${base}/jobs`;
 function listDatasetsPlan(query: Record<string, string> = { maxResults: '50' }): ReadRequestPlan {
   return { method: 'GET', path: `${base}/datasets`, query };
 }
@@ -34,12 +36,15 @@ function listTablesPlan(query: Record<string, string> = { maxResults: '50' }): R
 }
 const getDatasetPlan: ReadRequestPlan = { method: 'GET', path: `${base}/datasets/${datasetId}` };
 const getTablePlan: ReadRequestPlan = { method: 'GET', path: `${base}/datasets/${datasetId}/tables/events_20260830` };
-function dryPlan(query = 'SELECT event_name FROM events'): ReadRequestPlan {
-  return { method: 'POST', path: queriesPath, body: { query, useLegacySql: false, dryRun: true } };
+function dryPlan(query = 'SELECT event_name FROM events', overrides: Record<string, ConnectorJson> = {}): ReadRequestPlan {
+  return { method: 'POST', path: jobsPath, body: {
+    jobReference: { projectId, jobId: `ankka_dry_run_${jobUuid}`, location },
+    configuration: { dryRun: true, query: { query, useLegacySql: false }, ...overrides },
+  } };
 }
 function executePlan(overrides: Record<string, ConnectorJson> = {}): ReadRequestPlan {
   return { method: 'POST', path: queriesPath, body: {
-    query: 'SELECT event_name FROM events', useLegacySql: false,
+    query: 'SELECT event_name FROM events', useLegacySql: false, location,
     maximumBytesBilled: budget, maxResults: 200, timeoutMs: 6_500,
     jobCreationMode: 'JOB_CREATION_OPTIONAL', useQueryCache: true, ...overrides,
   } };
@@ -56,8 +61,7 @@ const exportSchema = {
   ],
 };
 const dryResult = {
-  jobComplete: true, statementType: 'SELECT', totalBytesProcessed: '1024',
-  schema: exportSchema, cacheHit: false,
+  statistics: { query: { statementType: 'SELECT', totalBytesProcessed: '1024', schema: exportSchema } },
 };
 const executeResult = {
   jobComplete: true, schema: exportSchema,
@@ -66,6 +70,7 @@ const executeResult = {
 };
 
 async function callTool(connector: ReadConnector, name: string, args: ToolArguments, execute: ReadExecutor) {
+  const randomUuid = vi.spyOn(crypto, 'randomUUID').mockReturnValue(jobUuid);
   const handler = createMcpHandler(() => {
     const server = new McpServer({ name: 'synthetic-bigquery-test', version: '1.0.0' });
     connector.registerTools(server, execute);
@@ -88,6 +93,7 @@ async function callTool(connector: ReadConnector, name: string, args: ToolArgume
     }));
     return await response.text();
   } finally {
+    randomUuid.mockRestore();
     await handler.close();
   }
 }
@@ -127,6 +133,21 @@ describe('BigQuery read plans', () => {
     executePlan({ createSession: true }),
     executePlan({ defaultDataset: { datasetId } }),
     executePlan({ labels: { 'Invalid-Key': 'x' } }),
+    executePlan({ location: 'US' }),
+    { method: 'POST', path: queriesPath, body: dryPlan().body },
+    { ...executePlan(), path: jobsPath },
+    dryPlan('SELECT 1', { dryRun: false }),
+    dryPlan('SELECT 1', { query: { query: 'SELECT 1', useLegacySql: true } }),
+    dryPlan('SELECT 1', { query: { query: 'SELECT 1', useLegacySql: false, destinationTable: {} } }),
+    dryPlan('SELECT 1', { load: {} }),
+    { method: 'POST', path: jobsPath, body: {
+      jobReference: { projectId: 'other-project', jobId: `ankka_dry_run_${jobUuid}`, location },
+      configuration: { dryRun: true, query: { query: 'SELECT 1', useLegacySql: false } },
+    } },
+    { method: 'POST', path: jobsPath, body: {
+      jobReference: { projectId, jobId: `ankka_dry_run_${jobUuid}`, location: 'US' },
+      configuration: { dryRun: true, query: { query: 'SELECT 1', useLegacySql: false } },
+    } },
   ])('denies project, dataset, operation, and query widening %j', (plan) => {
     expect(connector.allowRequest(plan)).toBe(false);
   });
@@ -195,15 +216,15 @@ describe('BigQuery tools and response projection', () => {
     expect(response).toContain(embedded('"rowsTruncated":true'));
     expect(response).not.toContain('synthetic-token=');
   });
-  it('refuses a non-SELECT statement before execution', async () => {
-    const execute = vi.fn<ReadExecutor>(async () => ({ ...dryResult, statementType: 'DELETE' }));
+  it.each(['DELETE', 'UPDATE', 'INSERT', 'MERGE', 'CREATE_TABLE', 'SCRIPT', 'CALL', 'EXPORT_DATA', 'CREATE_FUNCTION', 'DROP_TABLE', 'select'])('refuses Google classification %s before execution', async (statementType) => {
+    const execute = vi.fn<ReadExecutor>(async () => ({ statistics: { query: { ...dryResult.statistics.query, statementType } } }));
     const response = await callTool(connector, 'execute_sql_readonly',
       { projectId, query: 'SELECT event_name FROM events' }, execute);
     expect(execute).toHaveBeenCalledOnce();
     expect(response).toContain('CONNECTOR_QUERY_NOT_READ_ONLY');
   });
   it('refuses an estimated scan above the configured byte budget before execution', async () => {
-    const execute = vi.fn<ReadExecutor>(async () => ({ ...dryResult, totalBytesProcessed: '104857601' }));
+    const execute = vi.fn<ReadExecutor>(async () => ({ statistics: { query: { ...dryResult.statistics.query, totalBytesProcessed: '104857601' } } }));
     const response = await callTool(connector, 'execute_sql_readonly',
       { projectId, query: 'SELECT event_name FROM events' }, execute);
     expect(execute).toHaveBeenCalledOnce();
@@ -213,6 +234,8 @@ describe('BigQuery tools and response projection', () => {
     { projectId: 'other-project', query: 'SELECT 1' },
     { projectId, query: '' },
     { projectId, query: 'SELECT 1', maximumBytesBilled: '1' },
+    { projectId, query: 'SELECT 1', location: 'US' },
+    { projectId, query: 'SELECT 1', jobId: 'caller-job' },
     { projectId, query: 'SELECT 1', labels: { 'Invalid-Key': 'x' } },
     { projectId, query: `SELECT ${'x'.repeat(8_192)}` },
   ])('rejects unsupported query inputs before executing %j', async (args) => {
@@ -222,8 +245,14 @@ describe('BigQuery tools and response projection', () => {
   });
   it.each<ConnectorJson>([
     null,
-    { ...dryResult, jobComplete: false },
-    { ...dryResult, statementType: 12345 },
+    { jobComplete: true, statementType: 'SELECT', totalBytesProcessed: '1024' },
+    { statistics: { query: { ...dryResult.statistics.query, statementType: 12345 } } },
+    { statistics: { query: { totalBytesProcessed: '1024' } } },
+    { statistics: { query: { statementType: 'SELECT' } } },
+    { statistics: { query: { ...dryResult.statistics.query, dmlStats: { insertedRowCount: '1' } } } },
+    { ...dryResult, status: { state: 'RUNNING' } },
+    { ...dryResult, status: { errorResult: { message: 'synthetic-sensitive' } } },
+    { ...dryResult, status: { state: 'DONE', errors: [{ message: 'synthetic-sensitive' }] } },
     { ...dryResult, errors: [{ reason: 'synthetic-sensitive-reason' }] },
     { ...dryResult, rows: [] },
   ])('fails closed on malformed dry-run responses %j', async (value) => {
@@ -234,9 +263,36 @@ describe('BigQuery tools and response projection', () => {
     expect(response).toContain('CONNECTOR_READ_FAILED');
     expect(response).not.toContain('synthetic-sensitive');
   });
+  it('accepts an explicitly completed dry run and preserves identical query text and labels across phases', async () => {
+    const query = 'SELECT 1 AS answer';
+    const labels = { purpose: 'synthetic-read' };
+    const execute = vi.fn<ReadExecutor>(async (plan) =>
+      isDryRunPlan(plan) ? { ...dryResult, status: { state: 'DONE' } } : executeResult);
+    await callTool(connector, 'execute_sql_readonly', { projectId, query, labels }, execute);
+    expect(execute.mock.calls[0]?.[0]).toEqual(dryPlan(query, { labels }));
+    expect(execute.mock.calls[1]?.[0]).toEqual(executePlan({ query, labels }));
+  });
+  it('rejects UTF-8 query overflow before any upstream call even below the character cap', async () => {
+    const execute = vi.fn<ReadExecutor>();
+    const query = `SELECT '${'é'.repeat(4_096)}'`;
+    expect(query.length).toBeLessThan(8_192);
+    expect(connector.allowRequest(dryPlan(query))).toBe(false);
+    expect(connector.allowRequest(executePlan({ query }))).toBe(false);
+    await callTool(connector, 'execute_sql_readonly', { projectId, query }, execute);
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it('accepts a query exactly at the UTF-8 byte limit', async () => {
+    const query = `SELECT '${'é'.repeat(4_091)}' `;
+    expect(new TextEncoder().encode(query).byteLength).toBe(8_192);
+    const execute = vi.fn<ReadExecutor>(async () => dryResult);
+    const response = await callTool(connector, 'execute_sql_readonly', { projectId, query, dryRun: true }, execute);
+    expect(response).not.toContain('isError');
+    expect(execute).toHaveBeenCalledOnce();
+  });
   it.each<ConnectorJson>([
     { ...executeResult, jobComplete: false },
     { ...executeResult, numDmlAffectedRows: '1' },
+    { ...executeResult, dmlStats: { insertedRowCount: '1' } },
     { ...executeResult, errors: [{ message: 'synthetic-sensitive-message' }] },
     { ...executeResult, rows: Array.from({ length: 201 }, () => executeResult.rows[0] ?? {}) },
     { ...executeResult, totalRows: 'many' },
@@ -287,13 +343,20 @@ describe('BigQuery deployment configuration', () => {
     { allowedProjectIds: [projectId], allowedDatasetIds: [datasetId], maximumBytesBilled: budget, origin: 'https://other.example.com' },
     { allowedProjectIds: Array.from({ length: 5 }, (_, index) => `synthetic-project-${index}`), allowedDatasetIds: [datasetId], maximumBytesBilled: budget },
   ])('rejects malformed or widened configuration %j', (value) => {
-    expect(() => createBigQueryConnector(JSON.stringify(value), secret)).toThrow('CONNECTOR_CONFIGURATION_INVALID');
+    expect(() => createBigQueryConnector(JSON.stringify({ location, ...value }), secret)).toThrow('CONNECTOR_CONFIGURATION_INVALID');
+  });
+  it.each([undefined, '', 'us', 'europe_north1', 'europe-north1/queries', 'europe-north1?x=y', 'EU\n'])('rejects a missing or malformed location %j', (value) => {
+    expect(() => createBigQueryConnector(JSON.stringify({ ...configured, location: value }), secret)).toThrow('CONNECTOR_CONFIGURATION_INVALID');
+  });
+  it.each(['US', 'EU', 'europe-north1', 'asia-northeast2'])('accepts a deployment-owned location %s', (value) => {
+    expect(() => createBigQueryConnector(JSON.stringify({ ...configured, location: value }), secret)).not.toThrow();
   });
   it('accepts the documented budget bound and distinct resource sets', () => {
     const value = {
       allowedProjectIds: [projectId, 'synthetic-billing'],
       allowedDatasetIds: [datasetId, 'analytics_intraday'],
       maximumBytesBilled: '1099511627776',
+      location,
     };
     expect(() => createBigQueryConnector(JSON.stringify(value), secret)).not.toThrow();
   });
