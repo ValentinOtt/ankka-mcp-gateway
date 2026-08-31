@@ -267,7 +267,6 @@ describe('revision-bound complete Team actions', () => {
     { name: 'missing sourceIds', input: { expectedRevision: 7, members: [{ email: 'operator@example.com' }] } },
     { name: 'duplicate source IDs', input: { expectedRevision: 7, members: [{ email: 'operator@example.com', sourceIds: [sourceId, sourceId] }] } },
     { name: 'malformed source ID', input: { expectedRevision: 7, members: [{ email: 'operator@example.com', sourceIds: ['../other'] }] } },
-    { name: 'too many people', input: { expectedRevision: 7, members: Array.from({ length: 52 }, (_, i) => ({ email: `person${i}@example.com`, sourceIds: [] })) } },
     { name: 'too many source assignments', input: { expectedRevision: 7, members: [{ email: 'operator@example.com', sourceIds: Array.from({ length: 33 }, (_, i) => `source-${i}`) }] } },
   ]
 
@@ -286,6 +285,14 @@ describe('revision-bound complete Team actions', () => {
     expect(api.prepareRuntimeAction).not.toHaveBeenCalled()
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
     expect(api.prepareTeardownAction).not.toHaveBeenCalled()
+  })
+
+  it('accepts a reviewed roster larger than 51 users', async () => {
+    const { api, call, tool, teamResult } = fixture()
+    const largerTeam = [...members, ...Array.from({ length: 60 }, (_, i) => ({ email: `user${i}@example.com`, sourceIds: [] }))]
+    expect(tool('save_gateway_team').inputSchema.properties.members).not.toHaveProperty('maxItems')
+    expect(await call('save_gateway_team', { expectedRevision: 7, members: largerTeam })).toEqual({ ok: true, result: teamResult })
+    expect(api.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, largerTeam)
   })
 
   it('rechecks the current revision before a save instead of overwriting newer state', async () => {

@@ -10,7 +10,7 @@ import {
 import { manifest, NOW, requiredFixture, selectionInput } from './fixtures';
 
 describe('strict deployment contracts', () => {
-  it('canonicalizes admin and portal audiences while preserving explicit roles', () => {
+  it('canonicalizes admin and portal audiences while preserving explicit roles', async () => {
     const selection = parseDeploySelection(selectionInput);
     const firstSource = requiredFixture(selection.firstSource ?? undefined, 'first source');
     expect(selection.basics.adminEmail).toBe('owner@example.com');
@@ -22,26 +22,27 @@ describe('strict deployment contracts', () => {
     ]);
     expect(firstSource.enabledTools).toEqual(['company_prepare', 'company_search']);
 
-    expect(() => parseDeploySelection({
+    const largerTeam = parseDeploySelection({
       ...selectionInput,
       basics: {
         ...selectionInput.basics,
         additionalAdminEmails: Array.from(
-          { length: 19 },
+          { length: 60 },
           (_value, index) => `admin-${String(index).padStart(2, '0')}@example.com`,
         ),
       },
       firstSource: {
         ...selectionInput.firstSource,
         portalUserEmails: Array.from(
-          { length: 50 },
+          { length: 100 },
           (_value, index) => `member-${String(index).padStart(2, '0')}@example.com`,
         ),
       },
-    })).toThrow(expect.objectContaining({
-      code: 'bad_request',
-      reason: 'portal_user_emails_invalid',
-    }));
+    });
+    expect(largerTeam.basics.additionalAdminEmails).toHaveLength(60);
+    expect(largerTeam.firstSource?.portalUserEmails).toHaveLength(161);
+    const largerPlan = await buildStaticDeployPlan(largerTeam, manifest, NOW + 600_000);
+    expect(parseStaticDeployPlan(largerPlan)).toEqual(largerPlan);
   });
 
   it('preserves 228- and 224-tool sources and rejects input above the 500-tool bound', () => {

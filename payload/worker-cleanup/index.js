@@ -390,7 +390,7 @@ function parseManagementControl(value, claim) {
       !isText(value.portal.id) || !SAFE_ID.test(value.portal.id) ||
       !isText(value.portal.name) || value.portal.name.length < 2 || value.portal.name.length > 80 ||
       !hostname(value.portal.hostname) || value.portal.marker !== `acg:v1:${value.installationId}:${value.portal.id}` ||
-      !Array.isArray(value.audienceEmails) || value.audienceEmails.length < 1 || value.audienceEmails.length > 51 ||
+      !Array.isArray(value.audienceEmails) || value.audienceEmails.length < 1 ||
       !Array.isArray(value.sourceOwnership) || value.sourceOwnership.length > 32) return null;
   const ownership = [];
   for (const source of value.sourceOwnership) {

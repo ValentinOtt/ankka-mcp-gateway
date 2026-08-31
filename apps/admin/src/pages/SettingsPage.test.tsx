@@ -71,6 +71,6 @@ describe('SettingsPage danger zone', () => {
     const section = button.closest('section')
     await waitFor(() => expect(section).toHaveFocus())
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' })
-    expect(screen.getByText(/zero-write removal plan/u)).toBeInTheDocument()
+    expect(screen.getByText(/Opening the plan does not change your gateway/u)).toBeInTheDocument()
   })
 })

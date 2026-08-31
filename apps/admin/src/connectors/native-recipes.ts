@@ -319,7 +319,7 @@ const authoredRecipes: readonly NativeConnectorRecipe[] = [
     description: 'Read approved public-channel context with a restricted internal Slack app.',
     status: 'manual_setup', endpoint: 'https://mcp.slack.com/mcp',
     authentication: 'oauth_manual_client',
-    upstreamControls: ['Use an internal or Marketplace-published Slack app; unlisted distributed apps are not supported.', 'For a public-channel starting point, grant only public search and history access; exclude chat, reaction, canvas, and conversation writes.', 'Do not expose one person’s private conversations through a team-shared source.'],
+    upstreamControls: ['Use an internal or Marketplace-published Slack app; unlisted distributed apps are not supported.', 'For a public-channel starting point, grant only public search and history access; exclude chat, reaction, canvas, and conversation writes.', 'Do not expose one user’s private conversations through a team-shared source.'],
     requiredScopes: ['channels:history', 'search:read.public'],
     scopeNote: 'This is a minimal public-channel use case, not every Slack read tool. Add other read scopes only for an explicitly reviewed data category.',
     documentedReadTools: [],

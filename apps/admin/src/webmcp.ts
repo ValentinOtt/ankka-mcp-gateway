@@ -1,6 +1,6 @@
 import * as v from 'valibot'
 import {
-  GatewayApiError, safeGatewayErrorCode, TEAM_MAX_PEOPLE, validHandoffUrl,
+  GatewayApiError, safeGatewayErrorCode, validHandoffUrl,
   type GatewayAdminApi, type PreparedAction, type RuntimeOperation,
 } from './api'
 
@@ -153,7 +153,7 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
         type: 'object', additionalProperties: false, required: ['expectedRevision', 'members'],
         properties: {
           expectedRevision: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER - 1 },
-          members: { type: 'array', maxItems: TEAM_MAX_PEOPLE, items: {
+          members: { type: 'array', items: {
             type: 'object', additionalProperties: false, required: ['email', 'sourceIds'], properties: {
               email: { type: 'string', minLength: 1, maxLength: 254 },
               sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: { type: 'string', pattern: TEAM_SOURCE_ID } },
@@ -161,10 +161,10 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
           } },
         },
       },
-      v.strictObject({ expectedRevision: revision, members: v.pipe(v.array(v.strictObject({
+      v.strictObject({ expectedRevision: revision, members: v.array(v.strictObject({
         email: v.pipe(v.string(), v.minLength(1), v.maxLength(254)),
         sourceIds: v.pipe(v.array(v.pipe(v.string(), v.regex(new RegExp(TEAM_SOURCE_ID, 'u')))), v.maxLength(32), v.check((ids) => new Set(ids).size === ids.length)),
-      })), v.maxLength(TEAM_MAX_PEOPLE)) }),
+      })) }),
       { ...mutation, destructiveHint: true }, async ({ expectedRevision, members }) => {
         const current = await api.getTeam()
         if (current.revision !== expectedRevision) throw new GatewayApiError(409, 'team_access_revision_conflict')

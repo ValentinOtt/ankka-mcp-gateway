@@ -14,7 +14,7 @@ export function NativeConnectorGuides() {
 
   return (
     <details className="mt-5 rounded-xl border border-kumo-line p-4">
-      <summary className="cursor-pointer text-sm font-medium text-kumo-strong">Provider setup guides</summary>
+      <summary className="cursor-pointer text-sm font-medium text-subheading">Provider setup guides</summary>
       <p className="mt-3 max-w-[75ch] text-xs leading-5 text-kumo-subtle">{NATIVE_RECIPE_NOTICE}</p>
       <label htmlFor={selectId} className="mt-4 block text-xs font-medium text-kumo-default">Choose a provider guide</label>
       <select
@@ -36,7 +36,7 @@ export function NativeConnectorGuides() {
           <code className="mt-1 block select-all break-all text-xs leading-5 text-kumo-default">{recipe.endpoint}</code>
           <div className="mt-4 grid gap-5 lg:grid-cols-2">
             <section aria-label="Required provider controls">
-              <h4 className="text-xs font-semibold text-kumo-strong">Required provider controls</h4>
+              <h4 className="text-xs font-semibold text-subheading">Required provider controls</h4>
               <ul className="mt-2 list-disc space-y-2 pl-4 text-xs leading-5 text-kumo-subtle">
                 {recipe.upstreamControls.map((control) => <li key={control}>{control}</li>)}
               </ul>
@@ -46,7 +46,7 @@ export function NativeConnectorGuides() {
               <p className="mt-2 text-xs leading-5 text-kumo-subtle">{recipe.scopeNote}</p>
             </section>
             <section aria-label="Before connecting">
-              <h4 className="text-xs font-semibold text-kumo-strong">Before connecting</h4>
+              <h4 className="text-xs font-semibold text-subheading">Before connecting</h4>
               <ol className="mt-2 list-decimal space-y-2 pl-4 text-xs leading-5 text-kumo-subtle">
                 {recipe.setupSteps.map((step) => <li key={step}>{step}</li>)}
               </ol>
