@@ -140,9 +140,6 @@ export function parseDeploySelection<Input>(value: Input): DeploySelection {
     .replace(/-$/u, '');
   if (resourceSlug.length < 2) throw new DeployError(400, 'bad_request', 'gateway_name_invalid');
   const adminEmail = normalizeEmail(input.basics.adminEmail, 'admin_email_invalid');
-  if (input.basics.additionalAdminEmails.length > 19) {
-    throw new DeployError(400, 'bad_request', 'additional_admin_emails_invalid');
-  }
   const additionalAdminEmails = [...new Set(
     input.basics.additionalAdminEmails
       .map((email) => normalizeEmail(email, 'additional_admin_emails_invalid'))
@@ -208,9 +205,6 @@ export function parseDeploySelection<Input>(value: Input): DeploySelection {
     }
     return normalized;
   }))].sort();
-  if (input.firstSource.portalUserEmails.length > 50) {
-    throw new DeployError(400, 'bad_request', 'portal_user_emails_invalid');
-  }
   // OAuth actor (the person consenting), primary gateway admin, additional
   // admins, and portal users are distinct concepts. V1 requires the actor to
   // match adminEmail at callback; every admin is included in the Access audience.
@@ -220,9 +214,6 @@ export function parseDeploySelection<Input>(value: Input): DeploySelection {
     ...input.firstSource.portalUserEmails
       .map((email) => normalizeEmail(email, 'portal_user_emails_invalid')),
   ])].sort();
-  if (portalUserEmails.length > 51) {
-    throw new DeployError(400, 'bad_request', 'portal_user_emails_invalid');
-  }
   return Object.freeze({
     schemaVersion: 1,
     basics: Object.freeze({

@@ -23,11 +23,12 @@ import {
   type SourceDraftInput,
   type Team,
   type TeamAction,
+  type TeamActionResult,
   type TeamMember,
   validHandoffUrl,
 } from './api'
 
-type Notice = { tone: 'neutral' | 'success' | 'error'; message: string } | null
+type Notice = { tone: 'neutral' | 'success' | 'warning' | 'error'; message: string } | null
 
 interface GatewayContextValue {
   status: GatewayStatus | null
@@ -51,7 +52,7 @@ interface GatewayContextValue {
   prepareRuntimeAction(operation: RuntimeOperation): Promise<PreparedAction>
   prepareTeardownAction(): Promise<PreparedAction>
   getTeam(): Promise<Team>
-  prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<PreparedAction>
+  prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult>
   getTeamAction(actionId: string): Promise<TeamAction>
   cancelTeamAction(actionId: string): Promise<TeamAction>
 }
@@ -173,7 +174,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
           if (!active) return
           setSources(currentSources)
           if (currentSources.installationEnabled !== true) {
-            setSourceNotice({ tone: 'neutral', message: SOURCE_ADDITION_PAUSED_MESSAGE })
+            setSourceNotice({ tone: 'warning', message: SOURCE_ADDITION_PAUSED_MESSAGE })
             return
           }
           if (Date.parse(action.expiresAt) <= Date.now()) {
@@ -296,12 +297,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     getTeamAction,
     prepareTeamAction: (expectedRevision, members) => runBusy(async () => {
       try {
-        const trustedStatus = status ?? await apiRef.current.getStatus()
-        if (status === null) setStatus(trustedStatus)
-        const prepared = await apiRef.current.prepareTeamAction(expectedRevision, members)
-        const handoffUrl = validHandoffUrl(prepared.handoffUrl, trustedStatus.controlPlaneOrigin)
-        if (!handoffUrl) throw new GatewayApiError(502, 'team_handoff_invalid')
-        return { ...prepared, handoffUrl }
+        return await apiRef.current.prepareTeamAction(expectedRevision, members)
       } catch (cause) {
         throw cause instanceof GatewayApiError ? cause : new GatewayApiError(502, 'team_prepare_failed')
       }

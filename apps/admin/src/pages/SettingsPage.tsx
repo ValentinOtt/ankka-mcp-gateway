@@ -1,9 +1,8 @@
-import { Button } from '@cloudflare/kumo'
+import { Button } from '../components/Button'
 import {
   ArrowsClockwise,
   CheckCircle,
   ClockCounterClockwise,
-  ShieldCheck,
   Trash,
   Warning,
   X,
@@ -19,7 +18,6 @@ export function SettingsPage() {
     isBusy,
     prepareRuntimeAction,
     prepareTeardownAction,
-    refreshUpdate,
     update,
     updateNotice,
   } = useGateway()
@@ -51,25 +49,14 @@ export function SettingsPage() {
   const statusLabel = update.status === 'available' ? 'Update available'
     : update.status === 'unavailable' ? 'Channel unavailable' : 'Up to date'
   const channelLabel = update.channel === 'stable' ? 'Stable' : 'Canary'
+  const availableRelease = update.status === 'available' ? update.available?.release : null
 
   return (
     <div>
-      <PageHeader
-        eyebrow="Gateway administration"
-        title="Settings"
-        description="Manage the signed runtime and lifecycle of your gateway. Sources, credentials, Access policies, DNS, and Durable Object data remain separately controlled."
-      />
+      <PageHeader title="Settings" />
 
       <section className="mt-8" aria-labelledby="software-updates-title">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <h2 id="software-updates-title" className="text-lg font-semibold tracking-[-0.02em] text-kumo-strong">Software updates</h2>
-            <p className="mt-1 text-sm leading-6 text-kumo-subtle">Review and authorize signed changes to the gateway runtime.</p>
-          </div>
-          <Button variant="secondary" className="pressable" loading={isBusy} onClick={() => void refreshUpdate()}>
-            Check again
-          </Button>
-        </div>
+        <h2 id="software-updates-title" className="text-lg font-semibold tracking-[-0.02em] text-subheading">Software updates</h2>
 
         {updateNotice ? (
           <div role="status" className={`notice-banner mt-5 notice-${updateNotice.tone}`}>
@@ -80,33 +67,37 @@ export function SettingsPage() {
 
         <div className="surface-card mt-5 overflow-hidden">
           <div className="flex flex-wrap items-start justify-between gap-4 border-b border-kumo-line px-5 py-5 sm:px-6">
-            <div>
-              <p className="text-xs font-medium text-kumo-subtle">Gateway runtime</p>
-              <h3 className="mt-1 text-base font-semibold text-kumo-strong">{channelLabel} release channel</h3>
-            </div>
-            <StatusPill tone={update.status === 'available' ? 'attention' : update.status === 'unavailable' ? 'waiting' : 'ready'}>
+            <h3 className="text-sm font-medium text-subheading">{channelLabel} release channel</h3>
+            <StatusPill tone={update.status === 'available' || update.status === 'unavailable' ? 'attention' : 'ready'}>
               {statusLabel}
             </StatusPill>
           </div>
 
-          <dl className="grid gap-px bg-kumo-line sm:grid-cols-3">
-            <div className="bg-white px-5 py-5 sm:px-6">
+          <dl className="grid gap-px bg-kumo-line sm:grid-cols-2">
+            <div className="bg-kumo-overlay px-5 py-5 sm:px-6">
               <dt className="text-xs font-medium text-kumo-subtle">Installed</dt>
-              <dd className="mt-1.5 font-mono text-sm text-kumo-strong">{update.current?.release ?? 'Unavailable'}</dd>
+              <dd className="mt-1.5 break-all text-sm text-kumo-strong">{update.current?.release ?? 'Unavailable'}</dd>
             </div>
-            <div className="bg-white px-5 py-5 sm:px-6">
-              <dt className="text-xs font-medium text-kumo-subtle">Channel</dt>
-              <dd className="mt-1.5 font-mono text-sm text-kumo-strong">{update.channel}</dd>
-            </div>
-            <div className="bg-white px-5 py-5 sm:px-6">
-              <dt className="text-xs font-medium text-kumo-subtle">Classification</dt>
-              <dd className="mt-1.5 text-sm text-kumo-strong">
-                {update.available?.classification.kind === 'normal' ? 'Normal update' : update.status === 'unavailable' ? 'Unverified' : 'No change'}
-              </dd>
-            </div>
+            {availableRelease ? (
+              <div className="bg-brand-soft px-5 py-5 sm:px-6">
+                <dt className="text-xs font-medium text-brand-strong">Available version</dt>
+                <dd className="mt-1.5 break-all text-lg font-semibold text-brand-strong">{availableRelease}</dd>
+              </div>
+            ) : (
+              <div className="bg-kumo-overlay px-5 py-5 sm:px-6">
+                <dt className="text-xs font-medium text-kumo-subtle">Channel</dt>
+                <dd className="mt-1.5 text-sm text-kumo-strong">{update.channel}</dd>
+              </div>
+            )}
           </dl>
 
           <div className="px-5 py-5 sm:px-6">
+            <dl className="mb-4 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+              <dt className="text-kumo-subtle">Classification</dt>
+              <dd className="text-kumo-strong">
+                {update.available?.classification.kind === 'normal' ? 'Normal update' : update.status === 'unavailable' ? 'Unverified' : 'No change'}
+              </dd>
+            </dl>
             {update.status === 'unavailable' ? (
               <p className="text-sm leading-6 text-kumo-subtle">The signed channel could not be verified. Gateway management and an already available rollback remain usable.</p>
             ) : update.available?.notes?.length ? (
@@ -120,22 +111,18 @@ export function SettingsPage() {
             <div className="mt-5 flex flex-wrap gap-2 border-t border-kumo-line pt-5">
               {update.status === 'available' ? (
                 <Button variant="primary" className="pressable" loading={isBusy} onClick={() => void authorize('update')}>
-                  <ArrowsClockwise size={16} /> Review and authorize update
+                  <ArrowsClockwise size={16} /> Update
                 </Button>
               ) : null}
               {update.rollback.available ? (
                 <Button variant="secondary" className="pressable" disabled={isBusy} onClick={() => void authorize('rollback')}>
-                  <ClockCounterClockwise size={16} /> Review rollback to {update.rollback.release}
+                  <ClockCounterClockwise size={16} /> Rollback
                 </Button>
               ) : null}
             </div>
           </div>
         </div>
 
-        <aside className="mt-5 flex gap-3 rounded-xl border border-kumo-line bg-kumo-tint/55 p-4">
-          <ShieldCheck size={18} className="mt-0.5 shrink-0 text-success-strong" weight="fill" />
-          <p className="text-xs leading-5 text-kumo-subtle"><strong className="text-kumo-strong">Normal update boundary:</strong> the candidate is staged at 0%, probed at its exact version, then activated. Durable Object data is never rolled back.</p>
-        </aside>
       </section>
 
       <section
@@ -160,12 +147,12 @@ export function SettingsPage() {
                 <h3 className="text-base font-semibold">Teardown gateway</h3>
               </div>
               <p className="mt-2 text-sm leading-6 text-kumo-subtle">
-                Generate a one-time receipt proof, then review the exact zero-write removal plan in the signed installer. Cloudflare authorization is requested only after that review.
+                Review what will be removed before authorizing deletion in Cloudflare. Opening the plan does not change your gateway.
               </p>
             </div>
             <Button
-              variant="secondary"
-              className="pressable shrink-0 border-danger/30 text-danger"
+              variant="secondary-destructive"
+              className="pressable shrink-0"
               loading={isBusy}
               onClick={() => void reviewTeardown()}
             >

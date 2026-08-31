@@ -43,9 +43,9 @@ describe('SourcesPage', () => {
       expect(screen.getByRole('button', { name: 'Add your first source' })).toBeDisabled()
     } else {
       expect(screen.getByText('Installed knowledge')).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Installed knowledge' }))
       expect(screen.getByText('Operator-connected OAuth')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'Installation unavailable' })).toBeDisabled()
-      for (const summary of screen.getAllByText('1 exact tool')) await user.click(summary)
       expect(screen.getByText('search')).toBeVisible()
       expect(screen.getByText('Retained draft')).toBeInTheDocument()
     }
@@ -80,7 +80,7 @@ describe('SourcesPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('without an admin credential flow')
     expect(screen.getByText('OAuth protected')).toBeInTheDocument()
     expect(screen.queryByText('Public endpoint')).not.toBeInTheDocument()
-    expect(screen.queryByText('One Gateway login')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Connect this source as a gateway operator/u)).not.toBeInTheDocument()
     expect(screen.getByText('Synthetic read query.')).toBeInTheDocument()
     for (const checkbox of screen.getAllByRole('checkbox')) expect(checkbox).not.toBeChecked()
     await user.click(screen.getByRole('button', { name: 'Select shown' }))
@@ -337,8 +337,11 @@ describe('SourcesPage', () => {
       authMode: 'none',
       enabledTools: toolNames,
     })
-    const installedSummary = await screen.findByText(`${toolCount} exact tools`)
-    expect(installedSummary.closest('details')).not.toHaveAttribute('open')
+    const savedSource = await screen.findByRole('button', { name: 'Large read API' })
+    expect(savedSource).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText(`${toolCount} exact tools`)).not.toBeInTheDocument()
+    await user.click(savedSource)
+    expect(screen.getByText(`${toolCount} exact tools`)).toBeInTheDocument()
   }, 15_000)
 
   it('presents an OAuth-protected source as one operator connection', async () => {
@@ -369,7 +372,7 @@ describe('SourcesPage', () => {
     await user.type(screen.getByLabelText('Source name'), 'Protected read API')
     await user.type(screen.getByLabelText('MCP URL'), 'https://protected.example.com/mcp')
     await user.click(screen.getByRole('button', { name: 'Inspect source' }))
-    expect(await screen.findByText('One Gateway login')).toBeInTheDocument()
+    expect(await screen.findByText(/Connect this source as a gateway operator/u)).toBeInTheDocument()
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
     await user.type(screen.getByLabelText('Exact tool names'), 'company_read')
     await user.click(screen.getByRole('button', { name: 'Save draft' }))

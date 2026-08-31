@@ -5,22 +5,21 @@ import {
   redirect,
 } from '@tanstack/react-router'
 import { AppShell } from './components/AppShell'
-import { OverviewPage } from './pages/OverviewPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { SourcesPage } from './pages/SourcesPage'
 import { TeamPage } from './pages/TeamPage'
 
 const rootRoute = createRootRoute({ component: AppShell })
 
-const overviewRoute = createRoute({
+const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
   beforeLoad: ({ location }) => {
     if (new URLSearchParams(location.searchStr).get('teardown') === 'review') {
-      throw redirect({ to: '/settings', search: location.search })
+      throw redirect({ to: '/settings', search: location.search, replace: true })
     }
+    throw redirect({ to: '/sources', search: location.search, replace: true })
   },
-  component: OverviewPage,
 })
 
 const sourcesRoute = createRoute({
@@ -58,7 +57,7 @@ const fallbackRoute = createRoute({
 })
 
 export const routeTree = rootRoute.addChildren([
-  overviewRoute,
+  indexRoute,
   sourcesRoute,
   teamRoute,
   settingsRoute,

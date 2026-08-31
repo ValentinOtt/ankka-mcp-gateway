@@ -36,6 +36,13 @@ in this Apache-2.0 repository.
 No private product implementation, font files, private theme values, or
 generated build output were transferred.
 
+The Ankka favicon SVG was supplied by the repository maintainer on 2026-08-31
+for inclusion in the gateway dashboard and hosted installer. It is retained
+unchanged in `apps/admin/src/assets/ankka-icon.svg` and the fingerprinted
+installer asset. This request authorizes those product uses; no separate asset
+license or broader trademark permission was supplied. The SVG was reviewed for
+embedded scripts, external references, and private metadata; none were present.
+
 ## @cfworker/json-schema license fallback
 
 The file

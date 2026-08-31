@@ -88,7 +88,7 @@ function validate(input: SourceActionRelayInput, now: number): URL {
   try { management = new URL(input.managementOrigin); } catch { invalid(); }
   if (!ACCOUNT_ID.test(input.accountId) || !WORKER_NAME.test(input.workerName) ||
       !DNS_LABEL.test(input.workersSubdomain) || !ACTION_ID.test(input.actionId) ||
-      (input.action !== undefined && input.action !== 'access') ||
+      input.action !== undefined ||
       !NONCE.test(input.actionKey) || input.actorEmail !== input.actorEmail.toLowerCase() ||
       !EMAIL.test(input.actorEmail) || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= now ||
       input.expiresAt > now + 10 * 60 * 1000 || !v.is(v.string(), input.accessToken) ||
@@ -360,7 +360,7 @@ async function submitCustomerAction(
     expiresAt: input.expiresAt,
     cloudflareAccessToken: input.accessToken,
   };
-  const body = canonicalJson(input.action === 'access' ? { ...claim, action: 'access' } : claim);
+  const body = canonicalJson(claim);
   const response = await input.transport(actionUrl(input), {
     method: 'POST',
     headers: {
@@ -436,8 +436,7 @@ export async function relaySourceAction(input: SourceActionRelayInput): Promise<
     }
   }
   if (operationError) throw operationError;
-  if (input.action === 'access') management.pathname = '/team';
-  management.searchParams.set(input.action === 'access' ? 'accessAction' : 'sourceAction', input.actionId);
+  management.searchParams.set('sourceAction', input.actionId);
   return Object.freeze({
     schemaVersion: 1,
     actionId: input.actionId,

@@ -297,8 +297,8 @@ function versionResultFromBody<Input>(
     number: 1,
     annotations: body.annotations,
     assets: { config: assets.config },
-    bindings: bindings.map((binding) => binding.type === 'secret_text'
-      ? { name: binding.name, type: binding.type }
+    bindings: bindings.map((binding) => binding.type === 'secret_text' || binding.type === 'inherit'
+      ? { name: binding.name, type: 'secret_text' }
       : binding),
     compatibility_date: body.compatibility_date,
     compatibility_flags: body.compatibility_flags,
@@ -1221,6 +1221,41 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       restartedSubmission,
       call(verifyTransport.transport),
     )).resolves.toEqual(restartedSubmission);
+  });
+
+  it('commits exact-version inheritance without accepting or serializing a management credential', async () => {
+    const fixture = await releaseFixture();
+    const prepared = await prepareVerifiedWorkerRelease(prepareInput(fixture.release));
+    const worker: WorkerSubmission = {
+      kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID,
+    };
+    const plan = await prepareWorkerVersionMutation(prepared, worker, COMPLETION_JWT, 'clean', OTHER_VERSION_ID);
+    expect(plan.ephemeral.body.bindings).toContainEqual({
+      name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'inherit', version_id: OTHER_VERSION_ID,
+    });
+    expect(JSON.stringify(plan.recovery)).not.toMatch(/jwt|nonce|token|secret/iu);
+    expect(await recoveryClone(plan.recovery)).toEqual(plan.recovery);
+    expect(await parseWorkerVersionRecoveryRecord({
+      ...plan.recovery,
+      releaseContract: { ...plan.recovery.releaseContract, teamManagementBinding: { fromVersionId: VERSION_ID } },
+    })).toBeNull();
+    const submitTransport = sequencedTransport([() => success({ id: VERSION_ID }, 201)]);
+    const submission = await submitWorkerVersionMutation(plan.ephemeral, plan.recovery, call(submitTransport.transport));
+    const verifyTransport = sequencedTransport([() => success(versionResultFromBody(plan.ephemeral.body))]);
+    await expect(verifyWorkerVersionSubmission(plan.recovery, submission, call(verifyTransport.transport))).resolves.toEqual(submission);
+
+    const wrongBindingTransport = sequencedTransport([]);
+    const body = v.parse(versionSubmitBodySchema, plan.ephemeral.body);
+    const credentialWrite = {
+      ...plan.ephemeral,
+      body: { ...body, bindings: body.bindings.map((binding) => binding.name === 'ANKKA_TEAM_MANAGEMENT_TOKEN'
+        ? { name: binding.name, type: 'secret_text', text: 'unaccepted-synthetic-credential' } : binding) },
+    };
+    await expect(submitWorkerVersionMutation(credentialWrite, plan.recovery, call(wrongBindingTransport.transport))).rejects.toThrow();
+    expect(wrongBindingTransport.requests).toHaveLength(0);
+    for (const phase of ['bootstrap', 'provision'] as const) {
+      await expect(prepareWorkerVersionRecoveryRecord(prepared, worker, phase, OTHER_VERSION_ID)).rejects.toThrow();
+    }
   });
 
   it('rejects a contradictory optional version namespace_id against the list-bound ID', async () => {

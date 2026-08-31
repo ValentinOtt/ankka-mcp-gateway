@@ -126,7 +126,7 @@ function input(transport: (input: RequestInfo | URL, init?: RequestInit) => Prom
 }
 
 describe('source action relay', () => {
-  it.each([undefined, 'access'] as const)('relays one exact signed action (%s) and closes the Worker route', async (action) => {
+  it('relays one exact signed source action and closes the Worker route', async () => {
     let enabled = false;
     let customerPosts = 0;
     const providerWrites: boolean[] = [];
@@ -166,7 +166,7 @@ describe('source action relay', () => {
         `sha256=${[...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`,
       );
       const body = v.parse(sourceActionRequestSchema, JSON.parse(serialized));
-      expect(body.action).toBe(action);
+      expect(body.action).toBeUndefined();
       expect(body).toMatchObject({
         schemaVersion: 1,
         actionId: ACTION_ID,
@@ -183,23 +183,23 @@ describe('source action relay', () => {
         expiresAt: new Date(NOW + 10 * 60 * 1000).toISOString(),
         failureCode: null,
       };
-      return Response.json(action === 'access' ? { ...response, action } : response);
+      return Response.json(response);
     };
 
     const relayInput = input(transport);
-    const result = await relaySourceAction(action === 'access' ? { ...relayInput, action } : relayInput);
+    const result = await relaySourceAction(relayInput);
     expect(result).toEqual({
       schemaVersion: 1,
       actionId: ACTION_ID,
       status: 'succeeded',
-      managementUrl: `https://manage.example.com/${action === 'access' ? 'team?accessAction' : '?sourceAction'}=${ACTION_ID}`,
+      managementUrl: `https://manage.example.com/?sourceAction=${ACTION_ID}`,
     });
     expect(customerPosts).toBe(1);
     expect(providerWrites).toEqual([true, false]);
     expect(enabled).toBe(false);
   });
 
-  it.each([undefined, 'access'] as const)('rejects a successful response for the wrong action (%s)', async (action) => {
+  it('rejects a successful response for the wrong action', async () => {
     let enabled = false;
     const providerWrites: boolean[] = [];
     const transport = async (requestInput: RequestInfo | URL, init: RequestInit = {}) => {
@@ -222,14 +222,25 @@ describe('source action relay', () => {
         actionId: ACTION_ID,
         status: 'succeeded',
       };
-      return Response.json(action === undefined ? { ...response, action: 'access' } : response);
+      return Response.json({ ...response, action: 'access' });
     };
 
     const relayInput = input(transport);
-    await expect(relaySourceAction(action === 'access' ? { ...relayInput, action } : relayInput))
+    await expect(relaySourceAction(relayInput))
       .rejects.toMatchObject({ code: 'session_conflict' });
     expect(providerWrites).toEqual([true, false]);
     expect(enabled).toBe(false);
+  });
+
+  it('rejects legacy Team relays before any provider or customer request', async () => {
+    let requests = 0;
+    const relayInput = input(async () => {
+      requests += 1;
+      throw new Error('legacy Team relay must not reach a provider');
+    });
+    await expect(relaySourceAction({ ...relayInput, action: 'access' }))
+      .rejects.toMatchObject({ code: 'bad_request' });
+    expect(requests).toBe(0);
   });
 
   it('still disables the exact route when the customer action response is rejected', async () => {

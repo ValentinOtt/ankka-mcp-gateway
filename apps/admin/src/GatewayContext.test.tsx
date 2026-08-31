@@ -1,7 +1,8 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SOURCE_ADDITION_PAUSED_MESSAGE, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type RuntimeUpdate, type SourceAction } from './api'
+import { SOURCE_ADDITION_PAUSED_MESSAGE, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type RuntimeUpdate, type SourceAction, type TeamActionResult } from './api'
 import { GatewayProvider, useGateway } from './GatewayContext'
 
 const status: GatewayStatus = {
@@ -55,6 +56,17 @@ function PausedSourceProbe() {
   </div>
 }
 
+function TeamSaveProbe() {
+  const { prepareTeamAction } = useGateway()
+  const [result, setResult] = useState('unsaved')
+  return <div>
+    <span>{result}</span>
+    <button type="button" onClick={() => {
+      void prepareTeamAction(7, [{ email: 'admin@example.com', sourceIds: [] }]).then((value) => setResult(value.action.status)).catch(() => setResult('failed'))
+    }}>Save Team</button>
+  </div>
+}
+
 describe('GatewayProvider', () => {
   afterEach(() => { cleanup(); window.history.replaceState(null, '', '/') })
   it('hydrates the production status, source, and update contracts', async () => {
@@ -77,6 +89,22 @@ describe('GatewayProvider', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByText('8')).toBeInTheDocument()
     expect(saveSourceDraft).toHaveBeenCalledWith(7, expect.objectContaining({ label: 'Knowledge' }))
+  })
+
+  it('saves Team locally without requiring a control-plane origin or hosted authorization', async () => {
+    const user = userEvent.setup()
+    const prepareTeamAction = vi.fn(async (): Promise<TeamActionResult> => ({ schemaVersion: 1, action: {
+      schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, status: 'succeeded', expiresAt: '2030-01-01T00:00:00.000Z', failureCode: null, canCancel: false,
+    } }))
+    const client = api({ getStatus: vi.fn().mockRejectedValue(new Error('Status unavailable')), prepareTeamAction })
+    render(<GatewayProvider api={client}><Probe /><TeamSaveProbe /></GatewayProvider>)
+    await screen.findByText('settled')
+    await user.click(screen.getByRole('button', { name: 'Save Team' }))
+    expect(await screen.findByText('succeeded')).toBeInTheDocument()
+    expect(prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, [{ email: 'admin@example.com', sourceIds: [] }])
+    expect(client.getStatus).toHaveBeenCalledTimes(1)
+    expect(client.prepareSourceAction).not.toHaveBeenCalled()
+    expect(client.prepareRuntimeAction).not.toHaveBeenCalled()
   })
 
   it('blocks programmatic draft save and authorization before either API request when source addition is paused', async () => {

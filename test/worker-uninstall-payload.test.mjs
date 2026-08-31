@@ -250,8 +250,10 @@ test('cleanup through the public route opens the same Durable Object the primary
   assertNoSecretsPersisted(storage);
 });
 
-test('public cleanup accepts an untouched portal-only management state', async () => {
-  const claimInput = await portalOnlyClaim();
+test('public cleanup accepts untouched portal-only management state above 51 users', async () => {
+  const memberEmails = ['owner@example.com', ...Array.from({ length: 100 }, (_value, index) =>
+    `user-${String(index).padStart(3, '0')}@example.com`)];
+  const claimInput = await portalOnlyClaim(undefined, memberEmails);
   const gateway = await installed({ claimInput });
   const env = environment();
   env.ADMIN_STATE = durableNamespace(env, AdminState, gateway.objects);

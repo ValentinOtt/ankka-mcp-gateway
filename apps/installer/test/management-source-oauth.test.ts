@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import type { JsonObject } from '../src/boundary';
 import { REQUIRED_OAUTH_SCOPES, OAUTH_COOKIE, PUBLIC_ORIGIN } from '../src/constants';
-import { base64UrlEncode } from '../src/crypto';
+import { base64UrlEncode, sealOauthCookie } from '../src/crypto';
 import type { GatewayDeployEnv } from '../src/env';
 import { createGatewayDeployWorker, type GatewayDeployWorkerDependencies } from '../src/index';
 import {
@@ -166,8 +166,7 @@ async function authorizeManagement<Claim>(
 describe('management source OAuth', () => {
   it.each([
     { action: undefined, connected: true },
-    { action: 'access', connected: true },
-    { action: 'access', connected: false },
+    { action: undefined, connected: false },
   ] as const)('relays one memory-only grant without a hosted session ($action, connected=$connected)', async ({ action, connected }) => {
     let enabled = false;
     let customerPosts = 0;
@@ -220,7 +219,7 @@ describe('management source OAuth', () => {
           expiresAt: new Date(NOW + 10 * 60 * 1000).toISOString(),
           failureCode: null,
         };
-        return Response.json(action === 'access' ? { ...response, action } : response);
+        return Response.json(response);
       }
       throw new Error(`unexpected request ${request.method} ${url.href}`);
     };
@@ -243,7 +242,7 @@ describe('management source OAuth', () => {
     const worker = createGatewayDeployWorker(dependencies);
     const claim = managementClaim();
     const { oauth, state } = await authorizeManagement(
-      worker, env, MANAGEMENT_ORIGIN, action === 'access' ? { ...claim, action } : claim,
+      worker, env, MANAGEMENT_ORIGIN, claim,
     );
 
     const unverifiedContext = await worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/management/context`, {
@@ -264,7 +263,7 @@ describe('management source OAuth', () => {
 
     if (!connected) {
       expect(callback.headers.get('location')).toBe(
-        `${MANAGEMENT_ORIGIN}/team?accessAction=${ACTION_ID}&accessActionResult=finished`,
+        `${MANAGEMENT_ORIGIN}/?sourceAction=${ACTION_ID}&sourceActionResult=finished`,
       );
       expect(callback.headers.get('set-cookie')).toContain(`${OAUTH_COOKIE}=;`);
       return;
@@ -279,9 +278,62 @@ describe('management source OAuth', () => {
     expect(context.status).toBe(200);
     expect(await context.json()).toMatchObject({
       actionId: ACTION_ID,
-      managementUrl: `${MANAGEMENT_ORIGIN}/${action === 'access' ? 'team?accessAction' : '?sourceAction'}=${ACTION_ID}`,
+      managementUrl: `${MANAGEMENT_ORIGIN}/?sourceAction=${ACTION_ID}`,
     });
     expect(context.headers.get('set-cookie')).toContain(`${OAUTH_COOKIE}=;`);
+  });
+
+  it('rejects a legacy Team authorization before producing OAuth state or making requests', async () => {
+    let requests = 0;
+    const env = workerEnv();
+    const worker = createGatewayDeployWorker({ now: () => NOW, transport: async () => {
+      requests += 1;
+      throw new Error('legacy Team authorization must not reach a provider');
+    } });
+    const response = await requestManagementAuthorization(worker, env, { ...managementClaim(), action: 'access' });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: 'session_conflict' });
+    expect(response.headers.get('set-cookie')).toBeNull();
+    expect(requests).toBe(0);
+  });
+
+  it.each([true, false])('rejects an already-issued Team callback without exchanging or relaying a grant (connected=%s)', async (connected) => {
+    let requests = 0;
+    let releases = 0;
+    let shells = 0;
+    const env = workerEnv();
+    const state = 'C'.repeat(43);
+    const sealed = await sealOauthCookie(env.DEPLOY_SESSION_ENCRYPTION_KEY, {
+      schemaVersion: 4, purpose: 'source_apply', action: 'access', state,
+      verifier: 'D'.repeat(43), expiresAt: NOW + 600_000, actionId: ACTION_ID,
+      actionKey: ACTION_KEY, actorEmail: 'admin@example.com', accountId: ACCOUNT_ID,
+      workerName: 'ankka-gateway-example', workersSubdomain: 'customer-workers',
+      managementOrigin: MANAGEMENT_ORIGIN, releaseIdentity: signedRuntime.identity,
+    });
+    const dependencies: GatewayDeployWorkerDependencies = {
+      now: () => NOW,
+      transport: async () => { requests += 1; throw new Error('no Team grant exchange or relay'); },
+      exactReleaseProvider: { async loadVerifiedReleaseBundleForIdentity() {
+        releases += 1;
+        return signedRuntime.bundle;
+      } },
+    };
+    if (connected) dependencies.managementCallbackResponse = async () => {
+      shells += 1;
+      return new Response('must not render');
+    };
+    const worker = createGatewayDeployWorker(dependencies);
+    const response = await worker.fetch(new Request(
+      `${PUBLIC_ORIGIN}/oauth/callback?code=retired-team-code&state=${state}`,
+      { headers: { cookie: `${OAUTH_COOKIE}=${sealed}` } },
+    ), env);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: 'session_conflict' });
+    expect(response.headers.get('set-cookie')).toContain(`${OAUTH_COOKIE}=;`);
+    expect(response.headers.get('location')).toBeNull();
+    expect(requests).toBe(0);
+    expect(releases).toBe(0);
+    expect(shells).toBe(0);
   });
 
   it('keeps a denied unsigned management handoff on the fixed installer origin', async () => {

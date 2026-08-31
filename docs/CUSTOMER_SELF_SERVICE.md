@@ -30,7 +30,7 @@ Installation requires:
 - a different hostname for the management dashboard; and
 - the initial administrators, who also form the initial Portal audience.
 
-The browser flow uses Cloudflare OAuth. Do not create an API token for Ankka,
+The installer browser flow uses Cloudflare OAuth. Do not create an API token for Ankka,
 paste a provider credential into the installer, or put credentials in a URL or
 configuration file.
 
@@ -44,8 +44,8 @@ The first sign-in is read-only and requests exactly:
 - `zone.read`
 
 After discovery, the installer attempts bounded provider-side revocation and
-always discards its local copy. Installation and every later Cloudflare
-resource mutation use a separate, short-lived grant requesting exactly:
+always discards its local copy. Installation and installer-assisted updates,
+rollback, and removal use a separate, short-lived grant requesting exactly:
 
 - `access-acct.write`
 - `access.write`
@@ -65,6 +65,15 @@ starting a mutation.
 Compare Cloudflare's consent screen with these lists. Stop if a permission is
 missing or unexpected; the installer also rejects any release that asks for a
 different set.
+
+Team permission saves use a distinct customer-owned Worker secret, never one of
+these OAuth grants. The runtime token needs only account-scoped **Access: Apps
+and Policies — Edit** and **MCP Portals — Read**, restricted to the gateway's
+account. The Access permission permits broader account Access administration;
+it is not isolated to this gateway's policies. Read the exact endpoint evidence,
+direct Cloudflare provisioning, rotation/revocation, and migration steps in
+[Team access](TEAM_ACCESS.md#customer-owned-management-credential) before
+approving this standing authority.
 
 ## Installation flow
 
@@ -110,14 +119,18 @@ source installation.
   previously prepared installation links. Existing connections are unchanged.
 - **Team** manages who may connect and which existing sources each person can
   use. Administrator rights remain fixed; tool allowlists are shared per source.
+  One Save sends the complete batch to your own Worker, which updates and
+  verifies your Access policies without contacting Ankka or starting OAuth.
   See [Team access](TEAM_ACCESS.md) for verification and recovery limits.
 - **Settings** checks the installed signed release channel, prepares an
   update or rollback, and contains the removal entry point. Older canary
   versions may label the update screen **Updates**; the current source keeps
   `/updates` as a redirect to `/settings`.
 
-Permission changes, updates, rollback, and removal require a new short-lived
-Cloudflare authorization. Source draft saves and installation actions are
+Updates, rollback, and removal require a new short-lived Cloudflare
+authorization. Team saves require the separately provisioned
+`ANKKA_TEAM_MANAGEMENT_TOKEN` Worker secret and fail closed with setup guidance
+if it is missing or invalid; they never fall back to hosted OAuth. Source draft saves and installation actions are
 refused while the source-installation pause is active. The complete secret-free source-state
 record is bounded to 1 MiB of canonical UTF-8 JSON; a save that would cross the
 bound in its worst-case installed projection is rejected before Durable Object
@@ -176,6 +189,15 @@ Object data. Rollback restores a previous Worker version without rolling back
 data. See [Gateway updates and rollback](UPDATES.md) for the temporary,
 authenticated action route used during the operation.
 
+The customer-local Team release changes the optional secret-binding contract.
+An installed v16 gateway requires a separately reviewed maintenance migration;
+its normal code-only update cannot silently accept or provision that authority.
+Compatible later forward updates preserve the secret by inheriting it from the
+verified deployed version. Rollback is blocked when the current or target
+version has the management secret. Follow the
+[migration plan](TEAM_ACCESS.md#migration-from-the-v16-oauth-flow), preserving
+pending proposals, source credentials, and Durable Object data.
+
 After a Team policy write may have occurred, rollback to an older runtime is
 blocked. Rolling back code would not undo saved permissions or Access policies.
 
@@ -207,6 +229,11 @@ or removed manually in Cloudflare.
 Other unrelated Cloudflare resources and upstream provider accounts are not
 removed. Provider-side credentials or OAuth clients configured outside the
 gateway may need separate revocation.
+
+The Team management API token is created outside the installer and must be
+revoked separately in Cloudflare. Removing its Worker binding does not revoke
+it or erase historical versions. Neither step clears the restrictions caused
+by a possibly applied Team policy write.
 
 ## Experimental browser tools
 

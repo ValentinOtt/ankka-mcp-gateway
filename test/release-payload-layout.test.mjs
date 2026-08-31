@@ -10,25 +10,26 @@ const ROOT = new URL('../payload/', import.meta.url);
 const ADMIN_ROOT = new URL('../apps/admin/dist/', import.meta.url);
 const COMPONENTS = Object.freeze({
   admin: null,
-  installer: ['assets/installer-b89856ad.css', 'assets/installer-de4ef4f0.js', 'index.html'],
+  installer: ['assets/ankka-85bfe235.svg', 'assets/installer-b2899467.js', 'assets/installer-edf3d306.css', 'index.html'],
   worker: ['index.js'],
   'worker-cleanup': ['index.js'],
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: '1a4167836c1306de02a6771919bc5b0e48186e35190abd38560b639f12385da9',
-  worker: '5d1dbd3d3cd4d4197a2b762f66fcb21cf3da0176cc85a7797d1465cad6338e00',
-  'worker-cleanup': '294518970598816944bae9e5e6f6411d3aa7ce00238e81e6b5abebb6b449e46f',
+  installer: '1c0c032cdcaef8cb413a48e007a3b8e37b59ed89eca64def921005759c989684',
+  worker: 'c24ad0424fc2fc5e7a1426eaba838aa3c594dd6241b3d3b9f22aece01275664e',
+  'worker-cleanup': '417ff8beb85d4c7122d57052f873914173b9b37456bc0d134c69dd0dbdccdf1d',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
 const FROZEN_LIFECYCLE_SHA256 = Object.freeze({
-  'worker-cleanup/index.js': '53f8c1785c4b7ff2638a372f8da9cf93393cc9e2f89c4f7be81b5879b744d75b',
+  'worker-cleanup/index.js': '5e6f32d9d578bb2facb58f7ff6a8d244db2538a55d76c439027413b7226a9261',
   'worker-retirement/index.js': '506e91323d6f6c89398a15799bfcde6cb4d271a5d6bf28a4fbbd422331751bda',
 });
 const CONTENT_TYPES = Object.freeze({
   '.css': 'text/css; charset=utf-8',
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.svg': 'image/svg+xml',
   '.txt': 'text/plain; charset=utf-8',
 });
 
@@ -109,7 +110,7 @@ test('release sources have one generated admin and four exact payload components
       for (const name of names.filter((entry) => ![
         'index.html', 'LICENSE.txt', 'THIRD_PARTY_LICENSES.txt',
       ].includes(entry))) {
-        assert.match(name, /^assets\/admin-[a-f0-9]{8}\.(?:css|js)$/u);
+        assert.match(name, /^assets\/admin-[a-f0-9]{8}\.(?:css|js|svg)$/u);
       }
     } else {
       assert.deepEqual(names, expectedFiles);
@@ -124,7 +125,7 @@ test('release sources have one generated admin and four exact payload components
         assert.equal(record.sha256, FROZEN_LIFECYCLE_SHA256[relative]);
       }
       const basename = path.posix.basename(record.path);
-      const fingerprint = basename.match(/-([a-f0-9]{8})\.(?:css|js)$/u)?.[1];
+      const fingerprint = basename.match(/-([a-f0-9]{8})\.(?:css|js|svg)$/u)?.[1];
       if (fingerprint && component !== 'admin') assert.equal(record.sha256.startsWith(fingerprint), true);
     }
   }
@@ -178,9 +179,9 @@ test('admin and installer HTML use external same-origin assets without inline ex
     const sources = [...html.matchAll(/<(?:link|script)\b[^>]*(?:href|src)="([^"]+)"/giu)]
       .map((match) => match[1]);
     assert.equal(sources.length >= 2, true);
-    if (component === 'installer') assert.equal(sources.length, 2);
+    if (component === 'installer') assert.equal(sources.length, 3);
     for (const source of sources) {
-      assert.match(source, /^\/assets\/[a-z]+-[a-f0-9]{8}\.(?:css|js)$/u);
+      assert.match(source, /^\/assets\/[a-z]+-[a-f0-9]{8}\.(?:css|js|svg)$/u);
       const file = await readFile(componentUrl(component, source.slice(1)));
       if (component === 'installer') {
         assert.equal(sha256(file).startsWith(source.match(/-([a-f0-9]{8})\./u)[1]), true);
@@ -189,9 +190,25 @@ test('admin and installer HTML use external same-origin assets without inline ex
   }
 });
 
+test('admin and installer package the supplied Ankka favicon as a same-origin SVG', async () => {
+  const original = await readFile(new URL('../apps/admin/src/assets/ankka-icon.svg', import.meta.url));
+  assert.equal(sha256(original), '85bfe235ef97e3af373044f4af6de88276b788ba620c4b543c4c0708c98616fb');
+  for (const component of ['admin', 'installer']) {
+    const html = await readFile(componentUrl(component, 'index.html'), 'utf8');
+    const icons = [...html.matchAll(/<link\b[^>]*rel="icon"[^>]*>/gu)];
+    assert.equal(icons.length, 1);
+    assert.match(icons[0][0], /type="image\/svg\+xml"/u);
+    assert.match(icons[0][0], /sizes="any"/u);
+    const href = icons[0][0].match(/href="([^"]+)"/u)?.[1];
+    assert.ok(href);
+    assert.match(href, /^\/assets\/(?:ankka|admin)-[a-f0-9]{8}\.svg$/u);
+    assert.deepEqual(await readFile(componentUrl(component, href.slice(1))), original);
+  }
+});
+
 test('installer assets cover the exact hosted session, plan, deploy, result, and removal contract', async () => {
   const html = await readFile(new URL('installer/index.html', ROOT), 'utf8');
-  const script = await readFile(new URL('installer/assets/installer-de4ef4f0.js', ROOT), 'utf8');
+  const script = await readFile(new URL('installer/assets/installer-b2899467.js', ROOT), 'utf8');
   assert.doesNotMatch(`${html}\n${script}`, /\bcustomers?\b/iu);
   for (const route of ['/', '/gateway', '/review', '/deploy', '/manage', '/oauth/handoff', '/oauth/callback', '/result']) {
     if (route !== '/') assert.match(`${html}\n${script}`, new RegExp(route.replace('/', '\\/'), 'u'));
@@ -212,7 +229,7 @@ test('installer assets cover the exact hosted session, plan, deploy, result, and
   assert.match(script, /const management = await managementCallbackContext\(\)/u);
   assert.match(script, /window\.location\.replace\(management\.managementUrl\)/u);
   assert.match(script, /state\.callbackStreamActive \|\| state\.discovery/u);
-  assert.match(`${html}\n${script}`, /Create Cloudflare sign-in link/u);
+  assert.match(html, /id="authorize"[^>]*>Continue to Cloudflare/u);
   assert.match(`${html}\n${script}`, /Continue to Cloudflare/u);
   assert.doesNotMatch(html, /target="_blank"/u);
   assert.doesNotMatch(script, /window\.open/u);
@@ -268,7 +285,7 @@ test('admin assets provide safe source discovery, signed updates, one-time apply
   ]) {
     assert.ok(script.includes(tool));
   }
-  assert.match(script, /one-time Cloudflare authorization/iu);
+  assert.match(script, /one-time Cloudflare OAuth handoff/iu);
   assert.match(script, /No sources yet/u);
   assert.match(script, /release channel/u);
   assert.match(script, /untrustedContentHint/u);
@@ -291,11 +308,11 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
   assert.match(adminCss, /:focus-visible/u);
   assert.match(adminCss, /@media\s*\(prefers-reduced-motion:\s*reduce\)/u);
   assert.doesNotMatch(adminCss, /@font-face|\.ttf|\.otf/iu);
-  assert.match(adminCss, /--color-canvas:#fbfaf6/u);
-  assert.match(adminCss, /--color-brand:#3d132c/u);
-  assert.match(adminCss, /--color-sidebar:#250e1c/u);
+  assert.match(adminCss, /--color-canvas:#191919/u);
+  assert.match(adminCss, /--color-brand:#dedede/u);
+  assert.match(adminCss, /--color-sidebar:#131313/u);
 
-  const installerCss = await readFile(new URL('installer/assets/installer-b89856ad.css', ROOT), 'utf8');
+  const installerCss = await readFile(new URL('installer/assets/installer-edf3d306.css', ROOT), 'utf8');
   {
     const css = installerCss;
     assert.match(css, /font-family:\s*Inter, ui-sans-serif, system-ui/u);
@@ -308,17 +325,17 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
     assert.match(css, /@media \(prefers-reduced-motion: reduce\)/u);
     assert.doesNotMatch(css, /@font-face|\.ttf|\.otf/iu);
     assert.match(css, /color-scheme:\s*dark/u);
-    assert.match(css, /--canvas:\s*#1c1a15/u);
-    assert.match(css, /--accent:\s*#e0dac8/u);
-    assert.match(css, /--sidebar:\s*#1c1a15/u);
+    assert.match(css, /--canvas:\s*#1b1b1b/u);
+    assert.match(css, /--accent:\s*#ededed/u);
+    assert.match(css, /--sidebar:\s*#1b1b1b/u);
   }
-  assert.match(installerCss, /--cream:\s*#14130f/u);
-  assert.match(installerCss, /font-family:\s*var\(--font-display\)/u);
+  assert.match(installerCss, /--cream:\s*#141414/u);
+  assert.doesNotMatch(installerCss, /--font-display|font-family:\s*var\(--font-display\)/u);
   assert.match(installerCss, /--font-size-body:\s*1rem/u);
   assert.match(installerCss, /input,\s*\nselect,\s*\ntextarea[\s\S]*?font-size:\s*var\(--font-size-body\)/u);
-  assert.match(installerCss, /\.promise-grid h2\s*\{[^}]*font-size:\s*var\(--font-size-body\)/u);
+  assert.match(installerCss, /\.step-pill\s*\{[^}]*border-radius:\s*999px/u);
   assert.match(installerCss, /\.operation-copy > p:last-child\s*\{[^}]*font-size:\s*var\(--font-size-body\)/u);
-  assert.match(installerCss, /\.stage-position\s*\{[^}]*font-size:\s*var\(--font-size-body\)/u);
+  assert.match(installerCss, /\.stage-position\s*\{[^}]*font-size:\s*0\.8125rem/u);
 });
 
 test('admin and installer carry the reviewed Ankka wordmark and navigation treatment', async () => {
@@ -329,7 +346,7 @@ test('admin and installer carry the reviewed Ankka wordmark and navigation treat
   assert.match(admin, /M0 18\.2697V5\.97501/u);
   assert.match(installer, /M0 18\.2697V5\.97501/u);
   assert.match(admin, /Gateway management/u);
-  assert.match(installer, /class="product-label">MCP Gateway installer/u);
+  assert.doesNotMatch(installer, /class="product-label"/u);
   assert.match(installer, /class="step-indicators" aria-label="Installation progress"/u);
   assert.doesNotMatch(installer, /<aside\b/iu);
   assert.doesNotMatch(installer, /class="canary-badge"/u);

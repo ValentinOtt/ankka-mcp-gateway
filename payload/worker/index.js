@@ -1,5 +1,5 @@
-// Canonical bounded email-audience projection shared by runtime and unit tests.
-const TEAM_MAX_PEOPLE = 51;
+// Canonical email-audience projection shared by runtime and unit tests.
+// Request byte limits bound input size; Cloudflare enforces its own seat allowance.
 const TEAM_MAX_SOURCES = 32;
 const TEAM_EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u;
 const TEAM_SOURCE_ID = /^[a-z][a-z0-9-]{0,31}$/u;
@@ -73,7 +73,7 @@ function teamEmail(value) {
 }
 
 function teamEmails(values, minimum = 0) {
-  if (!Array.isArray(values) || values.length < minimum || values.length > TEAM_MAX_PEOPLE) teamFail();
+  if (!Array.isArray(values) || values.length < minimum) teamFail();
   const emails = [];
   for (const value of values) emails.push(teamEmail(value));
   if (new Set(emails).size !== emails.length) teamFail();
@@ -107,7 +107,7 @@ function teamContext(context) {
 }
 
 function teamMembers(values, context) {
-  if (!Array.isArray(values) || values.length === 0 || values.length > TEAM_MAX_PEOPLE) teamFail();
+  if (!Array.isArray(values) || values.length === 0) teamFail();
   const emails = new Set();
   const members = [];
   for (const value of values) {
@@ -164,8 +164,7 @@ function teamPolicyAudience(policy) {
         !teamKeys(policy.include[0].everyone, [])) teamFail();
     return [];
   }
-  if (policy.decision !== 'allow' || policy.include.length === 0 ||
-      policy.include.length > TEAM_MAX_PEOPLE) teamFail();
+  if (policy.decision !== 'allow' || policy.include.length === 0) teamFail();
   const emails = [];
   for (const rule of policy.include) {
     if (!teamKeys(rule, ['email']) || !teamKeys(rule.email, ['email'])) teamFail();
@@ -355,7 +354,10 @@ const APPROVED_UPDATE_CLOUDFLARE_CONTRACT = Object.freeze({
   observability: Object.freeze({ enabled: false }),
   previewUrls: false,
   publicBindings: Object.freeze({
-    secrets: Object.freeze([Object.freeze({ lifecycle: 'bootstrap-only', name: 'ANKKA_BOOTSTRAP_NONCE' })]),
+    secrets: Object.freeze([
+      Object.freeze({ lifecycle: 'bootstrap-only', name: 'ANKKA_BOOTSTRAP_NONCE' }),
+      Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_TEAM_MANAGEMENT_TOKEN' }),
+    ]),
     variables: Object.freeze([
       'ADMIN_EMAILS', 'ANKKA_GATEWAY_RELEASE', 'ANKKA_GATEWAY_RELEASE_SHA256',
       'CF_ACCESS_AUD', 'CF_ACCESS_ISSUER', 'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_ZONE_ID',
@@ -590,7 +592,7 @@ function normalizedEmail(value) {
   return email.length <= 254 && EMAIL.test(email) ? email : null;
 }
 
-function exactSortedUniqueStrings(value, parser, maximum, minimum = 0) {
+function exactSortedUniqueStrings(value, parser, maximum = Infinity, minimum = 0) {
   if (!Array.isArray(value) || value.length < minimum || value.length > maximum) return null;
   const parsed = [];
   for (const entry of value) {
@@ -1318,7 +1320,7 @@ function parseSettings(value) {
       !exactKeys(value.access, ['adminEmails', 'memberEmails']) ||
       !Array.isArray(value.sources) || value.sources.length > 1) return null;
   const adminEmails = exactSortedUniqueStrings(value.access.adminEmails, normalizedEmail, 1, 1);
-  const memberEmails = exactSortedUniqueStrings(value.access.memberEmails, normalizedEmail, 50);
+  const memberEmails = exactSortedUniqueStrings(value.access.memberEmails, normalizedEmail);
   if (!adminEmails || !memberEmails || adminEmails.some((email) => memberEmails.includes(email))) return null;
   if (value.sources.length === 0) {
     return Object.freeze({
@@ -2334,7 +2336,7 @@ function safeManagementControl(value) {
       !RESOURCE_KEY.test(value.portal.marker.slice(`acg:v1:${value.installationId}:`.length))) {
     return null;
   }
-  const audienceEmails = exactSortedUniqueStrings(value.audienceEmails, normalizedEmail, 51, 1);
+  const audienceEmails = exactSortedUniqueStrings(value.audienceEmails, normalizedEmail, undefined, 1);
   if (!audienceEmails || !Array.isArray(value.sourceOwnership) || value.sourceOwnership.length > 32) return null;
   const sourceOwnership = [];
   const sourceProviderLocators = new Set();
@@ -4065,8 +4067,9 @@ export class AdminState {
         let value;
         try { value = raw === null ? null : JSON.parse(raw); } catch { value = null; }
         if (value?.action === 'access') {
-          const applied = await processTeamAction(request, this.env, this.state.storage, value, raw, Date.now());
-          return applied ?? fixedJson(400, { schemaVersion: 1, error: 'team_action_rejected' });
+          // Retire every old signed Team handoff, including an unspent one.
+          // The retained proposal can only resume through the administrator API.
+          return fixedJson(410, { schemaVersion: 1, error: 'team_oauth_retired' });
         }
         return processSourceAction(request, this.env, this.state.storage);
       }
@@ -4169,10 +4172,11 @@ export class AdminState {
         return snapshot ? fixedJson(200, snapshot) : fixedJson(503, { schemaVersion: 1, error: 'team_unavailable' });
       }
       if (url.pathname === INTERNAL_TEAM_ACTIONS_PATH && request.method === 'POST') {
-        const input = await request.json().catch(() => null);
+        const input = await readJsonInput(request, REQUEST_LIMIT_BYTES + 2048);
         try {
           const action = await prepareTeamAction(this.state.storage, this.env, input);
-          return action ? fixedJson(200, publicTeamAction(action)) : fixedJson(409, { schemaVersion: 1, error: 'team_action_conflict' });
+          const applied = action && await processTeamAction(this.env, this.state.storage, action, Date.now());
+          return applied || fixedJson(409, { schemaVersion: 1, error: 'team_action_conflict' });
         } catch (error) {
           const code = error instanceof TeamAccessError ? error.code : 'team_action_conflict';
           return fixedJson(code === 'team_access_invalid_request' || code === 'team_access_admin_required' ? 400 : 409,
@@ -4251,7 +4255,7 @@ function accessConfiguration(env) {
   const emails = isText(env.ADMIN_EMAILS)
     ? [...new Set(env.ADMIN_EMAILS.split(',').map(normalizedEmail).filter(Boolean))].sort(compareText)
     : [];
-  if (emails.length < 1 || emails.length > 20) return null;
+  if (emails.length < 1) return null;
   return Object.freeze({ aud: env.CF_ACCESS_AUD, issuer: issuer.origin, emails: Object.freeze(emails) });
 }
 
@@ -4667,7 +4671,13 @@ async function otherLifecycleBlocksTeam(storage, now) {
 function publicTeamAction(action) {
   return { schemaVersion: 1, action: 'access', actionId: action.actionId, status: action.status,
     expiresAt: new Date(action.expiresAt).toISOString(), failureCode: action.failureCode,
-    canCancel: action.status === 'authorization_required' && action.journal.length === 0 };
+    canCancel: ['authorization_required', 'recovery_required'].includes(action.status) && action.journal.length === 0 };
+}
+
+function teamManagementCredential(env) {
+  const value = env.ANKKA_TEAM_MANAGEMENT_TOKEN;
+  return isText(value) && value.length >= 20 && value.length <= 16 * 1024 &&
+    value.trim() === value && !hasControlCharacter(value) ? value : null;
 }
 
 async function teamSnapshot(storage, env) {
@@ -4682,6 +4692,7 @@ async function teamSnapshot(storage, env) {
     pendingAction: state.pendingAction ? publicTeamAction(state.pendingAction) : null,
     proposedMembers: state.pendingAction && !['succeeded', 'failed'].includes(state.pendingAction.status)
       ? state.pendingAction.request.members : null,
+    managementCredentialConfigured: teamManagementCredential(env) !== null,
     editingEnabled: !blocked, editingDisabledReason: blocked ? 'lifecycle_action_pending' : null };
 }
 
@@ -4724,13 +4735,13 @@ async function prepareTeamAction(storage, env, input) {
   const plan = planTeamAccessChange(input.request, context.planner);
   const previous = context.team.pendingAction;
   const unfinished = previous && !['failed', 'succeeded'].includes(previous.status);
-  // A fresh authorization may replace the same reviewed proposal immediately.
-  // Replacing both action ID and key hash invalidates the older handoff. The
-  // Durable Object queue serializes this with any currently running apply.
+  // Resume only the exact retained proposal, including legacy OAuth proposals.
+  // Keep its write journal: a lost response never proves a write rolled back.
+  // The Durable Object queue serializes preparation and execution together.
   if (unfinished && canonicalJson(previous.request.members) !== canonicalJson(plan.nextState.members)) return null;
   const planHash = await sha256({ plan, sourceRevision: context.sources.revision });
   if (unfinished && previous.planHash !== planHash) return null;
-  const action = safeTeamAction({ schemaVersion: 1, actionId: input.actionId, actorEmail: input.actorEmail,
+  const action = safeTeamAction({ schemaVersion: 1, actionId: unfinished ? previous.actionId : input.actionId, actorEmail: input.actorEmail,
     actionKeyHash: input.actionKeyHash, issuedAt: input.issuedAt, expiresAt: input.expiresAt,
     status: 'authorization_required', failureCode: null, request: { schemaVersion: 1,
       expectedRevision: context.team.revision, members: plan.nextState.members },
@@ -4744,7 +4755,7 @@ async function prepareTeamAction(storage, env, input) {
 async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy = null) {
   const account = context.environment.accountId;
   const applications = await providerList(`/accounts/${account}/access/apps`, token, {}, context.signal);
-  if (applications.status !== 'ok' || !Array.isArray(applications.result)) return null;
+  if (!teamProviderOk(context, applications) || !Array.isArray(applications.result)) return null;
   const observed = new Map();
   for (const policy of plan.policies) {
     if (onlyPolicy !== null && policy.policyId !== onlyPolicy) continue;
@@ -4757,11 +4768,11 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
         (Object.hasOwn(candidates[0], 'account_id') && candidates[0].account_id !== account)) return null;
     const path = `/accounts/${account}/access/apps/${encodeURIComponent(policy.applicationId)}`;
     const app = await providerCall(path, token, { signal: context.signal });
-    if (app.status !== 'ok' || app.result?.id !== policy.applicationId ||
+    if (!teamProviderOk(context, app) || app.result?.id !== policy.applicationId ||
         (Object.hasOwn(app.result, 'account_id') && app.result.account_id !== account) ||
         !accessApplicationIdentityMatches(app.result, kind, entry.state)) return null;
     const policies = await providerList(`${path}/policies`, token, {}, context.signal);
-    if (policies.status !== 'ok' || !Array.isArray(policies.result) || policies.result.length !== 1) return null;
+    if (!teamProviderOk(context, policies) || !Array.isArray(policies.result) || policies.result.length !== 1) return null;
     const live = policies.result[0];
     if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== account)) return null;
     const armed = journal.find((value) => value.policyId === policy.policyId);
@@ -4772,27 +4783,21 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
     observed.set(policy.policyId, after ? 'after' : 'before');
   }
   const portal = await providerCall(`/accounts/${account}/access/ai-controls/mcp/portals/${encodeURIComponent(context.control.portal.id)}`, token, { signal: context.signal });
-  if (portal.status !== 'ok' || !portalExact(portal.result, context.control, context.authority.portalMappings)) return null;
+  if (!teamProviderOk(context, portal) || !portalExact(portal.result, context.control, context.authority.portalMappings)) return null;
   return observed;
 }
 
-async function processTeamAction(request, env, storage, value, rawBody, nowMs) {
-  if (request.method !== 'POST' || request.headers.has('authorization') || request.headers.has('cookie') ||
-      request.headers.has('referer') || request.headers.has('origin') ||
-      request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json' ||
-      !isPlainData(value) || canonicalJson(value) !== rawBody) return null;
+function teamProviderOk(context, response) {
+  if (response.status === 'auth') context.credentialRejected = true;
+  return response.status === 'ok';
+}
+
+async function processTeamAction(env, storage, prepared, nowMs) {
   const context = await teamRuntimeContext(storage, env);
   let action = context?.team.pendingAction;
-  if (!context || !action || value.action !== 'access' || !exactKeys(value, ['schemaVersion', 'action', 'actionId',
-    'actionKey', 'actorEmail', 'accountId', 'issuedAt', 'expiresAt', 'cloudflareAccessToken'])) return null;
-  const { action: _kind, ...claimValue } = value;
-  const claim = sourceActionClaim(claimValue, context.environment, action, nowMs);
-  if (!claim || action.status !== 'authorization_required' || await sha256(claim.actionKey) !== action.actionKeyHash ||
-      !await verifyHmac(rawBody, claim.actionKey, request.headers.get('x-ankka-source-action-signature')) ||
+  if (!context || !action || action.actionId !== prepared.actionId ||
+      action.status !== 'authorization_required' || action.expiresAt <= nowMs ||
       await otherLifecycleBlocksTeam(storage, nowMs)) return null;
-  // Only Team actions use this deadline. The operation-scoped grant remains
-  // request-local; cancellation covers both response headers and body reads.
-  context.signal = AbortSignal.timeout(Math.max(1, Math.min(60_000, claim.expiresAt - Date.now())));
   const plan = planTeamAccessChange(action.request, context.planner);
   if (action.sourceRevision !== context.sources.revision || action.planHash !== await sha256({ plan, sourceRevision: context.sources.revision }) ||
       action.journal.some((entry) => !plan.policyChanges.some((policy) => policy.policyId === entry.policyId))) return null;
@@ -4802,43 +4807,51 @@ async function processTeamAction(request, env, storage, value, rawBody, nowMs) {
     await storage.put(TEAM_KEY, { ...teamState, pendingAction: action });
   };
   const fail = async (code) => {
+    if (context.credentialRejected) code = 'team_management_credential_invalid';
     await persist({ status: 'recovery_required', failureCode: code });
     return fixedJson(409, { schemaVersion: 1, error: code });
   };
+  // This distinct, customer-provisioned binding is used only here. It never
+  // enters action state, a relay, a browser response, or another provider call.
+  const token = teamManagementCredential(env);
+  if (!token) return fail(env.ANKKA_TEAM_MANAGEMENT_TOKEN === undefined || env.ANKKA_TEAM_MANAGEMENT_TOKEN === ''
+    ? 'team_management_credential_missing' : 'team_management_credential_invalid');
+  // Bound the complete operation, including response body reads.
+  context.signal = AbortSignal.timeout(Math.max(1, Math.min(60_000, action.expiresAt - Date.now())));
   await persist({ status: 'applying', failureCode: null });
-  let observed = await verifyTeamPolicies(context, plan, claim.cloudflareAccessToken, action.journal);
+  let observed = await verifyTeamPolicies(context, plan, token, action.journal);
   if (!observed) return fail('team_policy_drift');
   for (const policy of plan.policyChanges) {
-    const fresh = await verifyTeamPolicies(context, plan, claim.cloudflareAccessToken, action.journal, policy.policyId);
+    const fresh = await verifyTeamPolicies(context, plan, token, action.journal, policy.policyId);
     if (!fresh) return fail('team_policy_drift');
     observed.set(policy.policyId, fresh.get(policy.policyId));
-    if (Date.now() >= claim.expiresAt || context.signal.aborted) return fail('team_action_recovery_required');
+    if (Date.now() >= action.expiresAt || context.signal.aborted) return fail('team_action_recovery_required');
     if (observed.get(policy.policyId) !== 'after') {
       const journal = action.journal.filter((entry) => entry.policyId !== policy.policyId);
       teamState = { ...teamState, teardownDisabled: true,
         minimumRuntimeRelease: teamState.minimumRuntimeRelease ?? context.environment.release };
       await persist({ journal: [...journal, { policyId: policy.policyId, phase: 'send_armed' }] });
       const updated = await providerCall(`/accounts/${context.environment.accountId}/access/apps/${encodeURIComponent(policy.applicationId)}/policies/${encodeURIComponent(policy.policyId)}`,
-        claim.cloudflareAccessToken, { method: 'PUT', body: canonicalJson(policy.after), signal: context.signal });
-      if (updated.status !== 'ok' || !teamPolicyMatches(updated.result, policy.after, policy.policyId) ||
+        token, { method: 'PUT', body: canonicalJson(policy.after), signal: context.signal });
+      if (!teamProviderOk(context, updated) || !teamPolicyMatches(updated.result, policy.after, policy.policyId) ||
           (Object.hasOwn(updated.result, 'account_id') && updated.result.account_id !== context.environment.accountId)) {
         return fail('team_action_recovery_required');
       }
     }
     // Verify this target after each write, then the entire graph once at the
     // end. The number of provider requests stays linear in source count.
-    const verified = await verifyTeamPolicies(context, plan, claim.cloudflareAccessToken, action.journal, policy.policyId);
+    const verified = await verifyTeamPolicies(context, plan, token, action.journal, policy.policyId);
     if (!verified || verified.get(policy.policyId) !== 'after') return fail('team_action_recovery_required');
     observed.set(policy.policyId, 'after');
     await persist({ journal: [...action.journal.filter((entry) => entry.policyId !== policy.policyId),
       { policyId: policy.policyId, phase: 'verified' }] });
   }
-  observed = await verifyTeamPolicies(context, plan, claim.cloudflareAccessToken, action.journal);
+  observed = await verifyTeamPolicies(context, plan, token, action.journal);
   if (!observed || plan.policies.some((policy) => observed.get(policy.policyId) !== 'after')) return fail('team_action_recovery_required');
   const completed = { ...teamState, ...plan.nextState,
     pendingAction: { ...action, status: 'succeeded', failureCode: null } };
   await storage.put(TEAM_KEY, completed);
-  return fixedJson(200, publicTeamAction(completed.pendingAction));
+  return fixedJson(200, { schemaVersion: 1, action: publicTeamAction(completed.pendingAction) });
 }
 
 async function handleTeam(request, env) {
@@ -4870,22 +4883,17 @@ async function handleTeam(request, env) {
   const now = Date.now();
   const expiresAt = now + 600_000;
   const nextId = `action_${randomBase64Url(24)}`;
-  const actionKey = randomBase64Url(32);
+  // Retain the stored v1 action shape for migration; no key or handoff is issued.
+  const actionKeyHash = await sha256(randomBase64Url(32));
   let prepared;
   try {
     prepared = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEAM_ACTIONS_PATH}`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: canonicalJson({ request: input, actorEmail, actionId: nextId, actionKeyHash: await sha256(actionKey), issuedAt: now, expiresAt }),
+      body: canonicalJson({ request: input, actorEmail, actionId: nextId, actionKeyHash, issuedAt: now, expiresAt }),
     }));
   } catch { prepared = null; }
-  if (!(prepared instanceof Response) || prepared.status !== 200) return prepared instanceof Response
+  return prepared instanceof Response
     ? prepared : fixedJson(409, { schemaVersion: 1, error: 'team_action_conflict' });
-  const claim = canonicalJson({ schemaVersion: 1, action: 'access', actionId: nextId, actionKey, actorEmail,
-    accountId: environment.accountId, controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
-    workerName: environment.workerName, workersSubdomain: environment.workersSubdomain,
-    managementOrigin: `https://${environment.managementHostname}`, releaseIdentity: exactReleaseIdentity(environment), expiresAt });
-  return fixedJson(200, { schemaVersion: 1, actionId: nextId, status: 'authorization_required',
-    expiresAt: new Date(expiresAt).toISOString(), handoffUrl: `${CONTROL_PLANE_ORIGIN}/manage#${base64UrlEncode(new TextEncoder().encode(claim))}` });
 }
 
 async function handleSourceActions(request, env) {

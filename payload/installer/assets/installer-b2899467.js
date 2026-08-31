@@ -460,15 +460,14 @@ function renderSelectionSummary(container) {
   const selection = state.session?.selection;
   if (!selection) {
     const message = document.createElement('p');
-    message.textContent = 'Complete the gateway step to create a plan.';
+    message.textContent = 'Complete the gateway setup to continue.';
     container.append(message);
     return;
   }
   appendSummary(container, 'Gateway', selection.basics.gatewayName);
   appendSummary(container, 'Zone', selection.basics.zoneName);
-  appendSummary(container, 'Management', selection.basics.managementHostname);
-  appendSummary(container, 'Portal', selection.basics.portalHostname);
-  appendSummary(container, 'Sources', 'Add after installation');
+  appendSummary(container, 'Dashboard address', selection.basics.managementHostname);
+  appendSummary(container, 'MCP address', selection.basics.portalHostname);
 }
 
 function renderPlan() {
@@ -477,7 +476,7 @@ function renderPlan() {
   const plan = state.session?.plan;
   groups.replaceChildren();
   byId('plan-expiry').textContent = '';
-  byId('create-plan').textContent = plan ? 'Approve this plan' : 'Create review plan';
+  byId('create-plan').textContent = plan ? 'Continue' : 'Review changes';
   if (!plan) return;
   for (const group of plan.resourceGroups ?? []) {
     const article = document.createElement('article');
@@ -498,7 +497,7 @@ function renderPlan() {
   const expiry = new Date(plan.expiresAt);
   byId('plan-expiry').textContent = Number.isNaN(expiry.valueOf())
     ? ''
-    : `This plan expires at ${expiry.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`;
+    : `Plan expires at ${expiry.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`;
 }
 
 function renderDeploy() {
@@ -507,15 +506,15 @@ function renderDeploy() {
   const session = state.session;
   if (!session?.plan || !session.selection) {
     const message = document.createElement('p');
-    message.textContent = 'Create and review a fresh plan before authorization.';
+    message.textContent = 'Review the deployment before continuing.';
     container.append(message);
     byId('authorize').disabled = true;
     return;
   }
   appendSummary(container, 'Gateway', session.selection.basics.gatewayName);
   appendSummary(container, 'Cloudflare zone', session.selection.basics.zoneName);
-  appendSummary(container, 'Runtime', 'Worker and durable state in your account');
-  appendSummary(container, 'Gateway access', 'Read-only allowlist');
+  appendSummary(container, 'Runtime', 'Cloudflare Worker');
+  appendSummary(container, 'Access', 'Read-only');
   byId('authorize').disabled = state.busy || session.capabilities?.deploy !== true;
 }
 
@@ -554,8 +553,8 @@ function renderCurrentOperation(operations, deploymentStatus) {
   byId('operation-title').textContent = text(operation.label) || 'Preparing installation';
   byId('operation-detail').textContent = text(operation.detail) || (
     status === 'running' ? 'Applying this reviewed change in your Cloudflare account…'
-      : status === 'succeeded' ? 'This stage completed successfully.'
-        : status === 'failed' || status === 'blocked' ? 'This stage needs attention before installation can continue.'
+      : status === 'succeeded' ? 'Complete.'
+        : status === 'failed' || status === 'blocked' ? 'This step needs attention before deployment can continue.'
           : 'Waiting to begin…'
   );
   if (changed && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
@@ -697,8 +696,8 @@ function renderResult() {
     intro.textContent = deployment.operations?.some((operation) => operation.status === 'blocked')
       ? 'The gateway is ready, with one Cloudflare grant action still requiring attention.'
       : 'Your gateway is ready.';
-    addResultLink(actions, 'Open management page', deployment.receipt?.managementUrl);
-    addResultLink(actions, 'Open MCP endpoint', deployment.receipt?.portalUrl);
+    addResultLink(actions, 'Open dashboard', deployment.receipt?.managementUrl);
+    addResultLink(actions, 'Open MCP Gateway', deployment.receipt?.portalUrl);
     showNotice('');
   } else if (deployment.status === 'failed') {
     state.callbackStreamActive = false;
@@ -709,13 +708,13 @@ function renderResult() {
       retry.type = 'button';
       retry.className = 'primary-button';
       retry.dataset.go = '/review';
-      retry.textContent = 'Create a fresh plan';
+      retry.textContent = 'Try again';
       retry.addEventListener('click', () => route('/review'));
       actions.append(retry);
     }
     showNotice('');
   } else {
-    intro.textContent = 'Your gateway is being created. The active stage updates live below.';
+    intro.textContent = 'Your gateway is being deployed.';
     showNotice('');
   }
   renderExistingGateway();
@@ -752,7 +751,7 @@ function renderWelcome() {
   if (!button) return;
   const ready = state.discovery?.status === 'ready';
   const hasTargets = (state.discovery?.targets ?? []).length > 0;
-  button.textContent = ready && hasTargets ? 'Continue with discovered account' : 'Connect Cloudflare';
+  button.textContent = ready && hasTargets ? 'Continue' : 'Connect Cloudflare';
   button.disabled = state.busy;
   if (ready) {
     const target = selectedDiscoveryTarget() ?? state.discovery.targets?.[0];

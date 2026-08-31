@@ -10,16 +10,16 @@ interface StatusPillProps {
 const toneClass = {
   ready: 'bg-success-soft text-success-strong',
   waiting: 'bg-kumo-tint text-kumo-subtle',
-  attention: 'bg-brand-soft text-brand-strong',
+  attention: 'bg-warning-soft text-warning-strong',
 }
 
 export function StatusPill({ tone, children }: StatusPillProps) {
   const Icon = tone === 'ready' ? CheckCircle : tone === 'attention' ? WarningCircle : Clock
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium tabular-nums ${toneClass[tone]}`}
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium tabular-nums ${toneClass[tone]}`}
     >
-      <Icon size={13} weight="fill" />
+      <Icon size={13} aria-hidden="true" />
       {children}
     </span>
   )

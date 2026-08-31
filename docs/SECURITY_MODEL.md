@@ -43,6 +43,25 @@ discarded.
 Revocation is a provider operation and may be unconfirmed. Discarding a local
 copy does not prove provider-side revocation.
 
+Customer-local Team saves use a third, distinct credential:
+`ANKKA_TEAM_MANAGEMENT_TOKEN`, a Cloudflare API token provisioned directly as a
+Secret in the customer's gateway Worker. It is optional until the customer
+explicitly approves standing management authority. It never transits Ankka or
+the gateway browser API and must not enter Durable Object state, configuration
+files, logs, telemetry, exceptions, deployment output, or support evidence.
+Installer grants, source credentials, and inbound Access tokens cannot be used
+for this purpose.
+
+The current minimum is **Access: Apps and Policies — Edit/Write** and **MCP
+Portals — Read**, scoped to the gateway's one account. Cloudflare does not
+document per-policy API-token isolation for these account permissions: the
+credential allows broader Access application and policy administration in that
+account. Exact runtime ownership checks constrain this implementation, not a
+stolen credential. Provisioning, rotation, revocation, endpoint evidence, and
+remaining live validation are documented in [Team access](TEAM_ACCESS.md).
+Deleting a Worker binding does not revoke its API token or remove the value from
+historical versions; the customer must revoke the token in Cloudflare.
+
 ## Authorization
 
 The initial source boundary is read-only with exact tool allowlists. Wildcards
@@ -73,6 +92,19 @@ The gateway Durable Object stores secret-free configuration, exact source
 allowlists, action journals, release state, and ownership receipts. It must not
 store Cloudflare OAuth grants or upstream tokens.
 
+Team Save calls only the same-origin customer Worker, which uses its separate
+management secret to verify the complete owned application/policy graph and
+Portal mappings before and after exact policy writes. Fixed administrators,
+same-origin/CSRF checks, revision checks, default-deny empty audiences, bounded
+provider requests, and durable write intent remain required. Missing or invalid
+credentials and provider drift fail closed without a hosted OAuth fallback.
+An uncertain write retains its proposal and journal; it is not called a rollback.
+
+Legacy Team authorization and callbacks are refused by the installer before
+OAuth code exchange. The relay and new Worker also reject the old Team grant
+submission. No temporary `workers.dev` route is needed for a Team save. Other
+installer action callbacks retain their existing operation-scoped grant handling.
+
 ## Ownership, recovery, and removal
 
 Resource names and provider IDs are not deletion authority. Removal requires a
@@ -101,6 +133,14 @@ requirements.
 Normal updates are limited to Worker code and management assets. Changes to
 permissions, bindings, migrations, compatibility settings, signing keys, or
 provider resources require a separately designed and approved release path.
+
+The customer-local Team release adds an explicitly optional secret contract.
+It requires a reviewed migration from v16; a normal update does not provision
+the secret. Compatible subsequent forward updates preserve it from the exact
+verified current Worker version without revealing its value. Rollback is
+refused when the current or target version carries this secret. The original
+teardown restrictions remain, including after token revocation or binding
+deletion if any Team policy write may have occurred.
 
 ## Logs and telemetry
 

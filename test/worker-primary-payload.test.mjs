@@ -620,7 +620,7 @@ test('bootstrap validates the private golden claim, explicitly creates seven res
   assert.equal(env.ADMIN_STATE.objects.get('v1:management').storage.snapshot(), undefined);
 });
 
-test('bootstrap accepts its maximum valid canonical envelope and cancels limit+1 bodies', async () => {
+test('bootstrap accepts a large canonical envelope above 51 users and cancels limit+1 bodies', async () => {
   const maximumClaim = await maximumBootstrapClaim();
   const maximumBody = canonicalJson(maximumClaim);
   const maximumBytes = Buffer.byteLength(maximumBody);
@@ -628,7 +628,7 @@ test('bootstrap accepts its maximum valid canonical envelope and cancels limit+1
   assert.ok(maximumBytes < 128 * 1024, 'the maximum valid envelope must fit the dedicated cap');
   assert.equal(maximumClaim.settings.sources[0].enabledTools.length, 500);
   assert.equal(maximumClaim.settings.sources[0].enabledTools.every((tool) => tool.length === 128), true);
-  assert.equal(maximumClaim.settings.access.memberEmails.length, 50);
+  assert.equal(maximumClaim.settings.access.memberEmails.length, 60);
   assert.equal(maximumClaim.settings.sources[0].url.length, 2048);
   assert.equal(maximumClaim.cloudflareAccessToken.length, 16 * 1024);
   await installReadyGateway({

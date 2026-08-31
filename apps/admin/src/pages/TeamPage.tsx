@@ -1,14 +1,14 @@
-import { Button, Input } from '@cloudflare/kumo'
-import { ArrowsClockwise, ArrowSquareOut, Plus, ShieldCheck, Trash, X } from '@phosphor-icons/react'
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { GatewayApiError, SOURCE_ADDITION_PAUSED_MESSAGE, TEAM_MAX_PEOPLE, type Team, type TeamAction, type TeamMember } from '../api'
+import { Button } from '../components/Button'
+import { AddUserDialog } from '../components/AddUserDialog'
+import { Check, Trash, X } from '@phosphor-icons/react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { GatewayApiError, SOURCE_ADDITION_PAUSED_MESSAGE, type Team, type TeamAction, type TeamMember } from '../api'
 import { PageHeader } from '../components/PageHeader'
 import { StatusPill } from '../components/StatusPill'
 import { useGateway } from '../GatewayContext'
 import { isGatewayUiPreview } from '../preview-api'
 
 const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u
-const EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u
 
 function canonicalMembers(members: TeamMember[]): TeamMember[] {
   return members.map((member) => ({
@@ -32,14 +32,15 @@ function isRecordedChange(action: TeamAction | null): boolean {
 function actionMessage(action: TeamAction | null): string | null {
   if (!action) return null
   if (action.status === 'succeeded') return 'The last recorded team access change was applied and verified in Cloudflare. Unsaved selections have not been applied.'
-  if (action.status === 'recovery_required') return 'Some access policies may already have changed. Resume the exact recorded change below. Nothing was automatically restored.'
+  const failure = action.failureCode && ['team_management_credential_missing', 'team_management_credential_invalid', 'team_policy_drift'].includes(action.failureCode)
+    ? `${new GatewayApiError(409, action.failureCode).message} `
+    : ''
+  if (action.status === 'recovery_required') return `${failure}Some access policies may already have changed. Resume the exact recorded change below. Nothing was automatically restored.`
   if (action.status === 'applying') return 'Applying and verifying team access. Some policies may already have changed; the saved configuration below is not a live check.'
   if (action.status === 'failed') return action.failureCode === 'team_action_cancelled'
     ? 'The recorded change was canceled before any access policy was changed.'
-    : 'The recorded team access change did not complete. Review the saved configuration before trying again.'
-  return Date.parse(action.expiresAt) <= Date.now()
-    ? 'Cloudflare authorization expired. Continue with the same recorded change to get a fresh authorization.'
-    : 'The recorded change is waiting for Cloudflare authorization. Preparing it does not grant or remove access.'
+    : `${failure}The recorded team access change did not complete. Review the saved configuration before trying again.`
+  return 'This proposal is retained in your gateway. Save the exact recorded change here to apply and verify it in your Cloudflare account. Hosted authorization is no longer used.'
 }
 
 export function TeamPage() {
@@ -49,9 +50,8 @@ export function TeamPage() {
   const [draft, setDraft] = useState<TeamMember[]>([])
   const [action, setAction] = useState<TeamAction | null>(null)
   const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [email, setEmail] = useState('')
-  const [formError, setFormError] = useState<string | null>(null)
   const [needsRefresh, setNeedsRefresh] = useState(false)
   const actionInFlight = useRef(false)
   const [callbackId, setCallbackId] = useState(() => {
@@ -72,7 +72,6 @@ export function TeamPage() {
     setAction(next.pendingAction)
     setDraft(withAdministrators(next, next.members))
     setNeedsRefresh(false)
-    setFormError(null)
     if (next.pendingAction && !['authorization_required', 'applying'].includes(next.pendingAction.status)) clearCallback()
   }, [clearCallback])
 
@@ -85,7 +84,7 @@ export function TeamPage() {
     }
     catch {
       setNeedsRefresh(true)
-      setError('Team access could not be loaded. Refresh to check the saved configuration and any recorded change before continuing.')
+      setError('Team access could not be loaded. Try again to check the saved configuration and any recorded change before continuing.')
     }
     finally { setLoading(false) }
   }, [acceptTeam, clearCallback, getTeam])
@@ -95,7 +94,7 @@ export function TeamPage() {
     void getTeam().then((next) => {
       if (active) acceptTeam(next)
     }).catch(() => {
-      if (active) setError('Team access could not be loaded. Refresh to try again.')
+      if (active) setError('Team access could not be loaded. Try again.')
     }).finally(() => { if (active) setLoading(false) })
     const url = new URL(window.location.href)
     if (url.searchParams.has('accessActionResult')) {
@@ -106,7 +105,7 @@ export function TeamPage() {
   }, [acceptTeam, getTeam])
 
   const actionId = action?.actionId ?? callbackId
-  const shouldPoll = team !== null && !loading && !isBusy && !needsRefresh && action?.status !== 'succeeded' && action?.status !== 'failed' && action?.status !== 'recovery_required'
+  const shouldPoll = team !== null && !loading && !saving && !isBusy && !needsRefresh && (action?.status === 'applying' || callbackId !== null)
 
   useEffect(() => {
     if (!actionId || !shouldPoll) return
@@ -127,12 +126,12 @@ export function TeamPage() {
         }
         setAction(next)
         clearCallback()
-        if (next.status === 'authorization_required' && Date.parse(next.expiresAt) <= Date.now()) return
+        if (next.status === 'authorization_required') return
         timer = window.setTimeout(() => { void poll() }, 1500)
       } catch {
         if (active) {
           setNeedsRefresh(true)
-          setError('The team access action status is unavailable. Refresh to check it before continuing. The saved configuration is not proof of live access.')
+          setError('The team access action status is unavailable. Try again to check it before continuing. The saved configuration is not proof of live access.')
         }
       }
     }
@@ -147,47 +146,29 @@ export function TeamPage() {
   const changed = JSON.stringify(canonicalMembers(draft)) !== JSON.stringify(effectiveMembers)
   const installed = team?.sources.filter((source) => source.status === 'installed') ?? []
   const message = actionMessage(action)
-  const disabled = isBusy || loading || needsRefresh || callbackId !== null || recorded || team?.editingEnabled !== true
-  const atCapacity = draft.length >= TEAM_MAX_PEOPLE
-  const canCancel = team?.editingEnabled === true && action?.status === 'authorization_required' && action.canCancel === true
+  const disabled = isBusy || saving || loading || needsRefresh || callbackId !== null || recorded || team?.editingEnabled !== true
+  const canCancel = team?.editingEnabled === true && (action?.status === 'authorization_required' || action?.status === 'recovery_required') && action.canCancel === true
 
-  const addPerson = (event: FormEvent) => {
-    event.preventDefault()
-    if (disabled) return
-    const normalized = email.trim().toLowerCase()
-    if (atCapacity) {
-      setFormError(`Your team can have up to ${TEAM_MAX_PEOPLE} people, including administrators.`)
-      return
-    }
-    if (normalized.length > 254 || !EMAIL.test(normalized)) {
-      setFormError('Enter a valid email address, up to 254 characters.')
-      return
-    }
-    if (draft.some((member) => member.email === normalized)) {
-      setFormError('This person is already in your team.')
-      return
-    }
-    setDraft((current) => canonicalMembers([...current, { email: normalized, sourceIds: [] }]))
-    setEmail('')
-    setFormError(null)
-  }
-
-  const authorize = async () => {
-    if (!team?.editingEnabled || loading || isBusy || needsRefresh || callbackId !== null || actionInFlight.current || action?.status === 'applying' || (!recorded && !changed)) return
+  const save = async () => {
+    if (!team?.editingEnabled || !team.managementCredentialConfigured || loading || isBusy || needsRefresh || callbackId !== null || actionInFlight.current || action?.status === 'applying' || (!recorded && !changed)) return
     const members = recorded ? team.proposedMembers : canonicalMembers(draft)
     if (!members) return
     actionInFlight.current = true
+    setSaving(true)
     setError(null)
     try {
-      const prepared = await prepareTeamAction(team.revision, members)
-      const pendingAction: TeamAction = { schemaVersion: 1, actionId: prepared.actionId, status: prepared.status, expiresAt: prepared.expiresAt, failureCode: null, canCancel: false }
+      const { action: pendingAction } = await prepareTeamAction(team.revision, members)
+      if (!ACTION_ID.test(pendingAction.actionId) || (recorded && pendingAction.actionId !== action?.actionId)) {
+        throw new GatewayApiError(502, 'team_action_invalid')
+      }
       setAction(pendingAction)
       setTeam((current) => current ? { ...current, pendingAction, proposedMembers: members } : current)
-      if (!preview) window.location.assign(prepared.handoffUrl)
+      acceptTeam(await getTeam())
+      clearCallback()
     } catch (cause) {
       setNeedsRefresh(true)
-      setError(cause instanceof GatewayApiError ? cause.message : 'The team access change could not be confirmed. Refresh to check the recorded state before trying again.')
-    } finally { actionInFlight.current = false }
+      setError(cause instanceof GatewayApiError ? cause.message : 'The team access change could not be confirmed. Try again to check the recorded state before making another change.')
+    } finally { actionInFlight.current = false; setSaving(false) }
   }
 
   const cancelRecordedChange = async () => {
@@ -204,111 +185,107 @@ export function TeamPage() {
       clearCallback()
     } catch (cause) {
       setNeedsRefresh(true)
-      setError(cause instanceof GatewayApiError ? cause.message : 'Cancellation could not be confirmed. Refresh to check the recorded change before trying again.')
+      setError(cause instanceof GatewayApiError ? cause.message : 'Cancellation could not be confirmed. Try again to check the recorded change before continuing.')
     } finally { actionInFlight.current = false }
   }
 
   return (
     <div>
-      <PageHeader
-        eyebrow="Gateway access"
-        title="Team"
-        description={team?.editingEnabled ? 'Choose which MCP sources each person can use. Changes require your confirmation in Cloudflare.' : 'Inspect the source access saved for your team and the tools each source shares.'}
-        action={<Button variant="secondary" className="pressable inline-flex items-center gap-2" loading={loading} disabled={isBusy || (!needsRefresh && !recorded && changed)} onClick={() => void refresh()}><ArrowsClockwise size={16} /> Refresh</Button>}
-      />
+      <PageHeader title="Team" />
 
-      {preview ? <p role="status" className="notice-banner notice-neutral mt-6">Local preview — synthetic people; no Cloudflare changes. Authorization is simulated and stays on this page.</p> : null}
-      {error ? <p role="alert" className="notice-banner notice-error mt-6">{error}</p> : null}
+      {preview ? <p role="status" className="notice-banner notice-neutral mt-6">Local preview — synthetic users; no Cloudflare changes. Saving is simulated and stays on this page.</p> : null}
+      {error ? (
+        <div className="mt-6">
+          <p role="alert" className="notice-banner notice-error">{error}</p>
+          <Button variant="secondary" className="pressable mt-3" loading={loading} disabled={isBusy || saving || (!needsRefresh && !recorded && changed)} onClick={() => void refresh()}>
+            Try again
+          </Button>
+        </div>
+      ) : null}
       {message ? <p role="status" className={`notice-banner mt-6 notice-${action?.status === 'succeeded' ? 'success' : action?.status === 'failed' || action?.status === 'recovery_required' ? 'error' : 'neutral'}`}>{message}</p> : null}
       {!team ? <p className="mt-8 text-sm text-kumo-subtle">{loading ? 'Loading team access…' : 'No team access information is available.'}</p> : (
         <>
-          {!team.editingEnabled ? <p role="status" className="notice-banner notice-neutral mt-6">{team.editingDisabledReason === 'lifecycle_action_pending' ? 'Another source, update, or teardown action is in progress. Finish or safely cancel that action, then refresh to edit team access.' : 'Team access changes are disabled until this gateway release is reviewed and approved.'} You can still inspect the saved access configuration and shared tools.</p> : null}
-          {sources && sources.installationEnabled !== true ? <p role="status" className="notice-banner notice-neutral mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} {team.editingEnabled ? 'You can grant or revoke access to the installed sources below.' : 'This restriction does not change saved access.'}</p> : null}
-          {needsRefresh ? <p role="status" className="notice-banner notice-neutral mt-6">Editing is paused until the recorded state can be checked. Refresh reloads the saved configuration and discards unsaved selections.</p> : null}
-          <section className="surface-card mt-7 p-5 sm:p-6" aria-labelledby="team-admins-title">
-            <div className="flex items-center gap-2"><ShieldCheck size={18} /><h2 id="team-admins-title" className="text-base font-semibold text-kumo-strong">Administrators</h2></div>
-            <p className="mt-2 max-w-[75ch] text-sm leading-6 text-kumo-subtle">Administrators manage this gateway. Their roles are fixed in the deployment configuration and cannot be changed here. {team.editingEnabled ? 'Source access is separate and can be changed below, including for administrators.' : 'Source access is shown separately below; edits are disabled in this release.'}</p>
-            <ul className="mt-4 flex flex-wrap gap-2" aria-label="Gateway administrators">
-              {team.adminEmails.map((value) => <li key={value} className="tool-chip break-all">{value}</li>)}
-            </ul>
-          </section>
-
-          <section className="surface-card mt-5 p-5 sm:p-6" aria-labelledby="verified-access-title">
+          {!team.editingEnabled ? <p role="status" className="notice-banner notice-warning mt-6">{team.editingDisabledReason === 'lifecycle_action_pending' ? 'Another source, update, or teardown action is in progress. Finish or safely cancel that action, then refresh to edit team access.' : 'Team access changes are disabled until this gateway release is reviewed and approved.'} You can still inspect the saved access configuration and shared tools.</p> : null}
+          {!team.managementCredentialConfigured ? <p role="status" className="notice-banner notice-warning mt-6">Team saves need a dedicated Cloudflare management API token. Its Access permission can administer other applications and policies in the same account. Follow the <a href="https://github.com/ValentinOtt/ankka-mcp-gateway/blob/main/docs/TEAM_ACCESS.md" target="_blank" rel="noreferrer" className="underline underline-offset-4">Team credential setup guide</a> for required permissions, rotation, and revocation. In your Cloudflare account, open this gateway Worker’s Settings → Variables and Secrets and add it as the encrypted secret <code>ANKKA_TEAM_MANAGEMENT_TOKEN</code>, then refresh. Never paste the token into this dashboard or send it to Ankka. Adding the secret does not apply a recorded change; review it here before saving.</p> : null}
+          {sources && sources.installationEnabled !== true ? <p role="status" className="notice-banner notice-warning mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} {team.editingEnabled ? 'You can grant or revoke access to the installed sources below.' : 'This restriction does not change saved access.'}</p> : null}
+          {needsRefresh ? <p role="status" className="notice-banner notice-warning mt-6">Editing is paused until the recorded state can be checked. Trying again reloads the saved configuration and discards unsaved selections; it does not resubmit a change.</p> : null}
+          <section className="mt-7" aria-labelledby="edit-access-title">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <h2 id="verified-access-title" className="text-base font-semibold text-kumo-strong">Saved access configuration</h2>
-              <span className="text-xs text-kumo-subtle">Revision {team.revision}</span>
-            </div>
-            <p className="mt-2 text-sm leading-6 text-kumo-subtle">This is the configuration saved by your gateway, not your unsaved selections or a live Cloudflare policy check. Changes made directly in Cloudflare are not reflected here.</p>
-            <ul className="mt-4 divide-y divide-kumo-line" aria-label="Saved team access">
-              {effectiveMembers.map((member) => (
-                <li key={member.email} className="flex flex-col gap-1 py-3 text-sm sm:flex-row sm:justify-between sm:gap-5">
-                  <span className="break-all font-medium text-kumo-strong">{member.email}</span>
-                  <span className="text-kumo-subtle sm:text-right">{member.sourceIds.length ? member.sourceIds.map((id) => team.sources.find((source) => source.id === id)?.label ?? 'Unavailable source').join(', ') : 'No source access'}</span>
-                </li>
-              ))}
-              {effectiveMembers.length === 0 ? <li className="py-3 text-sm text-kumo-subtle">No people have been configured.</li> : null}
-            </ul>
-          </section>
-
-          <section className="surface-card mt-5 p-5 sm:p-6" aria-labelledby="edit-access-title">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h2 id="edit-access-title" className="text-base font-semibold text-kumo-strong">{recorded ? 'Recorded change' : team.editingEnabled ? 'Edit source access' : 'Source access'}</h2>
-                <p className="mt-1 text-sm leading-6 text-kumo-subtle">{recorded ? canCancel ? 'This proposal is retained by your gateway. Continue with this exact change, or cancel it before any policy is changed.' : 'This proposal is retained by your gateway. It must be completed exactly before another change can be made.' : team.editingEnabled ? 'New people start with no sources. Selecting an installed source grants its shared enabled tools, not administrator access.' : 'Each source grants its shared enabled tools. Source grants do not change administrator roles.'}</p>
+              <h2 id="edit-access-title" className="text-base font-semibold text-subheading">{recorded ? 'Recorded change' : `Team members (${draft.length})`}</h2>
+              <div className="flex flex-wrap items-center gap-3">
+                {recorded || changed ? <StatusPill tone="attention">{recorded ? 'Not fully verified' : 'Unsaved changes'}</StatusPill> : null}
+                {!recorded ? <AddUserDialog members={draft} disabled={disabled} onAdd={(email) => {
+                  if (!disabled) setDraft((current) => canonicalMembers([...current, { email, sourceIds: [] }]))
+                }} /> : null}
               </div>
-              <StatusPill tone={recorded || changed ? 'attention' : 'waiting'}>{recorded ? 'Not fully verified' : changed ? 'Unsaved changes' : 'No unsaved changes'}</StatusPill>
             </div>
+
+            {recorded ? <p className="notice-banner notice-warning mt-4">{canCancel ? 'Save this exact recorded change, or cancel it before any policy is changed.' : 'This recorded change must be completed exactly before another change can be made.'}</p> : null}
 
             {recorded && team.proposedMembers === null ? <p role="alert" className="field-error">The recorded proposal is unavailable. Refresh to retrieve it; a different change cannot be submitted.</p> : null}
 
-            <div className="mt-5 grid gap-4">
+            <div className="mt-5 border-t border-kumo-line">
               {displayedMembers.map((member) => (
-                <fieldset key={member.email} disabled={disabled} className="min-w-0 rounded-lg border border-kumo-line p-4">
-                  <legend className="max-w-full break-all px-1 text-sm font-semibold text-kumo-strong">{member.email}</legend>
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span className="text-xs text-kumo-subtle">{administrators.has(member.email) ? 'Administrator · role unchanged' : 'Team member'}</span>
-                    {!administrators.has(member.email) && !recorded ? <Button type="button" variant="secondary" className="pressable inline-flex items-center gap-2" aria-label={`Remove ${member.email}`} onClick={() => setDraft((current) => current.filter((person) => person.email !== member.email))}><Trash size={14} /> Remove person</Button> : null}
+                <fieldset key={member.email} disabled={disabled} className="min-w-0 border-b border-kumo-line/70 py-4">
+                  <legend className="sr-only">{member.email}</legend>
+                  <div className="grid items-center gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_auto]">
+                    <div className="min-w-0">
+                      <p className="break-all text-sm font-medium text-kumo-strong">{member.email}</p>
+                      <p className="mt-1 text-xs text-kumo-subtle">{administrators.has(member.email) ? 'Administrator · role unchanged' : 'Team member'}</p>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap gap-2">
+                        {installed.map((source) => (
+                          <label key={source.id} className="inline-flex min-w-0 items-center gap-2 rounded-md bg-kumo-tint px-2.5 py-1.5 text-sm" title={`${source.enabledTools.length} shared tools`}>
+                            <input className="size-4 shrink-0 accent-brand" type="checkbox" checked={member.sourceIds.includes(source.id)} onChange={(event) => {
+                              const checked = event.target.checked
+                              setDraft((current) => current.map((person) => person.email === member.email ? { ...person, sourceIds: checked ? [...new Set([...person.sourceIds, source.id])] : person.sourceIds.filter((id) => id !== source.id) } : person))
+                            }} />
+                            <span className="break-words">{source.label}</span>
+                          </label>
+                        ))}
+                      </div>
+                      {member.sourceIds.length === 0 ? <p className="mt-1 text-xs text-kumo-subtle">No sources selected.</p> : null}
+                    </div>
+                    <div className="justify-self-end sm:min-w-9">
+                      {!administrators.has(member.email) && !recorded ? <Button type="button" variant="secondary" className="size-9 p-0" aria-label={`Remove ${member.email}`} onClick={() => setDraft((current) => current.filter((person) => person.email !== member.email))}><Trash size={16} aria-hidden="true" /></Button> : null}
+                    </div>
                   </div>
-                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                    {installed.map((source) => (
-                      <label key={source.id} className="tool-option-card">
-                        <input type="checkbox" checked={member.sourceIds.includes(source.id)} onChange={(event) => {
-                          const checked = event.target.checked
-                          setDraft((current) => current.map((person) => person.email === member.email ? { ...person, sourceIds: checked ? [...new Set([...person.sourceIds, source.id])] : person.sourceIds.filter((id) => id !== source.id) } : person))
-                        }} />
-                        <span className="text-sm">{source.label}<span className="mt-0.5 block text-xs text-kumo-subtle">{source.enabledTools.length} shared tool{source.enabledTools.length === 1 ? '' : 's'}</span></span>
-                      </label>
-                    ))}
-                    {installed.length === 0 ? <p className="text-sm text-kumo-subtle">{sources?.installationEnabled === true ? 'Install a source before granting source access.' : 'No installed sources are available to assign. New-source installation is paused.'}</p> : null}
-                  </div>
-                  {member.sourceIds.length === 0 ? <p className="mt-3 text-xs text-kumo-subtle">No sources selected.</p> : null}
                 </fieldset>
               ))}
+              {displayedMembers.length === 0 && !recorded ? <p className="py-5 text-sm text-kumo-subtle">No users have been configured.</p> : null}
             </div>
 
-            {!recorded ? (
-              <form onSubmit={addPerson} className="mt-5 flex flex-col gap-3 border-t border-kumo-line pt-5 sm:flex-row sm:items-end">
-                <Input label="Person’s email" type="email" autoComplete="off" required maxLength={254} className="w-full sm:max-w-sm" placeholder="teammate@example.com" value={email} disabled={disabled || atCapacity} onChange={(event) => { setEmail(event.target.value); setFormError(null) }} />
-                <Button type="submit" variant="secondary" className="pressable inline-flex items-center gap-2" disabled={disabled || atCapacity || !email.trim()}><Plus size={16} /> Add person</Button>
-              </form>
-            ) : null}
-            {!recorded ? <p className="mt-2 text-xs text-kumo-subtle">{draft.length} of {TEAM_MAX_PEOPLE} people, including administrators.{atCapacity ? ' Remove a team member before adding another person.' : ''}</p> : null}
-            {formError ? <p role="alert" className="field-error">{formError}</p> : null}
+            {installed.length === 0 ? <p className="mt-3 text-sm text-kumo-subtle">{sources?.installationEnabled === true ? 'Install a source before granting source access.' : 'No installed sources are available to assign. New-source installation is paused.'}</p> : null}
 
             <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-kumo-line pt-5">
-              <Button variant="primary" className="pressable inline-flex items-center gap-2" loading={isBusy} disabled={!team.editingEnabled || loading || isBusy || needsRefresh || callbackId !== null || action?.status === 'applying' || (recorded ? team.proposedMembers === null : !changed)} onClick={() => void authorize()}>
-                <ArrowSquareOut size={16} /> {action?.status === 'recovery_required' ? 'Resume change in Cloudflare' : recorded ? 'Continue in Cloudflare' : 'Review in Cloudflare'}
+              <Button variant="primary" className="pressable inline-flex items-center gap-2" loading={isBusy || saving} disabled={!team.editingEnabled || !team.managementCredentialConfigured || loading || saving || isBusy || needsRefresh || callbackId !== null || action?.status === 'applying' || (recorded ? team.proposedMembers === null : !changed)} onClick={() => void save()}>
+                <Check size={16} /> {action?.status === 'recovery_required' ? 'Resume recorded change' : recorded ? 'Save recorded change' : 'Save'}
               </Button>
-              {canCancel ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || loading || needsRefresh || callbackId !== null} onClick={() => void cancelRecordedChange()}><X size={16} /> Cancel recorded change</Button> : null}
-              {!recorded && changed ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy} onClick={() => { setDraft(effectiveMembers); setFormError(null) }}>Discard unsaved changes</Button> : null}
+              {canCancel ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving || loading || needsRefresh || callbackId !== null} onClick={() => void cancelRecordedChange()}><X size={16} /> Cancel recorded change</Button> : null}
+              {!recorded && changed ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving} onClick={() => setDraft(effectiveMembers)}>Discard unsaved changes</Button> : null}
               <p className="max-w-[65ch] text-xs leading-5 text-kumo-subtle">Access is not confirmed until Cloudflare applies and verifies the change. Existing cached sessions may remain valid until they expire or are revoked in Cloudflare Access.</p>
             </div>
             <p className="mt-3 max-w-[75ch] text-xs leading-5 text-kumo-subtle">After the first permission-policy change, automatic teardown is unavailable until a compatible gateway release supports it.</p>
+
+            <details className="mt-5 border-t border-kumo-line pt-4">
+              <summary className="cursor-pointer text-sm font-medium text-subheading">Saved access configuration <span className="ml-2 text-xs font-normal text-kumo-subtle">Revision {team.revision}</span></summary>
+              <p className="mt-2 text-sm leading-6 text-kumo-subtle">This is the configuration saved by your gateway, not your unsaved selections or a live Cloudflare policy check. Changes made directly in Cloudflare are not reflected here.</p>
+              <ul className="mt-3 divide-y divide-kumo-line" aria-label="Saved team access">
+                {effectiveMembers.map((member) => (
+                  <li key={member.email} className="flex flex-col gap-1 py-3 text-sm sm:flex-row sm:justify-between sm:gap-5">
+                    <span className="break-all font-medium text-kumo-strong">{member.email}</span>
+                    <span className="text-kumo-subtle sm:text-right">{member.sourceIds.length ? member.sourceIds.map((id) => team.sources.find((source) => source.id === id)?.label ?? 'Unavailable source').join(', ') : 'No source access'}</span>
+                  </li>
+                ))}
+                {effectiveMembers.length === 0 ? <li className="py-3 text-sm text-kumo-subtle">No users have been configured.</li> : null}
+              </ul>
+            </details>
           </section>
 
           <section className="surface-card mt-5 p-5 sm:p-6" aria-labelledby="shared-tools-title">
-            <h2 id="shared-tools-title" className="text-base font-semibold text-kumo-strong">Shared source tools</h2>
-            <p className="mt-2 max-w-[75ch] text-sm leading-6 text-kumo-subtle">Everyone granted a source gets the same enabled tools. This page does not set per-person tool permissions. Review the shared allowlist in <a href="/sources" className="underline underline-offset-4">Sources</a>.</p>
+            <h2 id="shared-tools-title" className="text-base font-semibold text-subheading">Shared source tools</h2>
+            <p className="mt-2 max-w-[75ch] text-sm leading-6 text-kumo-subtle">Everyone granted a source gets the same enabled tools. This page does not set per-user tool permissions. Review the shared allowlist in <a href="/sources" className="underline underline-offset-4">Sources</a>.</p>
             <div className="mt-4 divide-y divide-kumo-line">
               {team.sources.map((source) => (
                 <details key={source.id} className="py-3">

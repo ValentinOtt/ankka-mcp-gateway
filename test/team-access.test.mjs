@@ -112,12 +112,24 @@ test('emails are bounded and duplicates after normalization are rejected', () =>
   assert.throws(() => normalizeTeamAccessRequest(request([
     { email: ADMIN, sourceIds: [] }, { email: ' OWNER@EXAMPLE.COM ', sourceIds: [] },
   ]), context()), code('team_access_invalid_request'));
-  const people = Array.from({ length: 50 }, (_value, index) => ({ email: `person-${index}@example.com`, sourceIds: [] }));
-  people.push({ email: ADMIN, sourceIds: [] });
-  assert.equal(normalizeTeamAccessRequest(request(people), context()).members.length, 51);
-  assert.throws(() => normalizeTeamAccessRequest(request([
-    ...people, { email: 'one-too-many@example.com', sourceIds: [] },
-  ]), context()), code('team_access_invalid_request'));
+});
+
+test('larger teams and administrator audiences retain exact grants without a user-count cap', () => {
+  const members = [{ email: ADMIN, sourceIds: [] }, ...Array.from({ length: 100 }, (_value, index) => ({
+    email: `user-${String(index).padStart(3, '0')}@example.com`, sourceIds: ['erp'],
+  }))];
+  const current = context();
+  const parsed = normalizeTeamAccessRequest(request(members), current);
+  assert.deepEqual(parsed.members, members);
+  const plan = planTeamAccessChange(request(members), current);
+  assert.equal(plan.policies[0].after.include.length, 101);
+  const erp = plan.policies.find(({ sourceId }) => sourceId === 'erp').after;
+  assert.deepEqual(erp.include.map(({ email }) => email.email), members.slice(1).map(({ email }) => email));
+  assert.equal(teamPolicyMatches(observed(erp), erp, 'erp-policy'), true);
+  current.adminEmails = members.map(({ email }) => email);
+  assert.deepEqual(normalizeTeamAccessRequest(request(members), current).members, members);
+  assert.throws(() => normalizeTeamAccessRequest(request(members.slice(0, -1)), current),
+    code('team_access_admin_required'));
 });
 
 test('only explicitly assigned installed sources are valid', () => {
