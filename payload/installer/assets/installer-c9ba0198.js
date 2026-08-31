@@ -1013,10 +1013,15 @@ function runtimeCallbackResult() {
   if (!isText(result.managementUrl) || result.managementUrl.length > 2048) return null;
   try {
     const url = new URL(result.managementUrl);
+    const actionId = url.searchParams.get('runtimeAction');
     if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash ||
-        url.pathname !== '/' || url.searchParams.size !== 1 ||
-        !/^action_[A-Za-z0-9_-]{32}$/u.test(url.searchParams.get('runtimeAction') ?? '')) return null;
-    return { ...result, managementUrl: url.href };
+        url.pathname !== '/' || url.searchParams.size !== 1 || url.href !== result.managementUrl ||
+        !/^action_[A-Za-z0-9_-]{32}$/u.test(actionId ?? '') ||
+        url.search !== `?runtimeAction=${actionId}`) return null;
+    // Text extracted from a template is decoded DOM data. Keep the HTTPS and
+    // exact-action checks, then explicitly encode it for URL navigation sinks.
+    // Canonical input above prevents re-encoding an escaped action identifier.
+    return { ...result, managementUrl: encodeURI(url.href) };
   } catch { return null; }
 }
 
