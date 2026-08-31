@@ -2670,6 +2670,87 @@ function publicSourceAction(action) {
   });
 }
 
+function sourceActionHasWriteEvidence(action) {
+  return action.resources.length > 0 || action.pending !== null || action.portalUpdate !== null;
+}
+
+function sourceActionState(action, now) {
+  if (action.status === 'succeeded') return 'succeeded';
+  if (action.status === 'recovery_required' ||
+      (sourceActionHasWriteEvidence(action) && action.status !== 'applying') ||
+      (action.status === 'applying' && action.expiresAt <= now)) return 'recovery_required';
+  if (action.status === 'authorization_required' && action.expiresAt <= now) return 'authorization_expired';
+  return action.status;
+}
+
+function sourceActionCanCancel(action, actorEmail, now) {
+  return action.actorEmail === normalizedEmail(actorEmail) && now >= action.issuedAt &&
+    action.status === 'authorization_required' && !sourceActionHasWriteEvidence(action);
+}
+
+function sourceActionBlocks(action) {
+  return action.status !== 'succeeded' && (action.status !== 'failed' || sourceActionHasWriteEvidence(action));
+}
+
+function sourceActionPointer(action, kind = 'source') {
+  const pointer = { kind, actionId: action.actionId };
+  if (kind === 'source') pointer.sourceId = action.sourceId;
+  return Object.freeze(pointer);
+}
+
+function sourceActionConflict(reason, action) {
+  const body = { schemaVersion: 1, error: 'source_action_conflict' };
+  if (reason) body.reason = reason;
+  if (action) body.action = action;
+  return fixedJson(409, body);
+}
+
+async function sourceActionSnapshot(storage, actorEmail, now) {
+  const raw = await storage.get(ACTIONS_KEY);
+  const current = raw === undefined ? { schemaVersion: 1, revision: 1, actions: [] } : safeSourceActions(raw);
+  if (!current) return null;
+  const blocking = current.actions.find((action) => sourceActionBlocks(action) &&
+    sourceActionState(action, now) === 'recovery_required') ?? current.actions.find(sourceActionBlocks);
+  let blockingAction = blocking ? sourceActionPointer(blocking) : null;
+  for (const [key, kind, parse] of [
+    [UPDATES_KEY, 'runtime', safeRuntimeUpdates], [TEARDOWNS_KEY, 'teardown', safeTeardownActions],
+  ]) {
+    const value = await storage.get(key);
+    if (value === undefined) continue;
+    const state = parse(value);
+    if (!state) return null;
+    const action = state.actions.find((candidate) => !['succeeded', 'failed'].includes(candidate.status) &&
+      (candidate.status !== 'authorization_required' || candidate.expiresAt > now ||
+        (kind === 'runtime' && candidate.stage !== null)));
+    if (!blockingAction && action) blockingAction = sourceActionPointer(action, kind);
+  }
+  const team = await storage.get(TEAM_KEY);
+  if (team !== undefined) {
+    if (!isRecord(team) || !Object.hasOwn(team, 'pendingAction')) return null;
+    const action = team.pendingAction;
+    if (action !== null) {
+      if (!isRecord(action) || !ACTION_ID.test(action.actionId) ||
+          !['authorization_required', 'applying', 'succeeded', 'failed', 'recovery_required'].includes(action.status)) return null;
+      if (!blockingAction && !['succeeded', 'failed'].includes(action.status)) {
+        blockingAction = sourceActionPointer(action, 'team');
+      }
+    }
+  }
+  return { schemaVersion: 1, actions: current.actions.map((action) => ({
+    ...publicSourceAction(action), issuedAt: new Date(action.issuedAt).toISOString(),
+    state: sourceActionState(action, now), canCancel: sourceActionCanCancel(action, actorEmail, now),
+  })), blockingAction };
+}
+
+function sourceSnapshotConflict(snapshot) {
+  if (!snapshot) return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+  const pointer = snapshot.blockingAction;
+  if (!pointer) return null;
+  return sourceActionConflict(pointer.kind !== 'source' ? 'lifecycle_pending' :
+    snapshot.actions.find((action) => action.actionId === pointer.actionId)?.state === 'recovery_required'
+      ? 'recovery_required' : 'source_pending', pointer);
+}
+
 function parseSourceActionPrepare(value) {
   if (!exactKeys(value, [
     'schemaVersion', 'actionId', 'sourceId', 'sourceRevision', 'actorEmail',
@@ -2685,45 +2766,38 @@ function parseSourceActionPrepare(value) {
 }
 
 async function prepareSourceAction(storage, input) {
-  if (SOURCE_ADDITION_PAUSED || await teamActionBlocksLifecycle(storage)) return null;
+  if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
   const parsed = parseSourceActionPrepare(input);
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
-  if (!parsed || !sources || !control || !managementSourcesInstallProjectionFits(sources) ||
-      parsed.sourceRevision !== sources.revision) return null;
+  if (!parsed || !sources || !control || !managementSourcesInstallProjectionFits(sources)) return sourceActionConflict();
+  if (parsed.sourceRevision !== sources.revision) return sourceActionConflict('draft_changed');
   const source = sources.sources.find((candidate) => candidate.id === parsed.sourceId);
-  if (!source || source.status !== 'draft') return null;
+  if (!source || source.status !== 'draft') return sourceActionConflict('draft_changed');
+  const conflict = sourceSnapshotConflict(await sourceActionSnapshot(storage, parsed.actorEmail, parsed.issuedAt));
+  if (conflict) return conflict;
   const current = safeSourceActions(await storage.get(ACTIONS_KEY)) ?? Object.freeze({
     schemaVersion: 1, revision: 1, actions: Object.freeze([]),
   });
-  const previous = [...current.actions].reverse().find((action) => action.sourceId === parsed.sourceId &&
-    !['failed', 'succeeded'].includes(action.status));
-  // Never reinterpret an older potentially-applied Allow policy as a new Deny
-  // policy. Its journal remains available for explicit reconciliation.
-  if (previous && previous.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION &&
-      (previous.resources.length > 0 || previous.pending !== null || previous.portalUpdate !== null)) return null;
-  if (await otherLifecycleBlocksSource(storage, parsed.issuedAt, previous?.actionId)) return null;
-  if (previous && previous.expiresAt > parsed.issuedAt &&
-      (previous.status === 'authorization_required' || previous.status === 'applying')) return null;
-  const retained = current.actions.filter((action) => action.expiresAt > parsed.issuedAt &&
-    action.actionId !== previous?.actionId &&
-    !(action.sourceId === parsed.sourceId && ['failed', 'succeeded'].includes(action.status)));
+  // New authorization never adopts, discards, or reinterprets an unfinished
+  // journal. Only an explicit cancellation can release a proven-unstarted one.
+  const retained = current.actions.filter((action) => action.sourceId !== parsed.sourceId).slice(-15);
   const action = safeSourceAction({
     ...parsed,
     initialPolicyVersion: SOURCE_INITIAL_POLICY_VERSION,
     status: 'authorization_required',
-    resources: previous?.resources ?? [],
-    pending: previous?.pending ?? null,
-    portalUpdate: previous?.portalUpdate ?? null,
+    resources: [],
+    pending: null,
+    portalUpdate: null,
     failureCode: null,
   });
-  if (!action) return null;
+  if (!action) return sourceActionConflict();
   const updated = safeSourceActions({
     schemaVersion: 1,
     revision: current.revision + 1,
     actions: [...retained, action],
   });
-  if (!updated) return null;
+  if (!updated) return sourceActionConflict();
   await storage.put(ACTIONS_KEY, updated);
   return action;
 }
@@ -2768,10 +2842,8 @@ async function persistSourceAction(storage, action) {
 async function cancelSourceAction(storage, actionId, actorEmail, now) {
   const actions = safeSourceActions(await storage.get(ACTIONS_KEY));
   const action = actions?.actions.find((candidate) => candidate.actionId === actionId);
-  if (!actions || !action || action.actorEmail !== normalizedEmail(actorEmail) ||
-      !Number.isSafeInteger(now) || now < action.issuedAt || now > action.expiresAt ||
-      action.status !== 'authorization_required' || action.resources.length !== 0 ||
-      action.pending !== null || action.portalUpdate !== null) return null;
+  if (!actions || !action || !Number.isSafeInteger(now) ||
+      !sourceActionCanCancel(action, actorEmail, now)) return null;
   return persistSourceAction(storage, {
     ...action,
     status: 'failed',
@@ -3001,11 +3073,13 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
       await otherLifecycleBlocksSource(storage, nowMs, action.actionId)) return actionRecovery('source_action_conflict');
   const desiredState = await actionDesiredState(parsed.control, parsed.sources, action);
   if (!desiredState) return failSourceAction(storage, action, 'source_action_drift');
+  // Claim execution before the first remote read. Cancellation is serialized
+  // with this request, and concurrent status reads can no longer offer cancel.
+  action = await persistSourceAction(storage, { ...action, status: 'applying', failureCode: null });
+  if (!action) return actionRecovery('source_action_state_unavailable');
   try { await verifyManagedSource(desiredState.source); } catch {
     return failSourceAction(storage, action, 'source_discovery_failed');
   }
-  action = await persistSourceAction(storage, { ...action, status: 'applying', failureCode: null });
-  if (!action) return actionRecovery('source_action_state_unavailable');
   for (let index = 0; index < SOURCE_ACTION_RESOURCE_ORDER.length; index += 1) {
     const kind = SOURCE_ACTION_RESOURCE_ORDER[index];
     const state = { ...desiredState, resources: action.resources };
@@ -4058,6 +4132,13 @@ export class AdminState {
   }
 
   fetch(request) {
+    const requestUrl = new URL(request.url);
+    // Status must remain available while a serialized mutation awaits the
+    // provider. These reads neither authorize work nor change the journal.
+    if (request.method === 'GET' && ([INTERNAL_ACTIONS_PATH, INTERNAL_SOURCES_PATH, INTERNAL_STATUS_PATH].includes(requestUrl.pathname) ||
+        requestUrl.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`))) {
+      return this.readSourceManagementState(request, requestUrl);
+    }
     const operation = async () => {
       const url = new URL(request.url);
       if (url.pathname === INTERNAL_BOOTSTRAP_PATH) {
@@ -4119,9 +4200,7 @@ export class AdminState {
         if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
         const input = await request.json().catch(() => null);
         const action = await prepareSourceAction(this.state.storage, input);
-        return action
-          ? fixedJson(200, publicSourceAction(action))
-          : fixedJson(409, { schemaVersion: 1, error: 'source_action_conflict' });
+        return action instanceof Response ? action : fixedJson(200, publicSourceAction(action));
       }
       if (url.pathname === `${INTERNAL_ACTIONS_PATH}/apply` && request.method === 'POST') {
         const raw = await readBoundedText(request.clone(), REQUEST_LIMIT_BYTES);
@@ -4134,16 +4213,6 @@ export class AdminState {
         }
         return processSourceAction(request, this.env, this.state.storage);
       }
-      if (url.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`) && request.method === 'GET') {
-        const actionId = url.pathname.slice(`${INTERNAL_ACTIONS_PATH}/`.length);
-        const actions = safeSourceActions(await this.state.storage.get(ACTIONS_KEY));
-        const action = ACTION_ID.test(actionId)
-          ? actions?.actions.find((candidate) => candidate.actionId === actionId)
-          : null;
-        return action
-          ? fixedJson(200, publicSourceAction(action))
-          : fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
-      }
       if (url.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`) && request.method === 'DELETE') {
         const actionId = url.pathname.slice(`${INTERNAL_ACTIONS_PATH}/`.length);
         const input = await request.json().catch(() => null);
@@ -4152,7 +4221,8 @@ export class AdminState {
           : null;
         return action
           ? fixedJson(200, publicSourceAction(action))
-          : fixedJson(409, { schemaVersion: 1, error: 'source_action_conflict' });
+          : sourceSnapshotConflict(await sourceActionSnapshot(this.state.storage, input?.actorEmail, Date.now())) ??
+            sourceActionConflict();
       }
       if (url.pathname === INTERNAL_TEARDOWNS_PATH && request.method === 'POST') {
         if (await teamTeardownBlocked(this.state.storage)) return fixedJson(409, {
@@ -4215,19 +4285,6 @@ export class AdminState {
         return action ? fixedJson(200, publicRuntimeAction(action)) :
           fixedJson(404, { schemaVersion: 1, error: 'runtime_action_not_found' });
       }
-      if (url.pathname === INTERNAL_STATUS_PATH && request.method === 'GET') {
-        const status = await this.state.storage.get(STATUS_KEY);
-        const parsed = safePublicStatus(status);
-        return parsed
-          ? fixedJson(200, parsed)
-          : fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
-      }
-      if (url.pathname === INTERNAL_SOURCES_PATH && request.method === 'GET') {
-        const sources = safeManagementSources(await this.state.storage.get(SOURCES_KEY));
-        return sources
-          ? fixedJson(200, sources)
-          : fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
-      }
       if (url.pathname === INTERNAL_TEAM_PATH && request.method === 'GET') {
         const snapshot = await teamSnapshot(this.state.storage, this.env);
         return snapshot ? fixedJson(200, snapshot) : fixedJson(503, { schemaVersion: 1, error: 'team_unavailable' });
@@ -4272,9 +4329,12 @@ export class AdminState {
         const currentSource = current.sources.find((source) => source.url === input.source.url);
         const rawActions = await this.state.storage.get(ACTIONS_KEY);
         const actions = rawActions === undefined ? null : safeSourceActions(rawActions);
-        if ((rawActions !== undefined && actions === null) || (currentSource && actions?.actions.some((action) =>
-          action.sourceId === currentSource.id && !['succeeded', 'failed'].includes(action.status)))) {
-          return fixedJson(409, { schemaVersion: 1, error: 'source_action_conflict' });
+        if (rawActions !== undefined && actions === null) return sourceActionConflict();
+        const pendingSource = currentSource && actions?.actions.find((action) =>
+          action.sourceId === currentSource.id && sourceActionBlocks(action));
+        if (pendingSource) {
+          return sourceActionConflict(sourceActionState(pendingSource, Date.now()) === 'recovery_required'
+            ? 'recovery_required' : 'source_pending', sourceActionPointer(pendingSource));
         }
         const installedConflict = current.sources.some((source) => (
           source.url === input.source.url && source.status === 'installed'
@@ -4298,6 +4358,29 @@ export class AdminState {
     const result = this.queue.then(operation, operation);
     this.queue = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  async readSourceManagementState(request, url) {
+    if (url.pathname === INTERNAL_STATUS_PATH) {
+      const status = safePublicStatus(await this.state.storage.get(STATUS_KEY));
+      return status ? fixedJson(200, status) : fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
+    }
+    if (url.pathname === INTERNAL_SOURCES_PATH) {
+      const sources = safeManagementSources(await this.state.storage.get(SOURCES_KEY));
+      return sources ? fixedJson(200, sources) : fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+    }
+    if (url.pathname === INTERNAL_ACTIONS_PATH) {
+      const snapshot = await sourceActionSnapshot(this.state.storage,
+        request.headers.get('x-ankka-actor-email'), Date.now());
+      return snapshot ? fixedJson(200, snapshot) :
+        fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    }
+    const actionId = url.pathname.slice(`${INTERNAL_ACTIONS_PATH}/`.length);
+    const actions = safeSourceActions(await this.state.storage.get(ACTIONS_KEY));
+    const action = ACTION_ID.test(actionId)
+      ? actions?.actions.find((candidate) => candidate.actionId === actionId) : null;
+    return action ? fixedJson(200, publicSourceAction(action)) :
+      fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
   }
 }
 
@@ -5025,10 +5108,12 @@ async function handleSourceActions(request, env) {
   if (!stub) return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
   if (request.method === 'GET') {
     const actionId = url.pathname.slice('/api/source-actions/'.length);
-    if (!ACTION_ID.test(actionId)) return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
+    const collection = url.pathname === '/api/source-actions';
+    if (!collection && !ACTION_ID.test(actionId)) return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
     try {
       const response = await stub.fetch(new Request(
-        `https://admin-state.invalid${INTERNAL_ACTIONS_PATH}/${actionId}`,
+        `https://admin-state.invalid${INTERNAL_ACTIONS_PATH}${collection ? '' : `/${actionId}`}`,
+        { headers: { 'x-ankka-actor-email': actorEmail } },
       ));
       return response instanceof Response
         ? response
@@ -5070,6 +5155,18 @@ async function handleSourceActions(request, env) {
       !Number.isSafeInteger(input.revision) || input.revision < 1 || !SOURCE_ID.test(input.sourceId)) {
     return fixedJson(400, { schemaVersion: 1, error: 'source_action_invalid' });
   }
+  // Detect an existing authorization before another discovery request. The
+  // serialized prepare below repeats this check before creating any action.
+  try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_ACTIONS_PATH}`, {
+      headers: { 'x-ankka-actor-email': actorEmail },
+    }));
+    if (!(response instanceof Response) || response.status !== 200) {
+      return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    }
+    const conflict = sourceSnapshotConflict(await response.json());
+    if (conflict) return conflict;
+  } catch { return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' }); }
   let sources;
   try {
     const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_SOURCES_PATH}`));
@@ -5078,7 +5175,7 @@ async function handleSourceActions(request, env) {
   const parsedSources = safeManagementSources(sources);
   const source = parsedSources?.sources.find((candidate) => candidate.id === input.sourceId);
   if (!parsedSources || parsedSources.revision !== input.revision || !source || source.status !== 'draft') {
-    return fixedJson(409, { schemaVersion: 1, error: 'source_action_conflict' });
+    return sourceActionConflict('draft_changed');
   }
   try { await verifyManagedSource(source); } catch (error) { return sourceErrorResponse(error); }
   const now = Date.now();
@@ -5104,7 +5201,8 @@ async function handleSourceActions(request, env) {
     }));
   } catch { prepared = null; }
   if (!(prepared instanceof Response) || prepared.status !== 200) {
-    return fixedJson(409, { schemaVersion: 1, error: 'source_action_conflict' });
+    return prepared instanceof Response ? prepared :
+      fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
   }
   const managementOrigin = `https://${environment.managementHostname}`;
   const claim = canonicalJson({

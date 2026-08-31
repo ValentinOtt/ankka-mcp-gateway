@@ -1,7 +1,7 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SOURCE_ADDITION_PAUSED_MESSAGE, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type RuntimeUpdate, type SourceDiscovery } from '../api'
+import { GatewayApiError, SOURCE_ADDITION_PAUSED_MESSAGE, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type RuntimeUpdate, type SourceActions, type SourceActionSummary, type SourceDiscovery } from '../api'
 import { SYNTHETIC_SOURCE_CATALOG } from '../catalog/fixtures'
 import { GatewayProvider } from '../GatewayContext'
 import { SourcesPage } from './SourcesPage'
@@ -13,6 +13,137 @@ const status: GatewayStatus = {
 }
 const sources: ManagedSources = { schemaVersion: 1, revision: 4, applyMode: 'oauth_per_action', installationEnabled: true, sources: [] }
 const update: RuntimeUpdate = { schemaVersion: 1, channel: 'stable', status: 'up_to_date', current: { release: 'gateway-v1.0.0', artifactSha256: 'a'.repeat(64) }, available: null, rollback: { available: false } }
+
+const draft = { id: 'source-2222222222222222', label: 'Read-only warehouse', url: 'https://warehouse.example.com/mcp', authMode: 'none' as const, onBehalfOfUser: false, enabledTools: ['datasets.list', 'tables.list', 'tables.get', 'queries.estimate', 'queries.read'], status: 'draft' as const }
+
+function pendingAction(overrides: Partial<SourceActionSummary> = {}): SourceActionSummary {
+  return {
+    schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, sourceId: draft.id,
+    status: 'authorization_required', state: 'authorization_required', failureCode: null,
+    issuedAt: new Date(Date.now() - 120_000).toISOString(), expiresAt: new Date(Date.now() + 480_000).toISOString(),
+    canCancel: true, ...overrides,
+  }
+}
+
+function actionSnapshot(action: SourceActionSummary): SourceActions {
+  return { schemaVersion: 1, actions: [action], blockingAction: action.state === 'succeeded' || action.state === 'failed' ? null : { kind: 'source', actionId: action.actionId, sourceId: action.sourceId } }
+}
+
+function actionApi(snapshot: SourceActions): GatewayAdminApi {
+  return {
+    getStatus: vi.fn(async () => status), getSources: vi.fn(async () => ({ ...sources, sources: [draft] })), getUpdate: vi.fn(async () => update),
+    getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
+    discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+    prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+  }
+}
+
+describe('source installation recovery', () => {
+  afterEach(cleanup)
+
+  it('discovers slow consent in a fresh page without a return URL and blocks another Apply', async () => {
+    const user = userEvent.setup()
+    const action = pendingAction()
+    const api = actionApi(actionSnapshot(action))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const card = await screen.findByRole('article', { name: `Installation of ${draft.label}` })
+    expect(within(card).getByText('Waiting for Cloudflare')).toBeVisible()
+    expect(within(card).getByText(`Action: ${action.actionId}`)).toBeVisible()
+    expect(card.querySelectorAll('time')).toHaveLength(2)
+    expect(screen.queryByText('Saved draft')).not.toBeInTheDocument()
+    const apply = screen.getByRole('button', { name: 'Authorize and apply' })
+    expect(apply).toBeDisabled()
+    await user.click(apply)
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Check status' }))
+    expect(api.getSourceActions).toHaveBeenCalledTimes(2)
+  })
+
+  it('requires server-authorized cancellation before restarting a definitely-unstarted expired attempt', async () => {
+    const user = userEvent.setup()
+    const action = pendingAction({ state: 'authorization_expired', expiresAt: new Date(Date.now() - 1_000).toISOString() })
+    let current = actionSnapshot(action)
+    const api = actionApi(current)
+    api.getSourceActions = vi.fn(async () => current)
+    api.cancelSourceAction = vi.fn(async () => {
+      const cancelled = { ...action, state: 'failed' as const, status: 'failed' as const, failureCode: 'source_action_denied', canCancel: false }
+      current = actionSnapshot(cancelled)
+      return cancelled
+    })
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const card = await screen.findByRole('article', { name: `Installation of ${draft.label}` })
+    expect(within(card).getByText('Authorization expired before work began')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeDisabled()
+    await user.click(within(card).getByRole('button', { name: 'Cancel authorization' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeEnabled())
+    expect(api.cancelSourceAction).toHaveBeenCalledWith(action.actionId)
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Cancel authorization' })).not.toBeInTheDocument()
+  })
+
+  it.each(['applying', 'recovery_required'] as const)('never offers restart for %s work, even beyond expiry', async (state) => {
+    const action = pendingAction({ state, status: state, canCancel: false, expiresAt: new Date(Date.now() - 1_000).toISOString() })
+    const api = actionApi(actionSnapshot(action))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const card = await screen.findByRole('article', { name: `Installation of ${draft.label}` })
+    expect(within(card).getByText(state === 'applying' ? 'Applying and verifying' : 'Recovery required')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Cancel authorization' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/nothing changed|start a fresh authorization/i)).not.toBeInTheDocument()
+  })
+
+  it('does not offer cancellation to a different administrator', async () => {
+    const api = actionApi(actionSnapshot(pendingAction({ canCancel: false })))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await screen.findByText(/Only the administrator who started/)
+    expect(screen.queryByRole('button', { name: 'Cancel authorization' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeDisabled()
+  })
+
+  it('reconciles a late successful installation on Check status instead of offering a second install', async () => {
+    const user = userEvent.setup()
+    const action = pendingAction()
+    let completed = false
+    const api = actionApi(actionSnapshot(action))
+    api.getSourceActions = vi.fn(async () => actionSnapshot(completed ? { ...action, state: 'succeeded', status: 'succeeded', canCancel: false } : action))
+    api.getSources = vi.fn(async (): Promise<ManagedSources> => ({ ...sources, revision: completed ? 5 : 4, sources: [{ ...draft, status: completed ? 'installed' : 'draft' }] }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await screen.findByRole('article', { name: `Installation of ${draft.label}` })
+    completed = true
+    await user.click(screen.getByRole('button', { name: 'Check status' }))
+    expect(await screen.findByText('Installed')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Authorize and apply' })).not.toBeInTheDocument()
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+
+  it('names a different pending source and blocks all draft Apply buttons', async () => {
+    const other = { ...draft, id: 'source-3333333333333333', label: 'Company knowledge' }
+    const api = actionApi(actionSnapshot(pendingAction({ sourceId: other.id })))
+    api.getSources = vi.fn(async () => ({ ...sources, sources: [draft, other] }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await screen.findByRole('article', { name: `Installation of ${other.label}` })
+    for (const button of screen.getAllByRole('button', { name: 'Authorize and apply' })) expect(button).toBeDisabled()
+  })
+
+  it('identifies an unrelated lifecycle action without suggesting cancellation', async () => {
+    const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: { kind: 'runtime', actionId: `action_${'b'.repeat(32)}` } })
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await screen.findByText(/update or rollback action is blocking/)
+    expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Cancel authorization' })).not.toBeInTheDocument()
+  })
+
+  it('keeps Apply blocked when status cannot be read and allows an explicit retry', async () => {
+    const user = userEvent.setup()
+    const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
+    api.getSourceActions = vi.fn().mockRejectedValueOnce(new GatewayApiError(503, 'source_actions_unavailable')).mockResolvedValue({ schemaVersion: 1, actions: [], blockingAction: null })
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await screen.findByText(/Applying sources is disabled until status can be checked/)
+    expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Check status' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeEnabled())
+  })
+})
 
 describe('SourcesPage', () => {
   afterEach(cleanup)
@@ -29,7 +160,7 @@ describe('SourcesPage', () => {
     const api: GatewayAdminApi = {
       getStatus: vi.fn(async () => status), getSources: vi.fn(async () => current), getUpdate: vi.fn(async () => update),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-      discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
@@ -68,7 +199,7 @@ describe('SourcesPage', () => {
           { name: 'execute_sql', description: 'Synthetic write query.', destructiveHint: true, defaultSelected: false },
         ],
       })),
-      saveSourceDraft, prepareSourceAction: vi.fn(), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      saveSourceDraft, prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
@@ -114,7 +245,7 @@ describe('SourcesPage', () => {
       })),
       saveSourceDraft,
       prepareSourceAction,
-      getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
@@ -167,7 +298,7 @@ describe('SourcesPage', () => {
         tools: [{ name: 'reports.read', defaultSelected: true }],
       })),
       saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
@@ -196,7 +327,7 @@ describe('SourcesPage', () => {
         tools: [{ name: 'search', title: 'Search', description: 'Search documents.', readOnlyHint: true, defaultSelected: true }],
       })),
       saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
@@ -241,7 +372,7 @@ describe('SourcesPage', () => {
       getUpdate: vi.fn(async () => update),
       discoverSource,
       saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
@@ -304,7 +435,7 @@ describe('SourcesPage', () => {
         })),
       })),
       saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
@@ -363,7 +494,7 @@ describe('SourcesPage', () => {
         tools: [],
       })),
       saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }

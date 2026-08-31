@@ -2,7 +2,7 @@ import { Input } from '@cloudflare/kumo'
 import { Button } from '../components/Button'
 import { ArrowRight, Database, GlobeSimple, MagnifyingGlass, Plus, X } from '@phosphor-icons/react'
 import { type FormEvent, useMemo, useState } from 'react'
-import { GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type SourceDiscovery } from '../api'
+import { GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type SourceActionSummary, type SourceDiscovery } from '../api'
 import { SOURCE_CATALOG, type SourceCatalog, type SourceCatalogSource } from '../catalog'
 import { useGateway } from '../GatewayContext'
 import { GatewayEndpoint } from '../components/GatewayEndpoint'
@@ -23,6 +23,44 @@ function manualTools(value: string): string[] {
   return [...new Set(value.split(/\r?\n/u).map((tool) => tool.trim()).filter(Boolean))].sort()
 }
 
+const actionLabels = {
+  authorization_required: 'Waiting for Cloudflare',
+  authorization_expired: 'Authorization expired before work began',
+  applying: 'Applying and verifying',
+  succeeded: 'Installation completed',
+  failed: 'Authorization closed',
+  recovery_required: 'Recovery required',
+} satisfies Record<SourceActionSummary['state'], string>
+
+function sourceDraftLabel(action: SourceActionSummary | undefined): string {
+  return action && action.state !== 'failed' ? actionLabels[action.state] : 'Saved draft'
+}
+
+function actionGuidance(action: SourceActionSummary, pollingPaused: boolean): string {
+  switch (action.state) {
+    case 'authorization_required':
+      return pollingPaused
+        ? 'Complete the existing consent in the Cloudflare tab, then use Check status. Another authorization is blocked.'
+        : 'Complete the existing consent in the Cloudflare tab. This page checks status automatically; another authorization is blocked.'
+    case 'authorization_expired':
+      return 'The gateway did not start this attempt. Cancel this authorization, then authorize the saved draft again.'
+    case 'applying':
+      return 'The gateway is applying the source and verifying Cloudflare resources. Wait for a confirmed result before taking another action.'
+    case 'succeeded':
+      return 'The source installation was verified. Review access in Cloudflare before sharing it with approved members.'
+    case 'failed':
+      return action.failureCode === 'source_action_denied'
+        ? 'This authorization was cancelled. You can authorize the saved draft again.'
+        : 'This attempt is closed. Review the saved draft before starting another authorization.'
+    case 'recovery_required':
+      return 'Provisioning may be incomplete or still finishing. Check status before reviewing recovery in Cloudflare. The action journal is retained and starting again is blocked.'
+  }
+}
+
+function actionTime(value: string): string {
+  return new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
 interface SourcesPageProps {
   catalog?: SourceCatalog
 }
@@ -30,10 +68,16 @@ interface SourcesPageProps {
 export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   const {
     clearSourceNotice,
+    cancelSourceApply,
     discoverSource,
     isBusy,
+    isCheckingSourceActions,
     prepareSourceApply,
+    refreshSourceActions,
     saveSourceDraft,
+    sourceActions,
+    sourceActionsError,
+    sourceActionsPollingPaused,
     sourceNotice,
     sources,
   } = useGateway()
@@ -75,6 +119,14 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
 
   if (!sources) return null
   const installationEnabled = sources.installationEnabled === true
+  const applyBlocked = isBusy || isCheckingSourceActions || sourceActions === null || sourceActionsError !== null || sourceActions.blockingAction !== null
+  const latestActions = new Map<string, SourceActionSummary>()
+  for (const action of sourceActions?.actions ?? []) {
+    const previous = latestActions.get(action.sourceId)
+    if (!previous || Date.parse(action.issuedAt) >= Date.parse(previous.issuedAt)) latestActions.set(action.sourceId, action)
+  }
+  const blocker = sourceActions?.blockingAction
+  const showActionStatus = sources.sources.some((source) => source.status === 'draft') || latestActions.size > 0 || Boolean(blocker) || sourceActionsError !== null
 
   const clearDraftForm = () => {
     setCatalogSourceId(null)
@@ -158,7 +210,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   }
 
   const authorize = async (sourceId: string) => {
-    if (!installationEnabled) return
+    if (!installationEnabled || applyBlocked) return
     try {
       const prepared = await prepareSourceApply(sourceId)
       window.location.assign(prepared.handoffUrl)
@@ -187,6 +239,50 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           <p>{sourceNotice.message}</p>
           <button type="button" className="pressable" aria-label="Dismiss source notice" onClick={clearSourceNotice}><X size={14} /></button>
         </div>
+      ) : null}
+
+      {showActionStatus ? (
+        <section className="surface-card mt-6 p-5 sm:p-6" aria-labelledby="source-actions-title">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 id="source-actions-title" className="text-sm font-semibold text-kumo-strong">Source installation status</h2>
+            <Button variant="secondary" className="pressable" disabled={isBusy || isCheckingSourceActions} onClick={() => void refreshSourceActions().catch(() => {})}>
+              {isCheckingSourceActions ? 'Checking status…' : 'Check status'}
+            </Button>
+          </div>
+          {sourceActionsError ? <p role="alert" className="mt-3 text-sm text-danger">{sourceActionsError} Applying sources is disabled until status can be checked.</p> : null}
+          {!sourceActions && !sourceActionsError ? <p role="status" className="mt-3 text-sm text-kumo-subtle">Checking for existing gateway actions…</p> : null}
+          {sourceActionsPollingPaused ? <p role="status" className="mt-3 text-sm text-kumo-subtle">Automatic checks have paused. Use Check status for the latest result; this does not cancel the action.</p> : null}
+          {blocker && blocker.kind !== 'source' ? (
+            <p role="status" className="mt-3 text-sm leading-6 text-kumo-subtle">
+              A gateway {blocker.kind === 'runtime' ? 'update or rollback' : blocker.kind === 'teardown' ? 'removal' : 'Team access'} action is blocking source installation. Review that action before applying a source.
+              <span className="mt-1 block break-all font-mono text-xs">Action: {blocker.actionId}</span>
+            </p>
+          ) : null}
+          {sourceActions && !blocker && latestActions.size === 0 ? <p className="mt-3 text-sm text-kumo-subtle">No source installation is pending.</p> : null}
+          <div aria-live="polite">
+            {[...latestActions.values()].map((action) => (
+              <article key={action.actionId} className="mt-4 border-t border-kumo-line pt-4" aria-label={`Installation of ${sources.sources.find((source) => source.id === action.sourceId)?.label ?? action.sourceId}`}>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <h3 className="text-sm font-semibold text-kumo-strong">{sources.sources.find((source) => source.id === action.sourceId)?.label ?? action.sourceId}</h3>
+                  <StatusPill tone={action.state === 'succeeded' ? 'ready' : action.state === 'recovery_required' || action.state === 'authorization_expired' ? 'attention' : 'waiting'}>{actionLabels[action.state]}</StatusPill>
+                </div>
+                <p className="mt-2 max-w-[80ch] text-sm leading-6 text-kumo-subtle">{actionGuidance(action, sourceActionsPollingPaused)}</p>
+                <p className="mt-2 text-xs leading-5 text-kumo-subtle">
+                  Started <time dateTime={action.issuedAt}>{actionTime(action.issuedAt)}</time> · Authorization expires <time dateTime={action.expiresAt}>{actionTime(action.expiresAt)}</time>
+                </p>
+                <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Action: {action.actionId}</p>
+                {action.canCancel ? (
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <Button variant="secondary" className="pressable" disabled={isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void cancelSourceApply(action.actionId).catch(() => {})}>Cancel authorization</Button>
+                    <p className="max-w-[65ch] text-xs leading-5 text-kumo-subtle">The existing consent link will stop working. You can then authorize the saved draft again.</p>
+                  </div>
+                ) : action.state === 'authorization_required' || action.state === 'authorization_expired' ? (
+                  <p className="mt-3 text-xs leading-5 text-kumo-subtle">Only the administrator who started this authorization can cancel it while work has not begun.</p>
+                ) : null}
+              </article>
+            ))}
+          </div>
+        </section>
       ) : null}
 
       {showForm && installationEnabled ? (
@@ -418,7 +514,14 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             <Button variant="secondary" className="pressable mt-5" disabled={!installationEnabled} onClick={() => setShowForm(true)}><Plus size={16} weight="bold" /> Add your first source</Button>
           </div>
         ) : (
-          <SourceList sources={sources.sources} installationEnabled={installationEnabled} isBusy={isBusy} onAuthorize={(sourceId) => void authorize(sourceId)} />
+          <SourceList
+            sources={sources.sources}
+            installationEnabled={installationEnabled}
+            authorizeDisabled={applyBlocked}
+            isBusy={isBusy}
+            draftLabel={(sourceId) => sourceDraftLabel(latestActions.get(sourceId))}
+            onAuthorize={(sourceId) => void authorize(sourceId)}
+          />
         )}
       </section>
     </div>

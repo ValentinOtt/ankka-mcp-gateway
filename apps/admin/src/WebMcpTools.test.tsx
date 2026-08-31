@@ -46,6 +46,7 @@ function fixtureApi(): GatewayAdminApi {
     getStatus: vi.fn(async () => status), getSources: vi.fn(async () => sources), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(),
+    getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
     getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), prepareRuntimeAction: vi.fn(),
     getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
   }
@@ -198,6 +199,7 @@ describe('WebMcpTools', () => {
       saveSourceDraft: vi.fn(),
       prepareSourceAction: vi.fn(),
       getSourceAction: vi.fn(),
+      getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
       cancelSourceAction: vi.fn(),
       prepareRuntimeAction: vi.fn(),
       getRuntimeAction: vi.fn(),
@@ -254,16 +256,16 @@ describe('WebMcpTools', () => {
     const { registered, signals, modelContext } = modelContextFixture()
     document.modelContext = modelContext
     const mounted = render(<StrictMode><GatewayProvider api={api}><WebMcpTools /></GatewayProvider></StrictMode>)
-    await waitFor(() => expect(registered.size).toBe(17))
+    await waitFor(() => expect(registered.size).toBe(18))
     window.dispatchEvent(new Event('pagehide'))
     expect(registered.size).toBe(0)
     expect(signals.every((signal) => signal.aborted)).toBe(true)
     window.dispatchEvent(new Event('pageshow'))
-    await waitFor(() => expect(registered.size).toBe(17))
+    await waitFor(() => expect(registered.size).toBe(18))
     mounted.unmount()
     expect(registered.size).toBe(0)
     const remounted = render(<GatewayProvider api={api}><WebMcpTools /></GatewayProvider>)
-    await waitFor(() => expect(registered.size).toBe(17))
+    await waitFor(() => expect(registered.size).toBe(18))
     remounted.unmount()
     expect(registered.size).toBe(0)
   })

@@ -522,7 +522,10 @@ test('management source state enforces the canonical 1 MiB aggregate before the 
       }),
     }));
     assert.equal(prepared.status, 409);
-    assert.deepEqual(await prepared.json(), { schemaVersion: 1, error: 'source_action_conflict' });
+    const expected = { schemaVersion: 1, error: 'source_action_conflict' };
+    if (record === exactRecord) Object.assign(expected, { reason: 'source_pending',
+      action: { kind: 'source', actionId, sourceId: source.id } });
+    assert.deepEqual(await prepared.json(), expected);
     assert.equal(managementStorage.writes.length, before);
   }
   await managementStorage.put(MANAGEMENT_SOURCES_KEY, legacyUnsafeRecord);
@@ -1679,7 +1682,8 @@ test('management API preserves bounded discovery, draft capacity and shared oper
       }), env);
       assert.equal(prepared.status, path === '/api/source-actions' ? 409 : 404);
       assert.deepEqual(await prepared.json(), path === '/api/source-actions'
-        ? { schemaVersion: 1, error: 'source_action_conflict' } : { schemaVersion: 1, error: 'source_action_not_found' });
+        ? { schemaVersion: 1, error: 'source_action_conflict', reason: 'draft_changed' }
+        : { schemaVersion: 1, error: 'source_action_not_found' });
     }
     assert.equal(cloudflare.requests.length, sourceMutationStart);
     const unchanged = await worker.fetch(new Request('https://manage.example.com/api/sources', {

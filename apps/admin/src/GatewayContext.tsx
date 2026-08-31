@@ -19,6 +19,7 @@ import {
   type PreparedAction,
   type RuntimeOperation,
   type RuntimeUpdate,
+  type SourceActions,
   type SourceDiscovery,
   type SourceDraftInput,
   type Team,
@@ -34,6 +35,10 @@ interface GatewayContextValue {
   api: GatewayAdminApi
   status: GatewayStatus | null
   sources: ManagedSources | null
+  sourceActions: SourceActions | null
+  sourceActionsError: string | null
+  isCheckingSourceActions: boolean
+  sourceActionsPollingPaused: boolean
   update: RuntimeUpdate | null
   isLoading: boolean
   isBusy: boolean
@@ -45,6 +50,8 @@ interface GatewayContextValue {
   reload(): Promise<void>
   refreshAfterExternalChange(): Promise<void>
   refreshSources(): Promise<ManagedSources>
+  refreshSourceActions(): Promise<SourceActions>
+  cancelSourceApply(actionId: string): Promise<void>
   refreshUpdate(): Promise<RuntimeUpdate>
   clearError(): void
   clearSourceNotice(): void
@@ -66,6 +73,9 @@ interface GatewayProviderProps extends PropsWithChildren {
 
 const GatewayContext = createContext<GatewayContextValue | null>(null)
 const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u
+const SOURCE_ACTION_POLL_INTERVAL = 5_000
+const SOURCE_ACTION_POLL_LIMIT = 60
+const SOURCE_ACTION_STATUS_UNAVAILABLE = 'Source action status is temporarily unavailable. Check status before authorizing another source.'
 
 function errorMessage(cause: Error | null): string {
   return cause?.message ?? 'The gateway request failed.'
@@ -92,6 +102,10 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
   const apiRef = useRef<GatewayAdminApi>(api ?? new HttpGatewayAdminApi())
   const [status, setStatus] = useState<GatewayStatus | null>(null)
   const [sources, setSources] = useState<ManagedSources | null>(null)
+  const [sourceActions, setSourceActions] = useState<SourceActions | null>(null)
+  const [sourceActionsError, setSourceActionsError] = useState<string | null>(null)
+  const [isCheckingSourceActions, setIsCheckingSourceActions] = useState(false)
+  const [sourceActionsPollingPaused, setSourceActionsPollingPaused] = useState(false)
   const [update, setUpdate] = useState<RuntimeUpdate | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [busyCount, setBusyCount] = useState(0)
@@ -100,6 +114,14 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
   const [sourceNotice, setSourceNotice] = useState<Notice>(null)
   const [updateNotice, setUpdateNotice] = useState<Notice>(null)
   const [externalChangeVersion, setExternalChangeVersion] = useState(0)
+  const mounted = useRef(true)
+  const sourceActionRead = useRef(0)
+  const reconciledSourceActions = useRef(new Set<string>())
+
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false; sourceActionRead.current += 1 }
+  }, [])
 
   const runBusy = useCallback(async <T,>(operation: () => Promise<T>): Promise<T> => {
     setBusyCount((count) => count + 1)
@@ -117,6 +139,38 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     setSources((current) => current && current.revision > next.revision ? current : next)
     return next
   }, [])
+
+  const refreshSourceActions = useCallback(async (): Promise<SourceActions> => {
+    const read = ++sourceActionRead.current
+    setIsCheckingSourceActions(true)
+    try {
+      const next = await apiRef.current.getSourceActions()
+      if (!mounted.current || read !== sourceActionRead.current) return next
+      setSourceActions(next)
+      const completed = next.actions.filter((action) => action.state === 'succeeded' && !reconciledSourceActions.current.has(action.actionId))
+      if (completed.length > 0) {
+        await refreshSources()
+        for (const action of completed) reconciledSourceActions.current.add(action.actionId)
+      }
+      if (mounted.current && read === sourceActionRead.current) setSourceActionsError(null)
+      return next
+    } catch {
+      if (mounted.current && read === sourceActionRead.current) setSourceActionsError(SOURCE_ACTION_STATUS_UNAVAILABLE)
+      throw new Error(SOURCE_ACTION_STATUS_UNAVAILABLE)
+    } finally {
+      if (mounted.current && read === sourceActionRead.current) setIsCheckingSourceActions(false)
+    }
+  }, [refreshSources])
+
+  const cancelSourceApply = useCallback((actionId: string) => runBusy(async () => {
+    try {
+      await apiRef.current.cancelSourceAction(actionId)
+    } catch (cause) {
+      throw cause instanceof GatewayApiError ? cause : new Error('Cancellation could not be confirmed. Check status before starting another authorization.')
+    } finally {
+      await refreshSourceActions().catch(() => {})
+    }
+  }), [refreshSourceActions, runBusy])
 
   const getTeam = useCallback(() => apiRef.current.getTeam(), [])
   const getTeamAction = useCallback((actionId: string) => apiRef.current.getTeamAction(actionId), [])
@@ -136,6 +190,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
   const reload = useCallback(async () => {
     setIsLoading(true)
     setError(null)
+    const actionRefresh = refreshSourceActions().catch(() => {})
     try {
       const [nextStatus, nextSources] = await Promise.all([
         apiRef.current.getStatus(),
@@ -148,8 +203,11 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     } catch (requestError) {
       const parsed = v.safeParse(v.instance(Error), requestError)
       setError(errorMessage(parsed.success ? parsed.output : null))
-    } finally { setIsLoading(false) }
-  }, [refreshUpdate])
+    } finally {
+      await actionRefresh
+      setIsLoading(false)
+    }
+  }, [refreshSourceActions, refreshUpdate])
 
   const refreshAfterExternalChange = useCallback(async () => {
     setExternalChangeVersion((version) => version + 1)
@@ -159,55 +217,66 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
   useEffect(() => { void reload() }, [reload])
 
   useEffect(() => {
+    const check = () => { void refreshSourceActions().catch(() => {}) }
+    const checkVisible = () => { if (document.visibilityState === 'visible') check() }
+    window.addEventListener('focus', check)
+    document.addEventListener('visibilitychange', checkVisible)
+    return () => {
+      window.removeEventListener('focus', check)
+      document.removeEventListener('visibilitychange', checkVisible)
+    }
+  }, [refreshSourceActions])
+
+  const sourceActionPollingKey = sourceActions?.blockingAction
+    ? `${sourceActions.blockingAction.kind}:${sourceActions.blockingAction.actionId}`
+    : null
+  useEffect(() => {
+    setSourceActionsPollingPaused(false)
+    if (!sourceActionPollingKey) return
+    let active = true
+    let attempts = 0
+    let timer: number | undefined
+    const check = async () => {
+      await refreshSourceActions().catch(() => {})
+      if (!active) return
+      attempts += 1
+      if (attempts >= SOURCE_ACTION_POLL_LIMIT) {
+        setSourceActionsPollingPaused(true)
+        return
+      }
+      timer = window.setTimeout(() => { void check() }, SOURCE_ACTION_POLL_INTERVAL)
+    }
+    timer = window.setTimeout(() => { void check() }, SOURCE_ACTION_POLL_INTERVAL)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [sourceActionPollingKey, refreshSourceActions])
+
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    const actionId = url.searchParams.get('sourceAction')
+    const denied = url.searchParams.get('sourceActionResult') === 'denied'
+    if (url.searchParams.has('sourceActionResult')) removeResultParameter('sourceActionResult')
+    if (denied && actionId && ACTION_ID.test(actionId)) {
+      // The authenticated endpoint checks again that provisioning has not started.
+      void cancelSourceApply(actionId).catch(() => {})
+    }
+  }, [cancelSourceApply])
+
+  useEffect(() => {
+    const actionId = new URL(window.location.href).searchParams.get('sourceAction')
+    if (actionId && ACTION_ID.test(actionId) && sources?.installationEnabled === false) {
+      setSourceNotice({ tone: 'neutral', message: SOURCE_ADDITION_PAUSED_MESSAGE })
+    }
+  }, [sources?.installationEnabled])
+
+  useEffect(() => {
     let active = true
     const url = new URL(window.location.href)
-    const sourceActionId = url.searchParams.get('sourceAction')
     const runtimeActionId = url.searchParams.get('runtimeAction')
 
     const delay = () => new Promise<void>((resolve) => window.setTimeout(resolve, 1500))
-    const pollSource = async (actionId: string) => {
-      const denied = url.searchParams.get('sourceActionResult') === 'denied'
-      if (url.searchParams.has('sourceActionResult')) removeResultParameter('sourceActionResult')
-      while (active) {
-        try {
-          const action = denied
-            ? await apiRef.current.cancelSourceAction(actionId)
-            : await apiRef.current.getSourceAction(actionId)
-          if (!active) return
-          if (action.status === 'succeeded') {
-            setSourceNotice({ tone: 'success', message: 'Source installed with nobody assigned. Connect its operator account if required, then grant access in Team.' })
-            await reload()
-            return
-          }
-          const currentSources = await apiRef.current.getSources()
-          if (!active) return
-          setSources((current) => current && current.revision > currentSources.revision ? current : currentSources)
-          if (currentSources.installationEnabled !== true) {
-            setSourceNotice({ tone: 'warning', message: SOURCE_ADDITION_PAUSED_MESSAGE })
-            return
-          }
-          if (Date.parse(action.expiresAt) <= Date.now()) {
-            setSourceNotice({ tone: 'error', message: 'The one-time authorization expired. Start a fresh authorization from the saved draft.' })
-            return
-          }
-          if (action.status === 'failed' || action.status === 'recovery_required') {
-            setSourceNotice({ tone: 'error', message: 'The source action needs a fresh authorization.' })
-            return
-          }
-          setSourceNotice({
-            tone: 'neutral',
-            message: action.status === 'applying'
-              ? 'Applying the source and verifying each Cloudflare resource…'
-              : 'Waiting for Cloudflare authorization…',
-          })
-        } catch {
-          setSourceNotice({ tone: 'error', message: 'The source action status is temporarily unavailable.' })
-          return
-        }
-        await delay()
-      }
-    }
-
     const pollRuntime = async (actionId: string) => {
       if (url.searchParams.has('runtimeActionResult')) removeResultParameter('runtimeActionResult')
       while (active) {
@@ -246,7 +315,6 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       }
     }
 
-    if (sourceActionId && ACTION_ID.test(sourceActionId)) void pollSource(sourceActionId)
     if (runtimeActionId && ACTION_ID.test(runtimeActionId)) void pollRuntime(runtimeActionId)
     return () => { active = false }
   }, [reload])
@@ -255,6 +323,10 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     api: apiRef.current,
     status,
     sources,
+    sourceActions,
+    sourceActionsError,
+    isCheckingSourceActions,
+    sourceActionsPollingPaused,
     update,
     isLoading,
     isBusy: busyCount > 0,
@@ -266,6 +338,8 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     reload,
     refreshAfterExternalChange,
     refreshSources,
+    refreshSourceActions,
+    cancelSourceApply,
     refreshUpdate,
     clearError: () => setError(null),
     clearSourceNotice: () => setSourceNotice(null),
@@ -282,12 +356,28 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     prepareSourceApply: (sourceId) => runBusy(async () => {
       const current = sources ?? await refreshSources()
       if (current.installationEnabled !== true) throw new GatewayApiError(409, 'source_addition_paused')
-      const trustedStatus = status ?? await apiRef.current.getStatus()
-      if (status === null) setStatus(trustedStatus)
-      const prepared = await apiRef.current.prepareSourceAction(current.revision, sourceId)
-      const handoffUrl = validHandoffUrl(prepared.handoffUrl, trustedStatus.controlPlaneOrigin)
-      if (!handoffUrl) throw new Error('The authorization link could not be verified.')
-      return { ...prepared, handoffUrl }
+      const actions = await refreshSourceActions()
+      if (actions.blockingAction) {
+        const action = actions.blockingAction
+        const summary = actions.actions.find((candidate) => candidate.actionId === action.actionId)
+        throw new GatewayApiError(409, 'source_action_conflict', {
+          reason: summary?.state === 'recovery_required' ? 'recovery_required' : action.kind === 'source' ? 'source_pending' : 'lifecycle_pending',
+          action,
+        })
+      }
+      try {
+        const trustedStatus = status ?? await apiRef.current.getStatus()
+        if (status === null) setStatus(trustedStatus)
+        const prepared = await apiRef.current.prepareSourceAction(current.revision, sourceId)
+        const handoffUrl = validHandoffUrl(prepared.handoffUrl, trustedStatus.controlPlaneOrigin)
+        if (!handoffUrl) throw new Error('The authorization link could not be verified.')
+        return { ...prepared, handoffUrl }
+      } catch (cause) {
+        await refreshSources().catch(() => {})
+        throw cause instanceof GatewayApiError ? cause : new Error('Source authorization could not be confirmed. Check status before trying again.')
+      } finally {
+        await refreshSourceActions().catch(() => {})
+      }
     }),
     prepareRuntimeAction: (operation) => runBusy(async () => {
       const trustedStatus = status ?? await apiRef.current.getStatus()
@@ -324,6 +414,8 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     busyCount, error, hasLoaded, isLoading, refreshSources, refreshUpdate, reload, runBusy,
     sourceNotice, sources, status, update, updateNotice, getTeam, getTeamAction,
     externalChangeVersion, refreshAfterExternalChange,
+    sourceActions, sourceActionsError, isCheckingSourceActions, sourceActionsPollingPaused,
+    refreshSourceActions, cancelSourceApply,
   ])
 
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>

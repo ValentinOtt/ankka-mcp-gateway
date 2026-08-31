@@ -54,8 +54,9 @@ source draft/apply tools are conditional on installation being enabled.
 | `discover_mcp_source` | `{url}` | Inspect a bounded public HTTPS MCP endpoint; returned metadata is untrusted. |
 | `save_mcp_source_draft` | `{label, url, authMode, enabledTools}` | Recheck and persist a source draft; does not install the live source. Conditional. |
 | `apply_mcp_source` | `{sourceId}` | Record an exact saved source's authorization handoff; does not complete provider consent. Conditional. |
-| `get_mcp_source_action` | `{actionId}` | Read one recorded source action. |
-| `cancel_mcp_source_action` | `{actionId}` | Request cancellation through the existing source lifecycle checks; does not uninstall a source. |
+| `list_mcp_source_actions` | `{}` | Discover recorded source actions, effective states, times, cancellation permission, and a blocking action reference after reload or lost consent navigation. |
+| `get_mcp_source_action` | `{actionId}` | Read one recorded source action's legacy status; use the collection for effective expiry/recovery state and cancellation permission. |
+| `cancel_mcp_source_action` | `{actionId}` | Cancel only when the current server projection permits it; does not undo writes or start another action. |
 | `get_gateway_team` | `{}` | Read the saved roster, revision, installed source assignments, and retained proposal. |
 | `save_gateway_team` | `{expectedRevision, members}` | Apply or resume the complete reviewed roster and source assignments; may immediately change Access policies. |
 | `get_gateway_team_action` | `{actionId}` | Read one recorded Team action. |
@@ -72,6 +73,10 @@ source draft/apply tools are conditional on installation being enabled.
 IDs and action IDs from fresh results; never invent them from labels. Use the
 registered schema for exact bounds and formats. The tools return the same
 JSON-string envelope, `{ok: true, result}` or `{ok: false, error: {code, message}}`.
+Source conflicts may also include a fixed `reason` and a non-secret `action`
+reference in the error. These distinguish `draft_changed`, `source_pending`,
+`lifecycle_pending`, and `recovery_required`; they never include a grant or
+authorization fragment.
 `ok: true` means the tool request completed; inspect the nested operation status
 before reporting its outcome.
 
@@ -191,6 +196,31 @@ See [updates](UPDATES.md) and
 
 ## Inputs, outputs, and safe recovery
 
+For slow source consent, call `list_mcp_source_actions` before preparing anything
+else. It reads the authenticated server journal without a retained action ID or
+handoff URL. Its `blockingAction` identifies the relevant source installation
+or another gateway action. `get_gateway_capabilities` uses the same reference to
+report whether source installation is currently available.
+
+The source collection's `state` distinguishes waiting for authorization from
+`authorization_expired`: the latter means the authorization window expired
+before provisioning began. The legacy by-ID `status` remains unchanged.
+An expired applying action or uncertain write remains `recovery_required` and
+blocks another install. Expiry does not clear provider changes or allow an
+automatic restart. A late success appears as `succeeded`; read the source list
+again to see Installed. Applying an already installed source returns
+`status: "installed"` without preparing another handoff.
+
+Cancel only when the collection returns `canCancel: true` for that action.
+The cancellation tool reads this capability again, and the server checks it at
+execution so a race cannot cancel work that has begun. After confirmed
+cancellation, review the current saved draft before requesting a new handoff.
+There is no source Resume tool: no stored OAuth grant or action secret is
+recovered or reused. For active or uncertain work, retain the journal and use
+status/recovery guidance instead of a destructive restart.
+See [source action recovery](SOURCE_ACTION_RECOVERY.md) for the dashboard flow
+and the boundaries of safe cancellation.
+
 Use each registered tool's exact input schema. Empty-input tools require an
 empty object. Unknown top-level or nested arguments must be rejected before
 an API call. Action-status tools accept only the recorded action identifier,
@@ -205,7 +235,7 @@ tool call can still return an action that is waiting or requires recovery:
 | `applying` | The action is in progress; writes may already have occurred. |
 | `succeeded` | The recorded action completed its verification. Refresh current state before the next change. |
 | `failed` | The action did not complete, or a safely canceled proposal is retained. Inspect its fixed failure code; this does not imply rollback. |
-| `recovery_required` | The outcome may include partial changes. Retain and resume the recorded operation; do not replace it with a different proposal. |
+| `recovery_required` | The outcome may include partial changes. Retain the recorded operation and follow its supported recovery path; source grants cannot be resumed or reused. |
 
 For a retained legacy Team proposal, `authorization_required` is an old status
 name: resume the exact proposal with the customer-local Team save operation.
@@ -230,6 +260,11 @@ Start with the synthetic local dashboard preview, not a real permission change:
 ```sh
 VITE_GATEWAY_UI_PREVIEW=1 npm run dev:admin
 ```
+
+Source-status scenarios are available at `/sources?preview=source-pending`,
+`source-applying`, `source-expired`, `source-recovery`, `source-completed`,
+`source-late-success`, and `source-lifecycle`. The late-success scenario advances
+after 15 seconds. These use synthetic state and do not contact Cloudflare.
 
 Check the browser and agent client versions alongside the gateway version.
 Record fixed outcomes and synthetic data only; do not publish deployment IDs,

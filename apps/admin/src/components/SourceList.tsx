@@ -12,11 +12,13 @@ const filters = [
 interface SourceListProps {
   sources: ManagedSource[]
   installationEnabled: boolean
+  authorizeDisabled?: boolean
   isBusy: boolean
+  draftLabel?(sourceId: string): string
   onAuthorize(sourceId: string): void
 }
 
-export function SourceList({ sources, installationEnabled, isBusy, onAuthorize }: SourceListProps) {
+export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, draftLabel, onAuthorize }: SourceListProps) {
   const [filter, setFilter] = useState<(typeof filters)[number]['value']>('all')
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -99,12 +101,12 @@ export function SourceList({ sources, installationEnabled, isBusy, onAuthorize }
                       <span className="inline-flex items-center gap-2 text-success-strong"><Check aria-hidden="true" size={17} className="shrink-0" />Installed</span>
                     ) : (
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="inline-flex items-center gap-1.5 text-warning-strong"><Clock aria-hidden="true" size={16} />Draft</span>
+                        <span className="inline-flex items-center gap-1.5 text-warning-strong"><Clock aria-hidden="true" size={16} />{draftLabel?.(source.id) ?? 'Draft'}</span>
                         <Button
                           type="button"
                           variant="secondary"
                           className="pressable h-auto min-h-9 max-w-full whitespace-normal py-1.5"
-                          disabled={!installationEnabled}
+                          disabled={!installationEnabled || authorizeDisabled}
                           loading={isBusy}
                           onClick={() => onAuthorize(source.id)}
                         >

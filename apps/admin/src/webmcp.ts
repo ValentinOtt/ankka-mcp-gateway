@@ -97,7 +97,12 @@ function createTool<TSchema extends v.GenericSchema, TResult>(
         }
       } catch (cause) {
         const code = cause instanceof GatewayApiError ? safeGatewayErrorCode(cause.code) : 'request_failed'
-        return JSON.stringify({ ok: false, error: { code, message: new GatewayApiError(400, code).message } })
+        const safeError = new GatewayApiError(400, code, cause instanceof GatewayApiError ? {
+          reason: cause.reason, action: cause.action,
+        } : undefined)
+        return JSON.stringify({ ok: false, error: {
+          code, message: safeError.message, reason: safeError.reason, action: safeError.action,
+        } })
       }
     },
   }
@@ -128,9 +133,14 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
   const tools = [
     tool('get_gateway_status', 'Read the saved Gateway configuration and release. This is not a fresh upstream health test.', noInput, empty, readOnly, () => api.getStatus()),
     tool('get_gateway_capabilities', 'Read current management availability and recovery pointers. Credential configured means present, not verified. No credentials are returned.', noInput, empty, readOnly, async () => {
-      const [sources, team] = await Promise.all([api.getSources(), api.getTeam()])
+      const [sources, team, sourceActions] = await Promise.all([api.getSources(), api.getTeam(), api.getSourceActions()])
       return {
-        sourceInstallation: { available: sources.installationEnabled === true, reason: sources.installationEnabled === true ? null : 'source_addition_paused', revision: sources.revision },
+        sourceInstallation: {
+          available: sources.installationEnabled === true && sourceActions.blockingAction === null,
+          reason: !sources.installationEnabled ? 'source_addition_paused' : sourceActions.blockingAction ? 'source_action_conflict' : null,
+          revision: sources.revision, blockingAction: sourceActions.blockingAction,
+          statusTool: 'list_mcp_source_actions',
+        },
         team: {
           editingEnabled: team.editingEnabled, editingDisabledReason: team.editingDisabledReason,
           managementCredentialConfigured: team.managementCredentialConfigured, revision: team.revision,
@@ -178,8 +188,18 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
       if (action.actionId !== actionId || action.canCancel !== true) throw new GatewayApiError(409, 'team_action_conflict')
       return api.cancelTeamAction(actionId)
     }),
-    tool('get_mcp_source_action', 'Read an existing source action by its returned actionId. No automatic retry or provider write.', actionInput, actionSchema, readOnly, ({ actionId }) => api.getSourceAction(actionId)),
-    tool('cancel_mcp_source_action', 'Request cancellation of an existing source action. The server permits only its safe cancellation states; never assume it undoes provider changes.', actionInput, actionSchema, mutation, ({ actionId }) => api.cancelSourceAction(actionId)),
+    tool('list_mcp_source_actions', 'Discover recorded source installations after reload or lost consent navigation, including state, times, source references, any blocking gateway action, and server-authorized cancellation. Waiting, expired, applying, completed, and recovery states are distinct. No grant or authorization URL is returned. Never infer that expiry undoes writes.', noInput, empty, readOnly, () => api.getSourceActions()),
+    tool('get_mcp_source_action', 'Read the legacy status of an existing source action by actionId. Use list_mcp_source_actions for current expiry/recovery state and allowed cancellation. No automatic retry or provider write.', actionInput, actionSchema, readOnly, ({ actionId }) => api.getSourceAction(actionId)),
+    tool('cancel_mcp_source_action', 'Cancel only an existing source action explicitly marked canCancel by list_mcp_source_actions. The server rechecks permission and that provisioning never started. Does not undo writes, recover consent, or start another action.', actionInput, actionSchema, mutation, async ({ actionId }) => {
+      const current = await api.getSourceActions()
+      const action = current.actions.find((candidate) => candidate.actionId === actionId)
+      if (!action) throw new GatewayApiError(404, 'source_action_not_found')
+      if (!action.canCancel) throw new GatewayApiError(409, 'source_action_conflict', {
+        reason: action.state === 'recovery_required' ? 'recovery_required' : 'source_pending',
+        action: { kind: 'source', actionId, sourceId: action.sourceId },
+      })
+      return api.cancelSourceAction(actionId)
+    }),
     tool('check_gateway_update', 'Check the signed release channel against the Gateway. Performs no provider writes.', noInput, empty, { ...readOnly, openWorldHint: true }, () => api.getUpdate()),
     tool('review_gateway_update', 'Return the signed release and artifact digest, classification, notes, and unchanged-resource boundary for review. Does not start OAuth.', noInput, empty, { ...readOnly, openWorldHint: true }, async () => {
       const update = await api.getUpdate()
@@ -222,11 +242,21 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
       if (!current.installationEnabled) throw new GatewayApiError(409, 'source_addition_paused')
       return api.saveSourceDraft(current.revision, source)
     }))
-    tools.push(tool('apply_mcp_source', 'Prepare a one-time OAuth handoff for an exact saved source draft. Installation starts denied to everyone; operator connection and an explicit Team grant are separate steps. Before the first provider write, installation disables automatic teardown and blocks older-runtime rollback; preparation alone does not. Return the authorization URL to the user; never approve it for them or request their token.', {
+    tools.push(tool('apply_mcp_source', 'Prepare a one-time OAuth handoff for an exact saved source draft only when no recorded action blocks it. Use list_mcp_source_actions after slow consent or a lost response; do not retry or recover the grant. Installation starts denied to everyone; operator connection and an explicit Team grant are separate steps. Before the first provider write, installation disables automatic teardown and blocks older-runtime rollback; preparation alone does not. Return the authorization URL to the user; never approve it for them or request their token.', {
       type: 'object', additionalProperties: false, required: ['sourceId'], properties: { sourceId: { type: 'string', pattern: SOURCE_ID } },
     }, v.strictObject({ sourceId: v.pipe(v.string(), v.regex(new RegExp(SOURCE_ID, 'u'))) }), mutation, async ({ sourceId }) => {
       const current = await api.getSources()
       if (!current.installationEnabled) throw new GatewayApiError(409, 'source_addition_paused')
+      const source = current.sources.find((candidate) => candidate.id === sourceId)
+      if (!source) throw new GatewayApiError(409, 'source_action_conflict', { reason: 'draft_changed' })
+      if (source.status === 'installed') return { status: 'installed', sourceId }
+      const sourceActions = await api.getSourceActions()
+      const blocking = sourceActions.blockingAction
+      if (blocking) throw new GatewayApiError(409, 'source_action_conflict', {
+        reason: blocking.kind !== 'source' ? 'lifecycle_pending' :
+          sourceActions.actions.some((action) => action.actionId === blocking.actionId && action.state === 'recovery_required') ? 'recovery_required' : 'source_pending',
+        action: blocking,
+      })
       return handoff(api, () => api.prepareSourceAction(current.revision, sourceId))
     }))
   }
