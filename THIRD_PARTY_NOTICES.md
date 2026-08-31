@@ -44,6 +44,11 @@ Their transitive dependencies and development-only test/build packages remain
 subject to their own licenses as identified by the package metadata and
 lockfile. No dependency license grants rights to a third-party trademark.
 
+The Ankka favicon is maintainer-supplied brand artwork, included by request for
+the gateway dashboard and hosted installer. No separate asset license or general
+trademark license was supplied; its provenance and permitted use are recorded
+in `ORIGINS.md`.
+
 The vendored anti-slop Oxlint plugin under `tools/oxlint/anti-slop/` is
 Copyright (c) 2026 Dillon Mulroy and licensed under the MIT License. Its full
 license text is retained in `tools/oxlint/anti-slop/LICENSE`. Oxlint and

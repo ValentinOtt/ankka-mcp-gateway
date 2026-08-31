@@ -19,6 +19,13 @@ do not contact `deploy.ankka.ai`, request installer OAuth, or enable a temporary
 `workers.dev` route. Cloudflare continues enforcing access at the Portal and
 source boundary.
 
+An administrator edits the complete roster and source assignments, then clicks
+**Save** once. The dashboard sends the batch to its own Worker; the Worker
+updates and verifies the receipt-owned Cloudflare Access policies. Team saves
+do not contact `deploy.ankka.ai`, request installer OAuth, or enable a temporary
+`workers.dev` route. Cloudflare continues enforcing access at the Portal and
+source boundary.
+
 The read-only view reports saved installation configuration, not a fresh
 Cloudflare policy read. It uses the runtime administrator list separately from
 the saved source audience. Changes made directly in Cloudflare are not reflected
@@ -261,6 +268,88 @@ reject legacy Team grant submissions too. No old installer grant is retained or
 converted into the new secret. Existing installer grants from other actions
 keep their bounded revocation and discard behavior. This release also includes the separately
 reviewed [updater redirect fix](UPDATER_REDIRECT_FIX.md).
+
+After migration, compatible forward code updates preserve the optional secret
+without reading its value or provisioning it. Rollback is refused when either
+the current or target version carries this secret, so it cannot resurrect old
+authority. Existing exact-binding teardown restrictions remain; deleting the
+secret or revoking the token does not restore automatic teardown after an armed
+Team write. Any removal or broader migration needs its own review.
+
+Do not rotate or remove the secret, or change Worker deployments directly,
+while an update is running. The updater rechecks the deployment before staging
+and activation and after its final health probe, and refuses automatic
+compensation over an observed unrelated
+deployment. The provider deployment calls used here have no atomic
+compare-and-swap guard: a change between the last read and write can still race.
+Coordinate these customer operations and review uncertain outcomes before retrying.
+
+## Migration from the v16 OAuth flow
+
+`gateway-v0.1.16` does not have this credential contract. Its code-only updater
+cannot silently add a secret, and its exact release-contract validation does
+not accept this changed binding contract. A retained Team proposal also blocks
+ordinary lifecycle operations. Do not bypass those checks or delete pending
+state to make an update proceed.
+
+Before live work, approve a maintenance deployment built from the reviewed
+current source with the new contract, preserving the existing Durable Object,
+source configuration, ownership receipts, credentials, and exact pending Team
+proposal and journal. Verify the current v16 bytes, current policies, and
+whether the proposal is unstarted or has uncertain writes; a previously blocked
+callback is not proof that nothing changed. Reconcile any uncertain provider
+state before proceeding. Keep unrelated dashboard and connector work out of an
+older maintenance checkout.
+
+The maintenance plan must also explicitly reconcile the release bookkeeping in
+the same customer Durable Object. Deploying new code alone leaves
+`ankka-mcp-gateway/runtime-updates/v1` at v16; `prepareRuntimeAction` deliberately
+refuses future updates when its `current.release` or `current.artifactSha256`
+differs from the deployed environment. Do not delete this key or add an
+automatic reset to make that check pass. This candidate provides no maintenance
+migration endpoint or command; the following narrow state transition still
+requires a reviewed customer-local migration mechanism before live migration:
+
+1. Capture and validate the existing update record and its revision. Resolve
+   any pending or uncertain runtime operation first; preserve the action
+   history without fabricating a successful update. Keep the Team proposal,
+   its journal, and all source/lifecycle records unchanged.
+2. Verify the maintenance release signature, exact deployed Worker bytes,
+   bindings, and sole active deployment at 100%. The new record's `current`
+   must contain that release identifier, its `sha256:`-prefixed aggregate
+   artifact digest, and the provider-verified active Worker version ID. Its
+   release and digest must equal `ANKKA_GATEWAY_RELEASE` and
+   `ANKKA_GATEWAY_RELEASE_SHA256`; neither the v16 digest nor a module-only
+   digest is valid.
+3. In a guarded storage transaction requiring the captured update record to
+   remain unchanged, preserve `schemaVersion: 1` and `actions`, advance
+   `revision` by one, and replace only `current` and the incompatible rollback
+   pointer. Set `previous: null`: v16's earlier binding contract is not a
+   supported rollback target. Preserve the old record in customer-controlled
+   migration evidence. If the update key is genuinely absent, explicitly
+   initialize the same verified current tuple with revision 1, no actions, and
+   no previous version; absence must not be manufactured by deleting it.
+4. Update only `release` and `updatedAt` in
+   `ankka-mcp-gateway/public-status/v1` to the verified release and verification
+   time. Re-read both records and the active deployment. Do not rewrite the
+   original ownership receipt, credentials, roster, source state,
+   `teardownDisabled`, or any recovery journal. Drift or ambiguous storage or
+   deployment outcomes require review, not a claimed completed migration.
+
+Deploy the compatible code without a token first, complete the reviewed
+bookkeeping transition, verify that Team fails closed,
+and check that the pending proposal is still visible. Provision the separate
+secret only after the standing authority is approved. Resume the same proposal
+locally with fresh before/after verification; never submit its old OAuth link.
+Only an administrator may explicitly cancel a provably unstarted proposal.
+In-flight or uncertain proposals must remain available for recovery.
+
+The hosted installer rejects both new and already-issued legacy Team OAuth
+handoffs before exchanging a code; the relay and new Worker reject legacy Team
+grant submissions too. No old installer grant is retained or converted into the
+new secret. Existing installer grants from other actions keep their bounded
+revocation and discard behavior. Callback redirect/load-listener fixes for
+installation and updates are separate work.
 
 After migration, compatible forward code updates preserve the optional secret
 without reading its value or provisioning it. Rollback is refused when either
