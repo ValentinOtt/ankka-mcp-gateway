@@ -116,9 +116,14 @@ export function memoryStorage(initial) {
       return value === undefined ? undefined : structuredClone(value);
     },
     async put(key, value) {
-      const owned = structuredClone(value);
-      values.set(key, owned);
-      writes.push({ key, value: structuredClone(owned) });
+      // Durable Object multi-key puts are atomic. Clone/validate the entire
+      // batch before exposing any entry, preserving the single-key write log.
+      // oxlint-disable-next-line anti-slop/no-runtime-typeof -- Storage API overload boundary: string key/value or a multi-key entries object.
+      const entries = structuredClone(typeof key === 'string' ? [[key, value]] : Object.entries(key));
+      for (const [entryKey, owned] of entries) {
+        values.set(entryKey, owned);
+        writes.push({ key: entryKey, value: structuredClone(owned) });
+      }
     },
     snapshot(key = STORAGE_KEY) {
       const value = values.get(key);

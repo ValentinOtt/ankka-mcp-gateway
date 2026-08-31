@@ -166,7 +166,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     <div>
       <PageHeader
         title="Sources"
-        description={installationEnabled ? 'Discover MCP tool catalogues, save deny-by-default allowlists, and apply each draft with a fresh one-time Cloudflare authorization.' : 'Review your existing MCP sources and their exact tool allowlists. New-source installation is paused in this release.'}
+        description={installationEnabled ? 'Install exact read-only tool allowlists with a one-time Cloudflare authorization. New sources start with nobody assigned; grant access separately in Team.' : 'Review your existing MCP sources and their exact tool allowlists. New-source installation is paused in this release.'}
         action={
           <Button variant="primary" className="pressable" disabled={!installationEnabled} onClick={() => setShowForm((visible) => !visible)}>
             {showForm ? <X size={16} /> : <Plus size={16} weight="bold" />}
@@ -176,6 +176,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       />
 
       {!installationEnabled ? <p role="status" className="notice-banner notice-neutral mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
+      {installationEnabled ? <p className="notice-banner notice-neutral mt-6">Before authorizing: once source provisioning starts, automatic gateway removal and rollback below this runtime release are unavailable. Saving a draft does not activate this restriction.</p> : null}
 
       {sourceNotice ? (
         <div role="status" className={`notice-banner mt-6 notice-${sourceNotice.tone}`}>

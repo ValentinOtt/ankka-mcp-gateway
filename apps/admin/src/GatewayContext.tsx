@@ -167,7 +167,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
             : await apiRef.current.getSourceAction(actionId)
           if (!active) return
           if (action.status === 'succeeded') {
-            setSourceNotice({ tone: 'success', message: 'Source installed and the Cloudflare MCP Portal was updated.' })
+            setSourceNotice({ tone: 'success', message: 'Source installed with nobody assigned. Connect its operator account if required, then grant access in Team.' })
             await reload()
             return
           }

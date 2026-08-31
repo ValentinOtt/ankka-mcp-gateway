@@ -254,7 +254,7 @@ describe('HttpGatewayAdminApi', () => {
       ['team_policy_drift', 'Cloudflare access policies no longer match'],
       ['team_management_credential_missing', 'ANKKA_TEAM_MANAGEMENT_TOKEN'],
       ['team_management_credential_invalid', 'Check its expiry, account, and Access permissions'],
-      ['team_teardown_requires_compatible_release', 'Teardown is paused'],
+      ['team_teardown_requires_compatible_release', 'Automatic removal is unavailable'],
     ] as const) {
       vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: code, detail: 'private provider detail' }, { status: 409 })))
       await expect(new HttpGatewayAdminApi().prepareTeamAction(1, [])).rejects.toEqual(expect.objectContaining({ code, message: expect.stringContaining(explanation) }))
