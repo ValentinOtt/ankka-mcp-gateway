@@ -97,3 +97,13 @@ retained gateway state.
 
 The original installation receipt remains the ownership authority for later
 removal, even after updates.
+
+Customer-local Team writes and default-deny source creation can establish a
+minimum compatible runtime before their first provider mutation. An older
+runtime cannot be restored below that recorded floor, and automatic teardown
+remains unavailable. A merely prepared source action or saved draft does not
+set the restriction. The optional Team-management secret also blocks rollback
+when present on the current or target version. See [Team access](TEAM_ACCESS.md)
+and [first-source qualification](FIRST_SOURCE_ONBOARDING.md); a normal code
+update does not provision credentials, grant source access, or clear these
+lifecycle restrictions.

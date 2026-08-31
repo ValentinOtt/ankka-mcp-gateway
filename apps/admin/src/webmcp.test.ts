@@ -331,6 +331,18 @@ describe('exact signed runtime target', () => {
 })
 
 describe('source pause and current state', () => {
+  it('discloses source grants and lifecycle restrictions before agent actions', () => {
+    const { tool, api } = fixture()
+    expect(tool('apply_mcp_source').description).toContain('denied to everyone')
+    expect(tool('apply_mcp_source').description).toContain('explicit Team grant')
+    expect(tool('apply_mcp_source').description).toContain('preparation alone does not')
+    for (const name of ['apply_mcp_source', 'save_gateway_team']) {
+      expect(tool(name).description).toContain('disables automatic teardown')
+      expect(tool(name).description).toContain('blocks older-runtime rollback')
+    }
+    expectNoApiCalls(api)
+  })
+
   it('omits source writes when installation is disabled', () => {
     const { tools, api } = fixture(false)
     expect(tools.map((tool) => tool.name).sort()).toEqual(names.filter((name) => !['save_mcp_source_draft', 'apply_mcp_source'].includes(name)).sort())

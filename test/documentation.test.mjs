@@ -9,6 +9,7 @@ const documents = [
   'docs/README.md',
   'docs/CUSTOMER_SELF_SERVICE.md',
   'docs/SECURITY_MODEL.md',
+  'docs/FIRST_SOURCE_ONBOARDING.md',
 ];
 
 function read(path) {

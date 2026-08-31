@@ -99,6 +99,14 @@ provider requests, and durable write intent remain required. Missing or invalid
 credentials and provider drift fail closed without a hosted OAuth fallback.
 An uncertain write retains its proposal and journal; it is not called a rollback.
 
+The default-deny source-onboarding candidate creates each new source with one
+exact deny-Everyone policy and verifies the complete policy list before Portal
+attachment. No person, including an administrator, receives a new source
+implicitly. Upstream operator authentication and a later Team grant are separate
+steps. Existing receipt audiences remain immutable; only the exact historical
+initial policy and the new empty-audience profile are recognized. Old prepared
+source actions cannot silently become new-profile authorizations.
+
 Legacy Team authorization and callbacks are refused by the installer before
 OAuth code exchange. The relay and new Worker also reject the old Team grant
 submission. No temporary `workers.dev` route is needed for a Team save. Other
@@ -142,6 +150,10 @@ secret from the exact verified current Worker version without revealing its
 value. Rollback is refused when the current or target version carries this secret. The original
 teardown restrictions remain, including after token revocation or binding
 deletion if any Team policy write may have occurred.
+New-profile source creation uses the same conservative floor/removal safeguard
+before its first provider mutation. Source discovery, draft saving, and action
+review do not arm it. This restriction is disclosed before source authorization
+and must be reviewed before release activation; it is not deletion authority.
 
 ## Logs and telemetry
 
@@ -181,5 +193,8 @@ guarantee does not claim that those providers process no metadata.
 - Read-only tool policy depends on both gateway configuration and upstream
   enforcement.
 - Worker rollback does not roll back Durable Object data.
+- Automatic teardown is unavailable after a potentially applied Team policy
+  write or new-profile source creation. Revoking the management credential or
+  restoring the original roster does not clear the recorded restriction.
 - Provider APIs can return ambiguous outcomes; the system stops for recovery
   instead of claiming success.

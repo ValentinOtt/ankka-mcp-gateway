@@ -95,12 +95,13 @@ Capability information describes what the installed release can attempt. It
 does not guarantee that a credential is valid, that Cloudflare is reachable,
 or that an action has already been approved. In particular:
 
-- The current release pauses new-source installation. Source discovery can
-  still inspect a candidate, but cannot install it. Draft/apply tools are not
-  offered when installation is disabled, and the server also rejects bypasses.
-- A fresh empty gateway has no supported first-source onboarding path during
-  this pause. Do not describe inspection, a saved draft, or an existing-source
-  Team grant as successful onboarding.
+- Published v19 gateways pause new-source installation. Draft/apply tools are
+  not offered when installation is disabled, and the server rejects bypasses.
+- The default-deny onboarding candidate restores draft/apply tools when
+  installation is enabled. Source creation grants nobody access: complete the
+  operator connection, then explicitly grant the installed source in Team.
+  Inspection, a draft, or resource creation alone is not completed onboarding.
+  See [first-source qualification](FIRST_SOURCE_ONBOARDING.md).
 - Team's saved roster is not a fresh Cloudflare policy read. Out-of-band
   changes in Cloudflare may cause the next save to refuse policy drift.
 - `managementCredentialConfigured` means a binding exists, not that its
@@ -178,8 +179,8 @@ For an update or rollback:
    back when Worker code changes.
 
 Teardown continues to require the installation receipt and bounded resource
-ownership checks. It is unavailable when the current release cannot safely
-reconcile previously armed Team policy writes. This adapter cannot lift that
+ownership checks. It is unavailable after previously armed Team policy writes
+or new-profile source creation. This adapter cannot lift that
 restriction, cancel arbitrary runtime or teardown actions, clear the receipt,
 or remove unrelated provider resources. After successful removal the gateway's
 own status endpoint may no longer exist; use the installer result and normal
@@ -239,9 +240,11 @@ credentials, handoff fragments, cookies, or personal rosters.
   refresh/navigation, and are removed when their owning page is gone.
 - Every tool rejects unknown arguments. Malformed inputs, unexpected exceptions,
   and expired Access sessions return safe errors without provider writes.
-- With source installation paused, the draft/apply tools are absent and direct
-  calls cannot bypass the server restriction. An empty gateway is accurately
-  described as unable to onboard its first source.
+- When source installation is disabled, draft/apply tools are absent and direct
+  calls cannot bypass the restriction. When enabled, saving a draft retains
+  that capability, installation starts with no audience, and an explicit Team
+  save is required for access. Old signed source actions cannot bypass the
+  new profile. Report incomplete operator authentication or grants honestly.
 - Team read exposes the saved revision, shared source tools, credential status,
   and retained proposal. A synthetic reviewed save uses the entire roster.
   Stale revisions, missing administrators, extra fields, unknown sources, and
