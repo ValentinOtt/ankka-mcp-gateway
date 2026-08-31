@@ -115,19 +115,19 @@ Open the management URL and authenticate through your Cloudflare Access policy.
 access grant. The upstream connection and a reviewed Team assignment are
 separate steps. Gateways still on the published v19 preview cannot add sources.
 
-- **Overview** shows gateway status, the MCP URL, current release, audience,
-  and source state.
-- **Sources** shows sources and their selected tools. When the installed
+- **Sources** is the home page, with a copyable MCP Gateway URL and a searchable
+  source list. Expand a source to inspect its selected tools. When the installed
   runtime enables installation, save and authorize a reviewed draft here.
   New sources start denied; old prepared installation links cannot silently
   acquire the new default-deny authorization profile.
-- **Team** manages who may connect and which existing sources each person can
-  use. Administrator rights remain fixed; tool allowlists are shared per source.
+- **Team** manages users and their source access in one list, with an Add user
+  dialog. Administrator rights remain fixed; tool allowlists are shared per source.
   One Save sends the complete batch to your own Worker, which updates and
   verifies your Access policies without contacting Ankka or starting OAuth.
   See [Team access](TEAM_ACCESS.md) for verification and recovery limits.
 - **Settings** checks the installed signed release channel, prepares an
-  update or rollback, and contains the removal entry point. Older canary
+  update or rollback, and contains the removal entry point in its danger zone.
+  The sidebar footer shows the installed version and any available update. Older canary
   versions may label the update screen **Updates**; the current source keeps
   `/updates` as a redirect to `/settings`.
 

@@ -337,21 +337,21 @@ async function derivedBootstrapClaim(
 }
 
 /** The current hosted wizard's empty-Portal bootstrap claim. */
-export async function portalOnlyClaim(requestId = 'A'.repeat(22)) {
+export async function portalOnlyClaim(requestId = 'A'.repeat(22), memberEmails = ['owner@example.com']) {
   return derivedBootstrapClaim({
     schemaVersion: 1,
     connect: { name: GATEWAY_NAME, hostname: HOSTNAME, codeMode: 'default_on' },
-    access: { adminEmails: ['admin@example.com'], memberEmails: ['owner@example.com'] },
+    access: { adminEmails: ['admin@example.com'], memberEmails },
     sources: [],
   }, requestId, BOOTSTRAP_GRANT);
 }
 
-/** A valid claim at every variable-sized bootstrap field's supported maximum. */
+/** A large valid claim with maximum-length fields and more than 51 users. */
 export async function maximumBootstrapClaim(requestId = 'A'.repeat(22)) {
   const emailDomain = `${'d'.repeat(185)}.com`;
   const zoneName = `${'z'.repeat(63)}.${'z'.repeat(63)}.${'z'.repeat(61)}`;
   const portalHostname = `${'m'.repeat(63)}.${zoneName}`;
-  const memberEmails = Array.from({ length: 50 }, (_value, index) => (
+  const memberEmails = Array.from({ length: 60 }, (_value, index) => (
     `m${String(index).padStart(2, '0')}${'x'.repeat(61)}@${emailDomain}`
   ));
   const sourceUrlPrefix = 'https://source.example.net/';

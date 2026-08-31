@@ -223,16 +223,18 @@ describe('HttpGatewayAdminApi', () => {
     expect(fetch).toHaveBeenCalledWith(`/api/team-actions/${actionId}`, expect.objectContaining({ method: 'DELETE', credentials: 'same-origin', redirect: 'error', body: '{}' }))
   })
 
-  it('bounds the Team response before rendering people, source assignments, and tools', async () => {
+  it('accepts larger Team rosters while retaining field, source, and tool validation', async () => {
     const person = { email: 'teammate@example.com', sourceIds: [] }
     const source = { id: 'source-1111111111111111', label: 'Knowledge', enabledTools: ['search'], status: 'installed' }
     const validTeam = {
       schemaVersion: 1, revision: 4, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
       members: [person], adminEmails: ['admin@example.com'], sources: [source], pendingAction: null, proposedMembers: null,
     }
+    const members = Array.from({ length: 100 }, (_, index) => ({ email: `user${index}@example.com`, sourceIds: [] }))
+    const largeTeam = { ...validTeam, members, proposedMembers: members, adminEmails: members.map(({ email }) => email) }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(largeTeam)))
+    expect(await new HttpGatewayAdminApi().getTeam()).toEqual(largeTeam)
     for (const invalid of [
-      { members: Array(52).fill(person) },
-      { proposedMembers: Array(52).fill(person) },
       { members: [{ ...person, sourceIds: Array(33).fill(source.id) }] },
       { sources: Array(33).fill(source) },
       { sources: [{ ...source, enabledTools: Array(501).fill('search') }] },

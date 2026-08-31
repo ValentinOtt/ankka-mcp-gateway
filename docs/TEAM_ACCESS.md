@@ -69,8 +69,9 @@ projection for existing sources.
 - An empty source audience becomes `decision: "deny"` with
   `include: [{"everyone": {}}]`. It never becomes an empty Allow rule or an
   Allow-everyone rule.
-- The current limits are 51 people, 32 sources, and 500 selected tools per
-  source. This preserves the runtime's existing bounds.
+- There is no fixed gateway user-count cap. Cloudflare's subscription seat
+  allowance and Access policy limits still apply. Existing request-size limits
+  remain in place, as do the bounds of 32 sources and 500 selected tools per source.
 
 Source Access policies apply to the human Portal identity independently of
 `on_behalf: false`. The Portal may continue using its stored operator credential;

@@ -1,12 +1,15 @@
-import { Button, Input } from '@cloudflare/kumo'
-import { ArrowRight, Database, GlobeSimple, LockKey, MagnifyingGlass, Plus, ShieldCheck, X } from '@phosphor-icons/react'
+import { Input } from '@cloudflare/kumo'
+import { Button } from '../components/Button'
+import { ArrowRight, Database, GlobeSimple, MagnifyingGlass, Plus, X } from '@phosphor-icons/react'
 import { type FormEvent, useMemo, useState } from 'react'
 import { GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type SourceDiscovery } from '../api'
 import { SOURCE_CATALOG, type SourceCatalog, type SourceCatalogSource } from '../catalog'
 import { useGateway } from '../GatewayContext'
+import { GatewayEndpoint } from '../components/GatewayEndpoint'
 import { PageHeader } from '../components/PageHeader'
 import { NativeConnectorGuides } from '../components/NativeConnectorGuides'
 import { StatusPill } from '../components/StatusPill'
+import { SourceList } from '../components/SourceList'
 
 function annotation(tool: SourceDiscovery['tools'][number]): string {
   const flags = []
@@ -166,7 +169,6 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     <div>
       <PageHeader
         title="Sources"
-        description={installationEnabled ? 'Install exact read-only tool allowlists with a one-time Cloudflare authorization. New sources start with nobody assigned; grant access separately in Team.' : 'Review your existing MCP sources and their exact tool allowlists. New-source installation is paused in this release.'}
         action={
           <Button variant="primary" className="pressable" disabled={!installationEnabled} onClick={() => setShowForm((visible) => !visible)}>
             {showForm ? <X size={16} /> : <Plus size={16} weight="bold" />}
@@ -175,8 +177,10 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
         }
       />
 
-      {!installationEnabled ? <p role="status" className="notice-banner notice-neutral mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
-      {installationEnabled ? <p className="notice-banner notice-neutral mt-6">Before authorizing: once source provisioning starts, automatic gateway removal and rollback below this runtime release are unavailable. Saving a draft does not activate this restriction.</p> : null}
+      <GatewayEndpoint />
+
+      {!installationEnabled ? <p role="status" className="notice-banner notice-warning mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
+      {installationEnabled ? <p className="notice-banner notice-warning mt-6">Before authorizing: once source provisioning starts, automatic gateway removal and rollback below this runtime release are unavailable. Saving a draft does not activate this restriction.</p> : null}
 
       {sourceNotice ? (
         <div role="status" className={`notice-banner mt-6 notice-${sourceNotice.tone}`}>
@@ -189,8 +193,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
         <section className="surface-card mt-7 p-5 sm:p-6" aria-labelledby="add-source-title">
           <div className="flex flex-col justify-between gap-4 border-b border-kumo-line pb-5 sm:flex-row sm:items-start">
             <div>
-              <h2 id="add-source-title" className="text-base font-semibold text-kumo-strong">Add an MCP source</h2>
-              <p className="mt-1 max-w-[65ch] text-sm leading-6 text-kumo-subtle">The gateway reads the public catalogue or verifies the standard OAuth challenge. This form never accepts credentials.</p>
+              <h2 id="add-source-title" className="text-base font-semibold text-subheading">Add an MCP source</h2>
+              <p className="mt-1 max-w-[65ch] text-sm leading-6 text-kumo-subtle">Choose allowed tools. New sources start with nobody assigned; grant access in Team. Do not enter credentials here.</p>
             </div>
             <StatusPill tone="attention">Exact tools only</StatusPill>
           </div>
@@ -231,7 +235,6 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                 {catalog.sources.map((source) => (
                   <article key={source.sourceId} className="catalog-source-card">
                     <div className="flex flex-wrap gap-2">
-                      <StatusPill tone="ready">Ankka reviewed</StatusPill>
                       <StatusPill tone="waiting">{source.implementation.connection.authMode === 'oauth' ? 'OAuth' : 'Public'}</StatusPill>
                     </div>
                     <h3 className="mt-4 text-sm font-semibold text-kumo-strong">{source.displayName}</h3>
@@ -251,8 +254,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
               <div className="mt-5 rounded-xl border border-kumo-line bg-kumo-tint/55 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.04em] text-brand">Reviewed starting point</p>
-                    <h3 className="mt-1 text-sm font-semibold text-kumo-strong">{catalogSource.displayName}</h3>
+                    <h3 className="text-sm font-semibold text-kumo-strong">{catalogSource.displayName}</h3>
                     <p className="mt-1 text-xs leading-5 text-kumo-subtle">
                       Expected {catalogSource.implementation.connection.authMode === 'oauth' ? 'operator-connected OAuth' : 'public access'}. Live inspection must confirm it before you can save.
                     </p>
@@ -296,7 +298,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
               <section className="mt-6 border-t border-kumo-line pt-6" aria-labelledby="catalogue-title">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <h3 id="catalogue-title" className="text-sm font-semibold text-kumo-strong">Tool allowlist</h3>
+                    <h3 id="catalogue-title" className="text-sm font-semibold text-subheading">Tool allowlist</h3>
                     <p className="mt-1 text-xs leading-5 text-kumo-subtle">
                       {discovery.authentication === 'oauth' && discovery.tools.length === 0
                         ? catalogSource
@@ -309,8 +311,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                 </div>
 
                 {discovery.connectionBlock ? (
-                  <p className="mt-5 rounded-xl border border-kumo-line bg-kumo-tint/55 p-4 text-xs leading-5 text-kumo-subtle" role="alert">
-                    <strong className="block text-sm text-kumo-strong">Google connection blocked</strong>
+                  <p className="mt-5 rounded-xl border border-warning/30 bg-warning-soft p-4 text-xs leading-5 text-warning-strong" role="alert">
+                    <strong className="block text-sm">Google connection blocked</strong>
                     {GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE}{' '}
                     <a className="underline" href="https://github.com/ValentinOtt/ankka-mcp-gateway/blob/main/docs/BIGQUERY_GOOGLE_AUTH.md" target="_blank" rel="noreferrer">BigQuery setup guide</a>
                   </p>
@@ -318,12 +320,11 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
 
                 {discovery.authentication === 'oauth' && discovery.tools.length === 0 ? (
                   <div className="mt-5">
-                    {!discovery.connectionBlock ? <p className="mb-5 rounded-xl border border-kumo-line bg-kumo-tint/55 p-4 text-xs leading-5 text-kumo-subtle">
-                      <strong className="block text-sm text-kumo-strong">One Gateway login</strong>
-                      A gateway operator connects this source once in Cloudflare. Team members are not asked for a second source login.
+                    {!discovery.connectionBlock ? <p className="mb-5 text-xs leading-5 text-kumo-subtle">
+                      Connect this source as a gateway operator. The connection is shared with team members who have access.
                     </p> : null}
                     <label htmlFor="manual-tools" className="mb-1.5 block text-sm font-medium text-kumo-default">Exact tool names</label>
-                    <textarea id="manual-tools" className="text-input min-h-32 w-full font-mono" placeholder={'search\nfetch_document'} value={manual} onChange={(event) => setManual(event.target.value)} />
+                    <textarea id="manual-tools" className="text-input min-h-32 w-full" placeholder={'search\nfetch_document'} value={manual} onChange={(event) => setManual(event.target.value)} />
                     <p className="mt-1.5 text-xs leading-5 text-kumo-subtle">One exact tool per line. Wildcards are never accepted.</p>
                   </div>
                 ) : (
@@ -413,46 +414,13 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           <div className="empty-card">
             <div className="flex size-12 items-center justify-center rounded-2xl bg-kumo-tint text-kumo-subtle"><Database size={23} /></div>
             <h2 className="mt-4 text-base font-semibold text-kumo-strong">No sources yet</h2>
-            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Start with one useful MCP server and an exact allowlist you have independently verified as read-only.' : 'Source installation will be available in a compatible gateway release.'}</p>
+            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Add an MCP source and verify that each allowed tool is read-only.' : 'Source installation will be available in a compatible gateway release.'}</p>
             <Button variant="secondary" className="pressable mt-5" disabled={!installationEnabled} onClick={() => setShowForm(true)}><Plus size={16} weight="bold" /> Add your first source</Button>
           </div>
         ) : (
-          <div className="grid gap-3">
-            {sources.sources.map((source) => (
-              <article key={source.id} className="surface-card px-5 py-4 sm:px-6 sm:py-5">
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2.5">
-                      <h2 className="text-sm font-semibold text-kumo-strong">{source.label}</h2>
-                      <StatusPill tone={source.status === 'installed' ? 'ready' : 'attention'}>{source.status === 'installed' ? 'Installed' : 'Saved draft'}</StatusPill>
-                      <StatusPill tone="waiting">{source.authMode === 'oauth'
-                        ? source.onBehalfOfUser ? 'Legacy user-bound OAuth' : 'Operator-connected OAuth'
-                        : 'Public'}</StatusPill>
-                    </div>
-                    <p className="mt-1.5 truncate font-mono text-xs text-kumo-subtle">{source.url}</p>
-                  </div>
-                  {source.status === 'draft' ? (
-                    <Button variant="primary" className="pressable shrink-0" disabled={!installationEnabled} loading={isBusy} onClick={() => void authorize(source.id)}>{installationEnabled ? 'Authorize and apply' : 'Installation unavailable'}</Button>
-                  ) : null}
-                </div>
-                <details className="mt-4 border-t border-kumo-line pt-4">
-                  <summary className="cursor-pointer text-xs font-medium text-kumo-subtle">
-                    {source.enabledTools.length} exact tool{source.enabledTools.length === 1 ? '' : 's'}
-                  </summary>
-                  <div className="mt-3 flex max-h-52 flex-wrap gap-2 overflow-y-auto pr-1">
-                    {source.enabledTools.map((tool) => <code key={tool} className="tool-chip">{tool}</code>)}
-                  </div>
-                </details>
-              </article>
-            ))}
-          </div>
+          <SourceList sources={sources.sources} installationEnabled={installationEnabled} isBusy={isBusy} onAuthorize={(sourceId) => void authorize(sourceId)} />
         )}
       </section>
-
-      <aside className="mt-5 grid gap-3 rounded-xl border border-kumo-line bg-kumo-tint/55 p-4 sm:grid-cols-2">
-        <div className="flex gap-3"><ShieldCheck size={18} className="mt-0.5 shrink-0 text-success-strong" weight="fill" /><p className="text-xs leading-5 text-kumo-subtle"><strong className="text-kumo-strong">Deny by default</strong><br />Only the frozen exact names are mapped.</p></div>
-        <div className="flex gap-3"><LockKey size={18} className="mt-0.5 shrink-0 text-kumo-subtle" /><p className="text-xs leading-5 text-kumo-subtle"><strong className="text-kumo-strong">No credential forwarding</strong><br />Source OAuth credentials remain inside Cloudflare.</p></div>
-      </aside>
     </div>
   )
 }

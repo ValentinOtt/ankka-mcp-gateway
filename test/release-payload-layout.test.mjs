@@ -17,12 +17,12 @@ const COMPONENTS = Object.freeze({
 });
 const TREE_SHA256 = Object.freeze({
   installer: '1f04eb98e67a272a21aeef1f9eba5f6fb997c6a312a253f3425ff90ae9ea99ee',
-  worker: 'e65ae6e786cd7b5a98b633cdf6ed9cfbf61d4b5e95d4e95cce370b6418c601dd',
-  'worker-cleanup': '294518970598816944bae9e5e6f6411d3aa7ce00238e81e6b5abebb6b449e46f',
+  worker: 'b4ecadc4c969ea448c70b0f7be703e9e66703bd4a08e00b1c8807a32db3ce241',
+  'worker-cleanup': '417ff8beb85d4c7122d57052f873914173b9b37456bc0d134c69dd0dbdccdf1d',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
 const FROZEN_LIFECYCLE_SHA256 = Object.freeze({
-  'worker-cleanup/index.js': '53f8c1785c4b7ff2638a372f8da9cf93393cc9e2f89c4f7be81b5879b744d75b',
+  'worker-cleanup/index.js': '5e6f32d9d578bb2facb58f7ff6a8d244db2538a55d76c439027413b7226a9261',
   'worker-retirement/index.js': '506e91323d6f6c89398a15799bfcde6cb4d271a5d6bf28a4fbbd422331751bda',
 });
 const CONTENT_TYPES = Object.freeze({
@@ -272,7 +272,7 @@ test('admin assets provide safe source discovery, signed updates, one-time apply
   ]) {
     assert.ok(script.includes(tool));
   }
-  assert.match(script, /one-time Cloudflare authorization/iu);
+  assert.match(script, /one-time OAuth handoff/iu);
   assert.match(script, /No sources yet/u);
   assert.match(script, /release channel/u);
   assert.match(script, /untrustedContentHint/u);
@@ -297,9 +297,10 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
   assert.match(adminCss, /:focus-visible/u);
   assert.match(adminCss, /@media\s*\(prefers-reduced-motion:\s*reduce\)/u);
   assert.doesNotMatch(adminCss, /@font-face|\.ttf|\.otf/iu);
-  assert.match(adminCss, /--color-canvas:#fbfaf6/u);
-  assert.match(adminCss, /--color-brand:#3d132c/u);
-  assert.match(adminCss, /--color-sidebar:#250e1c/u);
+  assert.match(adminCss, /--color-canvas:#191919/u);
+  assert.match(adminCss, /--color-brand:#dedede/u);
+  assert.match(adminCss, /--color-sidebar:#131313/u);
+  assert.match(adminCss, /--font-mono:var\(--font-sans\)/u);
 
   const installerCss = await readFile(new URL('installer/assets/installer-b89856ad.css', ROOT), 'utf8');
   {

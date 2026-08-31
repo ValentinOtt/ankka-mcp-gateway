@@ -147,7 +147,6 @@ const teamActionResultSchema = v.strictObject({
     status: v.picklist(['applying', 'succeeded', 'failed', 'recovery_required']),
   }),
 })
-export const TEAM_MAX_PEOPLE = 51
 const TEAM_MAX_SOURCES = 32
 const teamEmailSchema = v.pipe(v.string(), v.minLength(1), v.maxLength(254))
 const teamSourceIdSchema = v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u))
@@ -155,7 +154,7 @@ const teamMemberSchema = v.strictObject({
   email: teamEmailSchema,
   sourceIds: v.pipe(v.array(teamSourceIdSchema), v.maxLength(TEAM_MAX_SOURCES)),
 })
-const teamMembersSchema = v.pipe(v.array(teamMemberSchema), v.maxLength(TEAM_MAX_PEOPLE))
+const teamMembersSchema = v.array(teamMemberSchema)
 const teamSchema = v.strictObject({
   schemaVersion: v.literal(1),
   revision: v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(Number.MAX_SAFE_INTEGER - 1)),
@@ -163,7 +162,7 @@ const teamSchema = v.strictObject({
   editingDisabledReason: v.nullable(v.picklist(['release_review_required', 'lifecycle_action_pending'])),
   managementCredentialConfigured: v.boolean(),
   members: teamMembersSchema,
-  adminEmails: v.pipe(v.array(teamEmailSchema), v.minLength(1), v.maxLength(TEAM_MAX_PEOPLE)),
+  adminEmails: v.pipe(v.array(teamEmailSchema), v.minLength(1)),
   sources: v.pipe(v.array(v.strictObject({
     id: teamSourceIdSchema,
     label: v.pipe(v.string(), v.minLength(1), v.maxLength(80)),

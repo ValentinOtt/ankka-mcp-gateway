@@ -1,5 +1,5 @@
-// Canonical bounded email-audience projection shared by runtime and unit tests.
-const TEAM_MAX_PEOPLE = 51;
+// Canonical email-audience projection shared by runtime and unit tests.
+// Request byte limits bound input size; Cloudflare enforces its own seat allowance.
 const TEAM_MAX_SOURCES = 32;
 const TEAM_EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u;
 const TEAM_SOURCE_ID = /^[a-z][a-z0-9-]{0,31}$/u;
@@ -73,7 +73,7 @@ function teamEmail(value) {
 }
 
 function teamEmails(values, minimum = 0) {
-  if (!Array.isArray(values) || values.length < minimum || values.length > TEAM_MAX_PEOPLE) teamFail();
+  if (!Array.isArray(values) || values.length < minimum) teamFail();
   const emails = [];
   for (const value of values) emails.push(teamEmail(value));
   if (new Set(emails).size !== emails.length) teamFail();
@@ -107,7 +107,7 @@ function teamContext(context) {
 }
 
 function teamMembers(values, context) {
-  if (!Array.isArray(values) || values.length === 0 || values.length > TEAM_MAX_PEOPLE) teamFail();
+  if (!Array.isArray(values) || values.length === 0) teamFail();
   const emails = new Set();
   const members = [];
   for (const value of values) {
@@ -164,8 +164,7 @@ function teamPolicyAudience(policy) {
         !teamKeys(policy.include[0].everyone, [])) teamFail();
     return [];
   }
-  if (policy.decision !== 'allow' || policy.include.length === 0 ||
-      policy.include.length > TEAM_MAX_PEOPLE) teamFail();
+  if (policy.decision !== 'allow' || policy.include.length === 0) teamFail();
   const emails = [];
   for (const rule of policy.include) {
     if (!teamKeys(rule, ['email']) || !teamKeys(rule.email, ['email'])) teamFail();
@@ -604,7 +603,7 @@ function normalizedEmail(value) {
   return email.length <= 254 && EMAIL.test(email) ? email : null;
 }
 
-function exactSortedUniqueStrings(value, parser, maximum, minimum = 0) {
+function exactSortedUniqueStrings(value, parser, maximum = Infinity, minimum = 0) {
   if (!Array.isArray(value) || value.length < minimum || value.length > maximum) return null;
   const parsed = [];
   for (const entry of value) {
@@ -1333,7 +1332,7 @@ function parseSettings(value) {
       !exactKeys(value.access, ['adminEmails', 'memberEmails']) ||
       !Array.isArray(value.sources) || value.sources.length > 1) return null;
   const adminEmails = exactSortedUniqueStrings(value.access.adminEmails, normalizedEmail, 1, 1);
-  const memberEmails = exactSortedUniqueStrings(value.access.memberEmails, normalizedEmail, 50);
+  const memberEmails = exactSortedUniqueStrings(value.access.memberEmails, normalizedEmail);
   if (!adminEmails || !memberEmails || adminEmails.some((email) => memberEmails.includes(email))) return null;
   if (value.sources.length === 0) {
     return Object.freeze({
@@ -2360,7 +2359,7 @@ function safeManagementControl(value) {
       !RESOURCE_KEY.test(value.portal.marker.slice(`acg:v1:${value.installationId}:`.length))) {
     return null;
   }
-  const audienceEmails = exactSortedUniqueStrings(value.audienceEmails, normalizedEmail, 51, 1);
+  const audienceEmails = exactSortedUniqueStrings(value.audienceEmails, normalizedEmail, undefined, 1);
   if (!audienceEmails || !Array.isArray(value.sourceOwnership) || value.sourceOwnership.length > 32) return null;
   const sourceOwnership = [];
   const sourceProviderLocators = new Set();
@@ -4324,7 +4323,7 @@ function accessConfiguration(env) {
   const emails = isText(env.ADMIN_EMAILS)
     ? [...new Set(env.ADMIN_EMAILS.split(',').map(normalizedEmail).filter(Boolean))].sort(compareText)
     : [];
-  if (emails.length < 1 || emails.length > 20) return null;
+  if (emails.length < 1) return null;
   return Object.freeze({ aud: env.CF_ACCESS_AUD, issuer: issuer.origin, emails: Object.freeze(emails) });
 }
 

@@ -28,7 +28,7 @@ import {
   validHandoffUrl,
 } from './api'
 
-type Notice = { tone: 'neutral' | 'success' | 'error'; message: string } | null
+type Notice = { tone: 'neutral' | 'success' | 'warning' | 'error'; message: string } | null
 
 interface GatewayContextValue {
   api: GatewayAdminApi
@@ -183,7 +183,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
           if (!active) return
           setSources((current) => current && current.revision > currentSources.revision ? current : currentSources)
           if (currentSources.installationEnabled !== true) {
-            setSourceNotice({ tone: 'neutral', message: SOURCE_ADDITION_PAUSED_MESSAGE })
+            setSourceNotice({ tone: 'warning', message: SOURCE_ADDITION_PAUSED_MESSAGE })
             return
           }
           if (Date.parse(action.expiresAt) <= Date.now()) {

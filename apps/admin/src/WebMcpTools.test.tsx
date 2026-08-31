@@ -135,7 +135,7 @@ describe('WebMcpTools', () => {
       expect(screen.getByText('Revision 7')).toBeVisible()
       expect(screen.queryByRole('group', { name: 'agent-added@example.com' })).not.toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
-      await user.click(screen.getByRole('button', { name: 'Refresh' }))
+      await user.click(screen.getByRole('button', { name: 'Try again' }))
     }
     expect(await screen.findByText('Revision 8')).toBeVisible()
     expect(screen.getByRole('group', { name: 'agent-added@example.com' })).toBeVisible()

@@ -407,6 +407,66 @@ test('Team applies only exact native source audiences and preserves original rec
   assert.equal(stale.status, 409);
 }));
 
+test('Team saves, reloads, and revokes exact audiences above the former user cap', async () => fixture(async (gateway) => {
+  const initial = await gateway.view();
+  const members = [
+    { email: ADMIN, sourceIds: [] },
+    { email: OWNER, sourceIds: [] },
+    ...Array.from({ length: 100 }, (_value, index) => ({
+      email: `user-${String(index).padStart(3, '0')}@example.com`, sourceIds: [initial.sources[0].id],
+    })),
+  ];
+  const saved = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: initial.revision, members,
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal((await saved.json()).action.status, 'succeeded');
+  const next = await gateway.view();
+  assert.deepEqual(next.members, members);
+  assert.deepEqual(policy(gateway, 'mcp_portal').include.map(({ email }) => email.email), members.map(({ email }) => email));
+  assert.deepEqual(policy(gateway).include.map(({ email }) => email.email), members.slice(2).map(({ email }) => email));
+  const revoked = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: next.revision, members: members.slice(0, -1),
+  } });
+  assert.equal(revoked.status, 200, await revoked.clone().text());
+  assert.deepEqual((await gateway.view()).members, members.slice(0, -1));
+  assert.deepEqual(policy(gateway).include.map(({ email }) => email.email), members.slice(2, -1).map(({ email }) => email));
+}));
+
+test('Team accepts larger administrator configurations without changing administrator requirements', async () => fixture(async (gateway) => {
+  const administrators = [ADMIN, OWNER, ...Array.from({ length: 60 }, (_value, index) => `user-${index}@example.com`)].sort();
+  gateway.env.ADMIN_EMAILS = administrators.join(',');
+  const view = await gateway.view();
+  assert.deepEqual(view.adminEmails, administrators);
+  assert.ok(administrators.every((email) => view.members.some((member) => member.email === email)));
+  const baseline = gateway.provider.requests.length;
+  const response = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: view.revision, members: view.members.filter(({ email }) => email !== administrators.at(-1)),
+  } });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'team_access_admin_required' });
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('Team still rejects oversized roster requests before storing or changing access', async () => fixture(async (gateway) => {
+  const initial = await gateway.view();
+  const input = {
+    schemaVersion: 1, expectedRevision: initial.revision,
+    members: [...initial.members, ...Array.from({ length: 2500 }, (_value, index) => ({
+      email: `user-${index}@example.com`, sourceIds: [],
+    }))],
+  };
+  assert.ok(Buffer.byteLength(canonicalJson(input)) > 96 * 1024);
+  const baseline = gateway.provider.requests.length;
+  const response = await gateway.api('/api/team-actions', { method: 'POST', body: input });
+  assert.ok([400, 409, 413].includes(response.status), await response.clone().text());
+  assertNoMutation(gateway.provider, baseline);
+  const after = await gateway.view();
+  assert.equal(after.revision, initial.revision);
+  assert.deepEqual(after.members, initial.members);
+  assert.equal(after.pendingAction, null);
+}));
+
 test('missing customer management credential retains the proposal and never falls back to any installer or source credential', async () => fixture(async (gateway) => {
   delete gateway.env.ANKKA_TEAM_MANAGEMENT_TOKEN;
   const view = await gateway.view();
