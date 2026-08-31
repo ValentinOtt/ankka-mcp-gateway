@@ -160,6 +160,7 @@ async function fixture(run, claimInput) {
   }
   const managementStorage = gateway.objects.get('v1:management').storage;
   const managementRequests = [];
+  let sourceRequestHook;
   const network = async (request) => {
     if (request.headers.get('authorization') === `Bearer ${SYNTHETIC_MANAGEMENT_TOKEN}`) {
       const url = new URL(request.url);
@@ -175,6 +176,7 @@ async function fixture(run, claimInput) {
       return Response.json({ keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] });
     }
     if (request.url === NEW_SOURCE_URL) {
+      await sourceRequestHook?.(request);
       const message = await request.json();
       if (message.method === 'initialize') return Response.json({ jsonrpc: '2.0', id: message.id, result: {
         protocolVersion: '2026-07-28', capabilities: { tools: {} }, serverInfo: { name: 'Synthetic source', version: '1' },
@@ -188,7 +190,10 @@ async function fixture(run, claimInput) {
     return provider.fetch(request);
   };
   return withProviderFetch(network, () => run({ ...gateway, api, view, draft, apply, teardown,
-    headers, managementStorage, managementRequests }));
+    headers, managementStorage, managementRequests,
+    onSourceRequest(hook) { sourceRequestHook = hook; },
+    reloadManagement() { instances.delete('v1:management'); },
+  }));
 }
 
 function changedRequest(view) {
@@ -955,6 +960,210 @@ test('source installation preserves administrator and same-origin authorization'
   assert.equal(gateway.provider.requests.length, baseline);
 }));
 
+test('slow consent is discoverable after reload and repeated Apply points to the same source action', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  const retained = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+  const baseline = gateway.provider.requests.length;
+  let sourceRequests = 0;
+  gateway.onSourceRequest(() => { sourceRequests += 1; });
+  const pointer = { kind: 'source', actionId: prepared.claim.actionId, sourceId: prepared.source.id };
+  for (let tab = 0; tab < 2; tab += 1) {
+    gateway.reloadManagement();
+    const response = await gateway.api('/api/source-actions');
+    assert.equal(response.status, 200);
+    const snapshot = await response.json();
+    assert.deepEqual(snapshot.blockingAction, pointer);
+    assert.equal(snapshot.actions.length, 1);
+    const action = snapshot.actions[0];
+    assert.equal(action.state, 'authorization_required');
+    assert.equal(action.canCancel, true);
+    assert.equal(action.issuedAt, new Date(retained.actions[0].issuedAt).toISOString());
+    assert.equal(action.expiresAt, new Date(prepared.claim.expiresAt).toISOString());
+    assert.doesNotMatch(canonicalJson(snapshot), /actionKey|actorEmail|accountId|provider|resources|sourceHash|cloudflareAccessToken|handoffUrl|catalog\.example/iu);
+    const duplicate = await gateway.api('/api/source-actions', { method: 'POST', body: {
+      schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id,
+    } });
+    assert.equal(duplicate.status, 409);
+    assert.deepEqual(await duplicate.json(), { schemaVersion: 1, error: 'source_action_conflict',
+      reason: 'source_pending', action: pointer });
+  }
+  assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), retained);
+  assert.equal(sourceRequests, 0, 'duplicate preparation stops before remote discovery');
+  assertNoMutation(gateway.provider, baseline);
+  const otherAdmin = await (await gateway.api('/api/source-actions', { email: OWNER })).json();
+  assert.equal(otherAdmin.actions[0].canCancel, false);
+  assert.equal((await gateway.api(`/api/source-actions/${prepared.claim.actionId}`, { method: 'DELETE', email: OWNER })).status, 409);
+  assert.equal((await gateway.api('/api/source-actions', { email: MEMBER })).status, 401);
+  assert.equal((await worker.fetch(new Request(`${MANAGEMENT_ORIGIN}/api/source-actions`), gateway.env)).status, 401);
+  assert.equal((await gateway.api('/api/source-actions', {
+    extraHeaders: { 'cf-access-authenticated-user-email': OWNER },
+  })).status, 401);
+  assert.equal((await gateway.api(`/api/source-actions/${prepared.claim.actionId}`, {
+    method: 'DELETE', extraHeaders: { origin: 'https://other.example.com' },
+  })).status, 403);
+  assert.equal((await gateway.api(`/api/source-actions/${prepared.claim.actionId}`, { method: 'DELETE' })).status, 200);
+  assert.equal((await gateway.apply(prepared, {}, null)).status, 400, 'cancellation wins before execution claims');
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('an expired proven-unstarted source action requires owner cancellation before a fresh authorization', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  const saved = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+  const now = Date.now();
+  await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, { ...saved,
+    actions: saved.actions.map((action) => ({ ...action, issuedAt: now - 700_000, expiresAt: now - 100_000 })) });
+  const snapshot = await (await gateway.api('/api/source-actions')).json();
+  assert.equal(snapshot.actions[0].state, 'authorization_expired');
+  assert.equal(snapshot.actions[0].canCancel, true);
+  assert.equal(snapshot.blockingAction.actionId, prepared.claim.actionId);
+  const repeat = await gateway.api('/api/source-actions', { method: 'POST', body: {
+    schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id,
+  } });
+  assert.equal(repeat.status, 409);
+  assert.equal((await repeat.json()).reason, 'source_pending');
+  const cancelled = await gateway.api(`/api/source-actions/${prepared.claim.actionId}`, { method: 'DELETE' });
+  assert.equal(cancelled.status, 200);
+  assert.equal((await cancelled.json()).status, 'failed');
+  assert.equal((await (await gateway.api('/api/source-actions')).json()).blockingAction, null);
+  const next = await authorizeNewSource(gateway, prepared.source.id, prepared.sources.revision);
+  assert.notEqual(next.claim.actionId, prepared.claim.actionId);
+  const baseline = gateway.provider.requests.length;
+  assert.equal((await gateway.apply(prepared, {}, null)).status, 400, 'old callback cannot execute after cancellation');
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('expired armed, partial, failed-with-evidence and unknown execution states remain protected', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  assert.equal((await gateway.apply(prepared, {}, null)).status, 200);
+  const saved = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+  const complete = saved.actions[0];
+  const now = Date.now();
+  const expired = { ...complete, issuedAt: now - 700_000, expiresAt: now - 100_000,
+    resources: [], pending: null, portalUpdate: null };
+  const cases = [
+    { ...expired, status: 'authorization_required', pending: { kind: 'mcp_server', phase: 'send_armed', provider: null } },
+    { ...expired, status: 'failed', pending: { kind: 'mcp_server', phase: 'submitted', provider: complete.resources[0].provider } },
+    { ...expired, status: 'recovery_required', resources: complete.resources.slice(0, 1) },
+    { ...expired, status: 'applying' },
+    { ...expired, status: 'applying', resources: complete.resources,
+      portalUpdate: { phase: 'submitted', desiredHash: `sha256:${'8'.repeat(64)}` } },
+  ];
+  for (const action of cases) {
+    const retained = { ...saved, actions: [action] };
+    await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, retained);
+    const before = gateway.managementStorage.writes.length;
+    const baseline = gateway.provider.requests.length;
+    const snapshot = await (await gateway.api('/api/source-actions')).json();
+    assert.equal(snapshot.actions[0].state, 'recovery_required');
+    assert.equal(snapshot.actions[0].canCancel, false);
+    assert.equal(snapshot.blockingAction.actionId, action.actionId);
+    for (const [path, options] of [
+      [`/api/source-actions/${action.actionId}`, { method: 'DELETE' }],
+      ['/api/source-actions', { method: 'POST', body: {
+        schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id,
+      } }],
+    ]) {
+      const response = await gateway.api(path, options);
+      assert.equal(response.status, 409);
+      assert.equal((await response.json()).reason, 'recovery_required');
+    }
+    assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), retained);
+    assert.equal(gateway.managementStorage.writes.length, before);
+    assertNoMutation(gateway.provider, baseline);
+  }
+}));
+
+test('source execution claims before remote discovery, stays observable and wins a cancellation race safely', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  let release;
+  let entered;
+  const held = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { entered = resolve; });
+  gateway.onSourceRequest(async () => { entered(); await held; });
+  const execution = gateway.apply(prepared, {}, null);
+  await started;
+  try {
+    const snapshot = await (await gateway.api('/api/source-actions')).json();
+    assert.equal(snapshot.actions[0].state, 'applying');
+    assert.equal(snapshot.actions[0].canCancel, false);
+    assert.equal((await gateway.api('/api/status')).status, 200);
+    const during = await (await gateway.api('/api/sources')).json();
+    assert.equal(during.sources.find((source) => source.id === prepared.source.id).status, 'draft');
+    assert.equal((await (await gateway.api(`/api/source-actions/${prepared.claim.actionId}`)).json()).status, 'applying');
+    const duplicate = await gateway.api('/api/source-actions', { method: 'POST', body: {
+      schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id,
+    } });
+    assert.equal(duplicate.status, 409);
+    assert.equal((await duplicate.json()).reason, 'source_pending');
+    const cancellation = gateway.api(`/api/source-actions/${prepared.claim.actionId}`, { method: 'DELETE' });
+    release();
+    assert.equal((await execution).status, 200);
+    assert.equal((await cancellation).status, 409);
+    const completed = await (await gateway.api('/api/source-actions')).json();
+    assert.equal(completed.actions[0].state, 'succeeded');
+    assert.equal(completed.actions[0].canCancel, false);
+    assert.equal(completed.blockingAction, null);
+    const sources = await (await gateway.api('/api/sources')).json();
+    assert.equal(sources.sources.find((source) => source.id === prepared.source.id).status, 'installed');
+    assert.doesNotMatch(canonicalJson(gateway.managementStorage.writes), /synthetic-legacy-installer-grant-never-store|cloudflareAccessToken/iu);
+  } finally { release(); }
+}));
+
+test('a stale source draft revision has its own conflict and creates no authorization', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  assert.equal((await gateway.api(`/api/source-actions/${prepared.claim.actionId}`, { method: 'DELETE' })).status, 200);
+  const saved = await gateway.api('/api/sources', { method: 'PUT', body: {
+    schemaVersion: 1, revision: prepared.sources.revision,
+    source: { label: 'Updated source label', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] },
+  } });
+  assert.equal(saved.status, 200);
+  const retained = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+  const stale = await gateway.api('/api/source-actions', { method: 'POST', body: {
+    schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id,
+  } });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), { schemaVersion: 1, error: 'source_action_conflict', reason: 'draft_changed' });
+  assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), retained);
+}));
+
+test('invalid source journal state cannot be presented as idle or replaced', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  const saved = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+  const invalid = { ...saved, actions: [{ ...saved.actions[0], pending: { phase: 'unknown' } }] };
+  await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, invalid);
+  const baseline = gateway.provider.requests.length;
+  for (const options of [{}, { method: 'POST', body: {
+    schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id,
+  } }]) {
+    const response = await gateway.api('/api/source-actions', options);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'source_actions_unavailable' });
+  }
+  assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), invalid);
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+for (const kind of ['source', 'runtime', 'teardown', 'team']) {
+  test(`source preparation identifies an unrelated ${kind} action`, async () => fixture(async (gateway) => {
+    const prepared = await prepareNewSource(gateway);
+    if (kind !== 'source') {
+      assert.equal((await gateway.api(`/api/source-actions/${prepared.claim.actionId}`, { method: 'DELETE' })).status, 200);
+      if (kind === 'runtime') assert.equal((await (await runtimeAction(gateway)).prepare()).status, 200);
+      if (kind === 'teardown') await gateway.teardown();
+      if (kind === 'team') await historicalPreparedTeam(gateway, changedRequest(await gateway.view()));
+    }
+    const response = await gateway.api('/api/source-actions', { method: 'POST', body: {
+      schemaVersion: 1, revision: prepared.sources.revision, sourceId: 'source-5555555555555555',
+    } });
+    assert.equal(response.status, 409);
+    const conflict = await response.json();
+    assert.equal(conflict.reason, kind === 'source' ? 'source_pending' : 'lifecycle_pending');
+    assert.equal(conflict.action.kind, kind);
+    const snapshot = await (await gateway.api('/api/source-actions')).json();
+    assert.deepEqual(snapshot.blockingAction, conflict.action);
+  }));
+}
+
 test('a fresh empty Portal can install its first source without implicitly granting it to anyone', async () => fixture(async (gateway) => {
   const prepared = await prepareNewSource(gateway);
   assert.equal(gateway.managementStorage.snapshot(TEAM_KEY), undefined);
@@ -993,11 +1202,13 @@ for (const createdBeforeFailure of [false, true]) {
     assert.equal(canonicalJson(gateway.storage.snapshot()), originalReceipt);
     gateway.provider.hook(undefined);
     const baseline = gateway.provider.requests.length;
-    const renewed = await authorizeNewSource(gateway, prepared.source.id, prepared.sources.revision);
-    const recovered = await gateway.apply(renewed, {}, null);
-    assert.equal(recovered.status, 200, await recovered.clone().text());
-    assert.equal(gateway.provider.requests.slice(baseline).filter((record) =>
-      record.method === 'POST' && record.pathname.endsWith('/mcp/servers')).length, createdBeforeFailure ? 0 : 1);
+    const renewal = await gateway.api('/api/source-actions', { method: 'POST', body: {
+      schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id,
+    } });
+    assert.equal(renewal.status, 409);
+    assert.equal((await renewal.json()).reason, 'recovery_required');
+    assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.at(-1), retained);
+    assertNoMutation(gateway.provider, baseline);
     assert.equal((await gateway.view()).members.some((member) => member.sourceIds.includes(prepared.source.id)), false);
   }));
 }
@@ -1041,19 +1252,24 @@ for (const committedBeforeInterruption of [false, true]) {
       assert.equal(action.status, 'applying');
       assert.equal(action.resources.length, 3);
       assert.equal(action.portalUpdate.phase, 'submitted');
-      // A stopped applying request remains journaled. Once its old grant has
-      // expired, a fresh authorization verifies provider state without replay.
+      // Expiry does not establish whether the provider or final local commit
+      // completed. Preserve the journal without minting a replacement action.
       const now = Date.now();
       await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, { ...state,
         actions: state.actions.map((entry) => entry.actionId === action.actionId
           ? { ...entry, issuedAt: now - 700_000, expiresAt: now - 100_000 } : entry) });
-      const renewed = await authorizeNewSource(gateway, prepared.source.id, prepared.sources.revision);
-      const recovered = await gateway.apply(renewed, {}, null);
-      assert.equal(recovered.status, 200, await recovered.clone().text());
+      const retained = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+      const renewal = await gateway.api('/api/source-actions', { method: 'POST', body: {
+        schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id,
+      } });
+      assert.equal(renewal.status, 409);
+      assert.equal((await renewal.json()).reason, 'recovery_required');
+      assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), retained);
     }
     assertNoMutation(gateway.provider, baseline);
     const team = await gateway.view();
-    assert.equal(team.sources.find((source) => source.id === prepared.source.id).status, 'installed');
+    assert.equal(team.sources.find((source) => source.id === prepared.source.id).status,
+      committedBeforeInterruption ? 'installed' : 'draft');
     assert.equal(team.members.some((member) => member.sourceIds.includes(prepared.source.id)), false);
     assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).teardownDisabled, true);
   }));

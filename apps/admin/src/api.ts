@@ -82,13 +82,46 @@ const sourceDiscoverySchema = v.strictObject({
   tools: v.array(discoveredToolSchema),
   connectionBlock: v.optional(v.literal('source_google_shared_oauth_unsupported')),
 })
+const sourceActionFailureCodes = new Set([
+  'source_action_denied', 'source_action_recovery_required', 'source_action_state_unavailable',
+  'source_action_conflict', 'source_action_drift', 'source_discovery_failed', 'source_action_invalid',
+  'source_action_authorization_failed', 'source_resource_collision', 'source_action_legacy_policy',
+])
 const sourceActionSchema = v.strictObject({
   schemaVersion: v.literal(1),
   actionId: v.string(),
   sourceId: v.string(),
   status: actionStatusSchema,
   expiresAt: v.string(),
-  failureCode: v.nullable(v.string()),
+  failureCode: v.nullable(v.pipe(v.string(), v.transform((code) => sourceActionFailureCodes.has(code) ? code : 'source_action_failed'))),
+})
+const sourceActionStateSchema = v.picklist([
+  'authorization_required', 'authorization_expired', 'applying', 'succeeded', 'failed', 'recovery_required',
+])
+const sourceActionPointerSchema = v.strictObject({
+  kind: v.picklist(['source', 'runtime', 'teardown', 'team']),
+  actionId: v.pipe(v.string(), v.regex(/^action_[A-Za-z0-9_-]{32}$/u)),
+  sourceId: v.optional(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u))),
+})
+const sourceActionSummarySchema = v.strictObject({
+  ...sourceActionSchema.entries,
+  actionId: sourceActionPointerSchema.entries.actionId,
+  sourceId: v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u)),
+  issuedAt: v.string(),
+  state: sourceActionStateSchema,
+  canCancel: v.boolean(),
+})
+const sourceActionsSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  actions: v.array(sourceActionSummarySchema),
+  blockingAction: v.nullable(sourceActionPointerSchema),
+})
+const sourceActionConflictReasonSchema = v.picklist([
+  'draft_changed', 'source_pending', 'lifecycle_pending', 'recovery_required',
+])
+const sourceActionConflictSchema = v.strictObject({
+  reason: v.optional(sourceActionConflictReasonSchema),
+  action: v.optional(sourceActionPointerSchema),
 })
 const runtimeUpdateSchema = v.strictObject({
   schemaVersion: v.literal(1),
@@ -201,6 +234,11 @@ export interface SourceDraftInput {
 
 export type PreparedAction = v.InferOutput<typeof preparedActionSchema>
 export type SourceAction = v.InferOutput<typeof sourceActionSchema>
+export type SourceActionState = v.InferOutput<typeof sourceActionStateSchema>
+export type SourceActionSummary = v.InferOutput<typeof sourceActionSummarySchema>
+export type SourceActionPointer = v.InferOutput<typeof sourceActionPointerSchema>
+export type SourceActions = v.InferOutput<typeof sourceActionsSchema>
+export type SourceActionConflictReason = v.InferOutput<typeof sourceActionConflictReasonSchema>
 export type RuntimeVersion = v.InferOutput<typeof runtimeVersionSchema>
 export type RuntimeUpdate = v.InferOutput<typeof runtimeUpdateSchema>
 export type RuntimeAction = v.InferOutput<typeof runtimeActionSchema>
@@ -221,6 +259,7 @@ export interface GatewayAdminApi {
   discoverSource(url: string): Promise<SourceDiscovery>
   saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources>
   prepareSourceAction(revision: number, sourceId: string): Promise<PreparedAction>
+  getSourceActions(): Promise<SourceActions>
   getSourceAction(actionId: string): Promise<SourceAction>
   cancelSourceAction(actionId: string): Promise<SourceAction>
   prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }>
@@ -256,7 +295,13 @@ const ERROR_MESSAGES = new Map([
   ['team_prepare_failed', 'The team access request could not be confirmed. Refresh to check whether a change was recorded before trying again.'],
   ['team_cancel_failed', 'Cancellation could not be confirmed. Refresh to check the recorded change before trying again.'],
   ['team_teardown_requires_compatible_release', 'Automatic removal is unavailable after source provisioning or team policy changes begin. A compatible removal release is required; do not discard the ownership or recovery records.'],
-  ['source_action_conflict', 'Another gateway action is pending, or the source draft changed. Refresh to review the saved state.'],
+  ['source_action_conflict', 'This source action cannot proceed. Check the recorded status before trying again.'],
+  ['source_action_state_unavailable', 'The saved source action state could not be verified. Check status before starting another installation.'],
+  ['source_actions_unavailable', 'The saved source action state could not be verified. Check status before starting another installation.'],
+  ['response_invalid', 'The gateway response could not be verified. Check status before trying again.'],
+  ['source_action_not_found', 'The recorded source action was not found. Check status to review the saved actions.'],
+  ['source_action_recovery_required', 'Source provisioning may have started. Keep the recorded action and review its status before attempting recovery.'],
+  ['source_action_failed', 'The source action failed. Check its recorded status before trying again.'],
   ['source_action_legacy_policy', 'This source authorization uses an older permission policy. Cancel it only if provisioning never started; otherwise retain its journal for reconciliation.'],
   ['source_action_invalid', 'The source action no longer matches the saved draft.'],
   ['source_addition_paused', SOURCE_ADDITION_PAUSED_MESSAGE],
@@ -284,12 +329,28 @@ const ERROR_MESSAGES = new Map([
 export class GatewayApiError extends Error {
   readonly status: number
   readonly code: string
+  readonly reason: SourceActionConflictReason | undefined
+  readonly action: SourceActionPointer | undefined
 
-  constructor(status: number, code: string) {
-    super(ERROR_MESSAGES.get(code) ?? 'The gateway request failed. Refresh and try again.')
+  constructor(status: number, code: string, details?: v.InferOutput<typeof sourceActionConflictSchema>) {
+    const parsed = v.safeParse(sourceActionConflictSchema, details ?? {})
+    const conflict = code === 'source_action_conflict' && parsed.success ? parsed.output : {}
+    super(sourceActionConflictMessage(conflict.reason) ?? ERROR_MESSAGES.get(code) ?? 'The gateway request failed. Refresh and try again.')
     this.name = 'GatewayApiError'
     this.status = status
     this.code = code
+    this.reason = conflict.reason
+    this.action = conflict.action
+  }
+}
+
+function sourceActionConflictMessage(reason: SourceActionConflictReason | undefined): string | undefined {
+  switch (reason) {
+    case 'draft_changed': return 'The saved source draft changed. Refresh and review its current tool selection before applying.'
+    case 'source_pending': return 'A source installation is already pending. Check its recorded status before starting another installation.'
+    case 'lifecycle_pending': return 'Another gateway action is pending. Review that action before starting a source installation.'
+    case 'recovery_required': return 'Source provisioning may have started. Keep the recorded action and review its recovery status; starting again is blocked.'
+    default: return undefined
   }
 }
 
@@ -367,6 +428,10 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     })
   }
 
+  getSourceActions(): Promise<SourceActions> {
+    return this.#request('/api/source-actions', sourceActionsSchema)
+  }
+
   getSourceAction(actionId: string): Promise<SourceAction> {
     return this.#request(`/api/source-actions/${encodeURIComponent(actionId)}`, sourceActionSchema)
   }
@@ -418,9 +483,15 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     const payload = await response.json().catch(() => null)
     if (!response.ok) {
       const parsed = v.safeParse(errorResponseSchema, payload)
-      const code = parsed.success ? parsed.output.error : 'request_failed'
-      throw new GatewayApiError(response.status, code)
+      const code = parsed.success ? safeGatewayErrorCode(parsed.output.error) : 'request_failed'
+      const details = v.safeParse(sourceActionConflictSchema, {
+        reason: payload?.reason,
+        action: payload?.action,
+      })
+      throw new GatewayApiError(response.status, code, details.success ? details.output : undefined)
     }
-    return v.parse(schema, payload)
+    const parsed = v.safeParse(schema, payload)
+    if (!parsed.success) throw new GatewayApiError(502, 'response_invalid')
+    return parsed.output
   }
 }

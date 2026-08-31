@@ -8,6 +8,7 @@ import {
   type RuntimeAction,
   type RuntimeUpdate,
   type SourceAction,
+  type SourceActions,
   type Team,
   type TeamAction,
   type TeamActionResult,
@@ -29,6 +30,7 @@ const names = [
   'get_gateway_status', 'get_gateway_capabilities', 'list_mcp_sources',
   'discover_mcp_source', 'save_mcp_source_draft', 'apply_mcp_source',
   'get_mcp_source_action', 'cancel_mcp_source_action', 'get_gateway_team',
+  'list_mcp_source_actions',
   'save_gateway_team', 'get_gateway_team_action', 'cancel_gateway_team_action',
   'check_gateway_update', 'review_gateway_update', 'apply_gateway_update',
   'rollback_gateway_update', 'get_gateway_runtime_action',
@@ -36,6 +38,7 @@ const names = [
 ]
 const noInputNames = [
   'get_gateway_status', 'get_gateway_capabilities', 'list_mcp_sources',
+  'list_mcp_source_actions',
   'get_gateway_team', 'check_gateway_update', 'review_gateway_update',
   'review_gateway_teardown',
 ]
@@ -122,6 +125,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     discoverSource: vi.fn<GatewayAdminApi['discoverSource']>(),
     saveSourceDraft: vi.fn<GatewayAdminApi['saveSourceDraft']>(async () => sources),
     prepareSourceAction: vi.fn<GatewayAdminApi['prepareSourceAction']>(async () => prepared),
+    getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
     getSourceAction: vi.fn(async (_actionId: string) => sourceAction),
     cancelSourceAction: vi.fn<GatewayAdminApi['cancelSourceAction']>(async () => ({ ...sourceAction, status: 'failed' })),
     prepareRuntimeAction: vi.fn<GatewayAdminApi['prepareRuntimeAction']>(async (operation) => ({ ...prepared, operation })),
@@ -200,10 +204,10 @@ describe('Gateway WebMCP tool contracts', () => {
     expect(refresh).not.toHaveBeenCalled()
   })
 
-  it('offers exactly nineteen non-generic tools when installation is enabled', () => {
+  it('offers exactly twenty non-generic tools when installation is enabled', () => {
     const { tools } = fixture()
     expect(tools.map((tool) => tool.name).sort()).toEqual([...names].sort())
-    expect(new Set(tools.map((tool) => tool.name)).size).toBe(19)
+    expect(new Set(tools.map((tool) => tool.name)).size).toBe(20)
     for (const tool of tools) {
       expect(tool.inputSchema.additionalProperties).toBe(false)
       for (const forbidden of ['token', 'headers', 'accountId', 'apiPath', 'actor', 'role', 'credential']) {
@@ -221,7 +225,7 @@ describe('Gateway WebMCP tool contracts', () => {
     for (const name of ['save_gateway_team', 'rollback_gateway_update', 'review_gateway_teardown']) {
       expect(tool(name).annotations.destructiveHint).toBe(true)
     }
-    for (const name of ['get_gateway_status', 'get_gateway_capabilities', 'get_gateway_team', 'get_gateway_team_action', 'get_mcp_source_action', 'get_gateway_runtime_action', 'get_gateway_teardown_action', 'review_gateway_update']) {
+    for (const name of ['get_gateway_status', 'get_gateway_capabilities', 'get_gateway_team', 'get_gateway_team_action', 'get_mcp_source_action', 'list_mcp_source_actions', 'get_gateway_runtime_action', 'get_gateway_teardown_action', 'review_gateway_update']) {
       expect(tool(name).annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false })
     }
   })
@@ -392,6 +396,82 @@ describe('exact signed runtime target', () => {
 })
 
 describe('source pause and current state', () => {
+  function recordedAction(state: SourceActions['actions'][number]['state'], canCancel = false): SourceActions {
+    return { schemaVersion: 1, blockingAction: state === 'succeeded' || state === 'failed' ? null : { kind: 'source', actionId, sourceId }, actions: [{
+      schemaVersion: 1, actionId, sourceId, issuedAt: '2030-01-01T00:00:00.000Z', expiresAt,
+      status: state === 'authorization_expired' ? 'authorization_required' : state,
+      state, canCancel, failureCode: state === 'recovery_required' ? 'source_action_recovery_required' : null,
+    }] }
+  }
+
+  it('discovers pending actions without a saved handoff and exposes safe capabilities', async () => {
+    const refresh = vi.fn(async () => {})
+    const { api, call } = fixture(true, refresh)
+    const snapshot = recordedAction('authorization_required', true)
+    api.getSourceActions.mockResolvedValue(snapshot)
+    expect(await call('list_mcp_source_actions')).toEqual({ ok: true, result: snapshot })
+    expect(await call('get_gateway_capabilities')).toMatchObject({ ok: true, result: { sourceInstallation: {
+      available: false, reason: 'source_action_conflict', blockingAction: snapshot.blockingAction, statusTool: 'list_mcp_source_actions',
+    } } })
+    expect(refresh).not.toHaveBeenCalled()
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+
+  it.each(['authorization_required', 'authorization_expired', 'applying', 'recovery_required'] as const)('does not prepare a second action while %s', async (state) => {
+    const { api, call, sources } = fixture()
+    api.getSources.mockResolvedValue({ ...sources, sources: sources.sources.map((source) => ({ ...source, status: 'draft' })) })
+    const snapshot = recordedAction(state, state === 'authorization_required' || state === 'authorization_expired')
+    api.getSourceActions.mockResolvedValue(snapshot)
+    expect(await call('apply_mcp_source', { sourceId })).toMatchObject({ ok: false, error: {
+      code: 'source_action_conflict', reason: state === 'recovery_required' ? 'recovery_required' : 'source_pending', action: snapshot.blockingAction,
+    } })
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+    expect(api.getStatus).not.toHaveBeenCalled()
+  })
+
+  it('returns Installed after late success without preparing another authorization', async () => {
+    const { api, call } = fixture()
+    expect(await call('apply_mcp_source', { sourceId })).toEqual({ ok: true, result: { status: 'installed', sourceId } })
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+
+  it.each(['runtime', 'teardown', 'team'] as const)('identifies an unrelated %s action without starting source consent', async (kind) => {
+    const { api, call, sources } = fixture()
+    api.getSources.mockResolvedValue({ ...sources, sources: sources.sources.map((source) => ({ ...source, status: 'draft' })) })
+    api.getSourceActions.mockResolvedValue({ schemaVersion: 1, actions: [], blockingAction: { kind, actionId: otherActionId } })
+    expect(await call('apply_mcp_source', { sourceId })).toMatchObject({ ok: false, error: {
+      code: 'source_action_conflict', reason: 'lifecycle_pending', action: { kind, actionId: otherActionId },
+    } })
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+
+  it('preserves a stale revision rejection after the status read, without retrying', async () => {
+    const { api, call, sources } = fixture()
+    api.getSources.mockResolvedValue({ ...sources, sources: sources.sources.map((source) => ({ ...source, status: 'draft' })) })
+    api.prepareSourceAction.mockRejectedValue(new GatewayApiError(409, 'source_action_conflict', { reason: 'draft_changed' }))
+    expect(await call('apply_mcp_source', { sourceId })).toMatchObject({ ok: false, error: {
+      reason: 'draft_changed', message: expect.stringContaining('draft changed'),
+    } })
+    expect(api.prepareSourceAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels a proven-unstarted expired action only after the current server capability permits it', async () => {
+    const { api, call } = fixture()
+    api.getSourceActions.mockResolvedValue(recordedAction('authorization_expired', true))
+    expect(await call('cancel_mcp_source_action', { actionId })).toMatchObject({ ok: true, result: { status: 'failed' } })
+    expect(api.getSourceActions).toHaveBeenCalledTimes(1)
+    expect(api.cancelSourceAction).toHaveBeenCalledExactlyOnceWith(actionId)
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+
+  it.each(['authorization_required', 'applying', 'recovery_required', 'succeeded'] as const)('does not cancel %s without server permission', async (state) => {
+    const { api, call } = fixture()
+    api.getSourceActions.mockResolvedValue(recordedAction(state))
+    expect(await call('cancel_mcp_source_action', { actionId })).toMatchObject({ ok: false, error: { code: 'source_action_conflict' } })
+    expect(api.cancelSourceAction).not.toHaveBeenCalled()
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+
   it('discloses source grants and lifecycle restrictions before agent actions', () => {
     const { tool, api } = fixture()
     expect(tool('apply_mcp_source').description).toContain('denied to everyone')
@@ -429,7 +509,7 @@ describe('source pause and current state', () => {
 
   it('uses the fresh source revision for an exact draft handoff', async () => {
     const { api, call, sources } = fixture()
-    api.getSources.mockResolvedValue({ ...sources, revision: 13 })
+    api.getSources.mockResolvedValue({ ...sources, revision: 13, sources: sources.sources.map((source) => ({ ...source, status: 'draft' })) })
     expect(await call('apply_mcp_source', { sourceId })).toMatchObject({ ok: true, result: { actionId } })
     expect(api.prepareSourceAction).toHaveBeenCalledExactlyOnceWith(13, sourceId)
   })
@@ -493,7 +573,11 @@ describe('recorded actions and cancellation', () => {
   })
 
   it('uses only the normal source cancellation API and preserves server denial', async () => {
-    const { api, call } = fixture()
+    const { api, call, sourceAction } = fixture()
+    api.getSourceActions.mockResolvedValue({ schemaVersion: 1, actions: [{
+      ...sourceAction, status: 'authorization_required', state: 'authorization_required',
+      issuedAt: '2030-01-01T00:00:00.000Z', canCancel: true,
+    }], blockingAction: { kind: 'source', actionId, sourceId } })
     api.cancelSourceAction.mockRejectedValue(new GatewayApiError(409, 'source_action_conflict'))
     expect(await call('cancel_mcp_source_action', { actionId })).toMatchObject({ ok: false, error: { code: 'source_action_conflict' } })
     expect(api.cancelSourceAction).toHaveBeenCalledExactlyOnceWith(actionId)

@@ -82,6 +82,89 @@ describe('HttpGatewayAdminApi', () => {
     )
   })
 
+  it('discovers source actions without requiring a saved action identifier or authorization fragment', async () => {
+    const actionId = `action_${'a'.repeat(32)}`
+    const action = {
+      schemaVersion: 1, actionId, sourceId: 'source-1111111111111111', status: 'authorization_required',
+      issuedAt: '2030-01-01T00:00:00.000Z', expiresAt: '2030-01-01T00:10:00.000Z',
+      state: 'authorization_expired', failureCode: null, canCancel: true,
+    }
+    const snapshot = { schemaVersion: 1, actions: [action], blockingAction: { kind: 'source', actionId, sourceId: action.sourceId } }
+    const fetch = vi.fn(async () => Response.json(snapshot))
+    vi.stubGlobal('fetch', fetch)
+    expect(await new HttpGatewayAdminApi().getSourceActions()).toEqual(snapshot)
+    expect(fetch).toHaveBeenCalledExactlyOnceWith('/api/source-actions', expect.objectContaining({ credentials: 'same-origin', redirect: 'error' }))
+  })
+
+  it.each([
+    ['draft_changed', 'saved source draft changed'],
+    ['source_pending', 'source installation is already pending'],
+    ['lifecycle_pending', 'Another gateway action is pending'],
+    ['recovery_required', 'Source provisioning may have started'],
+  ])('preserves the safe %s conflict reason and action pointer', async (reason, message) => {
+    const action = { kind: reason === 'lifecycle_pending' ? 'runtime' : 'source', actionId: `action_${'a'.repeat(32)}` }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      schemaVersion: 1, error: 'source_action_conflict', reason, action, detail: 'synthetic-provider-detail',
+    }, { status: 409 })))
+    const error = await new HttpGatewayAdminApi().prepareSourceAction(4, 'source-1111111111111111').catch((cause: unknown) => cause)
+    expect(error).toMatchObject({ code: 'source_action_conflict', reason, action, message: expect.stringContaining(message) })
+    expect(JSON.stringify(error)).not.toContain('synthetic-provider-detail')
+  })
+
+  it('drops unreviewed conflict reasons and credential-bearing action fields', async () => {
+    for (const details of [
+      { reason: 'synthetic-provider-detail' },
+      { reason: 'source_pending', action: { kind: 'source', actionId: `action_${'a'.repeat(32)}`, handoffUrl: 'synthetic-private-fragment' } },
+      { reason: 'source_pending', action: { kind: 'source', actionId: 'synthetic-private-fragment' } },
+    ]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: 'source_action_conflict', ...details }, { status: 409 })))
+      const error = await new HttpGatewayAdminApi().prepareSourceAction(4, 'source-1111111111111111').catch((cause: unknown) => cause)
+      expect(error).toMatchObject({ code: 'source_action_conflict', reason: undefined, action: undefined })
+      expect(JSON.stringify(error)).not.toMatch(/synthetic-provider|synthetic-private/u)
+    }
+  })
+
+  it('does not retain an arbitrary server error code in an exception', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: 'synthetic-sensitive-provider-error' }, { status: 503 })))
+    const error = await new HttpGatewayAdminApi().getSourceActions().catch((cause: unknown) => cause)
+    expect(error).toMatchObject({ code: 'request_failed', status: 503 })
+    expect(JSON.stringify(error)).not.toContain('synthetic-sensitive')
+  })
+
+  it('fails closed when source-action discovery contains unknown fields or cancellation is not explicit', async () => {
+    const action = {
+      schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, sourceId: 'source-1111111111111111',
+      status: 'authorization_required', issuedAt: '2030-01-01T00:00:00.000Z', expiresAt: '2030-01-01T00:10:00.000Z',
+      state: 'authorization_required', canCancel: true, failureCode: null,
+    }
+    for (const invalid of [
+      { ...action, handoffUrl: 'synthetic-sensitive-fragment' },
+      { ...action, canCancel: undefined },
+      { ...action, state: 'unreviewed' },
+    ]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, actions: [invalid], blockingAction: null })))
+      const error = await new HttpGatewayAdminApi().getSourceActions().catch((cause: unknown) => cause)
+      expect(error).toMatchObject({ code: 'response_invalid', status: 502 })
+      expect(error).not.toHaveProperty('issues')
+      expect(JSON.stringify(error)).not.toContain('synthetic-sensitive')
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, actions: [{ ...action, failureCode: 'synthetic-sensitive-provider-response' }], blockingAction: null })))
+    const snapshot = await new HttpGatewayAdminApi().getSourceActions()
+    expect(snapshot.actions[0]?.failureCode).toBe('source_action_failed')
+    expect(JSON.stringify(snapshot)).not.toContain('synthetic-sensitive')
+  })
+
+  it('preserves the legacy source status and cancellation response shape', async () => {
+    const actionId = `action_${'a'.repeat(32)}`
+    const action = { schemaVersion: 1, actionId, sourceId: 'source-1111111111111111', status: 'failed', expiresAt: '2030-01-01T00:10:00.000Z', failureCode: 'source_action_denied' }
+    const fetch = vi.fn(async () => Response.json(action))
+    vi.stubGlobal('fetch', fetch)
+    const api = new HttpGatewayAdminApi()
+    expect(await api.getSourceAction(actionId)).toEqual(action)
+    expect(await api.cancelSourceAction(actionId)).toEqual(action)
+    expect(fetch).toHaveBeenLastCalledWith(`/api/source-actions/${actionId}`, expect.objectContaining({ method: 'DELETE', body: '{}', credentials: 'same-origin', redirect: 'error' }))
+  })
+
   it('sends the exact reviewed runtime target without changing legacy request shape', async () => {
     const action = {
       schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, status: 'authorization_required',

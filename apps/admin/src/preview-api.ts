@@ -9,6 +9,8 @@ import type {
   RuntimeUpdate,
   RuntimeVersion,
   SourceAction,
+  SourceActions,
+  SourceActionSummary,
   SourceDiscovery,
   SourceDraftInput,
   Team,
@@ -17,7 +19,11 @@ import type {
   TeamMember,
 } from './api'
 
-type PreviewScenario = 'empty' | 'ready' | 'update' | 'error' | 'team-recovery' | 'team-readonly' | 'team-lifecycle' | 'team-legacy' | 'team-no-credential'
+const PREVIEW_SCENARIOS = [
+  'empty', 'ready', 'update', 'error', 'team-recovery', 'team-readonly', 'team-lifecycle', 'team-legacy', 'team-no-credential',
+  'source-pending', 'source-applying', 'source-expired', 'source-recovery', 'source-completed', 'source-late-success', 'source-lifecycle',
+] as const
+type PreviewScenario = typeof PREVIEW_SCENARIOS[number]
 const PREVIEW_STORAGE_KEY = 'ankka-gateway-ui-preview-scenario'
 const ACTION_ID = `action_${'a'.repeat(32)}`
 const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai'
@@ -69,12 +75,21 @@ const installedSources: ManagedSources = {
 
 function scenarioFromLocation(): PreviewScenario {
   const requested = new URLSearchParams(window.location.search).get('preview')
-  if (requested === 'empty' || requested === 'ready' || requested === 'update' || requested === 'error' || requested === 'team-recovery' || requested === 'team-readonly' || requested === 'team-lifecycle' || requested === 'team-legacy' || requested === 'team-no-credential') {
+  if (isPreviewScenario(requested)) {
     window.sessionStorage.setItem(PREVIEW_STORAGE_KEY, requested)
     return requested
   }
   const retained = window.sessionStorage.getItem(PREVIEW_STORAGE_KEY)
-  return retained === 'empty' || retained === 'update' || retained === 'error' || retained === 'team-recovery' || retained === 'team-readonly' || retained === 'team-lifecycle' || retained === 'team-legacy' || retained === 'team-no-credential' ? retained : 'ready'
+  return isPreviewScenario(retained) ? retained : 'ready'
+}
+
+function isPreviewScenario(value: string | null): value is PreviewScenario {
+  return PREVIEW_SCENARIOS.some((scenario) => scenario === value)
+}
+
+function legacySourceAction(action: SourceActionSummary): SourceAction {
+  const { schemaVersion, actionId, sourceId, status: actionStatus, expiresAt, failureCode } = action
+  return { schemaVersion, actionId, sourceId, status: actionStatus, expiresAt, failureCode }
 }
 
 function update(available: boolean): RuntimeUpdate {
@@ -110,12 +125,27 @@ function update(available: boolean): RuntimeUpdate {
 class PreviewGatewayAdminApi implements GatewayAdminApi {
   #sources: ManagedSources
   #team: Team
-  #preparedSourceId: string | null = null
+  #sourceActions: SourceActionSummary[] = []
   readonly #scenario: PreviewScenario
 
   constructor(scenario: PreviewScenario) {
     this.#scenario = scenario
     this.#sources = structuredClone(scenario === 'empty' ? { ...installedSources, revision: 1, sources: [] } : installedSources)
+    if (scenario.startsWith('source-') && scenario !== 'source-lifecycle') {
+      const state = scenario === 'source-expired' ? 'authorization_expired' : scenario === 'source-recovery' ? 'recovery_required' :
+        scenario === 'source-completed' ? 'succeeded' : scenario === 'source-applying' ? 'applying' : 'authorization_required'
+      const expired = scenario === 'source-expired' || scenario === 'source-recovery'
+      this.#sourceActions = [{
+        schemaVersion: 1, actionId: ACTION_ID, sourceId: 'source-2222222222222222',
+        issuedAt: new Date(Date.now() - (expired ? 660_000 : 60_000)).toISOString(),
+        expiresAt: new Date(Date.now() + (expired ? -60_000 : 540_000)).toISOString(),
+        status: state === 'authorization_expired' ? 'authorization_required' : state,
+        state, canCancel: state === 'authorization_required' || state === 'authorization_expired',
+        failureCode: state === 'recovery_required' ? 'source_action_recovery_required' : null,
+      }]
+      const completedSource = this.#sources.sources.find((source) => source.id === 'source-2222222222222222')
+      if (state === 'succeeded' && completedSource) completedSource.status = 'installed'
+    }
     this.#team = {
       schemaVersion: 1,
       revision: 2,
@@ -214,28 +244,59 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
 
   async prepareSourceAction(revision: number, sourceId: string): Promise<PreparedAction> {
     if (!this.#sources.installationEnabled) throw new GatewayApiError(409, 'source_addition_paused')
-    if (revision !== this.#sources.revision || !this.#sources.sources.some((source) => source.id === sourceId && source.status === 'draft')) throw new GatewayApiError(409, 'source_action_conflict')
-    if (this.#team.pendingAction && !['succeeded', 'failed'].includes(this.#team.pendingAction.status)) throw new GatewayApiError(409, 'team_action_conflict')
-    this.#preparedSourceId = sourceId
-    return { schemaVersion: 1, actionId: ACTION_ID, status: 'authorization_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), handoffUrl: HANDOFF }
+    if (revision !== this.#sources.revision || !this.#sources.sources.some((source) => source.id === sourceId && source.status === 'draft')) throw new GatewayApiError(409, 'source_action_conflict', { reason: 'draft_changed' })
+    const { blockingAction, actions } = await this.getSourceActions()
+    if (blockingAction) throw new GatewayApiError(409, 'source_action_conflict', {
+      reason: blockingAction.kind !== 'source' ? 'lifecycle_pending' : actions.some((action) => action.actionId === blockingAction.actionId && action.state === 'recovery_required') ? 'recovery_required' : 'source_pending',
+      action: blockingAction,
+    })
+    const action: SourceActionSummary = {
+      schemaVersion: 1, actionId: `action_${(this.#sourceActions.length + 1).toString(16).padStart(32, '0')}`, sourceId,
+      issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      status: 'authorization_required', state: 'authorization_required', failureCode: null, canCancel: true,
+    }
+    this.#sourceActions.push(action)
+    return { schemaVersion: 1, actionId: action.actionId, status: 'authorization_required', expiresAt: action.expiresAt, handoffUrl: HANDOFF }
   }
 
-  async getSourceAction(_actionId: string): Promise<SourceAction> {
-    if (!this.#preparedSourceId || _actionId !== ACTION_ID) throw new GatewayApiError(404, 'source_action_not_found')
-    const source = this.#sources.sources.find((candidate) => candidate.id === this.#preparedSourceId)
-    if (!source) throw new GatewayApiError(404, 'source_action_not_found')
-    if (source.status === 'draft') {
-      source.status = 'installed'
-      this.#sources.revision += 1
+  async getSourceActions(): Promise<SourceActions> {
+    for (const action of this.#sourceActions) {
+      if (action.state === 'authorization_required' && Date.now() >= Date.parse(action.expiresAt)) action.state = 'authorization_expired'
+      if (action.state === 'applying' && Date.now() >= Date.parse(action.expiresAt)) action.state = 'recovery_required'
+      if (this.#scenario === 'source-late-success' && action.state === 'authorization_required' && Date.now() >= Date.parse(action.issuedAt) + 75_000) {
+        action.status = action.state = 'succeeded'
+        action.canCancel = false
+        const source = this.#sources.sources.find((candidate) => candidate.id === action.sourceId)
+        if (source?.status === 'draft') { source.status = 'installed'; this.#sources.revision += 1 }
+      }
     }
-    return { schemaVersion: 1, actionId: ACTION_ID, sourceId: source.id, status: 'succeeded', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: null }
+    const pending = this.#sourceActions.find((action) => action.state !== 'succeeded' && action.state !== 'failed')
+    const teamAction = this.#team.pendingAction
+    const blockingAction: SourceActions['blockingAction'] = pending ? { kind: 'source', actionId: pending.actionId, sourceId: pending.sourceId } :
+      teamAction && !['succeeded', 'failed'].includes(teamAction.status) ? { kind: 'team', actionId: teamAction.actionId } :
+      this.#scenario === 'source-lifecycle' ? { kind: 'runtime', actionId: ACTION_ID } : null
+    return structuredClone({ schemaVersion: 1, actions: this.#sourceActions, blockingAction })
+  }
+
+  async getSourceAction(actionId: string): Promise<SourceAction> {
+    const current = await this.getSourceActions()
+    const action = current.actions.find((candidate) => candidate.actionId === actionId)
+    if (!action) throw new GatewayApiError(404, 'source_action_not_found')
+    return legacySourceAction(action)
   }
 
   async cancelSourceAction(actionId: string): Promise<SourceAction> {
-    if (!this.#preparedSourceId || actionId !== ACTION_ID) throw new GatewayApiError(404, 'source_action_not_found')
-    const sourceId = this.#preparedSourceId
-    this.#preparedSourceId = null
-    return { schemaVersion: 1, actionId, sourceId, status: 'failed', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: 'source_action_denied' }
+    await this.getSourceActions()
+    const action = this.#sourceActions.find((candidate) => candidate.actionId === actionId)
+    if (!action) throw new GatewayApiError(404, 'source_action_not_found')
+    if (!action.canCancel) throw new GatewayApiError(409, 'source_action_conflict', {
+      reason: action.state === 'recovery_required' ? 'recovery_required' : 'source_pending',
+      action: { kind: 'source', actionId, sourceId: action.sourceId },
+    })
+    action.status = action.state = 'failed'
+    action.failureCode = 'source_action_denied'
+    action.canCancel = false
+    return legacySourceAction(action)
   }
 
   async prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }> {

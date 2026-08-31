@@ -9,6 +9,7 @@ function previewApi() {
 
 describe('Team preview', () => {
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllEnvs()
     window.history.replaceState(null, '', '/')
     window.sessionStorage.removeItem('ankka-gateway-ui-preview-scenario')
@@ -29,7 +30,7 @@ describe('Team preview', () => {
     expect(createPreviewGatewayAdminApi()).toBeUndefined()
   })
 
-  it('previews source installation with nobody assigned and preserves existing Team grants', async () => {
+  it('records pending source consent without manufacturing completion or changing Team grants', async () => {
     vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
     window.history.replaceState(null, '', '/sources?preview=ready')
     const api = previewApi()
@@ -42,9 +43,74 @@ describe('Team preview', () => {
     const prepared = await api.prepareSourceAction(drafted.revision, source.id)
     expect(prepared.status).toBe('authorization_required')
     expect((await api.getSources()).sources.find((candidate) => candidate.id === source.id)?.status).toBe('draft')
-    expect((await api.getSourceAction(prepared.actionId)).status).toBe('succeeded')
+    expect((await api.getSourceAction(prepared.actionId)).status).toBe('authorization_required')
+    expect((await api.getSourceActions()).blockingAction).toEqual({ kind: 'source', actionId: prepared.actionId, sourceId: source.id })
     expect((await api.getTeam()).members).toEqual(team.members)
     expect((await api.getTeam()).editingEnabled).toBe(true)
+  })
+
+  it('rediscovers slow consent from the preview scenario after a fresh API instance', async () => {
+    vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
+    window.history.replaceState(null, '', '/sources?preview=source-pending')
+    const first = await previewApi().getSourceActions()
+    window.history.replaceState(null, '', '/sources')
+    const api = previewApi()
+    expect((await api.getSourceActions()).blockingAction).toEqual(first.blockingAction)
+    const sources = await api.getSources()
+    await expect(api.prepareSourceAction(sources.revision, 'source-2222222222222222')).rejects.toMatchObject({
+      code: 'source_action_conflict', reason: 'source_pending', action: first.blockingAction,
+    })
+    expect((await api.getSourceActions()).actions).toHaveLength(1)
+  })
+
+  it.each(['source-expired', 'source-recovery', 'source-applying'] as const)('keeps %s protected until the permitted recovery action', async (scenario) => {
+    vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
+    window.history.replaceState(null, '', `/sources?preview=${scenario}`)
+    const api = previewApi()
+    const before = await api.getSources()
+    const snapshot = await api.getSourceActions()
+    const action = snapshot.actions[0]
+    if (!action) throw new Error('Expected a recorded synthetic source action')
+    await expect(api.prepareSourceAction(before.revision, action.sourceId)).rejects.toMatchObject({ code: 'source_action_conflict' })
+    expect(action.canCancel).toBe(scenario === 'source-expired')
+    if (scenario === 'source-expired') {
+      expect(action.state).toBe('authorization_expired')
+      expect(await api.cancelSourceAction(action.actionId)).toMatchObject({ status: 'failed', failureCode: 'source_action_denied' })
+      expect((await api.getSourceActions()).blockingAction).toBeNull()
+      const next = await api.prepareSourceAction(before.revision, action.sourceId)
+      expect(next.actionId).not.toBe(action.actionId)
+    } else {
+      await expect(api.cancelSourceAction(action.actionId)).rejects.toMatchObject({ code: 'source_action_conflict' })
+      expect((await api.getSourceActions()).blockingAction).toEqual(snapshot.blockingAction)
+    }
+    expect(await api.getSources()).toEqual(before)
+  })
+
+  it('reconciles a synthetic late success into Installed while keeping Team grants unchanged', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2030-01-01T00:00:00.000Z'))
+    vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
+    window.history.replaceState(null, '', '/sources?preview=source-late-success')
+    const api = previewApi()
+    const team = await api.getTeam()
+    const action = (await api.getSourceActions()).actions[0]
+    if (!action) throw new Error('Expected a recorded synthetic source action')
+    expect(action.state).toBe('authorization_required')
+    vi.advanceTimersByTime(15_000)
+    expect((await api.getSourceActions()).actions[0]).toMatchObject({ state: 'succeeded', canCancel: false })
+    expect((await api.getSources()).sources.find((source) => source.id === action.sourceId)?.status).toBe('installed')
+    expect((await api.getSourceActions()).blockingAction).toBeNull()
+    expect((await api.getTeam()).members).toEqual(team.members)
+  })
+
+  it('distinguishes a changed draft from an unrelated lifecycle conflict', async () => {
+    vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
+    window.history.replaceState(null, '', '/sources?preview=source-lifecycle')
+    const api = previewApi()
+    const sources = await api.getSources()
+    await expect(api.prepareSourceAction(sources.revision - 1, 'source-2222222222222222')).rejects.toMatchObject({ reason: 'draft_changed' })
+    await expect(api.prepareSourceAction(sources.revision, 'source-2222222222222222')).rejects.toMatchObject({ reason: 'lifecycle_pending', action: { kind: 'runtime' } })
+    expect((await api.getSourceActions()).actions).toEqual([])
   })
 
   it('resumes only the exact locked recovery proposal through a local Save', async () => {
