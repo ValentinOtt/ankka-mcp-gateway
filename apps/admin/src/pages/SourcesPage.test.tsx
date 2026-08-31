@@ -111,7 +111,9 @@ describe('source installation recovery', () => {
     await screen.findByRole('article', { name: `Installation of ${draft.label}` })
     completed = true
     await user.click(screen.getByRole('button', { name: 'Check status' }))
-    expect(await screen.findByText('Installed')).toBeVisible()
+    const sourceRow = await within(screen.getByRole('table', { name: 'Source list' }))
+      .findByRole('row', { name: new RegExp(`${draft.label} Public Installed`, 'u') })
+    expect(within(sourceRow).getByText('Installed')).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Authorize and apply' })).not.toBeInTheDocument()
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })
