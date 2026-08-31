@@ -290,13 +290,13 @@ describe.each(providers)('$provider authenticated Google runtime', (fixture) => 
 
       const accessInit = outbound.mock.calls[0]?.[1];
       expect(accessInit?.method).toBe('GET');
-      expect(accessInit?.redirect).toBe('error');
+      expect(accessInit?.redirect).toBe('manual');
       expect(accessInit?.body).toBeUndefined();
       expect([...new Headers(accessInit?.headers).entries()]).toEqual([['accept', 'application/json']]);
       for (const [index, step] of steps.entries()) {
         const tokenInit = outbound.mock.calls[1 + index * 2]?.[1];
         expect(tokenInit?.method).toBe('POST');
-        expect(tokenInit?.redirect).toBe('error');
+        expect(tokenInit?.redirect).toBe('manual');
         expect([...new Headers(tokenInit?.headers).entries()]).toEqual([
           ['accept', 'application/json'], ['content-type', 'application/x-www-form-urlencoded'],
         ]);
@@ -316,7 +316,7 @@ describe.each(providers)('$provider authenticated Google runtime', (fixture) => 
 
         const providerInit = outbound.mock.calls[2 + index * 2]?.[1];
         expect(providerInit?.method).toBe(step.method);
-        expect(providerInit?.redirect).toBe('error');
+        expect(providerInit?.redirect).toBe('manual');
         const token = index === 0 ? mintedToken : `${mintedToken}-${index + 1}`;
         const expectedHeaders = [['accept', 'application/json'], ['authorization', `Bearer ${token}`]];
         if (step.body !== undefined) expectedHeaders.push(['content-type', 'application/json']);

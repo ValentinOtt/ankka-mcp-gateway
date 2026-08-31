@@ -20,7 +20,7 @@ function reject(status: number, code: string): Response {
 export async function handleRequest(
   request: Request,
   env: Env,
-  fetcher: typeof globalThis.fetch = globalThis.fetch,
+  fetcher: typeof globalThis.fetch = (input, init) => globalThis.fetch(input, init),
 ): Promise<Response> {
   try {
     const origin = new URL(env.PUBLIC_ORIGIN);

@@ -41,7 +41,7 @@ describe('deployment-owned fixed-scope Google service-account authorization', ()
     const [url, init] = outbound.mock.calls[0] ?? [];
     expect(url).toBe(GOOGLE_TOKEN_ENDPOINT);
     expect(init?.method).toBe('POST');
-    expect(init?.redirect).toBe('error');
+    expect(init?.redirect).toBe('manual');
     expect([...new Headers(init?.headers).entries()]).toEqual([
       ['accept', 'application/json'], ['content-type', 'application/x-www-form-urlencoded'],
     ]);
@@ -101,11 +101,26 @@ describe('deployment-owned fixed-scope Google service-account authorization', ()
     expect(outbound).not.toHaveBeenCalled();
   });
 
-  it('does not follow redirects or accept changed/broad/invalid token responses', async () => {
+  it.each([301, 302, 303, 307, 308])('rejects token redirect status %s without forwarding the signed assertion or making a second fetch', async (status) => {
+    const redirectTarget = 'https://evil.example.com/token';
+    const outbound = vi.fn<typeof globalThis.fetch>(async () => Response.redirect(redirectTarget, status));
+    await expect(createAuthorization()(outbound)).rejects.toEqual(new GoogleAuthorizationError('GOOGLE_AUTH_FAILED'));
+    expect(outbound).toHaveBeenCalledOnce();
+    const [url, init] = outbound.mock.calls[0] ?? [];
+    expect(url).toBe(GOOGLE_TOKEN_ENDPOINT);
+    expect(init?.method).toBe('POST');
+    expect(init?.redirect).toBe('manual');
+    expect(new URLSearchParams(String(init?.body)).has('assertion')).toBe(true);
+    expect(outbound.mock.calls.some(([destination]) => String(destination) === redirectTarget)).toBe(false);
+  });
+
+  it('does not accept already-followed, changed, broad, or invalid token responses', async () => {
     const wrongUrl = tokenResponse();
     Object.defineProperty(wrongUrl, 'url', { value: 'https://evil.example.com/token' });
+    const redirected = tokenResponse();
+    Object.defineProperty(redirected, 'redirected', { value: true });
     const responses = [
-      Response.redirect('https://evil.example.com/token'), wrongUrl,
+      redirected, wrongUrl,
       new Response('sentinel-server-secret', { status: 500 }),
       new Response('sentinel-server-secret', { headers: { 'Content-Type': 'text/plain' } }),
       new Response('not-json', { headers: { 'Content-Type': 'application/json' } }),
