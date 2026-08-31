@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="/assets/installer-b89856ad.css">
   </head>
   <body>
+    <!-- ankka-runtime-callback-state -->
     <header class="site-header">
       <a class="brand" href="/" data-route-link="/" aria-label="Ankka MCP Gateway installer home">
         <svg class="wordmark" viewBox="0 0 175 19" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -117,9 +118,17 @@
         </section>
 
         <section class="panel" data-route="/manage" aria-labelledby="manage-action-title" hidden>
-          <p class="eyebrow">Gateway action authorization</p>
+          <p id="manage-action-eyebrow" class="eyebrow">Gateway action authorization</p>
           <h1 id="manage-action-title">Authorize the approved action in Cloudflare</h1>
-          <p class="lede">After consent, this page keeps the short-lived grant only in the connected callback while your gateway Worker performs the exact action you reviewed.</p>
+          <p id="manage-action-intro" class="lede">After consent, this page keeps the short-lived grant only in the connected callback while your gateway Worker performs the exact action you reviewed.</p>
+          <div id="manage-action-stage" class="operation-stage" role="status" aria-live="polite" hidden>
+            <span class="stage-indicator" aria-hidden="true"><span></span></span>
+            <div class="operation-copy">
+              <h2 id="manage-action-stage-title">Applying and checking the update</h2>
+              <p id="manage-action-stage-detail">Keep this tab open. You’ll return to your gateway once verification and cleanup finish.</p>
+            </div>
+          </div>
+          <div id="manage-action-links" class="button-row" hidden><a id="manage-action-return" class="secondary-button" rel="noreferrer">Return to gateway</a></div>
           <div class="callout"><strong>Live action</strong><p>The temporary workers.dev route is enabled only for the signed action, then disabled and verified before grant revocation is attempted and the local copy is discarded.</p></div>
         </section>
 
@@ -137,6 +146,6 @@
       data expires automatically.</p></footer>
     <!-- Classic and parser-blocking by design: it starts progress polling while
          the OAuth callback keeps streaming heartbeats after this HTML shell. -->
-    <script src="/assets/installer-8eaba3a8.js"></script>
+    <script src="/assets/installer-84291f65.js"></script>
   </body>
 </html>

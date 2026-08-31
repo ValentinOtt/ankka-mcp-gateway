@@ -515,13 +515,38 @@ async function checkedControl(
 ): Promise<void> {
   try {
     await withDeadline(async (signal) => {
-      const response = await control(input, command, signal, versionOverride);
-      const expected = probeResponse ? 204 : 200;
-      if (response.status !== expected || response.redirected ||
-          probeResponse && response.headers.get('x-ankka-runtime-action') !== 'ready') {
-        await controlFailure(response, phase);
+      for (;;) {
+        signal.throwIfAborted();
+        const response = await control(input, command, signal, versionOverride);
+        const expected = probeResponse ? 204 : 200;
+        if (response.status !== expected || response.redirected ||
+            probeResponse && response.headers.get('x-ankka-runtime-action') !== 'ready') {
+          try {
+            await controlFailure(response, phase);
+          } catch (error) {
+            // Normal routing can briefly lag the verified deployment. Only this
+            // exact active-probe mismatch may wait within the same 10s deadline.
+            if (phase !== 'active_probe' || !probeResponse || versionOverride !== undefined ||
+                response.status !== 409 || response.redirected || signal.aborted ||
+                !(error instanceof DeployError) || error.reason !== 'runtime_active_probe_version_mismatch') {
+              throw error;
+            }
+            await new Promise<void>((resolve) => {
+              const finish = (): void => {
+                clearTimeout(timer);
+                signal.removeEventListener('abort', finish);
+                resolve();
+              };
+              const timer = setTimeout(finish, 250);
+              signal.addEventListener('abort', finish, { once: true });
+              if (signal.aborted) finish();
+            });
+            continue;
+          }
+        }
+        await response.body?.cancel();
+        return;
       }
-      await response.body?.cancel();
     }, 'session_conflict');
   } catch (error) {
     if (error instanceof DeployError && error.reason !== null) throw error;

@@ -373,6 +373,14 @@ function candidateResponse(response: (request: Request) => Promise<Response>): C
   };
 }
 
+function activeResponse(response: (request: Request) => Promise<Response>): ControlResponse {
+  return async (request) => {
+    const body = await requestJson(request.clone(), commandSchema);
+    return body.command === 'probe' && !request.headers.has('Cloudflare-Workers-Version-Overrides')
+      ? response(request) : null;
+  };
+}
+
 function expectSafeControlError(error: Error, reason: string) {
   expect(error).toMatchObject({ status: 409, code: 'session_conflict', reason });
   for (const privateValue of [ACCESS_TOKEN, ASSET_UPLOAD_JWT, ASSET_COMPLETION_JWT, ACTION_KEY, 'synthetic-private-control']) {
@@ -380,6 +388,222 @@ function expectSafeControlError(error: Error, reason: string) {
     expect(JSON.stringify(error)).not.toContain(privateValue);
   }
 }
+
+describe('bounded active-version propagation check', () => {
+  const mismatch = () => Response.json({ schemaVersion: 1, error: 'runtime_probe_version_mismatch' }, { status: 409 });
+  const ready = () => new Response(null, { status: 204, headers: { 'x-ankka-runtime-action': 'ready' } });
+
+  it('waits for the exact active version without repeating a candidate probe or provider mutation', async () => {
+    let activeCalls = 0;
+    const fixture = await updateTransportFixture(undefined, activeResponse(async () => (
+      ++activeCalls === 1 ? mismatch() : ready()
+    )));
+    await expect(relayRuntimeUpdate(fixture.relayInput)).resolves.toMatchObject({ status: 'succeeded' });
+    expect(activeCalls).toBe(2);
+    const probes = fixture.controls.filter(({ body }) => body.command === 'probe');
+    expect(probes.map(({ versionOverride }) => versionOverride)).toEqual([`${WORKER_NAME}="${TARGET_VERSION}"`, null, null]);
+    expect(probes.every(({ body }) => body.targetRelease === fixture.relayInput.to.release &&
+      body.targetArtifactSha256 === fixture.relayInput.to.artifactSha256)).toBe(true);
+    expect(fixture.events.filter((event) => event === 'worker_version')).toHaveLength(1);
+    expect(fixture.deployments).toEqual([
+      [{ version_id: OLD_VERSION, percentage: 100 }, { version_id: TARGET_VERSION, percentage: 0 }],
+      [{ version_id: TARGET_VERSION, percentage: 100 }],
+    ]);
+    expect(fixture.commands.filter((command) => command === 'complete')).toHaveLength(1);
+    expect(fixture.commands).not.toContain('fail');
+    expect(fixture.subdomainStates).toEqual([true, false]);
+  });
+
+  it('exhausts one total ten-second budget and compensates once for a persistent mismatch', async () => {
+    let announce: (() => void) | null = null;
+    const arrived = new Promise<void>((resolve) => { announce = resolve; });
+    let activeCalls = 0;
+    const fixture = await updateTransportFixture(undefined, activeResponse(async () => {
+      activeCalls += 1;
+      if (announce === null) throw new TypeError('missing probe observer');
+      announce();
+      return mismatch();
+    }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const outcome = relayRuntimeUpdate(fixture.relayInput).catch(caughtError);
+    await arrived;
+    await vi.advanceTimersByTimeAsync(10_000);
+    const error = await outcome;
+    if (!(error instanceof Error)) throw new TypeError('expected active probe timeout');
+    expectSafeControlError(error, 'runtime_active_probe_timeout');
+    expect(activeCalls).toBeGreaterThan(1);
+    expect(activeCalls).toBeLessThanOrEqual(40);
+    expect(fixture.deployments).toHaveLength(3);
+    expect(fixture.deployments.at(-1)).toEqual([{ version_id: OLD_VERSION, percentage: 100 }]);
+    expect(fixture.commands.filter((command) => command === 'fail')).toHaveLength(1);
+    expect(fixture.commands).not.toContain('complete');
+    expect(fixture.controls.at(-1)?.body).toMatchObject({ command: 'fail', recoveryRequired: false });
+    expect(fixture.subdomainStates).toEqual([true, false]);
+    const finalCalls = activeCalls;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(activeCalls).toBe(finalCalls);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  const mismatchBody = JSON.stringify({ schemaVersion: 1, error: 'runtime_probe_version_mismatch' });
+  it.each([
+    ['server status with mismatch body', () => Response.json({ schemaVersion: 1, error: 'runtime_probe_version_mismatch' }, { status: 503 }), 'version_mismatch'],
+    ['unauthorized status with mismatch body', () => Response.json({ schemaVersion: 1, error: 'runtime_probe_version_mismatch' }, { status: 401 }), 'version_mismatch'],
+    ['authentication rejection', () => Response.json({ schemaVersion: 1, error: 'runtime_action_rejected' }, { status: 400 }), 'action_rejected'],
+    ['action conflict', () => Response.json({ schemaVersion: 1, error: 'runtime_action_conflict' }, { status: 409 }), 'action_conflict'],
+    ['Team conflict', () => Response.json({ schemaVersion: 1, error: 'team_action_conflict' }, { status: 409 }), 'team_conflict'],
+    ['unavailable runtime', () => Response.json({ schemaVersion: 1, error: 'runtime_updates_unavailable' }, { status: 503 }), 'updates_unavailable'],
+    ['extra field', () => Response.json({ schemaVersion: 1, error: 'runtime_probe_version_mismatch', message: ACCESS_TOKEN }, { status: 409 }), 'rejected'],
+    ['unknown error', () => Response.json({ schemaVersion: 1, error: ACCESS_TOKEN }, { status: 409 }), 'rejected'],
+    ['wrong schema', () => Response.json({ schemaVersion: 2, error: 'runtime_probe_version_mismatch' }, { status: 409 }), 'rejected'],
+    ['malformed JSON', () => new Response('{', { status: 409, headers: { 'content-type': 'application/json' } }), 'rejected'],
+    ['HTML', () => new Response(ACCESS_TOKEN, { status: 409, headers: { 'content-type': 'text/html' } }), 'rejected'],
+    ['missing content type', () => new Response(new TextEncoder().encode(mismatchBody), { status: 409 }), 'rejected'],
+    ['oversized body', () => new Response(mismatchBody.padEnd(1_025, ' '), { status: 409, headers: { 'content-type': 'application/json' } }), 'rejected'],
+    ['oversized declared length', () => new Response(mismatchBody, { status: 409, headers: { 'content-type': 'application/json', 'content-length': '1025' } }), 'rejected'],
+    ['success status with mismatch body', () => Response.json({ schemaVersion: 1, error: 'runtime_probe_version_mismatch' }), 'rejected'],
+    ['missing readiness marker', () => new Response(null, { status: 204 }), 'rejected'],
+    ['redirect', () => new Response(mismatchBody, { status: 302, headers: { 'content-type': 'application/json', location: 'https://foreign.example/' } }), 'redirect'],
+    ['followed redirect', () => Object.defineProperty(mismatch(), 'redirected', { value: true }), 'redirect'],
+  ] as const)('never retries active %s', async (_label, response, detail) => {
+    let activeCalls = 0;
+    const fixture = await updateTransportFixture(undefined, activeResponse(async () => {
+      activeCalls += 1;
+      return response();
+    }));
+    const error = await relayRuntimeUpdate(fixture.relayInput).catch(caughtError);
+    if (!(error instanceof Error)) throw new TypeError('expected active probe failure');
+    expectSafeControlError(error, `runtime_active_probe_${detail}`);
+    expect(activeCalls).toBe(1);
+    expect(fixture.deployments).toHaveLength(3);
+    expect(fixture.deployments.at(-1)).toEqual([{ version_id: OLD_VERSION, percentage: 100 }]);
+    expect(fixture.commands).not.toContain('complete');
+    expect(fixture.subdomainStates).toEqual([true, false]);
+  });
+
+  it('never retries a transport exception after one transient mismatch', async () => {
+    let activeCalls = 0;
+    const fixture = await updateTransportFixture(undefined, activeResponse(async () => {
+      if (++activeCalls === 1) return mismatch();
+      throw new Error(ACCESS_TOKEN);
+    }));
+    const error = await relayRuntimeUpdate(fixture.relayInput).catch(caughtError);
+    if (!(error instanceof Error)) throw new TypeError('expected active probe failure');
+    expectSafeControlError(error, 'runtime_active_probe_request_failed');
+    expect(activeCalls).toBe(2);
+    expect(fixture.deployments).toHaveLength(3);
+    expect(fixture.commands).not.toContain('complete');
+    expect(fixture.subdomainStates).toEqual([true, false]);
+  });
+
+  it.each(['request', 'body'] as const)('shares the remaining deadline with a hung retry %s', async (kind) => {
+    let announceFirst: (() => void) | null = null;
+    let announceHeld: ((request: Request) => void) | null = null;
+    const first = new Promise<void>((resolve) => { announceFirst = resolve; });
+    const held = new Promise<Request>((resolve) => { announceHeld = resolve; });
+    let activeCalls = 0;
+    let aborted = 0;
+    const fixture = await updateTransportFixture(undefined, activeResponse(async (request) => {
+      if (++activeCalls === 1) {
+        if (announceFirst === null) throw new TypeError('missing first probe observer');
+        announceFirst();
+        return mismatch();
+      }
+      if (announceHeld === null) throw new TypeError('missing held probe observer');
+      announceHeld(request);
+      if (kind === 'request') return new Promise<Response>((_resolve, reject) => {
+        request.signal.addEventListener('abort', () => {
+          aborted += 1;
+          reject(new Error(ACCESS_TOKEN));
+        }, { once: true });
+      });
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"schemaVersion":1,"error":'));
+          request.signal.addEventListener('abort', () => {
+            aborted += 1;
+            controller.error(new Error(ACCESS_TOKEN));
+          }, { once: true });
+        },
+      }), { status: 409, headers: { 'content-type': 'application/json' } });
+    }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const outcome = relayRuntimeUpdate(fixture.relayInput).catch(caughtError);
+    await first;
+    await vi.advanceTimersByTimeAsync(250);
+    const request = await held;
+    await vi.advanceTimersByTimeAsync(9_749);
+    expect(request.signal.aborted).toBe(false);
+    expect(fixture.deployments).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await outcome;
+    if (!(error instanceof Error)) throw new TypeError('expected active probe timeout');
+    expectSafeControlError(error, 'runtime_active_probe_timeout');
+    expect(aborted).toBe(1);
+    expect(activeCalls).toBe(2);
+    expect(fixture.deployments).toHaveLength(3);
+    expect(fixture.commands).not.toContain('complete');
+    expect(fixture.subdomainStates).toEqual([true, false]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(activeCalls).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('counts response-body time and aborts a final backoff without issuing a late retry', async () => {
+    let announce: (() => void) | null = null;
+    const arrived = new Promise<void>((resolve) => { announce = resolve; });
+    let activeCalls = 0;
+    const fixture = await updateTransportFixture(undefined, activeResponse(async () => {
+      activeCalls += 1;
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          setTimeout(() => {
+            controller.enqueue(new TextEncoder().encode(mismatchBody));
+            controller.close();
+          }, 9_900);
+          if (announce === null) throw new TypeError('missing body observer');
+          announce();
+        },
+      }), { status: 409, headers: { 'content-type': 'application/json' } });
+    }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const outcome = relayRuntimeUpdate(fixture.relayInput).catch(caughtError);
+    await arrived;
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(activeCalls).toBe(1);
+    expect(fixture.deployments).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await outcome;
+    if (!(error instanceof Error)) throw new TypeError('expected active probe timeout');
+    expectSafeControlError(error, 'runtime_active_probe_timeout');
+    expect(fixture.deployments).toHaveLength(3);
+    expect(fixture.subdomainStates).toEqual([true, false]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(activeCalls).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['ready', 'rejected'] as const)('never overwrites a foreign deployment observed after an active retry becomes %s', async (result) => {
+    let activeCalls = 0;
+    const fixture = await updateTransportFixture(undefined, activeResponse(async () => {
+      if (++activeCalls === 1) return mismatch();
+      return result === 'ready' ? ready() : Response.json({ schemaVersion: 1, error: 'runtime_action_conflict' }, { status: 409 });
+    }));
+    const transport: TransportFixture['transport'] = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (activeCalls >= 1 && request.method === 'GET' && new URL(request.url).pathname.endsWith('/deployments')) {
+        return json({ deployments: [{ id: INITIAL_DEPLOYMENT, versions: [{ version_id: OLD_VERSION, percentage: 100 }] }] });
+      }
+      return fixture.relayInput.transport(request);
+    };
+    await expect(relayRuntimeUpdate({ ...fixture.relayInput, transport })).rejects.toMatchObject({ code: 'session_conflict' });
+    expect(activeCalls).toBe(2);
+    expect(fixture.deployments).toHaveLength(2);
+    expect(fixture.commands).not.toContain('complete');
+    expect(fixture.controls.at(-1)?.body).toMatchObject({ command: 'fail', recoveryRequired: true });
+    expect(fixture.subdomainStates).toEqual([true, false]);
+  });
+});
 
 describe('customer-owned Team management binding', () => {
   const management = { name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'secret_text' };

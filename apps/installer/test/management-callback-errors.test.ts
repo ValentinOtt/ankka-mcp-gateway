@@ -6,13 +6,18 @@ import { CloudflareDirectUploadError } from '../src/cloudflare-worker-direct-upl
 import { OAUTH_COOKIE, PUBLIC_ORIGIN, REQUIRED_OAUTH_SCOPES, SESSION_COOKIE } from '../src/constants';
 import { base64UrlEncode, deriveCsrfToken, openOauthCookie, sha256 } from '../src/crypto';
 import { DeployError } from '../src/errors';
-import { createGatewayDeployWorker, type GatewayDeployWorkerDependencies, type InstallCallbackResponseInput } from '../src/index';
+import {
+  createGatewayDeployWorker,
+  type GatewayDeployWorkerDependencies,
+  type InstallCallbackResponseInput,
+  type RuntimeCallbackResponseInput,
+} from '../src/index';
 import * as oauthModule from '../src/oauth';
 import * as runtimeRelay from '../src/runtime-update-relay';
 import { buildStaticDeployPlan, parseDeploySelection } from '../src/schema';
 import type { StoredDeploySession } from '../src/session';
 import * as sourceRelay from '../src/source-action-relay';
-import { streamingInstallCallbackResponse } from '../src/streaming-callback';
+import { streamingInstallCallbackResponse, streamingRuntimeCallbackResponse } from '../src/streaming-callback';
 import { responseJson } from './boundary';
 import { cookiePair, env, FakeDeploySessionNamespace, requiredFixture, selectionInput } from './fixtures';
 import { sourceActionRuntimeFixture, type SourceActionRuntimeFixture } from './source-action-runtime-fixture';
@@ -326,6 +331,182 @@ describe('runtime callback completion ordering', () => {
     expect(current.update).toHaveBeenCalledTimes(1);
     expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
     current.assertRetained(context);
+  });
+});
+
+describe('runtime callback pending shell and terminal completion', () => {
+  const html = '<!doctype html><body><!-- ankka-runtime-callback-state --><main>Management action</main></body>';
+  const stream = ({ execute }: RuntimeCallbackResponseInput) => streamingRuntimeCallbackResponse(new Response(html, {
+    headers: { 'content-type': 'text/html; charset=utf-8' },
+  }), execute);
+
+  it('leaves source actions on their existing verified management response when both factories are configured', async () => {
+    const shell = vi.fn(stream);
+    const current = await fixture('source', { runtimeCallbackResponse: shell });
+    const response = await current.callback();
+    expect(response.status).toBe(200);
+    expect(shell).not.toHaveBeenCalled();
+    expect(current.source).toHaveBeenCalledTimes(1);
+    expect(current.update).not.toHaveBeenCalled();
+    const verified = cookiePair(response.headers.get('set-cookie') ?? '', OAUTH_COOKIE);
+    const sealed = await openOauthCookie(
+      current.workerEnv.DEPLOY_SESSION_ENCRYPTION_KEY, verified.slice(OAUTH_COOKIE.length + 1),
+    );
+    expect(sealed).toMatchObject({ schemaVersion: 9, purpose: 'management_action_result', actionType: 'source_apply' });
+    current.assertRetained(response);
+  });
+
+  it.each([
+    ['succeeded', false], ['succeeded', true], ['failed', false], ['failed', true],
+  ] as const)('streams immediately but waits for %s and cleanup (revocation failure: %s) before terminal result', async (outcome, revokeFails) => {
+    const relayStarted = deferred();
+    const relayComplete = deferred();
+    const cleanupStarted = deferred();
+    const cleanupComplete = deferred();
+    const discard = vi.spyOn(oauthModule.EphemeralCloudflareGrant.prototype, 'discard');
+    const shell = vi.fn(({ execute, ...input }: RuntimeCallbackResponseInput) => stream({
+      ...input,
+      execute: () => {
+        const current = execute();
+        expect(execute()).toBe(current);
+        return current;
+      },
+    }));
+    const current = await fixture('runtime', { runtimeCallbackResponse: shell });
+    current.update.mockImplementation(async () => {
+      relayStarted.resolve();
+      await relayComplete.promise;
+      if (outcome === 'failed') throw new Error('provider-secret:' + ACCESS_TOKEN);
+      return {
+        schemaVersion: 1, actionId: ACTION_ID, operation: 'update', status: 'succeeded',
+        managementUrl: MANAGEMENT_ORIGIN + '/?runtimeAction=' + ACTION_ID,
+      };
+    });
+    const originalRevoke = oauthModule.EphemeralCloudflareGrant.prototype.revoke;
+    const revoke = vi.spyOn(oauthModule.EphemeralCloudflareGrant.prototype, 'revoke').mockImplementation(
+      async function (this: oauthModule.EphemeralCloudflareGrant, transport, config) {
+        cleanupStarted.resolve();
+        await cleanupComplete.promise;
+        await originalRevoke.call(this, transport, config);
+        if (revokeFails) throw new Error('revoke-secret:' + ACCESS_TOKEN);
+      },
+    );
+    const response = await current.callback();
+    expect(response.status).toBe(200);
+    expect(response.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
+    expect(response.headers.get('location')).toBeNull();
+    expect(shell).toHaveBeenCalledTimes(1);
+    current.assertRetained(response);
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    const first = new TextDecoder().decode((await reader?.read())?.value);
+    expect(first).toContain('ankka-runtime-callback-pending');
+    expect(first).not.toContain('ankka-runtime-callback-result');
+    expect(first).not.toContain(ACCESS_TOKEN);
+    await relayStarted.promise;
+    expect(revoke).not.toHaveBeenCalled();
+    let terminalRead = false;
+    const terminal = reader?.read().then((part) => { terminalRead = true; return part; });
+    relayComplete.resolve();
+    await cleanupStarted.promise;
+    expect(terminalRead).toBe(false);
+    expect(discard).not.toHaveBeenCalled();
+    const pendingContext = await current.worker.fetch(new Request(PUBLIC_ORIGIN + '/api/management/context', {
+      headers: { cookie: SESSION_PAIR + '; ' + current.oauth },
+    }), current.workerEnv);
+    expect(pendingContext.status).toBe(404);
+    cleanupComplete.resolve();
+    const body = new TextDecoder().decode((await terminal)?.value);
+    const expectedBase = {
+      schemaVersion: 1, kind: 'runtime_update',
+      managementUrl: MANAGEMENT_ORIGIN + '/?runtimeAction=' + ACTION_ID,
+      status: outcome,
+    };
+    const expected = outcome === 'failed'
+      ? { ...expectedBase, code: 'internal_error', reason: 'runtime_action_relay' }
+      : expectedBase;
+    expect(body).toContain('<template id="ankka-runtime-callback-result">' + JSON.stringify(expected) + '</template>');
+    expect(body).not.toContain(ACCESS_TOKEN);
+    expect(body).not.toContain(ACTION_KEY);
+    expect(body).not.toContain('authorization-code-value');
+    expect(body).not.toContain('provider-secret');
+    expect((await reader?.read())?.done).toBe(true);
+    expect(discard).toHaveBeenCalledTimes(1);
+    expect(revoke).toHaveBeenCalledTimes(1);
+    expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
+    expect(current.update).toHaveBeenCalledTimes(1);
+    expect(current.source).not.toHaveBeenCalled();
+    current.assertRetained(response);
+  });
+
+  it('reports an early release failure through this action stream without touching the previous install or a grant', async () => {
+    const current = await fixture('runtime', {
+      runtimeCallbackResponse: stream,
+      releaseProvider: {
+        loadVerifiedRelease: async () => runtime.bundle,
+        loadVerifiedReleaseBundle: async () => { throw new Error(ACCESS_TOKEN); },
+      },
+    });
+    const response = await current.callback();
+    const body = await response.text();
+    expect(body).toContain('ankka-runtime-callback-pending');
+    expect(body).toContain('"status":"failed","code":"internal_error","reason":"runtime_release_verification"');
+    expect(body).not.toContain(ACCESS_TOKEN);
+    expect(current.calls).toEqual({ exchanged: 0, revoked: 0 });
+    expect(current.update).not.toHaveBeenCalled();
+    current.assertRetained(response);
+  });
+
+  it('does not exchange a grant when the pending shell fails before execution', async () => {
+    const current = await fixture('runtime', {
+      runtimeCallbackResponse: async () => { throw new Error(ACCESS_TOKEN); },
+    });
+    const response = await current.callback();
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ code: 'internal_error', reason: 'runtime_callback_shell' });
+    expect(current.calls).toEqual({ exchanged: 0, revoked: 0 });
+    expect(current.update).not.toHaveBeenCalled();
+    current.assertRetained(response);
+  });
+
+  it('joins an already started invocation before reporting a shell failure without replaying it', async () => {
+    const relayStarted = deferred();
+    const relayComplete = deferred();
+    const current = await fixture('runtime', {
+      runtimeCallbackResponse: async ({ execute }) => {
+        const pending = execute();
+        await relayStarted.promise;
+        void pending;
+        throw new Error(ACCESS_TOKEN);
+      },
+    });
+    current.update.mockImplementation(async () => {
+      relayStarted.resolve();
+      await relayComplete.promise;
+      throw new Error(ACCESS_TOKEN);
+    });
+    let responded = false;
+    const pending = current.callback().then((response) => { responded = true; return response; });
+    await relayStarted.promise;
+    expect(responded).toBe(false);
+    relayComplete.resolve();
+    const response = await pending;
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ code: 'internal_error', reason: 'runtime_callback_shell' });
+    expect(current.calls).toEqual({ exchanged: 1, revoked: 1 });
+    expect(current.update).toHaveBeenCalledTimes(1);
+    current.assertRetained(response);
+  });
+
+  it('keeps denied consent outside the stream and never invokes its executor', async () => {
+    const shell = vi.fn(stream);
+    const current = await fixture('runtime', { runtimeCallbackResponse: shell });
+    const response = await current.callback(true);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ code: 'oauth_denied' });
+    expect(shell).not.toHaveBeenCalled();
+    expect(current.calls).toEqual({ exchanged: 0, revoked: 0 });
+    current.assertRetained(response);
   });
 });
 

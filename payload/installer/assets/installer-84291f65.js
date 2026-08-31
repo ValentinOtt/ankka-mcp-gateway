@@ -16,6 +16,7 @@ const state = {
   pollTimer: null,
   pollFailures: 0,
   callbackStreamActive: callbackStream,
+  runtimeCallbackStatus: null,
   agentToolsRegistered: false,
   agentToolsController: null,
   agentToolsRegistration: null,
@@ -992,6 +993,95 @@ async function managementCallbackContext() {
   return managementUrl ? { ...payload, managementUrl } : null;
 }
 
+function runtimeCallbackResult() {
+  const markers = document.querySelectorAll('[id="ankka-runtime-callback-result"]');
+  if (markers.length !== 1 || markers[0].tagName !== 'TEMPLATE') return null;
+  const encoded = markers[0].content.textContent;
+  if (!encoded || encoded.length > 4096) return null;
+  let result;
+  try { result = JSON.parse(encoded); } catch { return null; }
+  if (result?.schemaVersion !== 1 || result.kind !== 'runtime_update' ||
+      !['succeeded', 'failed'].includes(result.status)) return null;
+  const expected = ['schemaVersion', 'kind', 'status', 'managementUrl'];
+  if (result.status === 'failed') expected.push('code', 'reason');
+  if (Object.keys(result).length !== expected.length ||
+      !expected.every((key) => Object.hasOwn(result, key))) return null;
+  if (result.status === 'failed' && (
+    !AGENT_API_ERROR_CODES.has(result.code) ||
+    result.reason !== null && (!isText(result.reason) || !/^[a-z][a-z0-9_]{0,159}$/u.test(result.reason))
+  )) return null;
+  if (!isText(result.managementUrl) || result.managementUrl.length > 2048) return null;
+  try {
+    const url = new URL(result.managementUrl);
+    if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash ||
+        url.pathname !== '/' || url.searchParams.size !== 1 ||
+        !/^action_[A-Za-z0-9_-]{32}$/u.test(url.searchParams.get('runtimeAction') ?? '')) return null;
+    return { ...result, managementUrl: url.href };
+  } catch { return null; }
+}
+
+function showRuntimeCallback(status, result = null) {
+  state.runtimeCallbackStatus = status;
+  state.callbackStreamActive = status === 'running';
+  setBusy(status === 'running');
+  const pending = status === 'running';
+  const succeeded = status === 'succeeded';
+  const title = pending ? 'Updating your gateway'
+    : succeeded ? 'Update complete'
+      : status === 'failed' ? 'Update needs attention' : 'Update status unavailable';
+  document.title = `${title} · Ankka`;
+  byId('manage-action-eyebrow').textContent = 'Gateway update';
+  byId('manage-action-title').textContent = title;
+  byId('manage-action-intro').textContent = pending
+    ? 'Applying the change you approved in your Cloudflare account.'
+    : succeeded ? 'Your approved update was applied and verified.'
+      : 'Check the current status in your gateway before starting another update.';
+  const stage = byId('manage-action-stage');
+  stage.hidden = false;
+  stage.dataset.status = pending ? 'running' : succeeded ? 'succeeded' : 'failed';
+  byId('manage-action-stage-title').textContent = pending ? 'Applying and checking the update'
+    : succeeded ? 'Returning to your gateway…' : 'The update could not be confirmed';
+  byId('manage-action-stage-detail').textContent = pending
+    ? 'Keep this tab open. You’ll return to your gateway once verification and cleanup finish.'
+    : succeeded ? 'If you are not redirected, use the link below.'
+      : 'Do not reload this callback or repeat authorization before checking your gateway.';
+  const link = byId('manage-action-return');
+  byId('manage-action-links').hidden = !result;
+  if (result) link.href = result.managementUrl;
+  else link.removeAttribute('href');
+  showNotice(status === 'failed'
+    ? `Diagnostic: ${result.code}${result.reason ? ` / ${result.reason}` : ''}.`
+    : status === 'unknown' ? 'The connection ended without a verified result. No automatic retry was started.'
+      : '', status === 'failed' || status === 'unknown' ? 'error' : 'neutral');
+}
+
+function startRuntimeCallback() {
+  const pending = document.querySelectorAll('[id="ankka-runtime-callback-pending"]');
+  if (!pending.length) return false;
+  window.history.replaceState(null, '', '/manage');
+  state.route = '/manage';
+  document.querySelector('.step-indicators').hidden = true;
+  render();
+  if (pending.length !== 1 || pending[0].tagName !== 'TEMPLATE') {
+    showRuntimeCallback('unknown');
+    return true;
+  }
+  showRuntimeCallback('running');
+  let finished = false;
+  const finish = () => {
+    if (finished || document.readyState !== 'complete') return;
+    finished = true;
+    // A template can arrive in several network chunks. Read it only after the
+    // response has drained, and never interpret load/EOF alone as success.
+    const result = runtimeCallbackResult();
+    showRuntimeCallback(result?.status ?? 'unknown', result);
+    if (result?.status === 'succeeded') window.location.replace(result.managementUrl);
+  };
+  if (document.readyState === 'complete') finish();
+  else window.addEventListener('load', finish, { once: true });
+  return true;
+}
+
 async function runAgentAction(message, action) {
   if (state.busy) {
     return JSON.stringify({ ok: false, error: agentError(new Error('installer_busy')) });
@@ -1275,6 +1365,10 @@ for (const event of ['pageshow', 'focus']) {
 
 document.addEventListener('click', (event) => {
   const target = event.target.closest('[data-route-link], [data-go]');
+  if (target && state.runtimeCallbackStatus === 'running') {
+    event.preventDefault();
+    return;
+  }
   if (!target || state.busy) return;
   const path = target.dataset.routeLink ?? target.dataset.go;
   if (!ROUTES.has(path)) return;
@@ -1433,6 +1527,7 @@ async function start() {
       return;
     }
     if (callbackStream) {
+      if (startRuntimeCallback()) return;
       const management = await managementCallbackContext();
       if (management) {
         window.history.replaceState(null, '', '/manage');
@@ -1469,7 +1564,7 @@ async function start() {
       ), 'error');
     }
   } finally {
-    setBusy(false);
+    setBusy(state.runtimeCallbackStatus === 'running');
     render();
   }
 }
