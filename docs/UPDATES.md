@@ -28,8 +28,8 @@ It must not change:
 
 During the approved operation, the updater temporarily enables the existing
 gateway Worker's `workers.dev` subdomain for a bounded, authenticated action
-route. It disables and verifies that route before completion. An unconfirmed
-cleanup result becomes recovery-required rather than success.
+route. It disables and verifies that route before completion. The installer
+reports unconfirmed route cleanup as a failure rather than success.
 
 Changes outside this boundary require a separately designed and
 operator-approved migration or a fresh installation.
@@ -64,10 +64,22 @@ The updater:
 2. uploads the verified candidate;
 3. stages the candidate at 0% beside the current version at 100%;
 4. probes the exact candidate version;
-5. activates the candidate at 100% only after the probe succeeds; and
-6. records the result in the team's Durable Object.
+5. activates the candidate at 100% only after the probe succeeds;
+6. probes the active version through normal routing and re-verifies the deployment; and
+7. records the result in the team's Durable Object.
 
 Gateway traffic is not gradually split between versions.
+
+Only an exact HTTP 409 `runtime_probe_version_mismatch` from the normal-routing
+active probe is retried, with 250 ms pauses inside one total 10-second deadline.
+Candidate probes, other errors, and provider mutations are not retried by this
+check.
+
+The connected callback displays a pending loader while the approved operation
+runs. An explicit terminal result is emitted only after execution,
+temporary-route cleanup, and the grant revocation attempt and discard. The
+grant remains request-local and is never persisted. Automatic return requires
+a valid success result and a complete document; EOF alone is not success.
 
 If staging or activation fails, the updater attempts to restore and verify the
 previous version. An unverified provider outcome becomes recovery-required

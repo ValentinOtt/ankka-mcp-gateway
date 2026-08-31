@@ -5,46 +5,47 @@ update because its asynchronous management-context request finished after the
 window's `load` event. Registering a listener at that point never navigated.
 This is separate from Chrome's `ERR_BLOCKED_BY_CLIENT` behavior.
 
-The installer now returns to the validated management-context URL immediately
-when `document.readyState` is `complete`; otherwise it registers a one-time
-`load` listener. These mutually exclusive branches execute synchronously, so
-they neither miss a subsequent load event nor navigate twice.
+Source management callbacks retain the existing load/already-complete return
+behavior. Runtime update callbacks now show a pending loader immediately and
+return automatically only when the complete document contains one valid
+explicit success result. Load or EOF alone never establishes success.
 
 ## Completion and authority
 
-No server execution or validation behavior changes. In
-[`runtimeUpdateOauthCallback()`](../apps/installer/src/index.ts), the callback
-awaits the memoized `executeOnce()` operation, including the runtime relay and
-the grant revocation attempt and discard, before constructing the management
-shell or issuing verified result context. The
-[streaming response](../apps/installer/src/streaming-callback.ts) awaits that
-same promise before closing. Waiting for document completion preserves this
-response boundary; the progress banner does not establish action success.
+The reviewed [`runtimeUpdateOauthCallback()`](../apps/installer/src/index.ts)
+streams its verified pending shell before the memoized `executeOnce()`
+operation finishes. The early response clears the OAuth cookie; it does not
+issue verified result context. Only after execution and cleanup—including the
+grant revocation attempt and discard—does the
+[stream](../apps/installer/src/streaming-callback.ts) append an escaped terminal
+result.
 
-The browser still obtains its target only from `/api/management/context` and
-uses the existing URL validator. The server still validates the management
-origin, release identity, authenticated relay, and action result. No callback
-query, grant, cookie, or credential is read or persisted by the browser fix.
-Missing, expired, malformed, and unavailable context retain the existing
-result/session recovery behavior. Team saves and `accessAction` validation are
-outside this change.
+That result contains only a public status, bounded diagnostic, and validated
+management URL. The grant remains in request-local memory; neither it nor the
+action key or authorization code enters the HTML.
+
+The runtime loader makes no management-context or installation-status
+requests. It validates the terminal result after document completion. Failure
+offers a manual return link; a missing or malformed result remains unknown,
+without navigation or replay. Source callbacks retain their existing
+verified-context and recovery behavior. Existing authorization checks and
+Team-save behavior are unchanged.
 
 ## Local verification
 
 The [browser regression suite](../test/installer-management-redirect.test.mjs)
 executes the complete JavaScript asset referenced by the release HTML, with
-controlled load events and context responses. Against the preceding asset,
-two of its 16 cases fail: load during the pending request and a document that
-is already complete. With the fix, all 16 pass. Context before load still
-waits; duplicate events navigate once; invalid or unavailable context never
-redirects; successful return performs only one context GET and no action POST.
+controlled load events, context responses, and terminal templates. It covers
+immediate progress, fragmented templates, already-complete documents,
+once-only success navigation, manual-only failure, malformed or missing
+results, and unchanged source callbacks.
 
 The [callback lifecycle suite](../apps/installer/test/management-callback-errors.test.ts)
-also holds the relay and grant cleanup separately, covering action success and
-failure with both successful and failed revocation. It asserts that no shell
-escapes before cleanup, repeated execution callbacks reuse the same operation,
-and current failures remain bounded instead of displaying an earlier success.
-All fixtures are synthetic; this verification does not run a customer update.
+holds execution and grant cleanup separately: the pending shell arrives early,
+but no terminal result escapes before cleanup finishes. Repeated execution
+callbacks reuse the same operation, sensitive values never enter the result,
+and source callbacks retain their existing response path. All fixtures are
+synthetic; these tests do not run a customer update.
 
 ## Required delivery path
 

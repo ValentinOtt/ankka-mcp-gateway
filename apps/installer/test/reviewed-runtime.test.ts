@@ -7,6 +7,8 @@ import {
   SESSION_COOKIE,
 } from '../src/constants';
 import { DeployError } from '../src/errors';
+import { sealOauthCookie } from '../src/crypto';
+import * as runtimeRelay from '../src/runtime-update-relay';
 import type {
   PinnedR2Release,
   R2ReleaseBundleProvider,
@@ -31,6 +33,12 @@ import {
 import { cookiePair, env, selectionInput } from './fixtures';
 
 const encoder = new TextEncoder();
+
+function deferred() {
+  let resolve = (): void => undefined;
+  const promise = new Promise<void>((next) => { resolve = next; });
+  return { promise, resolve };
+}
 
 interface SourceFile {
   readonly bytes: Uint8Array;
@@ -89,7 +97,8 @@ async function signedSnapshotFixture(controlPlaneOrigin = PUBLIC_ORIGIN): Promis
     await source(
       'payload/installer/index.html',
       'text/html; charset=utf-8',
-      '<!doctype html><main>signed reviewed installer</main><script type="module" src="/assets/app-A1b2C3d4.js"></script>',
+      '<!doctype html><body><!-- ankka-runtime-callback-state --><main>signed reviewed installer</main>' +
+        '<script type="module" src="/assets/app-A1b2C3d4.js"></script></body>',
     ),
   ];
   const worker = [await source(
@@ -526,5 +535,102 @@ describe('reviewed runtime boundary', () => {
     expect(await completed.json()).toMatchObject({
       deployment: { status: 'failed', failure: { code: 'install_mutations_disabled' } },
     });
+  });
+
+  it('wires the runtime-only pending stream to the signed shell and emits completion only after relay cleanup', async () => {
+    const fixture = await signedSnapshotFixture();
+    const provider = new SequencedProvider(fixture.bundle);
+    const now = Date.UTC(2026, 7, 31, 1, 0, 0);
+    const actionId = 'action_' + 'A'.repeat(32);
+    const state = 'S'.repeat(43);
+    const relayGate = deferred();
+    const relayStarted = deferred();
+    const revokeGate = deferred();
+    const revokeStarted = deferred();
+    const relay = vi.spyOn(runtimeRelay, 'relayRuntimeUpdate').mockImplementation(async () => {
+      relayStarted.resolve();
+      await relayGate.promise;
+      return {
+        schemaVersion: 1, actionId, operation: 'update', status: 'succeeded',
+        managementUrl: 'https://manage.example.com/?runtimeAction=' + actionId,
+      };
+    });
+    const calls = { exchanged: 0, revoked: 0 };
+    const worker = createReviewedGatewayDeployRuntime(fixture.pin, {
+      releaseBundleProvider: provider,
+      now: () => now,
+      transport: async (input) => {
+        const url = new URL(input instanceof Request ? input.url : input.toString());
+        if (url.pathname === '/oauth2/token') {
+          calls.exchanged += 1;
+          return Response.json({
+            access_token: 'runtime-stream-private-token', token_type: 'Bearer', scope: REQUIRED_OAUTH_SCOPES.join(' '),
+          });
+        }
+        if (url.pathname.endsWith('/user')) {
+          return Response.json({ success: true, result: { id: 'synthetic-user', email: 'owner@example.com' } });
+        }
+        if (url.pathname.endsWith('/accounts')) {
+          return Response.json({ success: true, result: [{ id: 'a'.repeat(32), name: 'Disposable account' }] });
+        }
+        if (url.pathname === '/oauth2/revoke') {
+          calls.revoked += 1;
+          revokeStarted.resolve();
+          await revokeGate.promise;
+          return Response.json({});
+        }
+        throw new Error('unexpected synthetic runtime transport');
+      },
+    });
+    const workerEnv = runtimeEnv();
+    const sealed = await sealOauthCookie(workerEnv.DEPLOY_SESSION_ENCRYPTION_KEY, {
+      schemaVersion: 5, purpose: 'runtime_update', state, verifier: 'V'.repeat(43),
+      expiresAt: now + 10 * 60_000, actionId, actionKey: 'K'.repeat(43),
+      actorEmail: 'owner@example.com', accountId: 'a'.repeat(32), workerName: 'ankka-gateway-example',
+      workersSubdomain: 'customer-workers', managementOrigin: 'https://manage.example.com', operation: 'update',
+      from: { release: 'gateway-v0.9.0', artifactSha256: 'sha256:' + 'f'.repeat(64), versionId: null },
+      to: {
+        release: fixture.bundle.manifest.release,
+        artifactSha256: 'sha256:' + fixture.bundle.manifest.artifact.treeSha256,
+        versionId: null,
+      },
+    });
+    const tasks: Promise<unknown>[] = [];
+    try {
+      const callback = await worker.fetch(new Request(
+        `${PUBLIC_ORIGIN}/oauth/callback?code=authorization-code-value&state=${state}`,
+        { headers: { cookie: OAUTH_COOKIE + '=' + sealed } },
+      ), workerEnv, { waitUntil: (task) => { tasks.push(task); } });
+      expect(callback.status).toBe(200);
+      expect(callback.headers.get('content-type')).toContain('text/html');
+      expect(callback.headers.get('set-cookie')).toContain(OAUTH_COOKIE + '=;');
+      expect(callback.headers.get('location')).toBeNull();
+      const reader = callback.body?.getReader();
+      const first = new TextDecoder().decode((await reader?.read())?.value);
+      expect(first).toContain('signed reviewed installer');
+      expect(first).toContain('ankka-runtime-callback-pending');
+      expect(first).not.toContain('ankka-runtime-callback-result');
+      await relayStarted.promise;
+      relayGate.resolve();
+      await revokeStarted.promise;
+      expect(calls).toEqual({ exchanged: 1, revoked: 1 });
+      let receivedTerminal = false;
+      const terminal = reader?.read().then((part) => { receivedTerminal = true; return part; });
+      await Promise.resolve();
+      expect(receivedTerminal).toBe(false);
+      revokeGate.resolve();
+      const body = new TextDecoder().decode((await terminal)?.value);
+      expect(body).toContain('"status":"succeeded"');
+      expect(body).toContain('"managementUrl":"https://manage.example.com/?runtimeAction=' + actionId + '"');
+      expect(body).not.toContain('runtime-stream-private-token');
+      expect((await reader?.read())?.done).toBe(true);
+      expect(relay).toHaveBeenCalledTimes(1);
+      expect(tasks).toHaveLength(1);
+      await Promise.all(tasks);
+    } finally {
+      relayGate.resolve();
+      revokeGate.resolve();
+      relay.mockRestore();
+    }
   });
 });

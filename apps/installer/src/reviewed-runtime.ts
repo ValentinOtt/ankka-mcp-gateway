@@ -47,7 +47,7 @@ import {
   createSignedInstallerAssetIndex,
   type SignedInstallerAssetIndex,
 } from './signed-installer-assets';
-import { streamingInstallCallbackResponse } from './streaming-callback';
+import { streamingInstallCallbackResponse, streamingRuntimeCallbackResponse } from './streaming-callback';
 import { parseVerifiedReleaseBundle } from './verified-release-bundle';
 
 const CALLBACK_PATH = new URL(OAUTH_CALLBACK_URL).pathname;
@@ -403,6 +403,16 @@ export function createReviewedGatewayDeployRuntime(
       return context === undefined
         ? streamingInstallCallbackResponse(shell, execute)
         : streamingInstallCallbackResponse(shell, execute, { context });
+    },
+    runtimeCallbackResponse: async ({ env, context, execute }) => {
+      const loaded = await snapshot.load(env);
+      const shell = buildSignedInstallerAssetResponse(
+        loaded.installerAssets,
+        new Request(`${PUBLIC_ORIGIN}/manage`),
+      );
+      return context === undefined
+        ? streamingRuntimeCallbackResponse(shell, execute)
+        : streamingRuntimeCallbackResponse(shell, execute, { context });
     },
     ...optionalExecutionControls(dependencies.now === undefined ? {} : { now: dependencies.now }),
   };

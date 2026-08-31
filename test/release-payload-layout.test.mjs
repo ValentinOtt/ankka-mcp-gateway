@@ -10,13 +10,13 @@ const ROOT = new URL('../payload/', import.meta.url);
 const ADMIN_ROOT = new URL('../apps/admin/dist/', import.meta.url);
 const COMPONENTS = Object.freeze({
   admin: null,
-  installer: ['assets/installer-8eaba3a8.js', 'assets/installer-b89856ad.css', 'index.html'],
+  installer: ['assets/installer-84291f65.js', 'assets/installer-b89856ad.css', 'index.html'],
   worker: ['index.js'],
   'worker-cleanup': ['index.js'],
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: 'c7426a67a997744503a30237decab8b66b8744e153615a1edbf1492a89cf32da',
+  installer: 'ce00c8be19047e3149872d9bd7987386c4f748d2fe518cf05d28e8f089032f87',
   worker: 'fb05a95f482ce5a5109016a9ff86e47d5b6aa40d546076e3c5258cbba1684aca',
   'worker-cleanup': '294518970598816944bae9e5e6f6411d3aa7ce00238e81e6b5abebb6b449e46f',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
@@ -191,7 +191,7 @@ test('admin and installer HTML use external same-origin assets without inline ex
 
 test('installer assets cover the exact hosted session, plan, deploy, result, and removal contract', async () => {
   const html = await readFile(new URL('installer/index.html', ROOT), 'utf8');
-  const script = await readFile(new URL('installer/assets/installer-8eaba3a8.js', ROOT), 'utf8');
+  const script = await readFile(new URL('installer/assets/installer-84291f65.js', ROOT), 'utf8');
   assert.doesNotMatch(`${html}\n${script}`, /\bcustomers?\b/iu);
   for (const route of ['/', '/gateway', '/review', '/deploy', '/manage', '/oauth/handoff', '/oauth/callback', '/result']) {
     if (route !== '/') assert.match(`${html}\n${script}`, new RegExp(route.replace('/', '\\/'), 'u'));

@@ -135,6 +135,7 @@ import {
   type ReturningUninstallExecutor,
 } from './returning-uninstall-executor';
 import { createReturningUninstallJournalPort } from './returning-uninstall-journal-port';
+import type { RuntimeCallbackResult } from './streaming-callback';
 
 export { GatewayDeploySession };
 
@@ -155,6 +156,12 @@ export type InstallCallbackResponse = (
 
 export type ManagementCallbackResponse = InstallCallbackResponse;
 
+export interface RuntimeCallbackResponseInput extends Omit<InstallCallbackResponseInput, 'execute'> {
+  readonly execute: () => Promise<RuntimeCallbackResult>;
+}
+
+export type RuntimeCallbackResponse = (input: RuntimeCallbackResponseInput) => Promise<Response>;
+
 export interface GatewayDeployWorkerDependencies {
   now?: () => number;
   abuseControlPolicy?: HostedAbuseControlPolicy;
@@ -167,6 +174,7 @@ export interface GatewayDeployWorkerDependencies {
   capabilityPolicy?: InstallerCapabilityPolicy;
   installCallbackResponse?: InstallCallbackResponse;
   managementCallbackResponse?: ManagementCallbackResponse;
+  runtimeCallbackResponse?: RuntimeCallbackResponse;
 }
 
 interface SessionContext {
@@ -1978,6 +1986,7 @@ async function runtimeUpdateOauthCallback(
   sealed: Extract<SealedOauthCookie, { schemaVersion: 5 }>,
   managementCallbackResponse?: ManagementCallbackResponse,
   context?: GatewayDeployExecutionContext,
+  runtimeCallbackResponse?: RuntimeCallbackResponse,
 ): Promise<Response> {
   if (sealed.purpose !== 'runtime_update' || sealed.expiresAt <= now) {
     throw new DeployError(400, 'session_invalid');
@@ -2037,6 +2046,41 @@ async function runtimeUpdateOauthCallback(
     })();
     return execution;
   };
+  if (runtimeCallbackResponse) {
+    let completed: Promise<RuntimeCallbackResult> | null = null;
+    const executeResultOnce = (): Promise<RuntimeCallbackResult> => {
+      completed ??= (async () => {
+        const target = new URL(sealed.managementOrigin);
+        target.searchParams.set('runtimeAction', sealed.actionId);
+        const shared = {
+          schemaVersion: 1 as const,
+          kind: 'runtime_update' as const,
+          managementUrl: target.toString(),
+        };
+        try {
+          await executeOnce();
+          return { ...shared, status: 'succeeded' as const };
+        } catch (error) {
+          const failure = managementCallbackError(error, phase);
+          return { ...shared, status: 'failed' as const, code: failure.code, reason: failure.reason };
+        }
+      })();
+      return completed;
+    };
+    try {
+      const callbackInput: RuntimeCallbackResponseInput = context === undefined
+        ? { request, env, execute: executeResultOnce }
+        : { request, env, context, execute: executeResultOnce };
+      // The early shell is pending, not verified result context. Its only
+      // completion signal is emitted after execution and grant cleanup.
+      return withClearedOauthCookie(await runtimeCallbackResponse(callbackInput));
+    } catch (error) {
+      // A shell can fail after starting execution. Join that exact invocation
+      // before returning; never strand or replay an exchanged grant.
+      if (execution !== null) await executeResultOnce();
+      return errorResponse(managementCallbackError(error, 'runtime_callback_shell'), true);
+    }
+  }
   try {
     await executeOnce();
   } catch (error) {
@@ -2086,6 +2130,7 @@ async function oauthCallback(
   installCallbackResponse?: InstallCallbackResponse,
   managementCallbackResponse?: ManagementCallbackResponse,
   context?: GatewayDeployExecutionContext,
+  runtimeCallbackResponse?: RuntimeCallbackResponse,
 ): Promise<Response> {
   const sealedValue = readOauthCookie(request);
   if (!sealedValue) throw new DeployError(400, 'session_invalid');
@@ -2123,6 +2168,7 @@ async function oauthCallback(
       sealed,
       managementCallbackResponse,
       context,
+      runtimeCallbackResponse,
     );
   }
   if (sealed.schemaVersion === 7 && sealed.purpose === 'gateway_teardown') {
@@ -2950,6 +2996,7 @@ export function createGatewayDeployWorker(
     new DisabledReturningUninstallExecutor();
   const installCallbackResponse = dependencies.installCallbackResponse;
   const managementCallbackResponse = dependencies.managementCallbackResponse;
+  const runtimeCallbackResponse = dependencies.runtimeCallbackResponse;
   const capabilityPolicy = validatedCapabilityPolicy(dependencies.capabilityPolicy);
   const abuseControlPolicy = validatedAbuseControlPolicy(dependencies.abuseControlPolicy);
   return {
@@ -3120,6 +3167,7 @@ export function createGatewayDeployWorker(
             installCallbackResponse,
             managementCallbackResponse,
             executionContext,
+            runtimeCallbackResponse,
           );
         }
         return errorResponse(new DeployError(404, 'bad_request'));
