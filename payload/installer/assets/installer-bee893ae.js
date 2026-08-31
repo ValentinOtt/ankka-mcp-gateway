@@ -1021,7 +1021,14 @@ function runtimeCallbackResult() {
     // Text extracted from a template is decoded DOM data. Keep the HTTPS and
     // exact-action checks, then explicitly encode it for URL navigation sinks.
     // Canonical input above prevents re-encoding an escaped action identifier.
-    return { ...result, managementUrl: encodeURI(url.href) };
+    const managementUrl = encodeURI(url.href);
+    // Do not copy the untrusted parsed object over the validated return fields.
+    return result.status === 'succeeded'
+      ? { schemaVersion: 1, kind: 'runtime_update', status: 'succeeded', managementUrl }
+      : {
+        schemaVersion: 1, kind: 'runtime_update', status: 'failed', managementUrl,
+        code: result.code, reason: result.reason,
+      };
   } catch { return null; }
 }
 
