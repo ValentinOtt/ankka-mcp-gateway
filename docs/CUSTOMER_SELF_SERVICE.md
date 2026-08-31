@@ -86,10 +86,13 @@ The public installer is designed to:
 6. create and verify the gateway management surface and empty MCP Portal; and
 7. return the MCP URL and management URL.
 
-Installation does not add an upstream MCP source. First-source onboarding is
-unavailable in this release: a fresh empty gateway cannot add a source through
-the dashboard or API. Use this release only for gateways with sources already
-installed until a compatible release restores source installation.
+Installation does not add an upstream MCP source. The default-deny onboarding
+candidate restores a separate Sources workflow: discover and review the exact
+read-only tools, save a draft, authorize installation, connect the upstream in
+Cloudflare, and explicitly grant source access in Team. A new source initially
+denies everyone. The published v19 runtime still pauses this workflow; use the
+installed release's capability state and [qualification checklist](FIRST_SOURCE_ONBOARDING.md),
+not main-branch documentation, to determine availability.
 
 If discovery finds an existing or conflicting installation, the installer
 stops instead of adopting or overwriting it.
@@ -108,16 +111,16 @@ cleanup.
 
 Open the management URL and authenticate through your Cloudflare Access policy.
 
-**Native-permissions preview limitation:** this release is for gateways with
-sources already installed. A fresh empty gateway cannot add its first source
-through the dashboard or source-action API until a compatible release restores
-source installation.
+**Source onboarding is default-deny:** creating source resources is not an
+access grant. The upstream connection and a reviewed Team assignment are
+separate steps. Gateways still on the published v19 preview cannot add sources.
 
 - **Overview** shows gateway status, the MCP URL, current release, audience,
   and source state.
-- **Sources** shows existing sources and their selected tools. Adding a source
-  is temporarily unavailable in the native-permissions release, including from
-  previously prepared installation links. Existing connections are unchanged.
+- **Sources** shows sources and their selected tools. When the installed
+  runtime enables installation, save and authorize a reviewed draft here.
+  New sources start denied; old prepared installation links cannot silently
+  acquire the new default-deny authorization profile.
 - **Team** manages who may connect and which existing sources each person can
   use. Administrator rights remain fixed; tool allowlists are shared per source.
   One Save sends the complete batch to your own Worker, which updates and
@@ -131,8 +134,9 @@ source installation.
 Updates, rollback, and removal require a new short-lived Cloudflare
 authorization. Team saves require the separately provisioned
 `ANKKA_TEAM_MANAGEMENT_TOKEN` Worker secret and fail closed with setup guidance
-if it is missing or invalid; they never fall back to hosted OAuth. Source draft saves and installation actions are
-refused while the source-installation pause is active. The complete secret-free source-state
+if it is missing or invalid; they never fall back to hosted OAuth. Source
+installation uses a separate short-lived installer authorization. Source draft
+saves do not request OAuth or grant access. The complete secret-free source-state
 record is bounded to 1 MiB of canonical UTF-8 JSON; a save that would cross the
 bound in its worst-case installed projection is rejected before Durable Object
 storage is changed.
@@ -202,8 +206,9 @@ version has the management secret. Follow the
 application data. It requires explicit normal cancellation of any provably
 unstarted Team proposal; an armed or uncertain proposal must be reconciled first.
 
-After a Team policy write may have occurred, rollback to an older runtime is
-blocked. Rolling back code would not undo saved permissions or Access policies.
+After a Team policy write or new-profile source creation may have occurred,
+rollback below the recorded runtime floor is blocked. Rolling back code would
+not undo saved permissions, new ownership receipts, or Access policies.
 
 ## Removing a gateway
 
@@ -217,9 +222,12 @@ gateway dashboard.
 Both paths show the exact teardown plan and require a new Cloudflare
 authorization before any deletion.
 
-Automatic teardown is unavailable after a Team policy write may have occurred,
-including for older prepared removal links. The original ownership receipt is
-preserved; a later compatible release is required to support changed audiences.
+Automatic teardown is unavailable after a Team policy write or new-profile
+source creation may have occurred, including for older prepared removal links.
+The original ownership receipt is preserved; a later compatible release is
+required to support this lifecycle state. Merely discovering a source, saving
+its draft, or reviewing an action does not set the restriction. Review this
+limitation before authorizing source installation.
 
 Deletion authority comes from the checksum-valid receipt stored by the
 gateway, not from a hostname, resource name, or provider identifier.
@@ -255,8 +263,9 @@ status. See [the complete WebMCP tool contract](WEBMCP.md) for exact names,
 inputs, safe recovery, and browser-test instructions. No separate management
 MCP connection is required.
 
-The source draft/apply tools obey the same temporary installation pause as the
-dashboard and cannot add a source in this release.
+The source draft/apply tools follow the installed runtime's capability state,
+just like the dashboard. Published v19 gateways keep them paused; the default-deny
+candidate restores them without granting source access automatically.
 
 These tools call the same same-origin APIs as the visible interface. They add
 no independent mutation authority. Team Save applies the complete reviewed

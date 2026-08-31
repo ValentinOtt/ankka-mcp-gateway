@@ -3,14 +3,14 @@
 Status: implementation candidate, not yet deployed or live-qualified. The
 Worker includes customer-local permission saves, policy updates, verification,
 and recovery. Do not treat local tests as proof of Cloudflare enforcement.
-This release deliberately pauses adding sources to an installed Gateway. Its
-native permissions apply only to existing sources. Release and live acceptance
-checks below remain required; this document does not assert a deployment.
+The default-deny onboarding candidate restores adding sources without granting
+them to existing team members. Release and live acceptance checks below remain
+required; this document does not assert a deployment. Published v19 gateways
+still pause new-source installation until a compatible signed update is applied.
 
-**Existing-source preview only:** a fresh empty Gateway has no supported path
-to add its first source in this release. Do not use it for new-source onboarding
-or publish getting-started instructions that promise that workflow. Existing
-installed sources continue to work while their team permissions are managed.
+**New sources start denied:** resource installation does not grant anyone source
+access. Complete the upstream operator connection in Cloudflare, then explicitly
+assign the installed source in Team. See [first-source qualification](FIRST_SOURCE_ONBOARDING.md).
 
 An administrator edits the complete roster and source assignments, then clicks
 **Save** once. The dashboard sends the batch to its own Worker; the Worker
@@ -35,12 +35,12 @@ environment variable or request field.
 
 ## Remaining release gates
 
-- Verify the temporary source-installation pause at the dashboard, authenticated
-  API, Durable Object, and previously prepared signed source-action entrypoints.
-  No request field or environment variable can lift this release restriction.
-- Keep automatic teardown disabled once a native policy write may have
-  happened. The original ownership receipt is immutable; this release does
-  not reinterpret its original audience as deletion authority.
+- Verify default-deny source creation at the dashboard, authenticated API,
+  Durable Object, and signed source-action entrypoints. Old source actions
+  cannot silently acquire the new authorization profile.
+- Keep automatic teardown disabled once a native policy write or new-profile
+  source creation may have happened. The original ownership receipt is immutable;
+  this release does not reinterpret its original audience as deletion authority.
 - Preserve the currently published installer fixes, review the Worker payload,
   and update its release checksum through the normal release gate. Unrelated
   unfinished dashboard or connector changes are not part of this release.
@@ -61,9 +61,9 @@ projection for existing sources.
 - Runtime gateway administrators remain administrators and must remain in the
   team. This interface cannot transfer ownership or change administrator rights.
 - Each person explicitly receives zero or more installed sources. Joining the
-  team does not grant all sources. Adding a source is temporarily unavailable:
-  neither a new draft nor an old prepared installation can create it. A future
-  release must establish default-deny creation before restoring this workflow.
+  team does not grant all sources. Newly installed sources start with no
+  assignments, including for administrators. An explicit Team save is needed
+  after installation; first opening Team cannot add implicit grants.
 - Tools are an exact **shared source allowlist**, not per-person tool settings.
   Every person granted a source receives that same selected toolset.
 - An empty source audience becomes `decision: "deny"` with
@@ -204,17 +204,24 @@ claim that Cloudflare rolled changes back. Only a definitely unstarted action
 can be canceled. The management credential remains in the Worker environment
 and request-local execution; neither it nor the roster is sent to Ankka.
 
-Automatic teardown becomes unavailable after the first policy write is armed.
+Automatic teardown becomes unavailable after the first policy write or
+new-profile source creation is armed.
 It stays unavailable until a later compatible release explicitly supports the
 changed audience. Rollback to older runtimes is also refused after that point;
 rolling back Worker code would not roll back Durable Object data or Access
 policies. Simply viewing Team or applying a no-op does not set this restriction.
 
-The source-installation pause does not rewrite stored drafts, pending source
-actions, existing policies, credentials, tool allowlists, or ownership receipts.
-Read/status and safe cancellation remain available. Previously interrupted
-source installations may need a later compatible release to resume; this
-release does not discard their recovery records or claim they were rolled back.
+Default-deny onboarding does not rewrite existing policies, credentials, tool
+allowlists, or ownership receipts. Existing legacy source actions cannot be
+replayed as new-profile actions. Read/status and safe cancellation remain
+available where the server permits them. An interrupted legacy installation
+with a pending or possibly applied write requires reviewed recovery; this
+release does not discard its journal or claim it was rolled back.
+
+Source creation still uses its own short-lived installer OAuth flow. Team saves
+continue to use only the customer-local credential. New-profile source creation
+raises the same conservative runtime floor and teardown restriction before its
+first provider mutation; discovery, draft saves, and action review do not do so.
 
 ## Migration from the v16 OAuth flow
 
@@ -285,9 +292,11 @@ Before releasing native permission editing, verify with two synthetic identities
    Code Mode. Hiding a list entry alone is not sufficient.
 3. Removing access denies new and already-connected sessions within the
    documented/tested propagation window; report that window honestly.
-4. An existing source with nobody assigned denies everyone. Adding a source,
-   including through an old signed handoff, is refused without provider writes.
-   Existing shared tool allowlists and `on_behalf: false` remain unchanged.
+4. An existing source with nobody assigned denies everyone. A newly installed
+   source also starts denied, before Portal attachment and before any Team read.
+   Old signed handoffs cannot bypass this profile. Verify one-time operator
+   authentication while the native audience is empty, then an explicit Team
+   grant. Existing shared allowlists and `on_behalf: false` remain unchanged.
 5. Conflicting revisions, extra policies, groups, and unrecognized provider
    settings fail closed without overwriting Cloudflare configuration.
 6. One Save applies the whole batch using only the customer dashboard and

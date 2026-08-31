@@ -134,7 +134,7 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
       v.strictObject({ url: v.pipe(v.string(), v.maxLength(2048), v.url()) }),
       { ...readOnly, openWorldHint: true, untrustedContentHint: true }, ({ url }) => api.discoverSource(url)),
     tool('get_gateway_team', 'Read the saved Team roster, fixed administrators, installed-source selections, revision, and any recorded proposal. Saved state is not a fresh live Access check.', noInput, empty, readOnly, () => api.getTeam()),
-    tool('save_gateway_team', 'APPLY a complete reviewed Team roster immediately using your Gateway management credential. This grants/revokes access, not a draft or preview. Include fixed administrators and every person to retain. Use get_gateway_team revision. For recovery, submit only the exact recorded proposedMembers; inspect status after uncertain errors before retrying.',
+    tool('save_gateway_team', 'APPLY a complete reviewed Team roster immediately using your Gateway management credential. This grants/revokes access, not a draft or preview. Before attempting a policy write, the Gateway disables automatic teardown and blocks older-runtime rollback. Include fixed administrators and every person to retain. Use get_gateway_team revision. For recovery, submit only the exact recorded proposedMembers; inspect status after uncertain errors before retrying.',
       {
         type: 'object', additionalProperties: false, required: ['expectedRevision', 'members'],
         properties: {
@@ -208,7 +208,7 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
       if (!current.installationEnabled) throw new GatewayApiError(409, 'source_addition_paused')
       return api.saveSourceDraft(current.revision, source)
     }))
-    tools.push(tool('apply_mcp_source', 'Prepare a one-time OAuth handoff for an exact saved source draft. Return the authorization URL to the user; never approve it for them or request their token.', {
+    tools.push(tool('apply_mcp_source', 'Prepare a one-time OAuth handoff for an exact saved source draft. Installation starts denied to everyone; operator connection and an explicit Team grant are separate steps. Before the first provider write, installation disables automatic teardown and blocks older-runtime rollback; preparation alone does not. Return the authorization URL to the user; never approve it for them or request their token.', {
       type: 'object', additionalProperties: false, required: ['sourceId'], properties: { sourceId: { type: 'string', pattern: SOURCE_ID } },
     }, v.strictObject({ sourceId: v.pipe(v.string(), v.regex(new RegExp(SOURCE_ID, 'u'))) }), mutation, async ({ sourceId }) => {
       const current = await api.getSources()

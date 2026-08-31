@@ -15,6 +15,16 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Restore source onboarding with an exact deny-Everyone initial policy and no
+  implicit Team assignments. Operator connection and a later explicit Team
+  grant remain separate steps. Legacy source actions cannot bypass the new
+  profile; new-profile creation conservatively disables automatic teardown
+  and older-runtime rollback before its first provider mutation. Deployment
+  and live shared-auth/permission qualification remain required.
+- Show the runtime-update loader immediately after OAuth authorization, emit
+  a terminal result only after execution and grant cleanup, and retry only an
+  exact active-version propagation mismatch within a shared ten-second bound.
+  Missing or malformed completion never means success or starts another update.
 - Correct the release-verification note: published canary releases already
   carry the signing key identity and sanitized verification record, so the
   complete verification check applies to them today.
