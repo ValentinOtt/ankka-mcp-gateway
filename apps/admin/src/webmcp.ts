@@ -75,9 +75,10 @@ const releaseSchema = v.strictObject({
   approvedArtifactSha256: v.pipe(v.string(), v.regex(new RegExp(DIGEST, 'u'))),
 })
 
-function tool<TSchema extends v.GenericSchema, TResult>(
+function createTool<TSchema extends v.GenericSchema, TResult>(
   name: string, description: string, inputSchema: InputSchema, schema: TSchema,
   annotations: WebMcpAnnotations, action: (input: v.InferOutput<TSchema>) => Promise<TResult>,
+  onStateChange?: () => Promise<void>,
 ): WebMcpTool {
   return {
     name, description, inputSchema, annotations,
@@ -87,7 +88,13 @@ function tool<TSchema extends v.GenericSchema, TResult>(
         const parsed = v.safeParse(schema, input)
         if (!parsed.success) throw new GatewayApiError(400, 'webmcp_input_invalid')
         // Once started, a durable mutation may complete despite client cancellation.
-        return JSON.stringify({ ok: true, result: await action(parsed.output) })
+        try {
+          return JSON.stringify({ ok: true, result: await action(parsed.output) })
+        } finally {
+          // Refresh is observational: never replay an uncertain mutation or
+          // replace its result with a separate dashboard refresh failure.
+          try { void onStateChange?.().catch(() => {}) } catch { /* The UI owns refresh errors. */ }
+        }
       } catch (cause) {
         const code = cause instanceof GatewayApiError ? safeGatewayErrorCode(cause.code) : 'request_failed'
         return JSON.stringify({ ok: false, error: { code, message: new GatewayApiError(400, code).message } })
@@ -110,7 +117,14 @@ async function handoff(api: GatewayAdminApi, prepare: () => Promise<PreparedActi
 }
 
 /** Thin website tools over the same typed, same-origin API used by the dashboard. */
-export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabled: boolean): WebMcpTool[] {
+export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabled: boolean, onStateChange?: () => Promise<void>): WebMcpTool[] {
+  function tool<TSchema extends v.GenericSchema, TResult>(
+    name: string, description: string, inputSchema: InputSchema, schema: TSchema,
+    annotations: WebMcpAnnotations, action: (input: v.InferOutput<TSchema>) => Promise<TResult>,
+  ) {
+    return createTool(name, description, inputSchema, schema, annotations, action,
+      !annotations.readOnlyHint ? onStateChange : undefined)
+  }
   const tools = [
     tool('get_gateway_status', 'Read the saved Gateway configuration and release. This is not a fresh upstream health test.', noInput, empty, readOnly, () => api.getStatus()),
     tool('get_gateway_capabilities', 'Read current management availability and recovery pointers. Credential configured means present, not verified. No credentials are returned.', noInput, empty, readOnly, async () => {

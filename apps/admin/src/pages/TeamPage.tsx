@@ -45,7 +45,7 @@ function actionMessage(action: TeamAction | null): string | null {
 
 export function TeamPage() {
   const preview = isGatewayUiPreview()
-  const { getTeam, getTeamAction, prepareTeamAction, cancelTeamAction, isBusy, sources } = useGateway()
+  const { getTeam, getTeamAction, prepareTeamAction, cancelTeamAction, isBusy, sources, externalChangeVersion } = useGateway()
   const [team, setTeam] = useState<Team | null>(null)
   const [draft, setDraft] = useState<TeamMember[]>([])
   const [action, setAction] = useState<TeamAction | null>(null)
@@ -56,6 +56,8 @@ export function TeamPage() {
   const [formError, setFormError] = useState<string | null>(null)
   const [needsRefresh, setNeedsRefresh] = useState(false)
   const actionInFlight = useRef(false)
+  const seenExternalChange = useRef(externalChangeVersion)
+  const teamReadGeneration = useRef(0)
   const [callbackId, setCallbackId] = useState(() => {
     const value = new URL(window.location.href).searchParams.get('accessAction')
     return value && ACTION_ID.test(value) ? value : null
@@ -78,34 +80,45 @@ export function TeamPage() {
     if (next.pendingAction && !['authorization_required', 'applying'].includes(next.pendingAction.status)) clearCallback()
   }, [clearCallback])
 
+  const readTeam = useCallback(async (showLoading = true) => {
+    const generation = ++teamReadGeneration.current
+    if (showLoading) setLoading(true)
+    try {
+      const next = await getTeam()
+      if (generation !== teamReadGeneration.current) return false
+      acceptTeam(next)
+      return true
+    } catch (cause) {
+      if (generation !== teamReadGeneration.current) return false
+      throw cause
+    } finally {
+      if (generation === teamReadGeneration.current) setLoading(false)
+    }
+  }, [acceptTeam, getTeam])
+
   const refresh = useCallback(async () => {
-    setLoading(true)
     setError(null)
     try {
-      acceptTeam(await getTeam())
-      clearCallback()
+      if (await readTeam()) clearCallback()
     }
     catch {
       setNeedsRefresh(true)
       setError('Team access could not be loaded. Refresh to check the saved configuration and any recorded change before continuing.')
     }
-    finally { setLoading(false) }
-  }, [acceptTeam, clearCallback, getTeam])
+  }, [clearCallback, readTeam])
 
   useEffect(() => {
     let active = true
-    void getTeam().then((next) => {
-      if (active) acceptTeam(next)
-    }).catch(() => {
+    void readTeam().catch(() => {
       if (active) setError('Team access could not be loaded. Refresh to try again.')
-    }).finally(() => { if (active) setLoading(false) })
+    })
     const url = new URL(window.location.href)
     if (url.searchParams.has('accessActionResult')) {
       url.searchParams.delete('accessActionResult')
       window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
     }
-    return () => { active = false }
-  }, [acceptTeam, getTeam])
+    return () => { active = false; teamReadGeneration.current += 1 }
+  }, [readTeam])
 
   const actionId = action?.actionId ?? callbackId
   const shouldPoll = team !== null && !loading && !saving && !isBusy && !needsRefresh && (action?.status === 'applying' || callbackId !== null)
@@ -120,11 +133,7 @@ export function TeamPage() {
         if (!active) return
         if (next.actionId !== actionId) throw new Error('action_mismatch')
         if (next.status === 'succeeded' || next.status === 'failed' || next.status === 'recovery_required') {
-          const current = await getTeam()
-          if (active) {
-            acceptTeam(current)
-            clearCallback()
-          }
+          if (await readTeam(false)) clearCallback()
           return
         }
         setAction(next)
@@ -140,13 +149,23 @@ export function TeamPage() {
     }
     void poll()
     return () => { active = false; window.clearTimeout(timer) }
-  }, [acceptTeam, actionId, clearCallback, getTeam, getTeamAction, shouldPoll])
+  }, [actionId, clearCallback, readTeam, getTeamAction, shouldPoll])
 
   const administrators = useMemo(() => new Set(team?.adminEmails.map((value) => value.toLowerCase()) ?? []), [team?.adminEmails])
   const effectiveMembers = useMemo(() => team ? withAdministrators(team, team.members) : [], [team])
   const recorded = isRecordedChange(action)
   const displayedMembers = recorded ? team?.proposedMembers ?? [] : draft
   const changed = JSON.stringify(canonicalMembers(draft)) !== JSON.stringify(effectiveMembers)
+  useEffect(() => {
+    if (seenExternalChange.current === externalChangeVersion) return
+    seenExternalChange.current = externalChangeVersion
+    if (changed || actionInFlight.current) {
+      setNeedsRefresh(true)
+      setError('Gateway state may have changed through another action. Your unsaved selections were preserved. Refresh to review the saved team before continuing.')
+      return
+    }
+    void refresh()
+  }, [externalChangeVersion, changed, refresh])
   const installed = team?.sources.filter((source) => source.status === 'installed') ?? []
   const message = actionMessage(action)
   const disabled = isBusy || saving || loading || needsRefresh || callbackId !== null || recorded || team?.editingEnabled !== true
@@ -188,8 +207,7 @@ export function TeamPage() {
       }
       setAction(pendingAction)
       setTeam((current) => current ? { ...current, pendingAction, proposedMembers: members } : current)
-      acceptTeam(await getTeam())
-      clearCallback()
+      if (await readTeam()) clearCallback()
     } catch (cause) {
       setNeedsRefresh(true)
       setError(cause instanceof GatewayApiError ? cause.message : 'The team access change could not be confirmed. Refresh to check the recorded state before trying again.')
@@ -205,9 +223,7 @@ export function TeamPage() {
       if (canceled.actionId !== action.actionId || canceled.status !== 'failed' || canceled.failureCode !== 'team_action_cancelled') {
         throw new GatewayApiError(409, 'team_cancel_failed')
       }
-      const current = await getTeam()
-      acceptTeam(current)
-      clearCallback()
+      if (await readTeam()) clearCallback()
     } catch (cause) {
       setNeedsRefresh(true)
       setError(cause instanceof GatewayApiError ? cause.message : 'Cancellation could not be confirmed. Refresh to check the recorded change before trying again.')
