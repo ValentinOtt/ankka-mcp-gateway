@@ -94,7 +94,8 @@ export async function executeReadRequest(options: ExecuteReadRequestOptions): Pr
 
     // Do not even read the trusted credential object until the provider gate passes.
     headers = prepareHeaders(options.headers, prepared.body !== undefined);
-    fetcher = options.fetch ?? globalThis.fetch;
+    // Preserve native fetch's global receiver; injected fetches stay unchanged.
+    fetcher = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   } catch (error) {
     if (error instanceof ConnectorRequestError) {
       throw error;
@@ -120,7 +121,8 @@ export async function executeReadRequest(options: ExecuteReadRequestOptions): Pr
       const init: RequestInit = {
         method: prepared.plan.method,
         headers,
-        redirect: "error",
+        // Manual mode is supported by Workers; the response checks below reject every redirect.
+        redirect: "manual",
         signal: controller.signal,
       };
       if (prepared.body !== undefined) {

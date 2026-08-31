@@ -30,7 +30,7 @@ describe('Access ingress verification', () => {
     expect(await verifyAccess(request(await assertion()), team, audience, fetcher)).toBe(true);
     expect(fetcher).toHaveBeenCalledOnce();
     expect(fetcher).toHaveBeenCalledWith(`${issuer}/cdn-cgi/access/certs`, expect.objectContaining({
-      method: 'GET', redirect: 'error',
+      method: 'GET', redirect: 'manual',
     }));
     const init = vi.mocked(fetcher).mock.calls[0]?.[1];
     expect(new Headers(init?.headers).has('authorization')).toBe(false);

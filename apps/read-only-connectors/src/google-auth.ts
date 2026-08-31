@@ -92,7 +92,8 @@ export function createGoogleAuthorization(rawSecret: string, provider: GooglePro
         }).toString();
         if (expired || encoder.encode(body).byteLength > GOOGLE_AUTH_LIMITS.requestBytes) throw new Error();
         const response = await fetcher(GOOGLE_TOKEN_ENDPOINT, {
-          method: 'POST', redirect: 'error', signal: controller.signal,
+          // Never let the runtime forward the signed assertion to a redirect target.
+          method: 'POST', redirect: 'manual', signal: controller.signal,
           headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
           body,
         });

@@ -55,6 +55,31 @@ function protocolRequest(version: string, message: RpcFixture): Request {
 }
 
 describe('self-hosted MCP runtime', () => {
+  it.each(['2025-06-18', '2026-07-28'])('preserves the global fetch receiver for Access and provider reads for MCP %s', async (version) => {
+    const upstream = 'https://api.hubapi.com/crm/v3/objects/contacts/7?properties=email&archived=false';
+    const outbound = vi.spyOn(globalThis, 'fetch').mockImplementation(async function (this: typeof globalThis | undefined, input) {
+      if (this !== globalThis) throw new TypeError('Illegal invocation');
+      if (String(input) === `https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`) {
+        return new Response(jwks, { headers: { 'Content-Type': 'application/json' } });
+      }
+      expect(String(input)).toBe(upstream);
+      return Response.json({ id: '7', properties: { email: 'synthetic@example.com' } });
+    });
+    try {
+      const response = await handleRequest(protocolRequest(version, {
+        method: 'tools/call', params: { name: 'hubspot_get_record', arguments: { objectType: 'contacts', recordId: '7' } },
+      }), env);
+      const text = await response.text();
+      expect(response.status, text).toBe(200);
+      expect(text).toContain('synthetic@example.com');
+      expect(text).not.toContain(env.PROVIDER_TOKEN);
+      expect(outbound).toHaveBeenCalledTimes(2);
+      expect(new Headers(outbound.mock.calls[0]?.[1]?.headers).has('authorization')).toBe(false);
+      expect(new Headers(outbound.mock.calls[1]?.[1]?.headers).get('authorization')).toBe(`Bearer ${env.PROVIDER_TOKEN}`);
+    } finally {
+      outbound.mockRestore();
+    }
+  });
   it.each(['2025-06-18', '2026-07-28'])('serves the same ordinary read tools for MCP %s', async (version) => {
     const input = protocolRequest(version, { method: 'tools/list', params: {} });
     const outbound = fetcher();
@@ -92,7 +117,7 @@ describe('self-hosted MCP runtime', () => {
     const [url, init] = outbound.mock.calls[1] ?? [];
     expect(url).toBe(upstream);
     expect(init?.method).toBe('GET');
-    expect(init?.redirect).toBe('error');
+    expect(init?.redirect).toBe('manual');
     expect(init?.body).toBeUndefined();
     expect([...new Headers(init?.headers).entries()]).toEqual([
       ['accept', 'application/json'], ['authorization', `Bearer ${env.PROVIDER_TOKEN}`],

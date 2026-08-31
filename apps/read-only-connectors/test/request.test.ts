@@ -24,6 +24,33 @@ afterEach(() => {
 });
 
 describe("shared read-only connector outbound boundary", () => {
+  it("preserves the global fetch receiver when no custom fetch is injected", async () => {
+    const outbound = vi.spyOn(globalThis, "fetch").mockImplementation(async function (this: typeof globalThis | undefined) {
+      if (this !== globalThis) throw new TypeError("Illegal invocation");
+      return jsonResponse({ rows: [] });
+    });
+    await expect(executeReadRequest({
+      origin: ORIGIN, plan: GET_PLAN, headers: HEADERS, allowRequest: allowGet,
+    })).resolves.toEqual({ rows: [] });
+    expect(outbound).toHaveBeenCalledOnce();
+    expect(outbound).toHaveBeenCalledWith(`${ORIGIN}/v1/search`, expect.objectContaining({
+      method: "GET", redirect: "manual", signal: expect.any(AbortSignal),
+    }));
+  });
+
+  it("does not rebind an injected fetch or fall back to global fetch", async () => {
+    const globalFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("Unexpected global fetch");
+    });
+    const outbound = vi.fn<typeof globalThis.fetch>(async function (this: undefined) {
+      expect(this).toBeUndefined();
+      return jsonResponse({ rows: [] });
+    });
+    await expect(runWith(outbound)).resolves.toEqual({ rows: [] });
+    expect(outbound).toHaveBeenCalledOnce();
+    expect(globalFetch).not.toHaveBeenCalled();
+  });
+
   it("sends one exact destination with only explicit trusted headers and encoded query values", async () => {
     const fetcher = vi.fn<typeof globalThis.fetch>(async () => jsonResponse({ rows: [] }));
     await expect(executeReadRequest({
@@ -42,7 +69,7 @@ describe("shared read-only connector outbound boundary", () => {
     expect(url).toBe("https://api.example.com/v1/search?q=name%3Da%26after%3Db&cursor=opaque%2F..%2Fvalue%3Fx%23y&limit=25");
     expect(init?.method).toBe("GET");
     expect(init?.body).toBeUndefined();
-    expect(init?.redirect).toBe("error");
+    expect(init?.redirect).toBe("manual");
     expect(init?.signal).toBeInstanceOf(AbortSignal);
     expect([...new Headers(init?.headers).entries()]).toEqual([
       ["accept", "application/json"],
@@ -226,17 +253,28 @@ describe("shared read-only connector outbound boundary", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it("never follows redirects, retries rejected requests, or follows pagination URLs", async () => {
-    const redirect = Response.redirect("https://evil.example.com/next", 302);
+  it.each([301, 302, 303, 307, 308])("rejects redirect status %s without forwarding credentials or making a second fetch", async (status) => {
+    const redirectTarget = "https://evil.example.com/next";
+    const fetcher = vi.fn<typeof globalThis.fetch>(async () => Response.redirect(redirectTarget, status));
+    await expect(runWith(fetcher)).rejects.toEqual(new ConnectorRequestError("CONNECTOR_UPSTREAM_REJECTED"));
+    expect(fetcher).toHaveBeenCalledOnce();
+    const [url, init] = fetcher.mock.calls[0] ?? [];
+    expect(url).toBe(`${ORIGIN}/v1/search`);
+    expect(init?.redirect).toBe("manual");
+    expect(new Headers(init?.headers).get("authorization")).toBe(HEADERS.Authorization);
+    expect(fetcher.mock.calls.some(([destination]) => String(destination) === redirectTarget)).toBe(false);
+  });
+
+  it("rejects already-followed responses, retries no rejected requests, and follows no pagination URLs", async () => {
     const redirected = jsonResponse({ rows: [] });
     Object.defineProperty(redirected, "redirected", { value: true });
     const wrongUrl = jsonResponse({ rows: [] });
     Object.defineProperty(wrongUrl, "url", { value: "https://evil.example.com/next" });
-    for (const response of [redirect, redirected, wrongUrl, new Response("sentinel-provider-detail", { status: 429 })]) {
+    for (const response of [redirected, wrongUrl, new Response("sentinel-provider-detail", { status: 429 })]) {
       const fetcher = vi.fn<typeof globalThis.fetch>(async () => response);
       await expect(runWith(fetcher)).rejects.toEqual(new ConnectorRequestError("CONNECTOR_UPSTREAM_REJECTED"));
       expect(fetcher).toHaveBeenCalledTimes(1);
-      expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe("error");
+      expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe("manual");
     }
     const fetcher = vi.fn<typeof globalThis.fetch>(async () => jsonResponse({ next: "https://evil.example.com/next" }));
     await expect(runWith(fetcher)).resolves.toEqual({ next: "https://evil.example.com/next" });
