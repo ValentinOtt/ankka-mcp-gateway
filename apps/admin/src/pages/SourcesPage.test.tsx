@@ -73,6 +73,8 @@ describe('SourcesPage', () => {
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByText('No sources yet')
+    expect(screen.getByText(/New sources start with nobody assigned/)).toBeInTheDocument()
+    expect(screen.getByText(/once source provisioning starts, automatic gateway removal/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Add source' }))
     await user.type(screen.getByLabelText('Source name'), 'GA4 example')
     await user.type(screen.getByLabelText('MCP URL'), 'https://bigquery.googleapis.com/mcp')

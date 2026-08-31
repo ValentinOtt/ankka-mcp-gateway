@@ -441,9 +441,8 @@ test('management source state enforces the canonical 1 MiB aggregate before the 
     body: canonicalJson(saveInput(revision, enabledTools)),
   });
 
-  // Preserve the canonical aggregate-capacity contract independently of the
-  // temporary release-wide source-addition pause. This calls only pure
-  // validators: no route, storage, provider or authorization bypass is enabled.
+  // Exercise aggregate capacity both in pure validators and at the serialized
+  // Durable Object write boundary.
   const exactSaved = await saveDraftSource(retained, parseSourceSave(saveInput(15, exactTools)));
   assert.ok(exactSaved);
   assert.equal(canonicalByteLength(aggregateInstalledProjection(exactSaved)), MANAGEMENT_SOURCES_LIMIT_BYTES);
@@ -465,9 +464,9 @@ test('management source state enforces the canonical 1 MiB aggregate before the 
   const exactStorage = platformBoundedStorage([[MANAGEMENT_SOURCES_KEY, exactSaved]]);
   const exactState = new AdminState({ storage: exactStorage }, {});
   const exactResponse = await exactState.fetch(saveRequest(exactSaved.revision, exactTools));
-  assert.equal(exactResponse.status, 409);
-  assert.deepEqual(await exactResponse.json(), { schemaVersion: 1, error: 'source_addition_paused', retryable: false });
-  assert.deepEqual(exactStorage.stats, { writeAttempts: 0, platformRejections: 0 });
+  assert.equal(exactResponse.status, 200);
+  assert.equal((await exactResponse.json()).revision, exactSaved.revision + 1);
+  assert.deepEqual(exactStorage.stats, { writeAttempts: 1, platformRejections: 0 });
   const exactRead = await exactState.fetch(new Request('https://admin-state.invalid/sources'));
   assert.equal(exactRead.status, 200);
   const installedProjection = aggregateInstalledProjection(exactSaved);
@@ -475,13 +474,13 @@ test('management source state enforces the canonical 1 MiB aggregate before the 
   const installedRead = await exactState.fetch(new Request('https://admin-state.invalid/sources'));
   assert.equal(installedRead.status, 200);
   assert.equal(canonicalByteLength(await installedRead.json()), MANAGEMENT_SOURCES_LIMIT_BYTES);
-  assert.deepEqual(exactStorage.stats, { writeAttempts: 1, platformRejections: 0 });
+  assert.deepEqual(exactStorage.stats, { writeAttempts: 2, platformRejections: 0 });
 
   const overStorage = platformBoundedStorage([[MANAGEMENT_SOURCES_KEY, retained]]);
   const overState = new AdminState({ storage: overStorage }, {});
   const overResponse = await overState.fetch(saveRequest(15, overTools));
-  assert.equal(overResponse.status, 409);
-  assert.deepEqual(await overResponse.json(), { schemaVersion: 1, error: 'source_addition_paused', retryable: false });
+  assert.equal(overResponse.status, 413);
+  assert.deepEqual(await overResponse.json(), { schemaVersion: 1, error: 'source_capacity_exceeded', revision: retained.revision });
   assert.deepEqual(overStorage.stats, { writeAttempts: 0, platformRejections: 0 });
   assert.equal(canonicalJson(overStorage.snapshot(MANAGEMENT_SOURCES_KEY)), canonicalJson(retained));
 
@@ -509,7 +508,7 @@ test('management source state enforces the canonical 1 MiB aggregate before the 
     }),
   };
   // Historical unspent authorization: preserve validation of unsafe persisted
-  // projections without issuing a new source handoff in the paused release.
+  // projections without replacing the retained authorization.
   await managementStorage.put('ankka-mcp-gateway/source-actions/v1', {
     schemaVersion: 1, revision: 2, actions: [{ ...originalPrepare, status: 'authorization_required',
       resources: [], pending: null, portalUpdate: null, failureCode: null }],
@@ -523,7 +522,7 @@ test('management source state enforces the canonical 1 MiB aggregate before the 
       }),
     }));
     assert.equal(prepared.status, 409);
-    assert.deepEqual(await prepared.json(), { schemaVersion: 1, error: 'source_addition_paused', retryable: false });
+    assert.deepEqual(await prepared.json(), { schemaVersion: 1, error: 'source_action_conflict' });
     assert.equal(managementStorage.writes.length, before);
   }
   await managementStorage.put(MANAGEMENT_SOURCES_KEY, legacyUnsafeRecord);
@@ -1455,7 +1454,7 @@ test('runtime action expected targets reject malformed or stale intent and prese
   exerciseSignedRuntimeUpdate(true)
 ));
 
-test('management API preserves bounded discovery and existing sources while new installation is paused', async () => {
+test('management API preserves bounded discovery, draft capacity and shared operator authentication', async () => {
   const { env, provider: cloudflare, readyReceipt } = await installReadyGateway();
   const largeSourceFixture = JSON.parse(await readFile(
     new URL('../fixtures/large-source/gateway.config.json', import.meta.url),
@@ -1664,12 +1663,12 @@ test('management API preserves bounded discovery and existing sources while new 
         },
       }),
     }), env);
-    const paused = { schemaVersion: 1, error: 'source_addition_paused', retryable: false };
-    assert.equal(saved.status, 409);
-    assert.deepEqual(await saved.json(), paused);
-    assert.equal(initialSources.installationEnabled, false);
-    assert.equal(mcpRequests.length, expectedCatalogueCursors.length);
-    assert.deepEqual(catalogueCursors, expectedCatalogueCursors);
+    assert.equal(saved.status, 200);
+    let currentSources = await saved.json();
+    assert.equal(currentSources.installationEnabled, true);
+    assert.equal(initialSources.installationEnabled, true);
+    assert.equal(mcpRequests.length, expectedCatalogueCursors.length * 2);
+    assert.deepEqual(catalogueCursors, [...expectedCatalogueCursors, ...expectedCatalogueCursors]);
 
     const sourceMutationStart = cloudflare.requests.length;
     for (const path of ['/api/source-actions', '/api/source-actions/not-an-action']) {
@@ -1680,13 +1679,13 @@ test('management API preserves bounded discovery and existing sources while new 
       }), env);
       assert.equal(prepared.status, path === '/api/source-actions' ? 409 : 404);
       assert.deepEqual(await prepared.json(), path === '/api/source-actions'
-        ? paused : { schemaVersion: 1, error: 'source_action_not_found' });
+        ? { schemaVersion: 1, error: 'source_action_conflict' } : { schemaVersion: 1, error: 'source_action_not_found' });
     }
     assert.equal(cloudflare.requests.length, sourceMutationStart);
     const unchanged = await worker.fetch(new Request('https://manage.example.com/api/sources', {
       headers: accessHeaders,
     }), env);
-    assert.deepEqual(await unchanged.json(), initialSources);
+    assert.deepEqual(await unchanged.json(), currentSources);
 
     const oauthDiscovery = await worker.fetch(new Request('https://manage.example.com/api/sources/discover', {
       method: 'POST',
@@ -1761,8 +1760,8 @@ test('management API preserves bounded discovery and existing sources while new 
           duplex: 'half',
         },
       ), env);
-      assert.equal(oversizedSave.status, 409);
-      assert.deepEqual(await oversizedSave.json(), paused);
+      assert.equal(oversizedSave.status, 400);
+      assert.deepEqual(await oversizedSave.json(), { schemaVersion: 1, error: 'source_invalid' });
       assert.equal(mcpRequests.length, beforeMcpRequests);
       assert.equal(cloudflare.requests.length, beforeProviderRequests);
       assert.equal(sourceStateStorage.writes.length, beforeStorageWrites);
@@ -1770,7 +1769,7 @@ test('management API preserves bounded discovery and existing sources while new 
 
     const maximumSaveBody = JSON.stringify({
       schemaVersion: 1,
-      revision: initialSources.revision,
+      revision: currentSources.revision,
       source: {
         label: 'Maximum bounded catalogue',
         url: 'https://maximum-paged-tools.example.net/mcp',
@@ -1792,9 +1791,10 @@ test('management API preserves bounded discovery and existing sources while new 
         body: maximumSaveBody,
       },
     ), env);
-    assert.equal(maximumSavedResponse.status, 409);
-    assert.deepEqual(await maximumSavedResponse.json(), paused);
-    assert.deepEqual(maximumCursors, expectedMaximumCursors);
+    assert.equal(maximumSavedResponse.status, 200);
+    currentSources = await maximumSavedResponse.json();
+    assert.equal(currentSources.installationEnabled, true);
+    assert.deepEqual(maximumCursors, [...expectedMaximumCursors, ...expectedMaximumCursors]);
 
     for (const [url, error] of [
       ['https://too-many-tools.example.net/mcp', 'source_tool_list_invalid'],
@@ -1823,8 +1823,8 @@ test('management API preserves bounded discovery and existing sources while new 
     assert.equal(oversizedCatalogueRequest.signal.aborted, true);
     assert.equal(oversizedCatalogueBodyCancelled, true);
 
-    const sourceStateBeforePausedOauth = sourceStateStorage.writes.length;
-    const providerStateBeforePausedOauth = cloudflare.requests.length;
+    const sourceStateBeforeOauth = sourceStateStorage.writes.length;
+    const providerStateBeforeOauth = cloudflare.requests.length;
     for (const onBehalfOfUser of [undefined, false, true]) {
       const source = {
         label: 'Private company files', url: 'https://oauth-source.example.net/mcp',
@@ -1834,13 +1834,16 @@ test('management API preserves bounded discovery and existing sources while new 
       const oauthSaved = await worker.fetch(new Request('https://manage.example.com/api/sources', {
         method: 'PUT',
         headers: { ...accessHeaders, origin: 'https://manage.example.com', 'content-type': 'application/json' },
-        body: JSON.stringify({ schemaVersion: 1, revision: initialSources.revision, source }),
+        body: JSON.stringify({ schemaVersion: 1, revision: currentSources.revision, source }),
       }), env);
-      assert.equal(oauthSaved.status, 409);
-      assert.deepEqual(await oauthSaved.json(), paused);
+      assert.equal(oauthSaved.status, onBehalfOfUser === undefined ? 200 : 400);
+      if (onBehalfOfUser === undefined) {
+        currentSources = await oauthSaved.json();
+        assert.equal(currentSources.sources.find((entry) => entry.url === source.url).onBehalfOfUser, false);
+      } else assert.deepEqual(await oauthSaved.json(), { schemaVersion: 1, error: 'source_invalid' });
     }
-    assert.equal(sourceStateStorage.writes.length, sourceStateBeforePausedOauth);
-    assert.equal(cloudflare.requests.length, providerStateBeforePausedOauth);
+    assert.equal(sourceStateStorage.writes.length, sourceStateBeforeOauth + 1);
+    assert.equal(cloudflare.requests.length, providerStateBeforeOauth);
     assert.equal(cloudflare.state.servers.size, 1);
     assert.equal(cloudflare.state.portal.servers.length, 1);
     assert.equal(cloudflare.state.portal.servers[0].on_behalf, false);
@@ -1904,7 +1907,7 @@ test('management API preserves bounded discovery and existing sources while new 
     ));
     assert.ok(initialOwner);
     // Day-two historical receipt graphs are exercised by the uninstall suite.
-    // This current-runtime path never installs a source while the release pause is active.
+    // This discovery/draft path has not yet provisioned an additional source.
 
     const proof = await sendTeardown('prove');
     assert.equal(proof.status, 200, await proof.clone().text());

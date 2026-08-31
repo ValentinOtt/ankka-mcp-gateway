@@ -295,9 +295,10 @@ const ACTIONS_KEY = 'ankka-mcp-gateway/source-actions/v1';
 const UPDATES_KEY = 'ankka-mcp-gateway/runtime-updates/v1';
 const TEARDOWNS_KEY = 'ankka-mcp-gateway/teardown-actions/v1';
 const TEAM_KEY = 'ankka-mcp-gateway/team-access/v1';
-// This release edits existing-source audiences only. New-source installation
-// stays paused until its initial authorization boundary is reviewed separately.
-const SOURCE_ADDITION_PAUSED = true;
+// New source policies start with no audience. Only a separate Team save grants
+// access; historical receipts and their original audiences remain immutable.
+const SOURCE_ADDITION_PAUSED = false;
+const SOURCE_INITIAL_POLICY_VERSION = 2;
 const MANAGER = 'ankka-mcp-gateway';
 const PORTAL_CNAME_TARGET = 'gateway.agents.cloudflare.com';
 const REQUEST_LIMIT_BYTES = 96 * 1024;
@@ -1390,7 +1391,7 @@ function marker(installationId, key) {
   return `acg:v1:${installationId}:${key}`;
 }
 
-async function buildDesiredResources(settings, installationId) {
+async function buildDesiredResources(settings, installationId, sourceDefaultDeny = false) {
   const source = settings.sources[0] ?? null;
   const allowedEmails = [...settings.access.adminEmails, ...settings.access.memberEmails].sort(compareText);
   const identitiesHash = await sha256({ emails: allowedEmails });
@@ -1401,6 +1402,10 @@ async function buildDesiredResources(settings, installationId) {
     identityCount: allowedEmails.length,
     identitiesHash,
   };
+  const sourceAllowPolicy = sourceDefaultDeny ? {
+    identitiesRef: 'team.sourceMembers', identityType: 'email', identityCount: 0,
+    identitiesHash: await sha256({ emails: [] }),
+  } : emailAllowPolicy;
   const mcpKey = source === null ? null : await stableResourceKey('mcp', installationId, source.id);
   const sourceApplicationKey = source === null ? null : await stableResourceKey('source-app', installationId, source.id);
   const sourceAccessKey = source === null ? null : await stableResourceKey('source-access', installationId, source.id);
@@ -1432,7 +1437,7 @@ async function buildDesiredResources(settings, installationId) {
     } },
     { kind: 'source_access_policy', key: sourceAccessKey, desired: {
       metadata, sourceApplicationResourceKey: sourceApplicationKey,
-      defaultAction: 'deny', allow: emailAllowPolicy,
+      defaultAction: 'deny', allow: sourceAllowPolicy,
     } },
   ];
   const specifications = [
@@ -1799,6 +1804,11 @@ function managedOauthMatches(value) {
 }
 
 function policyMatches(value, desired, settings) {
+  if (desired.kind === 'source_access_policy' && desired.desired.allow.identitiesRef === 'team.sourceMembers') {
+    return teamPolicyMatches(value, teamPolicy([], `${settings.sources[0].label} users [${marker(
+      desired.desired.metadata.installationId, desired.key,
+    )}]`), value?.id);
+  }
   if (!isRecord(value) || !safeProviderId(value.id) || value.decision !== 'allow' ||
       !isText(value.name) || !value.name.endsWith(` [${marker(
         desired.desired.metadata.installationId, desired.key,
@@ -1881,6 +1891,11 @@ async function discoverResource(state, kind, token) {
       token,
     );
     if (response.status !== 'ok') return Object.freeze({ status: response.status, provider: null });
+    if (kind === 'source_access_policy' && desired.desired.allow.identitiesRef === 'team.sourceMembers' &&
+        (response.result.length > 1 || (response.result.length === 1 &&
+          !policyMatches(response.result[0], desired, state.settings)))) {
+      return Object.freeze({ status: 'conflict', provider: null });
+    }
     const match = exactOne(response.result, (value) => policyMatches(value, desired, state.settings));
     return match
       ? Object.freeze({ status: 'present', provider: Object.freeze({ id: match.id, parentId: parent.id }) })
@@ -1977,13 +1992,10 @@ async function createResource(state, kind, token) {
     const parent = locator(state, parentKind);
     if (!parent) return Object.freeze({ status: 'conflict', provider: null });
     path = `/accounts/${account}/access/apps/${encodeURIComponent(parent.id)}/policies`;
-    body = {
-      name: `${kind === 'source_access_policy' ? state.settings.sources[0].label : state.settings.connect.name} users [${marker(state.installationId, desired.key)}]`,
-      decision: 'allow',
-      include: emailRules(state.settings),
-      exclude: [],
-      require: [],
-    };
+    const name = `${kind === 'source_access_policy' ? state.settings.sources[0].label : state.settings.connect.name} users [${marker(state.installationId, desired.key)}]`;
+    body = kind === 'source_access_policy' && desired.desired.allow.identitiesRef === 'team.sourceMembers'
+      ? teamPolicy([], name)
+      : { name, decision: 'allow', include: emailRules(state.settings), exclude: [], require: [] };
   } else {
     path = `/zones/${zone}/dns_records`;
     body = {
@@ -2609,7 +2621,9 @@ function safeSourceAction(value) {
   if (!exactKeys(value, [
     'schemaVersion', 'actionId', 'sourceId', 'sourceRevision', 'actorEmail', 'issuedAt',
     'expiresAt', 'status', 'actionKeyHash', 'sourceHash', 'resources', 'pending', 'portalUpdate', 'failureCode',
+    ...(Object.hasOwn(value ?? {}, 'initialPolicyVersion') ? ['initialPolicyVersion'] : []),
   ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) || !SOURCE_ID.test(value.sourceId) ||
+      (Object.hasOwn(value, 'initialPolicyVersion') && value.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION) ||
       !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
       !normalizedEmail(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
       !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
@@ -2685,6 +2699,11 @@ async function prepareSourceAction(storage, input) {
   });
   const previous = [...current.actions].reverse().find((action) => action.sourceId === parsed.sourceId &&
     !['failed', 'succeeded'].includes(action.status));
+  // Never reinterpret an older potentially-applied Allow policy as a new Deny
+  // policy. Its journal remains available for explicit reconciliation.
+  if (previous && previous.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION &&
+      (previous.resources.length > 0 || previous.pending !== null || previous.portalUpdate !== null)) return null;
+  if (await otherLifecycleBlocksSource(storage, parsed.issuedAt, previous?.actionId)) return null;
   if (previous && previous.expiresAt > parsed.issuedAt &&
       (previous.status === 'authorization_required' || previous.status === 'applying')) return null;
   const retained = current.actions.filter((action) => action.expiresAt > parsed.issuedAt &&
@@ -2692,6 +2711,7 @@ async function prepareSourceAction(storage, input) {
     !(action.sourceId === parsed.sourceId && ['failed', 'succeeded'].includes(action.status)));
   const action = safeSourceAction({
     ...parsed,
+    initialPolicyVersion: SOURCE_INITIAL_POLICY_VERSION,
     status: 'authorization_required',
     resources: previous?.resources ?? [],
     pending: previous?.pending ?? null,
@@ -2751,7 +2771,8 @@ async function cancelSourceAction(storage, actionId, actorEmail, now) {
   const action = actions?.actions.find((candidate) => candidate.actionId === actionId);
   if (!actions || !action || action.actorEmail !== normalizedEmail(actorEmail) ||
       !Number.isSafeInteger(now) || now < action.issuedAt || now > action.expiresAt ||
-      action.status !== 'authorization_required') return null;
+      action.status !== 'authorization_required' || action.resources.length !== 0 ||
+      action.pending !== null || action.portalUpdate !== null) return null;
   return persistSourceAction(storage, {
     ...action,
     status: 'failed',
@@ -2782,12 +2803,12 @@ async function actionDesiredState(control, sources, action) {
       enabledTools: [...source.enabledTools],
     }],
   };
-  const desiredResources = (await buildDesiredResources(settings, control.installationId)).slice(0, 3);
+  const desiredResources = (await buildDesiredResources(settings, control.installationId, true)).slice(0, 3);
   return Object.freeze({
     installationId: control.installationId,
     target: Object.freeze({ accountId: control.accountId }),
     settings: Object.freeze(settings),
-    accessPolicy: Object.freeze({ identitiesHash: await sha256({ emails: control.audienceEmails }) }),
+    accessPolicy: Object.freeze({ identitiesHash: await sha256({ emails: [] }) }),
     desiredResources: Object.freeze(desiredResources),
     resources: action.resources,
     source,
@@ -2868,9 +2889,12 @@ function portalServerMappings(control, sources, action) {
 }
 
 function normalizedPortalMappings(value) {
-  if (!isRecord(value) || !Array.isArray(value.servers)) return null;
+  if (!isRecord(value)) return null;
+  // A newly created empty Portal may omit the optional servers array.
+  const servers = Object.hasOwn(value, 'servers') ? value.servers : [];
+  if (!Array.isArray(servers)) return null;
   const mappings = [];
-  for (const mapping of value.servers) {
+  for (const mapping of servers) {
     if (!isRecord(mapping)) return null;
     const serverId = safeProviderId(mapping.server_id ?? mapping.id);
     if (!serverId || mapping.default_disabled !== true || !isBoolean(mapping.on_behalf) ||
@@ -2912,14 +2936,17 @@ function portalExact(value, control, mappings) {
   return portalStaticMatches(value, control) && observed !== null && canonicalJson(observed) === canonicalJson(expected);
 }
 
-async function finalizeSourceAction(storage, context, action) {
+async function finalizeSourceAction(storage, action) {
   const ownership = Object.freeze({
     sourceId: action.sourceId,
     resources: action.resources,
   });
   let control = safeManagementControl(await storage.get(CONTROL_KEY));
   let sources = safeManagementSources(await storage.get(SOURCES_KEY));
-  if (!control || !sources) return null;
+  const actions = safeSourceActions(await storage.get(ACTIONS_KEY));
+  const actionIndex = actions?.actions.findIndex((candidate) => candidate.actionId === action.actionId) ?? -1;
+  if (!control || !sources || !actions || actionIndex < 0 ||
+      canonicalJson(actions.actions[actionIndex]) !== canonicalJson(action)) return null;
   const retained = control.sourceOwnership.find((entry) => entry.sourceId === ownership.sourceId);
   if (retained && canonicalJson(retained) !== canonicalJson(ownership)) return null;
   if (!retained) {
@@ -2928,7 +2955,6 @@ async function finalizeSourceAction(storage, context, action) {
       sourceOwnership: [...control.sourceOwnership, ownership].sort((left, right) => compareText(left.sourceId, right.sourceId)),
     });
     if (!control) return null;
-    await storage.put(CONTROL_KEY, control);
   }
   const source = sources.sources.find((candidate) => candidate.id === action.sourceId);
   if (!source || await managedSourceHash(source) !== action.sourceHash ||
@@ -2942,24 +2968,38 @@ async function finalizeSourceAction(storage, context, action) {
         : candidate),
     });
     if (!sources) return null;
-    await storage.put(SOURCES_KEY, sources);
   }
-  return persistSourceAction(storage, {
+  const completed = safeSourceAction({
     ...action,
     status: 'succeeded',
     pending: null,
     portalUpdate: null,
     failureCode: null,
   });
+  if (!completed) return null;
+  const updatedActions = safeSourceActions({
+    ...actions, revision: actions.revision + 1,
+    actions: actions.actions.map((candidate, index) => index === actionIndex ? completed : candidate),
+  });
+  if (!updatedActions) return null;
+  // One atomic multi-key write: a restart cannot leave installed ownership and
+  // source status committed without the corresponding completed action journal.
+  await storage.put({ [CONTROL_KEY]: control, [SOURCES_KEY]: sources, [ACTIONS_KEY]: updatedActions });
+  return completed;
 }
 
 async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   if (await teamActionBlocksLifecycle(storage)) return actionRecovery('team_action_conflict');
   const parsed = await parseSourceActionRequest(request, env, storage, nowMs);
   if (!parsed) return fixedJson(400, { schemaVersion: 1, error: 'source_action_rejected', retryable: false });
-  // Old, still-valid handoffs must not bypass the pause after a runtime update.
+  // A release gate is enforced here as well as in the authenticated API.
   if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
   let { action } = parsed;
+  if (action.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION) {
+    return fixedJson(409, { schemaVersion: 1, error: 'source_action_legacy_policy', retryable: false });
+  }
+  if (action.sourceRevision !== parsed.sources.revision ||
+      await otherLifecycleBlocksSource(storage, nowMs, action.actionId)) return actionRecovery('source_action_conflict');
   const desiredState = await actionDesiredState(parsed.control, parsed.sources, action);
   if (!desiredState) return failSourceAction(storage, action, 'source_action_drift');
   try { await verifyManagedSource(desiredState.source); } catch {
@@ -3004,11 +3044,13 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
       baseline.status === 'auth' ? 'source_action_authorization_failed' : 'source_resource_collision',
       baseline.status === 'auth',
     );
+    if (Date.now() >= action.expiresAt) return failSourceAction(storage, action, 'source_action_recovery_required');
     action = await persistSourceAction(storage, {
       ...action,
       pending: { kind, phase: 'send_armed', provider: null },
     });
     if (!action) return actionRecovery('source_action_state_unavailable');
+    if (!await armSourceCompatibility(storage, env)) return actionRecovery('source_action_state_unavailable');
     const created = await createResource(state, kind, parsed.claim.cloudflareAccessToken);
     if (created.status !== 'submitted') return failSourceAction(storage, action, 'source_action_recovery_required');
     action = await persistSourceAction(storage, {
@@ -3047,18 +3089,17 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     return failSourceAction(storage, action, 'portal_drift');
   }
   if (!portalExact(live.result, refreshed.control, mappings)) {
+    if (action.portalUpdate && action.portalUpdate.desiredHash !== desiredHash) {
+      return failSourceAction(storage, action, 'source_action_drift');
+    }
+    const baselineMappings = portalServerMappings(
+      refreshed.control, refreshed.sources, { ...action, resources: [] },
+    );
+    if (!baselineMappings || !portalExact(live.result, refreshed.control, baselineMappings)) {
+      return failSourceAction(storage, action, 'portal_drift');
+    }
+    if (Date.now() >= action.expiresAt) return failSourceAction(storage, action, 'source_action_recovery_required');
     if (action.portalUpdate) {
-      if (action.portalUpdate.desiredHash !== desiredHash) {
-        return failSourceAction(storage, action, 'source_action_drift');
-      }
-      const baselineMappings = portalServerMappings(
-        refreshed.control,
-        refreshed.sources,
-        { ...action, resources: [] },
-      );
-      if (!baselineMappings || !portalExact(live.result, refreshed.control, baselineMappings)) {
-        return failSourceAction(storage, action, 'portal_drift');
-      }
       action = await persistSourceAction(storage, { ...action, portalUpdate: null });
       if (!action) return actionRecovery('source_action_state_unavailable');
     }
@@ -3067,6 +3108,7 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
       portalUpdate: { phase: 'send_armed', desiredHash },
     });
     if (!action) return actionRecovery('source_action_state_unavailable');
+    if (!await armSourceCompatibility(storage, env)) return actionRecovery('source_action_state_unavailable');
     const updated = await providerCall(portalPath, parsed.claim.cloudflareAccessToken, {
       method: 'PUT', body: canonicalJson(portalBody),
     });
@@ -3083,7 +3125,7 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   } else if (action.portalUpdate?.desiredHash !== desiredHash && action.portalUpdate !== null) {
     return failSourceAction(storage, action, 'source_action_drift');
   }
-  const completed = await finalizeSourceAction(storage, refreshed, action);
+  const completed = await finalizeSourceAction(storage, action);
   return completed
     ? fixedJson(200, publicSourceAction(completed))
     : actionRecovery('source_action_state_unavailable');
@@ -3570,12 +3612,20 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment)
     const source = installedSources.find((candidate) => candidate.id === ownership.sourceId);
     if (!source) return null;
     const settings = teardownSettings(control, source, source.id);
-    const desiredResources = (await buildDesiredResources(settings, root.installationId)).slice(0, 3);
+    // Two exact receipt profiles, not mutable policy inference: historical
+    // sources began with the original audience; newly installed sources begin
+    // with none. Both must rederive every original resource hash exactly.
+    const emptyAudienceHash = await sha256({ emails: [] });
+    const sourceIdentityHash = ownership.resources[2].identityHash;
+    if (sourceIdentityHash !== audienceHash && sourceIdentityHash !== emptyAudienceHash) return null;
+    const desiredResources = (await buildDesiredResources(
+      settings, root.installationId, sourceIdentityHash === emptyAudienceHash,
+    )).slice(0, 3);
     const state = Object.freeze({
       installationId: root.installationId,
       target: root.receipt.target,
       settings,
-      accessPolicy: Object.freeze({ identitiesHash: audienceHash }),
+      accessPolicy: Object.freeze({ identitiesHash: sourceIdentityHash }),
       desiredResources: Object.freeze(desiredResources),
       resources: ownership.resources,
     });
@@ -3583,7 +3633,7 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment)
       const actual = ownership.resources[index];
       const desired = desiredResources[index];
       const key = teardownResourceKey(actual);
-      if (entries.has(key) || !teardownReceiptResourceMatchesDesired(actual, desired, audienceHash)) return null;
+      if (entries.has(key) || !teardownReceiptResourceMatchesDesired(actual, desired, sourceIdentityHash)) return null;
       entries.set(key, Object.freeze({ desired, state }));
     }
   }
@@ -4220,6 +4270,13 @@ export class AdminState {
         const input = parseSourceSave(parsed);
         const current = safeManagementSources(await this.state.storage.get(SOURCES_KEY));
         if (!input || !current) return fixedJson(400, { schemaVersion: 1, error: 'source_invalid' });
+        const currentSource = current.sources.find((source) => source.url === input.source.url);
+        const rawActions = await this.state.storage.get(ACTIONS_KEY);
+        const actions = rawActions === undefined ? null : safeSourceActions(rawActions);
+        if ((rawActions !== undefined && actions === null) || (currentSource && actions?.actions.some((action) =>
+          action.sourceId === currentSource.id && !['succeeded', 'failed'].includes(action.status)))) {
+          return fixedJson(409, { schemaVersion: 1, error: 'source_action_conflict' });
+        }
         const installedConflict = current.sources.some((source) => (
           source.url === input.source.url && source.status === 'installed'
         ));
@@ -4564,9 +4621,11 @@ async function handleSources(request, env) {
       headers: { 'content-type': 'application/json' },
       body: canonicalJson({ schemaVersion: 1, revision: input.revision, source: input.source }),
     }));
-    return response instanceof Response
-      ? response
-      : fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+    if (!(response instanceof Response)) return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+    if (response.status !== 200) return response;
+    const sources = safeManagementSources(await response.json());
+    return sources ? fixedJson(200, { ...sources, installationEnabled: !SOURCE_ADDITION_PAUSED }) :
+      fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
   } catch {
     return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
   }
@@ -4628,9 +4687,22 @@ async function readTeamState(storage, env) {
   if (!control || !sources || !admins || !environment) return null;
   const raw = await storage.get(TEAM_KEY);
   if (raw !== undefined) return safeTeamState(raw, control, sources, admins);
-  const sourceIds = sources.sources.filter((source) => source.status === 'installed').map((source) => source.id).sort(compareText);
+  const legacyAudienceHash = await sha256({ emails: control.audienceEmails });
+  const emptyAudienceHash = await sha256({ emails: [] });
+  const installed = sources.sources.filter((source) => source.status === 'installed');
+  if (installed.some((source) => {
+    const hash = control.sourceOwnership.find((entry) => entry.sourceId === source.id)?.resources[2].identityHash;
+    return hash !== legacyAudienceHash && hash !== emptyAudienceHash;
+  })) return null;
+  const sourceIds = installed.filter((source) => control.sourceOwnership.find((entry) =>
+    entry.sourceId === source.id)?.resources[2].identityHash === legacyAudienceHash).map((source) => source.id).sort(compareText);
+  const hasNativeSource = installed.length !== sourceIds.length;
   const initial = safeTeamState({
-    schemaVersion: 1, revision: 1, minimumRuntimeRelease: null, teardownDisabled: false,
+    schemaVersion: 1, revision: 1,
+    // Restoring a missing Team record cannot erase evidence that a native
+    // source was already provisioned, or make that source inherit old grants.
+    minimumRuntimeRelease: hasNativeSource ? environment.release : null,
+    teardownDisabled: hasNativeSource,
     sourceBaselines: sourceIds,
     members: [...new Set([...control.audienceEmails, ...admins])].sort(compareText).map((email) => ({
       email, sourceIds: control.audienceEmails.includes(email) ? sourceIds : [],
@@ -4639,6 +4711,39 @@ async function readTeamState(storage, env) {
   }, control, sources, admins);
   if (initial) await storage.put(TEAM_KEY, initial);
   return initial;
+}
+
+async function armSourceCompatibility(storage, env) {
+  const state = await readTeamState(storage, env);
+  const environment = parseManagementEnvironment(env);
+  if (!state || !environment || await teamActionBlocksLifecycle(storage)) return false;
+  const minimumRuntimeRelease = state.minimumRuntimeRelease === null ||
+    compareUpdateRelease(state.minimumRuntimeRelease, environment.release) === -1
+    ? environment.release : state.minimumRuntimeRelease;
+  if (!state.teardownDisabled || state.minimumRuntimeRelease !== minimumRuntimeRelease) {
+    await storage.put(TEAM_KEY, { ...state, teardownDisabled: true, minimumRuntimeRelease });
+  }
+  return true;
+}
+
+async function otherLifecycleBlocksSource(storage, now, currentActionId) {
+  for (const key of [ACTIONS_KEY, UPDATES_KEY, TEARDOWNS_KEY]) {
+    const raw = await storage.get(key);
+    if (raw === undefined) continue;
+    const state = key === ACTIONS_KEY ? safeSourceActions(raw) : key === UPDATES_KEY
+      ? safeRuntimeUpdates(raw) : safeTeardownActions(raw);
+    if (!state || state.actions.some((action) => {
+      if (action.actionId === currentActionId || action.status === 'succeeded') return false;
+      // An expired grant is not evidence that its provider mutation never ran.
+      // Retain source journals even if a historical status says unstarted/failed.
+      if (key === ACTIONS_KEY && (action.resources.length > 0 || action.pending !== null ||
+        action.portalUpdate !== null)) return true;
+      if (action.status === 'failed') return false;
+      if (action.status !== 'authorization_required' || action.expiresAt > now) return true;
+      return key === UPDATES_KEY && action.stage !== null;
+    })) return true;
+  }
+  return false;
 }
 
 async function teamActionBlocksLifecycle(storage) {

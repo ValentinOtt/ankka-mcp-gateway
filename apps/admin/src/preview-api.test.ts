@@ -29,15 +29,21 @@ describe('Team preview', () => {
     expect(createPreviewGatewayAdminApi()).toBeUndefined()
   })
 
-  it('keeps source addition paused in preview while preserving existing sources and Team editing', async () => {
+  it('previews source installation with nobody assigned and preserves existing Team grants', async () => {
     vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
     window.history.replaceState(null, '', '/sources?preview=ready')
     const api = previewApi()
     const saved = await api.getSources()
-    expect(saved.installationEnabled).toBe(false)
-    await expect(api.prepareSourceAction(saved.revision, 'source-2222222222222222')).rejects.toEqual(expect.objectContaining({ code: 'source_addition_paused' }))
-    await expect(api.saveSourceDraft(saved.revision, { label: 'New draft', url: 'https://new.example.com/mcp', authMode: 'none', enabledTools: ['search'] })).rejects.toEqual(expect.objectContaining({ code: 'source_addition_paused' }))
-    expect(await api.getSources()).toEqual(saved)
+    const team = await api.getTeam()
+    expect(saved.installationEnabled).toBe(true)
+    const drafted = await api.saveSourceDraft(saved.revision, { label: 'New draft', url: 'https://new.example.com/mcp', authMode: 'none', enabledTools: ['search'] })
+    const source = drafted.sources.find((candidate) => candidate.url === 'https://new.example.com/mcp')
+    if (!source) throw new Error('Expected saved preview source')
+    const prepared = await api.prepareSourceAction(drafted.revision, source.id)
+    expect(prepared.status).toBe('authorization_required')
+    expect((await api.getSources()).sources.find((candidate) => candidate.id === source.id)?.status).toBe('draft')
+    expect((await api.getSourceAction(prepared.actionId)).status).toBe('succeeded')
+    expect((await api.getTeam()).members).toEqual(team.members)
     expect((await api.getTeam()).editingEnabled).toBe(true)
   })
 

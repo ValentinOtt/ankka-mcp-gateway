@@ -44,7 +44,7 @@ const installedSources: ManagedSources = {
   schemaVersion: 1,
   revision: 3,
   applyMode: 'oauth_per_action',
-  installationEnabled: false,
+  installationEnabled: true,
   sources: [
     {
       id: 'source-1111111111111111',
@@ -110,6 +110,7 @@ function update(available: boolean): RuntimeUpdate {
 class PreviewGatewayAdminApi implements GatewayAdminApi {
   #sources: ManagedSources
   #team: Team
+  #preparedSourceId: string | null = null
   readonly #scenario: PreviewScenario
 
   constructor(scenario: PreviewScenario) {
@@ -195,8 +196,9 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     }
   }
 
-  async saveSourceDraft(_revision: number, source: SourceDraftInput): Promise<ManagedSources> {
+  async saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources> {
     if (!this.#sources.installationEnabled) throw new GatewayApiError(409, 'source_addition_paused')
+    if (revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_conflict')
     this.#sources = {
       ...this.#sources,
       revision: this.#sources.revision + 1,
@@ -210,15 +212,31 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return structuredClone(this.#sources)
   }
 
-  async prepareSourceAction(_revision: number, _sourceId: string): Promise<PreparedAction> {
-    throw new GatewayApiError(409, 'source_addition_paused')
+  async prepareSourceAction(revision: number, sourceId: string): Promise<PreparedAction> {
+    if (!this.#sources.installationEnabled) throw new GatewayApiError(409, 'source_addition_paused')
+    if (revision !== this.#sources.revision || !this.#sources.sources.some((source) => source.id === sourceId && source.status === 'draft')) throw new GatewayApiError(409, 'source_action_conflict')
+    if (this.#team.pendingAction && !['succeeded', 'failed'].includes(this.#team.pendingAction.status)) throw new GatewayApiError(409, 'team_action_conflict')
+    this.#preparedSourceId = sourceId
+    return { schemaVersion: 1, actionId: ACTION_ID, status: 'authorization_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), handoffUrl: HANDOFF }
   }
 
   async getSourceAction(_actionId: string): Promise<SourceAction> {
-    return { schemaVersion: 1, actionId: ACTION_ID, sourceId: 'source-2222222222222222', status: 'succeeded', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: null }
+    if (!this.#preparedSourceId || _actionId !== ACTION_ID) throw new GatewayApiError(404, 'source_action_not_found')
+    const source = this.#sources.sources.find((candidate) => candidate.id === this.#preparedSourceId)
+    if (!source) throw new GatewayApiError(404, 'source_action_not_found')
+    if (source.status === 'draft') {
+      source.status = 'installed'
+      this.#sources.revision += 1
+    }
+    return { schemaVersion: 1, actionId: ACTION_ID, sourceId: source.id, status: 'succeeded', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: null }
   }
 
-  async cancelSourceAction(actionId: string): Promise<SourceAction> { return this.getSourceAction(actionId) }
+  async cancelSourceAction(actionId: string): Promise<SourceAction> {
+    if (!this.#preparedSourceId || actionId !== ACTION_ID) throw new GatewayApiError(404, 'source_action_not_found')
+    const sourceId = this.#preparedSourceId
+    this.#preparedSourceId = null
+    return { schemaVersion: 1, actionId, sourceId, status: 'failed', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: 'source_action_denied' }
+  }
 
   async prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }> {
     const current = await this.getUpdate()
