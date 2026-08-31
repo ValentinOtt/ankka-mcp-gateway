@@ -195,11 +195,14 @@ tenant/resource selection are separate controls.
 BigQuery (`bigquery`):
 
 ```json
-{"allowedProjectIds":["synthetic-project"],"allowedDatasetIds":["analytics_123456"],"maximumBytesBilled":"104857600"}
+{"allowedProjectIds":["synthetic-project"],"allowedDatasetIds":["analytics_123456"],"location":"europe-north1","maximumBytesBilled":"104857600"}
 ```
 
+The required `location` must match the dataset; it cannot be selected by callers.
 The byte budget applies per query at execution; dataset access inside SQL is
-enforced by the identity's IAM, not by statement parsing. See
+enforced by the identity's IAM, not by statement parsing. BigQuery requires the
+standard `bigquery` OAuth scope for the dry-run classification endpoint; a
+dedicated identity with no data-write permissions is mandatory. See
 [GOOGLE.md](GOOGLE.md) for roles, the scope decision, and the exact tools.
 
 ## Remaining release work

@@ -23,18 +23,23 @@ const boundedText = (length: number) => z.string().max(length);
 const fieldName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,299}$/u);
 const budgetText = int64Text.refine((value) =>
   BigInt(value) >= 1n && BigInt(value) <= BigInt(BIGQUERY_LIMITS.maximumBytesBilled));
+// One deployment owns one query location; callers cannot override it.
+const location = z.string().max(64).regex(/^(?:US|EU|[a-z]+(?:-[a-z]+)+[0-9]+)$/u);
 const configSchema = z.object({
   allowedProjectIds: z.array(project).min(1).max(BIGQUERY_LIMITS.projects)
     .refine((values) => new Set(values).size === values.length),
   allowedDatasetIds: z.array(dataset).min(1).max(BIGQUERY_LIMITS.datasets)
     .refine((values) => new Set(values).size === values.length),
   maximumBytesBilled: budgetText,
+  location,
 }).strict();
 const queryText = z.string().min(1).max(BIGQUERY_LIMITS.queryBytes)
+  .refine((value) => new TextEncoder().encode(value).byteLength <= BIGQUERY_LIMITS.queryBytes)
   .refine((value) => ![...value].some((character) => {
     const code = character.charCodeAt(0);
     return (code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127;
   }));
+const dryRunJobId = z.string().regex(/^ankka_dry_run_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
 const labelRecord = z.record(
   z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/u),
   z.string().regex(/^[a-z0-9_-]{0,63}$/u),
@@ -45,11 +50,6 @@ const listPlan = z.object({
   method: z.literal('GET'), path: z.string(),
   query: z.object({ maxResults: pageSizeText, pageToken: pageToken.optional() }).strict(),
 }).strict();
-const dryRunBody = z.object({
-  query: queryText, useLegacySql: z.literal(false), dryRun: z.literal(true),
-  labels: labelRecord.optional(),
-}).strict();
-
 // Bounded nested TableFieldSchema: the GA4 export nests event_params and
 // items item_params records four levels deep; one spare level is allowed.
 const leafField = z.object({
@@ -112,9 +112,19 @@ const tableResponse = z.object({
   }).optional(),
 });
 const dryRunResponse = z.object({
-  jobComplete: z.literal(true), statementType: boundedText(64),
-  totalBytesProcessed: int64Text, schema: tableSchema.optional(),
-  cacheHit: z.boolean().optional(),
+  // jobs.query does not expose statementType. A jobs.insert dry run exposes
+  // classification in JobStatistics2 without executing a query or creating a job.
+  statistics: z.object({ query: z.object({
+    statementType: boundedText(64), totalBytesProcessed: int64Text,
+    schema: tableSchema.optional(),
+    numDmlAffectedRows: z.undefined().optional(),
+    dmlStats: z.undefined().optional(),
+  }) }),
+  // Successful dry-run Job responses may omit status entirely.
+  status: z.object({
+    state: z.literal('DONE').optional(),
+    errorResult: z.undefined().optional(), errors: z.undefined().optional(),
+  }).optional(),
   // Forbidden result keys: any present JSON value fails these markers closed.
   rows: z.undefined().optional(), errors: z.undefined().optional(),
   numDmlAffectedRows: z.undefined().optional(),
@@ -126,6 +136,7 @@ const executeResponse = z.object({
   totalBytesBilled: int64Text.optional(), cacheHit: z.boolean().optional(),
   pageToken: pageToken.optional(),
   errors: z.undefined().optional(), numDmlAffectedRows: z.undefined().optional(),
+  dmlStats: z.undefined().optional(),
 });
 
 type ProjectedField = {
@@ -151,24 +162,41 @@ export function createBigQueryConnector(rawConfig: string, rawSecret: string): R
   const projects = new Set(config.allowedProjectIds);
   const datasets = new Set(config.allowedDatasetIds);
   const authorize = createGoogleAuthorization(rawSecret, 'bigquery');
+  const dryRunBody = z.object({
+    jobReference: z.object({ projectId: project, jobId: dryRunJobId, location: z.literal(config.location) }).strict(),
+    configuration: z.object({
+      dryRun: z.literal(true),
+      query: z.object({ query: queryText, useLegacySql: z.literal(false) }).strict(),
+      labels: labelRecord.optional(),
+    }).strict(),
+  }).strict();
   const executeBody = z.object({
     query: queryText, useLegacySql: z.literal(false),
+    location: z.literal(config.location),
     maximumBytesBilled: z.literal(config.maximumBytesBilled),
     maxResults: z.literal(BIGQUERY_LIMITS.rows), timeoutMs: z.literal(BIGQUERY_LIMITS.timeoutMs),
     jobCreationMode: z.literal('JOB_CREATION_OPTIONAL'), useQueryCache: z.literal(true),
     labels: labelRecord.optional(),
   }).strict();
-  const dryPlanSchema = z.object({ method: z.literal('POST'), path: z.string(), body: dryRunBody }).strict();
+  const dryPlanSchema = z.object({
+    method: z.literal('POST'), path: z.string(),
+    body: dryRunBody,
+  }).strict();
   const executePlanSchema = z.object({ method: z.literal('POST'), path: z.string(), body: executeBody }).strict();
 
   function allowRequest(plan: ReadRequestPlan): boolean {
-    const matched = /^\/bigquery\/v2\/projects\/([a-z][a-z0-9-]{4,28}[a-z0-9])(?:\/(queries|datasets)(?:\/([A-Za-z0-9_]{1,1024})(?:\/(tables)(?:\/([A-Za-z0-9_]{1,1024}))?)?)?)?$/u
+    const matched = /^\/bigquery\/v2\/projects\/([a-z][a-z0-9-]{4,28}[a-z0-9])(?:\/(jobs|queries|datasets)(?:\/([A-Za-z0-9_]{1,1024})(?:\/(tables)(?:\/([A-Za-z0-9_]{1,1024}))?)?)?)?$/u
       .exec(plan.path);
     const [, projectId, resource, datasetId, tables, tableId] = matched ?? [];
     if (projectId === undefined || resource === undefined || !projects.has(projectId)) return false;
+    if (resource === 'jobs') {
+      if (datasetId !== undefined) return false;
+      const parsed = dryPlanSchema.safeParse(plan);
+      return parsed.success && parsed.data.body.jobReference.projectId === projectId;
+    }
     if (resource === 'queries') {
       if (datasetId !== undefined) return false;
-      return dryPlanSchema.safeParse(plan).success || executePlanSchema.safeParse(plan).success;
+      return executePlanSchema.safeParse(plan).success;
     }
     if (datasetId === undefined) return listPlan.safeParse(plan).success;
     if (!datasets.has(datasetId)) return false;
@@ -186,7 +214,7 @@ export function createBigQueryConnector(rawConfig: string, rawSecret: string): R
 
   function registerReadOnlySql(server: McpServer, execute: ReadExecutor): void {
     server.registerTool('execute_sql_readonly', {
-      description: `Run one bounded GoogleSQL SELECT statement in a configured project. Every call dry-runs first: non-SELECT statement types and estimated scans above the configured maximumBytesBilled are refused before execution, and execution enforces that budget, a ${BIGQUERY_LIMITS.timeoutMs} ms timeout, and at most ${BIGQUERY_LIMITS.rows} returned rows without pagination. Table access comes from the deployment identity's read-only IAM, not from this tool. Set dryRun to true to review the statement type and byte estimate without running.`,
+      description: `Run a bounded GoogleSQL query classified by Google as SELECT in a configured project and deployment-owned location. Every call dry-runs first: non-SELECT statement types and estimated scans above the configured maximumBytesBilled are refused before execution. Execution enforces that byte budget and returns at most ${BIGQUERY_LIMITS.rows} rows without pagination. The ${BIGQUERY_LIMITS.timeoutMs} ms provider wait timeout does not cancel a running query; incomplete responses fail closed. Dataset access and restrictions on routines and external connections come from the deployment identity's read-only IAM, not from this tool. Set dryRun to true to review the statement type and byte estimate without running.`,
       inputSchema: z.object({
         projectId: project, query: queryText,
         dryRun: z.boolean().default(false), labels: labelRecord.optional(),
@@ -198,11 +226,14 @@ export function createBigQueryConnector(rawConfig: string, rawSecret: string): R
         const path = `/bigquery/v2/projects/${input.projectId}/queries`;
         const labels = input.labels === undefined ? {} : { labels: input.labels };
         const dryPlan: ReadRequestPlan = {
-          method: 'POST', path,
-          body: { query: input.query, useLegacySql: false, dryRun: true, ...labels },
+          method: 'POST', path: `/bigquery/v2/projects/${input.projectId}/jobs`,
+          body: {
+            jobReference: { projectId: input.projectId, jobId: `ankka_dry_run_${crypto.randomUUID()}`, location: config.location },
+            configuration: { dryRun: true, query: { query: input.query, useLegacySql: false }, ...labels },
+          },
         };
         if (!allowRequest(dryPlan)) throw new Error('CONNECTOR_REQUEST_NOT_ALLOWED');
-        const estimate = dryRunResponse.parse(await execute(dryPlan));
+        const estimate = dryRunResponse.parse(await execute(dryPlan)).statistics.query;
         assertReadWithinBudget(estimate.statementType, estimate.totalBytesProcessed);
         if (input.dryRun) {
           return { content: [{ type: 'text', text: JSON.stringify({
@@ -216,6 +247,7 @@ export function createBigQueryConnector(rawConfig: string, rawSecret: string): R
           method: 'POST', path,
           body: {
             query: input.query, useLegacySql: false,
+            location: config.location,
             maximumBytesBilled: config.maximumBytesBilled,
             maxResults: BIGQUERY_LIMITS.rows, timeoutMs: BIGQUERY_LIMITS.timeoutMs,
             jobCreationMode: 'JOB_CREATION_OPTIONAL', useQueryCache: true, ...labels,

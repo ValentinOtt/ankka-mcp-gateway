@@ -58,14 +58,18 @@ provider's explicit read allowlist.
 | --- | --- |
 | `google-search-console` | `https://www.googleapis.com/auth/webmasters.readonly` |
 | `google-analytics` | `https://www.googleapis.com/auth/analytics.readonly` |
-| `bigquery` | `https://www.googleapis.com/auth/cloud-platform.read-only` |
+| `bigquery` | `https://www.googleapis.com/auth/bigquery` |
 
-BigQuery's REST methods accept no `bigquery.readonly` scope for query or
-metadata calls; per Google's published discovery contract, the narrowest
-read-only-named scope all five used methods accept is
-`cloud-platform.read-only`. The scope is defense in depth, not the boundary:
-the dataset-scoped read-only IAM above and the connector's statement-type gate
-carry the read-only guarantee.
+BigQuery's dry-run classification uses `jobs.insert`, which does **not** list
+`cloud-platform.read-only` among its accepted scopes. The reader therefore
+requests the standard `bigquery` scope, not `cloud-platform` or a combined scope.
+That scope is not read-only: the dedicated identity's dataset-scoped IAM above
+prevents data writes. The exact request allowlist additionally admits
+`jobs.insert` only with `configuration.dryRun: true` and a query configuration;
+load, copy, extract, and executing-job bodies are refused. See
+[accepted scopes](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/jobs/insert).
+Do not deploy with an existing owner/editor credential. Changing the scope
+requires an explicit review of the deployment identity and its effective grants.
 
 After the exact read plan passes its provider allowlist, the Worker signs an
 RS256 assertion with the service-account email as `iss`, a five-minute lifetime,
@@ -79,8 +83,9 @@ response reading in one eight-second deadline. Secret input is capped at 16 KiB,
 the outgoing form at 8 KiB, and token JSON at 16 KiB/32 chunks. Redirects,
 non-JSON responses, wrong token types, unexpected returned scopes, and lifetimes
 outside 1–3600 seconds fail closed. Tokens and imported keys are not cached.
-Each approved tool call mints its own short-lived token, then makes one approved
-API request. Tool discovery and denied read plans mint no token. Errors expose
+Each approved REST request mints its own short-lived token. BigQuery query
+execution performs two separately authorized requests: dry run, then execution.
+Tool discovery and denied read plans mint no token. Errors expose
 only fixed codes; neither provider errors nor credentials are logged.
 
 ## Search Console
@@ -171,12 +176,16 @@ and [Data API quotas](https://developers.google.com/analytics/devguides/reportin
 Set `CONNECTOR_PROVIDER` to `bigquery`. A synthetic configuration:
 
 ```json
-{"allowedProjectIds":["synthetic-project"],"allowedDatasetIds":["analytics_123456"],"maximumBytesBilled":"104857600"}
+{"allowedProjectIds":["synthetic-project"],"allowedDatasetIds":["analytics_123456"],"location":"europe-north1","maximumBytesBilled":"104857600"}
 ```
 
 Configure 1–4 unique project IDs, 1–16 unique dataset IDs (a GA4 export
-dataset is `analytics_<propertyId>`), and a per-query byte budget from 1 to
-1 TiB as a decimal string. The tool names and camelCase arguments mirror
+dataset is `analytics_<propertyId>`), a required query `location` matching the
+dataset, and a per-query byte budget from 1 to 1 TiB as a decimal string.
+Use the exact metadata location (for example `europe-north1`, `EU`, or `US`),
+not an inferred default. The location is deployment-owned in both requests;
+tool callers cannot override it. Existing experimental configurations without
+`location` now fail closed and must be updated explicitly. The tool names and camelCase arguments mirror
 Google's hosted BigQuery MCP read tools, so the same clients work against a
 future native connection; the write-capable `execute_sql` tool is deliberately
 never implemented. All five tools use `https://bigquery.googleapis.com`:
@@ -187,21 +196,36 @@ never implemented. All five tools use `https://bigquery.googleapis.com`:
 | `get_dataset_info` | `GET /bigquery/v2/projects/{projectId}/datasets/{datasetId}` |
 | `list_table_ids` | `GET /bigquery/v2/projects/{projectId}/datasets/{datasetId}/tables` with `maxResults` 1–50 and optional `pageToken` |
 | `get_table_info` | `GET /bigquery/v2/projects/{projectId}/datasets/{datasetId}/tables/{tableId}` |
-| `execute_sql_readonly` | Two `POST /bigquery/v2/projects/{projectId}/queries` calls: a mandatory dry run, then the bounded execution |
+| `execute_sql_readonly` | `POST /bigquery/v2/projects/{projectId}/jobs` with `configuration.dryRun: true`, then `POST /bigquery/v2/projects/{projectId}/queries` for bounded execution |
 
-`execute_sql_readonly` accepts one GoogleSQL statement of at most 8 KiB with
+`execute_sql_readonly` accepts GoogleSQL text of at most 8 KiB **UTF-8 bytes** with
 optional lowercase labels. Every call dry-runs first; execution proceeds only
-when BigQuery reports `statementType` `SELECT` and an estimated scan within the
-configured budget, so DML, DDL, scripts, and oversized scans are refused before
-any billable work. Setting `dryRun: true` returns only the statement type, byte
+when the returned Job reports `statistics.query.statementType: SELECT` and
+`statistics.query.totalBytesProcessed` within the configured budget. Missing
+classification, reported errors, DML, DDL, `SCRIPT`, and oversized scans are
+refused before execution. `jobs.query` does not expose this classification and
+is not used for preflight. The Worker generates a bounded job ID internally
+and pins its project and location; no job-control arguments are caller-supplied.
+The dry-run request does not execute the query or incur query charges. Setting
+`dryRun: true` returns only the statement type, byte
 estimate, and result schema. Execution always sends `maximumBytesBilled` (the
-hard cost cap the hosted MCP tools lack), a fixed 6.5-second `timeoutMs`, a
+per-query billing bound the hosted MCP tools lack), a fixed 6.5-second `timeoutMs`, a
 200-row `maxResults`, `jobCreationMode: JOB_CREATION_OPTIONAL`, and
-`useLegacySql: false`. Queries that do not complete within the timeout, report
-provider errors, or return DML statistics fail closed; there is no result
+`useLegacySql: false`. `timeoutMs` limits how long Google waits for results; it
+does **not** cancel execution. An incomplete response or the separate bounded
+HTTP deadline fails closed, but the query may continue within its byte budget.
+There is no automatic retry or cancellation. Responses reporting provider
+errors or DML statistics also fail closed; there is no result
 pagination, and `rowsTruncated` marks incomplete result sets. Dataset scoping
-inside SQL comes from the identity's IAM, not from parsing the statement. A dry
+inside SQL comes from the identity's IAM, not from parsing the statement.
+Google-classified `SELECT` is not a universal side-effect check: remote functions
+can invoke external services if the identity has connection access. Keep the
+dedicated identity free of connection permissions and unrelated routine access;
+do not substitute SQL parsing for IAM. A dry
 run is an estimate; `maximumBytesBilled` is the enforcement at execution. See
+[dry runs](https://docs.cloud.google.com/bigquery/docs/running-queries#dry-run),
+[Job query statistics](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/Job#JobStatistics2),
+[remote-function permissions](https://docs.cloud.google.com/bigquery/docs/remote-functions#use_a_remote_function_in_a_query),
 [jobs.query](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/jobs/query),
 [tables.get](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/tables/get),
 and [datasets.list](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/datasets/list).
@@ -213,6 +237,25 @@ appear through `list_table_ids` as dated ids such as `events_20260830`;
 partition decorators and wildcard table arguments are rejected. Queries consume
 your BigQuery on-demand quota and billing; consider Google's custom query
 quotas on the query project as an additional daily bound.
+
+The dataset name is tied to the linked GA4 property, not to the export date.
+Daily `events_YYYYMMDD` tables and temporary `events_intraday_YYYYMMDD` tables
+change underneath it. Intraday is incomplete; daily exports accept late events
+for several days and can be reprocessed later. Read metadata again after any
+project/property migration rather than assuming identifiers or location are
+permanent. See the [GA4 export schema](https://support.google.com/analytics/answer/7029846?hl=en)
+and [export schedule](https://support.google.com/analytics/answer/9358801?hl=en#schedule).
+
+For the first real-account canary, verify dataset/table metadata through this
+Worker, then request a dry run of a narrowly date-filtered aggregate. Execute
+only if the estimate fits the configured budget; a SQL `LIMIT` does not limit
+bytes scanned. Confirm the exact five-tool list and denied unconfigured
+resources before connecting the Access-protected source to your Portal with
+shared operator OAuth (`on_behalf: false`). Source onboarding must use the
+Gateway's reviewed default-deny flow, not a direct policy/receipt bypass.
+Only then test a compact BLS + BigQuery Code Mode join, reporting join coverage
+and keeping event-level rows out of the model response. Synthetic tests and
+metadata reads through a different BigQuery client do not qualify this path.
 
 ## Validation and remaining acceptance
 

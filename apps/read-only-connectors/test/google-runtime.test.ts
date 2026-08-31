@@ -13,9 +13,29 @@ const serviceAccountEmail = 'synthetic-reader@synthetic-project.iam.gserviceacco
 const mintedToken = 'synthetic-minted-google-access-token';
 const site = 'sc-domain:example.com';
 const propertyId = '123456789';
+const queryProjectId = 'synthetic-query-project';
+const dataProjectId = 'synthetic-data-project';
+const datasetId = 'analytics_123456';
+const tableId = 'events_20260830';
+const location = 'europe-north1';
+const maximumBytesBilled = '104857600';
+const bigqueryBase = `https://bigquery.googleapis.com/bigquery/v2/projects/${dataProjectId}/datasets`;
+const queryUrl = `https://bigquery.googleapis.com/bigquery/v2/projects/${queryProjectId}/queries`;
+const dryRunUrl = `https://bigquery.googleapis.com/bigquery/v2/projects/${queryProjectId}/jobs`;
+const dryRunUuid = '12345678-1234-4123-8123-123456789abc';
+const query = `SELECT event_name FROM \`${dataProjectId}.${datasetId}.${tableId}\` LIMIT 1`;
+const querySchema = { fields: [{ name: 'event_name', type: 'STRING', mode: 'NULLABLE' }] };
+const dryRunBody = {
+  jobReference: { projectId: queryProjectId, jobId: `ankka_dry_run_${dryRunUuid}`, location },
+  configuration: { dryRun: true, query: { query, useLegacySql: false } },
+};
+const dryRunResult = {
+  statistics: { query: { statementType: 'SELECT', totalBytesProcessed: '1024', schema: querySchema } },
+  status: { state: 'DONE' },
+};
 const dates = { startDate: '2026-08-01', endDate: '2026-08-30' };
 const protocolVersions = ['2025-06-18', '2026-07-28'] as const;
-type GoogleProviderId = 'google-search-console' | 'google-analytics';
+type GoogleProviderId = 'google-search-console' | 'google-analytics' | 'bigquery';
 
 interface GoogleFixture {
   provider: GoogleProviderId;
@@ -34,6 +54,14 @@ const providers: readonly GoogleFixture[] = [
     scope: 'https://www.googleapis.com/auth/analytics.readonly',
     tools: ['google_analytics_daily_traffic', 'google_analytics_realtime_by_device'],
   },
+  {
+    provider: 'bigquery', config: JSON.stringify({
+      allowedProjectIds: [queryProjectId, dataProjectId], allowedDatasetIds: [datasetId],
+      maximumBytesBilled, location,
+    }),
+    scope: 'https://www.googleapis.com/auth/bigquery',
+    tools: ['execute_sql_readonly', 'get_dataset_info', 'get_table_info', 'list_dataset_ids', 'list_table_ids'],
+  },
 ];
 
 interface GoogleReadFixture {
@@ -45,6 +73,7 @@ interface GoogleReadFixture {
   body?: ConnectorJson;
   response: ConnectorJson;
   expectedText: string;
+  preflight?: { url: string; method: 'POST'; body: ConnectorJson; response: ConnectorJson };
 }
 const reads: readonly GoogleReadFixture[] = [
   {
@@ -97,6 +126,49 @@ const reads: readonly GoogleReadFixture[] = [
       rowCount: 1, extra: 'sentinel-provider-extra',
     },
     expectedText: 'desktop',
+  },
+  {
+    provider: 'bigquery', name: 'get_dataset_info', arguments: { projectId: dataProjectId, datasetId },
+    url: `${bigqueryBase}/${datasetId}`, method: 'GET',
+    response: { datasetReference: { projectId: dataProjectId, datasetId }, location,
+      access: [{ role: 'OWNER', userByEmail: 'sentinel-provider-owner@example.com' }] },
+    expectedText: location,
+  },
+  {
+    provider: 'bigquery', name: 'list_dataset_ids', arguments: { projectId: dataProjectId, pageSize: 1 },
+    url: `${bigqueryBase}?maxResults=1`, method: 'GET',
+    response: { datasets: [{ datasetReference: { projectId: dataProjectId, datasetId } }],
+      extra: 'sentinel-provider-extra' },
+    expectedText: datasetId,
+  },
+  {
+    provider: 'bigquery', name: 'list_table_ids', arguments: { projectId: dataProjectId, datasetId, pageSize: 1 },
+    url: `${bigqueryBase}/${datasetId}/tables?maxResults=1`, method: 'GET',
+    response: { tables: [{ tableReference: { projectId: dataProjectId, datasetId, tableId } }], totalItems: 1,
+      extra: 'sentinel-provider-extra' },
+    expectedText: tableId,
+  },
+  {
+    provider: 'bigquery', name: 'get_table_info', arguments: { projectId: dataProjectId, datasetId, tableId },
+    url: `${bigqueryBase}/${datasetId}/tables/${tableId}`, method: 'GET',
+    response: { tableReference: { projectId: dataProjectId, datasetId, tableId }, schema: querySchema,
+      numRows: '9007199254740993', extra: 'sentinel-provider-extra' },
+    expectedText: '9007199254740993',
+  },
+  {
+    provider: 'bigquery', name: 'execute_sql_readonly', arguments: { projectId: queryProjectId, query, dryRun: true },
+    url: dryRunUrl, method: 'POST', body: dryRunBody, response: dryRunResult,
+    expectedText: 'totalBytesProcessed',
+  },
+  {
+    provider: 'bigquery', name: 'execute_sql_readonly', arguments: { projectId: queryProjectId, query },
+    url: queryUrl, method: 'POST',
+    preflight: { url: dryRunUrl, method: 'POST', body: dryRunBody, response: dryRunResult },
+    body: { query, useLegacySql: false, maximumBytesBilled, maxResults: 200, timeoutMs: 6_500,
+      jobCreationMode: 'JOB_CREATION_OPTIONAL', useQueryCache: true, location },
+    response: { jobComplete: true, schema: querySchema,
+      rows: [{ f: [{ v: 'page_view' }] }], totalRows: '1', totalBytesProcessed: '1024', totalBytesBilled: '1024' },
+    expectedText: 'page_view',
   },
 ];
 
@@ -151,17 +223,27 @@ function protocolRequest(version: string, message: RpcFixture): Request {
 function toolRequest(version: string, read: GoogleReadFixture): Request {
   return protocolRequest(version, { method: 'tools/call', params: { name: read.name, arguments: read.arguments } });
 }
-function tokenResponse(fixture: GoogleFixture): Response {
-  return Response.json({ access_token: mintedToken, token_type: 'Bearer', expires_in: 3_600, scope: fixture.scope });
+function tokenResponse(fixture: GoogleFixture, token = mintedToken): Response {
+  return Response.json({ access_token: token, token_type: 'Bearer', expires_in: 3_600, scope: fixture.scope });
 }
 function mockFetch(fixture: GoogleFixture, read?: GoogleReadFixture, tokenReply?: () => Response, providerReply?: () => Response) {
   // Any accidental global fetch also fails locally rather than touching the network.
   vi.stubGlobal('fetch', vi.fn<typeof globalThis.fetch>(async () => { throw new Error('Unexpected global fetch'); }));
+  let providerRequests = 0;
+  let tokenRequests = 0;
   return vi.fn<typeof globalThis.fetch>(async (input) => {
     const url = String(input);
     if (url === accessKeysEndpoint) return new Response(jwks, { headers: { 'Content-Type': 'application/json' } });
-    if (url === tokenEndpoint) return tokenReply === undefined ? tokenResponse(fixture) : tokenReply();
-    if (read !== undefined && url === read.url) return providerReply === undefined ? Response.json(read.response) : providerReply();
+    if (url === tokenEndpoint) {
+      tokenRequests += 1;
+      return tokenReply === undefined
+        ? tokenResponse(fixture, tokenRequests === 1 ? mintedToken : `${mintedToken}-${tokenRequests}`) : tokenReply();
+    }
+    if (read !== undefined && (url === read.url || url === read.preflight?.url)) {
+      providerRequests += 1;
+      if (providerReply !== undefined) return providerReply();
+      return Response.json(providerRequests === 1 && read.preflight !== undefined ? read.preflight.response : read.response);
+    }
     throw new Error('Unexpected mocked destination');
   });
 }
@@ -193,6 +275,7 @@ describe.each(providers)('$provider authenticated Google runtime', (fixture) => 
     });
 
     it.each(providerReads)('mints only the fixed scope and executes the exact $name read', async (read) => {
+      if (read.provider === 'bigquery') vi.spyOn(crypto, 'randomUUID').mockReturnValue(dryRunUuid);
       const outbound = mockFetch(fixture, read);
       const response = await handleRequest(toolRequest(version, read), environment(fixture), outbound);
       const text = await response.text();
@@ -201,51 +284,59 @@ describe.each(providers)('$provider authenticated Google runtime', (fixture) => 
       expect(text).not.toMatch(/"isError":true|CONNECTOR_READ_FAILED/);
       expectNoSecrets(text);
       expect(response.headers.get('cache-control')).toBe('no-store');
-      expect(outbound.mock.calls.map(([url]) => String(url))).toEqual([accessKeysEndpoint, tokenEndpoint, read.url]);
+      const steps = read.preflight === undefined ? [read] : [read.preflight, read];
+      expect(outbound.mock.calls.map(([url]) => String(url)))
+        .toEqual([accessKeysEndpoint, ...steps.flatMap((step) => [tokenEndpoint, step.url])]);
 
       const accessInit = outbound.mock.calls[0]?.[1];
       expect(accessInit?.method).toBe('GET');
       expect(accessInit?.redirect).toBe('error');
       expect(accessInit?.body).toBeUndefined();
       expect([...new Headers(accessInit?.headers).entries()]).toEqual([['accept', 'application/json']]);
-      const tokenInit = outbound.mock.calls[1]?.[1];
-      expect(tokenInit?.method).toBe('POST');
-      expect(tokenInit?.redirect).toBe('error');
-      expect([...new Headers(tokenInit?.headers).entries()]).toEqual([
-        ['accept', 'application/json'], ['content-type', 'application/x-www-form-urlencoded'],
-      ]);
-      const form = new URLSearchParams(String(tokenInit?.body));
-      expect([...form.keys()]).toEqual(['grant_type', 'assertion']);
-      expect(form.get('grant_type')).toBe('urn:ietf:params:oauth:grant-type:jwt-bearer');
-      const assertion = form.get('assertion') ?? '';
-      const signed = await jwtVerify(assertion, serviceAccountPublicKey, {
-        algorithms: ['RS256'], audience: tokenEndpoint, issuer: serviceAccountEmail,
-      });
-      expect(signed.protectedHeader).toEqual({ alg: 'RS256', typ: 'JWT', kid: 'a'.repeat(40) });
-      expect(signed.payload.scope).toBe(fixture.scope);
-      expect(Object.keys(signed.payload).sort()).toEqual(['aud', 'exp', 'iat', 'iss', 'scope']);
-      expect((signed.payload.exp ?? 0) - (signed.payload.iat ?? 0)).toBe(300);
-      expect(assertion).not.toBe(accessAssertion);
-      expectNoSecrets(String(tokenInit?.body));
+      for (const [index, step] of steps.entries()) {
+        const tokenInit = outbound.mock.calls[1 + index * 2]?.[1];
+        expect(tokenInit?.method).toBe('POST');
+        expect(tokenInit?.redirect).toBe('error');
+        expect([...new Headers(tokenInit?.headers).entries()]).toEqual([
+          ['accept', 'application/json'], ['content-type', 'application/x-www-form-urlencoded'],
+        ]);
+        const form = new URLSearchParams(String(tokenInit?.body));
+        expect([...form.keys()]).toEqual(['grant_type', 'assertion']);
+        expect(form.get('grant_type')).toBe('urn:ietf:params:oauth:grant-type:jwt-bearer');
+        const assertion = form.get('assertion') ?? '';
+        const signed = await jwtVerify(assertion, serviceAccountPublicKey, {
+          algorithms: ['RS256'], audience: tokenEndpoint, issuer: serviceAccountEmail,
+        });
+        expect(signed.protectedHeader).toEqual({ alg: 'RS256', typ: 'JWT', kid: 'a'.repeat(40) });
+        expect(signed.payload.scope).toBe(fixture.scope);
+        expect(Object.keys(signed.payload).sort()).toEqual(['aud', 'exp', 'iat', 'iss', 'scope']);
+        expect((signed.payload.exp ?? 0) - (signed.payload.iat ?? 0)).toBe(300);
+        expect(assertion).not.toBe(accessAssertion);
+        expectNoSecrets(String(tokenInit?.body));
 
-      const providerInit = outbound.mock.calls[2]?.[1];
-      expect(providerInit?.method).toBe(read.method);
-      expect(providerInit?.redirect).toBe('error');
-      const expectedHeaders = [['accept', 'application/json'], ['authorization', `Bearer ${mintedToken}`]];
-      if (read.body !== undefined) expectedHeaders.push(['content-type', 'application/json']);
-      expect([...new Headers(providerInit?.headers).entries()]).toEqual(expectedHeaders);
-      expect(providerInit?.body).toBe(read.body === undefined ? undefined : JSON.stringify(read.body));
-      expect(String(providerInit?.body)).not.toContain(assertion);
-      expectNoSecrets(String(providerInit?.body));
-      expectNoSecrets(read.url);
+        const providerInit = outbound.mock.calls[2 + index * 2]?.[1];
+        expect(providerInit?.method).toBe(step.method);
+        expect(providerInit?.redirect).toBe('error');
+        const token = index === 0 ? mintedToken : `${mintedToken}-${index + 1}`;
+        const expectedHeaders = [['accept', 'application/json'], ['authorization', `Bearer ${token}`]];
+        if (step.body !== undefined) expectedHeaders.push(['content-type', 'application/json']);
+        expect([...new Headers(providerInit?.headers).entries()]).toEqual(expectedHeaders);
+        if (step.body === undefined) expect(providerInit?.body).toBeUndefined();
+        else expect(JSON.parse(String(providerInit?.body))).toEqual(step.body);
+        expect(String(providerInit?.body)).not.toContain(assertion);
+        expectNoSecrets(String(providerInit?.body));
+        expectNoSecrets(step.url);
+      }
     });
 
-    it('rejects unconfigured sites or properties before the token endpoint for every authored tool', async () => {
+    it('rejects unconfigured resources before the token endpoint for every authored tool', async () => {
       for (const read of providerReads) {
         const outbound = mockFetch(fixture, read);
         const args = fixture.provider === 'google-search-console'
           ? { ...read.arguments, site: 'sc-domain:other.example.com' }
-          : { ...read.arguments, propertyId: '987654321' };
+          : fixture.provider === 'google-analytics'
+            ? { ...read.arguments, propertyId: '987654321' }
+            : { ...read.arguments, projectId: 'other-project' };
         const response = await handleRequest(protocolRequest(version, {
           method: 'tools/call', params: { name: read.name, arguments: args },
         }), environment(fixture), outbound);
@@ -255,6 +346,47 @@ describe.each(providers)('$provider authenticated Google runtime', (fixture) => 
         expect(outbound.mock.calls.map(([url]) => String(url))).toEqual([accessKeysEndpoint]);
       }
     });
+
+    if (fixture.provider === 'bigquery') {
+      it.each<{ result: ConnectorJson; code: string }>([
+        { result: { statistics: { query: { statementType: 'DELETE', totalBytesProcessed: '1024' } } },
+          code: 'CONNECTOR_QUERY_NOT_READ_ONLY' },
+        { result: { statistics: { query: { statementType: 'SELECT', totalBytesProcessed: '104857601' } } },
+          code: 'CONNECTOR_QUERY_BUDGET_EXCEEDED' },
+        { result: { statistics: { query: { statementType: 'SELECT', totalBytesProcessed: '1024', dmlStats: { insertedRowCount: '1' } } } },
+          code: 'CONNECTOR_READ_FAILED' },
+        { result: { ...dryRunResult, status: { state: 'RUNNING' } }, code: 'CONNECTOR_READ_FAILED' },
+        { result: { ...dryRunResult, status: { state: 'DONE', errorResult: { message: 'sentinel-provider-error' } } },
+          code: 'CONNECTOR_READ_FAILED' },
+        { result: { jobComplete: true, statementType: 'SELECT', totalBytesProcessed: '1024' },
+          code: 'CONNECTOR_READ_FAILED' },
+      ])('stops before query execution or a second token exchange on dry-run rejection $code', async ({ result, code }) => {
+        const read = providerReads.find((candidate) => candidate.preflight !== undefined);
+        if (read === undefined) throw new Error('Missing synthetic query');
+        const outbound = mockFetch(fixture, read, undefined, () => Response.json(result));
+        const response = await handleRequest(toolRequest(version, read), environment(fixture), outbound);
+        const text = await response.text();
+        expect(text).toContain(code);
+        expectNoSecrets(text);
+        expect(outbound.mock.calls.map(([url]) => String(url)))
+          .toEqual([accessKeysEndpoint, tokenEndpoint, dryRunUrl]);
+      });
+
+      it.each<{ name: string; arguments: Record<string, ConnectorJson> }>([
+        { name: 'execute_sql_readonly', arguments: { projectId: queryProjectId, query, location: 'US' } },
+        { name: 'execute_sql_readonly', arguments: { projectId: queryProjectId, query, maximumBytesBilled: '999999999999' } },
+        { name: 'execute_sql', arguments: { projectId: queryProjectId, query } },
+      ])('rejects unapproved BigQuery tool or execution controls for $name before minting', async (input) => {
+        const outbound = mockFetch(fixture);
+        const response = await handleRequest(protocolRequest(version, {
+          method: 'tools/call', params: input,
+        }), environment(fixture), outbound);
+        const text = await response.text();
+        expect(text).toMatch(/"isError":true|"error":/u);
+        expectNoSecrets(text);
+        expect(outbound.mock.calls.map(([url]) => String(url))).toEqual([accessKeysEndpoint]);
+      });
+    }
 
     it.each(['status', 'scope', 'redirect', 'exception'] as const)('sanitizes a token %s failure without attempting the provider read', async (failure) => {
       const read = providerReads[0];
@@ -298,11 +430,11 @@ describe.each(providers)('$provider authenticated Google runtime', (fixture) => 
     });
   });
 
-  it('does not read service-account credentials or contact any endpoint without an Access assertion', async () => {
+  it.each(protocolVersions)('does not read credentials or contact any endpoint without Access in MCP %s', async (version) => {
     const readSecret = vi.fn(() => serviceAccountSecret);
     const protectedEnv = { ...environment(fixture), get PROVIDER_TOKEN(): string { return readSecret(); } };
     const outbound = mockFetch(fixture);
-    const request = protocolRequest('2026-07-28', { method: 'tools/list', params: {} });
+    const request = protocolRequest(version, { method: 'tools/list', params: {} });
     request.headers.delete('Cf-Access-Jwt-Assertion');
     const response = await handleRequest(request, protectedEnv, outbound);
     expect(response.status).toBe(403);
