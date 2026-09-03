@@ -1254,3 +1254,10 @@ deploying the production relay. Both are operator steps.
   environment types, and the shared test fixtures lost the legacy Durable
   Object fakes. `cloudflare-uninstall-finalizer.ts` stays: it is the
   two-stage hosted finalizer, not yet wired to a route.
+- 2026-09-03 decision (operator): deploy.ankka.ai serves one channel. The
+  hosted runtime keeps a single pin; the first stable release repins the
+  site to stable, after which `/api/releases/canary` answers 404 and canary
+  installs stop updating (none exist in production). Canary releases remain
+  published for testing on isolated hostnames. No runtime change follows
+  from this; the alternatives (two pins, or a separate canary site) were
+  declined.
