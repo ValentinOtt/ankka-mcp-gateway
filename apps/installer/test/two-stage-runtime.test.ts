@@ -537,7 +537,10 @@ describe('clean hosted two-stage runtime', () => {
     expect(failedResponse.status).toBe(303);
     expect(second.browser.bootstrapCookie).toBeNull();
     expect(failed.events).toEqual(['token-exchange']);
-    expect(await currentPhase(failed, second.browser)).toMatchObject({ phase: 'failed', failure: { code: 'provision_failed' } });
+    expect(await currentPhase(failed, second.browser)).toMatchObject({
+      phase: 'failed',
+      failure: { code: 'provision_failed', reason: expect.stringMatching(/^[a-z][a-z0-9_]{0,159}$/u) },
+    });
   });
 
   it('rejects callbacks whose state, cookie, or query do not match exactly, before any exchange', async () => {

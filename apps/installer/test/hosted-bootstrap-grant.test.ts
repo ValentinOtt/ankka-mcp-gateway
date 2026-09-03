@@ -1,8 +1,16 @@
+import { DeployError } from '../src/errors';
 import type { BoundaryValue } from '../src/boundary';
 import {
   buildHostedBootstrapAuthorizationUrl,
   executeHostedBootstrapGrant,
 } from '../src/hosted-bootstrap-grant';
+
+class StagedProviderError extends Error {
+  constructor(readonly stage: string, readonly outcome: string) {
+    super(`provider ${stage} ${outcome} token_${'z'.repeat(32)}`);
+    this.name = 'StagedProviderError';
+  }
+}
 
 const CLIENT_ID = 'a'.repeat(32);
 const CLIENT_SECRET = `secret-${'b'.repeat(32)}`;
@@ -95,6 +103,50 @@ describe('hosted Stage 1 bootstrap grant', () => {
       },
       deploy: async () => { throw new Error(`must-not-escape-${ACCESS_TOKEN}`); },
     })).rejects.toMatchObject({ reason: 'bootstrap_deploy_failed' });
+    expect(revoked).toBe(true);
+  });
+
+  it('keeps a provider stage and outcome, and only those, as the deploy failure reason', async () => {
+    let revoked = false;
+    await expect(executeHostedBootstrapGrant({
+      code: CODE,
+      verifier: VERIFIER,
+      config: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET },
+      transport: async (input) => {
+        const url = String(input);
+        if (url.endsWith('/oauth2/token')) return json({
+          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write',
+        });
+        if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) return json({
+          success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }],
+        });
+        if (url.endsWith('/oauth2/revoke')) { revoked = true; return json({ revoked: true }); }
+        throw new Error('unexpected request');
+      },
+      deploy: async () => { throw new StagedProviderError('account_worker_subdomain_get', 'rejected'); },
+    })).rejects.toMatchObject({ reason: 'account_worker_subdomain_get_rejected' });
+    expect(revoked).toBe(true);
+  });
+
+  it('keeps a stable deploy error code as the failure reason', async () => {
+    let revoked = false;
+    await expect(executeHostedBootstrapGrant({
+      code: CODE,
+      verifier: VERIFIER,
+      config: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET },
+      transport: async (input) => {
+        const url = String(input);
+        if (url.endsWith('/oauth2/token')) return json({
+          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write',
+        });
+        if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) return json({
+          success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }],
+        });
+        if (url.endsWith('/oauth2/revoke')) { revoked = true; return json({ revoked: true }); }
+        throw new Error('unexpected request');
+      },
+      deploy: async () => { throw new DeployError(503, 'bootstrap_not_ready'); },
+    })).rejects.toMatchObject({ reason: 'bootstrap_not_ready' });
     expect(revoked).toBe(true);
   });
 

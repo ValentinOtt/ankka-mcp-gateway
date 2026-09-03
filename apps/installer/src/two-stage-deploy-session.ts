@@ -2,7 +2,7 @@ import * as v from 'valibot';
 
 import { boundaryObjectSchema, type BoundaryObject } from './boundary';
 import type { BootstrapRandomBytes } from './customer-bootstrap-state';
-import { DeployError, isDeployErrorCode, type DeployErrorCode } from './errors';
+import { DeployError, isDeployErrorCode, type DeployErrorCode, FAILURE_REASON_PATTERN } from './errors';
 import { parseHostedStage1Provision, type HostedStage1Provision } from './hosted-stage1-bootstrap';
 import {
   HOSTED_STAGE1_CLEANUP_REASONS,
@@ -75,6 +75,7 @@ const bodySchemas = Object.freeze({
   '/attempt/fail': v.strictObject({
     attemptId: attemptIdSchema,
     code: v.picklist(HOSTED_STAGE1_FAILURE_CODES),
+    reason: v.union([v.pipe(v.string(), v.regex(FAILURE_REASON_PATTERN)), v.null()]),
   }),
   '/bootstrap/provision': v.strictObject({ attemptId: attemptIdSchema, provision: boundaryObjectSchema }),
   '/bootstrap/handed-off': v.strictObject({
@@ -488,8 +489,13 @@ export class TwoStageDeploySessionClient {
   async failAttempt(input: {
     readonly attemptId: string;
     readonly code: HostedStage1FailureCode;
+    readonly reason?: string | null | undefined;
   }): Promise<HostedStage1Session> {
-    return this.sessionOf(await this.call('/attempt/fail', { attemptId: input.attemptId, code: input.code }));
+    return this.sessionOf(await this.call('/attempt/fail', {
+      attemptId: input.attemptId,
+      code: input.code,
+      reason: input.reason ?? null,
+    }));
   }
 
   async recordProvision(input: {

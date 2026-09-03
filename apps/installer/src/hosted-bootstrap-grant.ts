@@ -36,6 +36,23 @@ export interface HostedBootstrapExecutionResult<Deployment> {
  * is available only to the fixed deploy callback and is revoked before a value
  * is returned to the caller.
  */
+const stagedProviderErrorSchema = v.object({
+  stage: v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,80}$/u)),
+  outcome: v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,32}$/u)),
+});
+
+/**
+ * Secret-free diagnostic for a failed shell deployment: the provider stage
+ * and outcome when the thrown error carries them, else the stable code.
+ * Never provider text, ids, or tokens.
+ */
+function deployFailureReason<Thrown>(error: Thrown): string {
+  const staged = v.safeParse(stagedProviderErrorSchema, error);
+  if (staged.success) return `${staged.output.stage}_${staged.output.outcome}`;
+  if (error instanceof DeployError) return error.reason ?? error.code;
+  return 'bootstrap_deploy_failed';
+}
+
 export async function executeHostedBootstrapGrant<Deployment>(input: {
   readonly code: string;
   readonly verifier: string;
@@ -80,8 +97,8 @@ export async function executeHostedBootstrapGrant<Deployment>(input: {
       try {
         const deployment = await input.deploy({ accessToken, accountId });
         return Object.freeze({ accountId, deployment });
-      } catch {
-        throw new DeployError(502, 'oauth_exchange_failed', 'bootstrap_deploy_failed');
+      } catch (error) {
+        throw new DeployError(502, 'oauth_exchange_failed', deployFailureReason(error));
       }
     });
     return Object.freeze({ ...result, grantRevocation: 'confirmed' });
