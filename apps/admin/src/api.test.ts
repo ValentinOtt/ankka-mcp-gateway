@@ -337,8 +337,9 @@ describe('HttpGatewayAdminApi', () => {
       ['team_access_revision_conflict', 'Team access changed in another tab'],
       ['team_action_recovery_required', 'Some access policies may already have changed'],
       ['team_policy_drift', 'Cloudflare access policies no longer match'],
-      ['team_management_credential_missing', 'ANKKA_TEAM_MANAGEMENT_TOKEN'],
-      ['team_management_credential_invalid', 'Check its expiry, account, and Access permissions'],
+      ['team_editing_managed_in_cloudflare', 'managed directly in Cloudflare'],
+      ['team_management_credential_missing', 'legacy Team action cannot continue'],
+      ['team_management_credential_invalid', 'legacy Team action cannot continue'],
       ['team_teardown_requires_compatible_release', 'Automatic removal is unavailable'],
     ] as const) {
       vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: code, detail: 'private provider detail' }, { status: 409 })))

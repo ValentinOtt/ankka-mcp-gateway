@@ -23,8 +23,8 @@ installed release; a document or fixture is not a compatibility certification.
 - [First-source onboarding qualification](FIRST_SOURCE_ONBOARDING.md): the
   default-deny candidate, separate operator connection and Team grant, and live
   acceptance required before enabling the workflow.
-- [Team access](TEAM_ACCESS.md): customer-local permission saves, the separate
-  management credential, recovery, and session-propagation limits.
+- [Team access](TEAM_ACCESS.md): V1 Cloudflare-managed membership, legacy
+  recovery, future editor options, and session-propagation limits.
 - [Updates and rollback](UPDATES.md): operator-approved changes and the
   distinction between Worker versions and retained gateway data.
 - [Portal audit logging](CUSTOMER_AUDIT_LOGGING.md): logs in your account,

@@ -38,7 +38,7 @@ a production deployment or grant permission to make changes.
   chat, logs, or screenshots.
 
 See [the security model](SECURITY_MODEL.md) and
-[Team access](TEAM_ACCESS.md) for the underlying checks and credential boundary.
+[Team access](TEAM_ACCESS.md) for the underlying checks and V1 manual boundary.
 
 ## Dashboard tool contract
 
@@ -58,7 +58,6 @@ source draft/apply tools are conditional on installation being enabled.
 | `get_mcp_source_action` | `{actionId}` | Read one recorded source action's legacy status; use the collection for effective expiry/recovery state and cancellation permission. |
 | `cancel_mcp_source_action` | `{actionId}` | Cancel only when the current server projection permits it; does not undo writes or start another action. |
 | `get_gateway_team` | `{}` | Read the saved roster, revision, installed source assignments, and retained proposal. |
-| `save_gateway_team` | `{expectedRevision, members}` | Apply or resume the complete reviewed roster and source assignments; may immediately change Access policies. |
 | `get_gateway_team_action` | `{actionId}` | Read one recorded Team action. |
 | `cancel_gateway_team_action` | `{actionId}` | Cancel only a definitely unstarted proposal when the server permits it; retain history. |
 | `check_gateway_update` | `{}` | Read the signed channel's update status. |
@@ -69,10 +68,10 @@ source draft/apply tools are conditional on installation being enabled.
 | `review_gateway_teardown` | `{}` | Record a receipt-authorized teardown review handoff; this is a mutation, not a status read. |
 | `get_gateway_teardown_action` | `{actionId}` | Read one recorded teardown action. |
 
-`members` is the complete array of `{email, sourceIds}` objects. Copy source
-IDs and action IDs from fresh results; never invent them from labels. Use the
-registered schema for exact bounds and formats. The tools return the same
-JSON-string envelope, `{ok: true, result}` or `{ok: false, error: {code, message}}`.
+Copy source IDs and action IDs from fresh results; never invent them from
+labels. Use the registered schema for exact bounds and formats. The tools return
+the same JSON-string envelope, `{ok: true, result}` or
+`{ok: false, error: {code, message}}`.
 Source conflicts may also include a fixed `reason` and a non-secret `action`
 reference in the error. These distinguish `draft_changed`, `source_pending`,
 `lifecycle_pending`, and `recovery_required`; they never include a grant or
@@ -97,51 +96,34 @@ by hand. Its forms and busy indicator do not automatically mirror WebMCP calls;
 the server's revision and lifecycle checks still prevent conflicting changes.
 
 Capability information describes what the installed release can attempt. It
-does not guarantee that a credential is valid, that Cloudflare is reachable,
-or that an action has already been approved. In particular:
+does not guarantee that Cloudflare is reachable or that an action has already
+been approved. In particular:
 
 - Published v19 gateways pause new-source installation. Draft/apply tools are
   not offered when installation is disabled, and the server rejects bypasses.
 - The default-deny onboarding candidate restores draft/apply tools when
   installation is enabled. Source creation grants nobody access: complete the
-  operator connection, then explicitly grant the installed source in Team.
+  operator connection, then explicitly grant the installed source in
+  Cloudflare Access.
   Inspection, a draft, or resource creation alone is not completed onboarding.
   See [first-source qualification](FIRST_SOURCE_ONBOARDING.md).
-- Team's saved roster is not a fresh Cloudflare policy read. Out-of-band
-  changes in Cloudflare may cause the next save to refuse policy drift.
-- `managementCredentialConfigured` means a binding exists, not that its
-  permissions, expiry, or account have been verified.
+- Team's saved roster is not a fresh Cloudflare policy read. V1 Team membership
+  is managed directly in Cloudflare and may differ from this snapshot.
+- Team capabilities report `management: "cloudflare_dashboard"`. No permanent
+  gateway management credential is configured or required.
 - Administrator roles are fixed. Tool selection remains shared per source;
   there are no per-person tool subsets in this interface.
 
-## Team: read, review, save, then verify
+## Team: read here, manage in Cloudflare
 
-Team saves apply the **complete roster and source assignments**, not a partial
-patch or a draft. They may immediately grant or revoke live source access.
+`get_gateway_team` returns the saved gateway snapshot, fixed administrators,
+installed sources, and any retained legacy action. It is not a live Access
+policy read. V1 does not register `save_gateway_team`; use the Cloudflare
+dashboard to change the receipt-owned reusable Access policies.
 
-1. Read Team state and retain its exact `revision`. Inspect `editingEnabled`,
-   `editingDisabledReason`, `managementCredentialConfigured`, and
-   `pendingAction` before preparing a change.
-2. Review the complete intended roster with the person authorizing the action.
-   Preserve every fixed administrator. Include each person's complete intended
-   `sourceIds`; an empty array means no source access. Only installed sources
-   can be assigned. Do not infer an all-sources default for a new person.
-3. Submit the exact reviewed `members` with `expectedRevision` from that read.
-   A stale revision must trigger a fresh read and review, not an automatic
-   overwrite of another administrator's changes.
-4. Record the returned `actionId`. Inspect its status and refresh Team state.
-   Treat only `succeeded` as a completed, provider-verified action. Unsaved
-   selections or a successful HTTP response alone are not sufficient.
-5. If an outcome is uncertain, inspect the retained proposal. Resume only its
-   exact roster and revision through the normal save operation, when the
-   server allows it. Do not submit a different proposal, delete recovery state,
-   or assume failed requests rolled policies back.
-
-The current bounds are 51 people including administrators, 32 sources, and
-500 shared tools per source. Email identities and source selections are
-validated and normalized by the Worker; duplicate people, duplicate source
-assignments, unknown fields, invalid identifiers, and missing administrators
-must not be used to reinterpret the request.
+Do not create an account-wide API token to make the missing save tool work.
+Cloudflare cannot scope such a token to one reusable policy. Adding an
+undeclared Worker secret also does not enable the V1 editor.
 
 Cancel a recorded Team change only when the returned action says it can be
 canceled. Cancellation is itself a mutation of recorded state, even though it
@@ -150,14 +132,8 @@ does not revoke or restore access. Successful cancellation is represented by
 history and refresh Team state. If a policy write may have started, cancellation
 is refused. See [recovery and lifecycle limits](TEAM_ACCESS.md#recovery-and-lifecycle-limits).
 
-### No Team credential intake
-
-Team saves use the separately provisioned `ANKKA_TEAM_MANAGEMENT_TOKEN` inside
-your Worker. They do not obtain a fresh hosted installer OAuth grant. This
-WebMCP slice cannot create, receive, replace, or validate a token on your behalf.
-Follow the [credential setup guide](TEAM_ACCESS.md#customer-owned-management-credential)
-to approve its standing authority and configure it directly in Cloudflare.
-Adding a credential does not itself approve a pending access change.
+Follow the [Team access guide](TEAM_ACCESS.md) for exact manual boundaries and
+retirement instructions for the older credential preview.
 
 ## Updates and teardown: preparation is not execution
 
@@ -238,8 +214,9 @@ tool call can still return an action that is waiting or requires recovery:
 | `recovery_required` | The outcome may include partial changes. Retain the recorded operation and follow its supported recovery path; source grants cannot be resumed or reused. |
 
 For a retained legacy Team proposal, `authorization_required` is an old status
-name: resume the exact proposal with the customer-local Team save operation.
-It does not mean Team should start hosted OAuth again.
+name. Cancel it only when the server says no policy write started; otherwise
+reconcile the retained journal against Cloudflare manually. It does not mean
+Team should start hosted OAuth or accept a standing token again.
 
 Use fixed public error codes for troubleshooting. Validation and unexpected
 errors must not reflect arbitrary exception text, submitted arguments, tokens,

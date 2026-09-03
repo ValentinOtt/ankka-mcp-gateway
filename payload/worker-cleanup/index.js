@@ -384,9 +384,10 @@ function parseSourceResource(value, index, installationId) {
 
 function parseManagementControl(value, claim) {
   if (!exactKeys(value, [
-    'schemaVersion', 'installationId', 'accountId', 'portal', 'audienceEmails', 'sourceOwnership',
+    'schemaVersion', 'installationId', 'accountId', 'zoneId', 'portal', 'audienceEmails', 'sourceOwnership',
   ]) || value.schemaVersion !== 1 || value.installationId !== claim.expected.installationId ||
-      value.accountId !== claim.target.accountId || !exactKeys(value.portal, ['id', 'name', 'hostname', 'marker']) ||
+      value.accountId !== claim.target.accountId || value.zoneId !== claim.target.zoneId ||
+      !exactKeys(value.portal, ['id', 'name', 'hostname', 'marker']) ||
       !isText(value.portal.id) || !SAFE_ID.test(value.portal.id) ||
       !isText(value.portal.name) || value.portal.name.length < 2 || value.portal.name.length > 80 ||
       !hostname(value.portal.hostname) || value.portal.marker !== `acg:v1:${value.installationId}:${value.portal.id}` ||
@@ -574,11 +575,11 @@ function providerUrl(resource, receipt) {
     return new URL(`/client/v4/accounts/${account}/access/ai-controls/mcp/portals/${id}`, API_ORIGIN);
   }
   if (resource.kind === 'source_access_application' || resource.kind === 'portal_access_application') {
-    return new URL(`/client/v4/accounts/${account}/access/apps/${id}`, API_ORIGIN);
+    return new URL(`/client/v4/zones/${zone}/access/apps/${id}`, API_ORIGIN);
   }
   if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
     return new URL(
-      `/client/v4/accounts/${account}/access/apps/${encodeURIComponent(resource.provider.parentId)}/policies/${id}`,
+      `/client/v4/zones/${zone}/access/apps/${encodeURIComponent(resource.provider.parentId)}/policies/${id}`,
       API_ORIGIN,
     );
   }

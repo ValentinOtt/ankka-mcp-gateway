@@ -466,7 +466,7 @@ test('never advances to sync after an outcome-unknown server POST', async () => 
 test('creates an explicit source Access application under the exact receipt-owned server', async () => {
   const fixture = await mutationFixture('source_access_application', 'create');
   const serverId = fixture.resource.desired.sourceResourceKey;
-  const appsRoot = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+  const appsRoot = `/client/v4/zones/${ZONE_ID}/access/apps`;
   const app = exactSourceApp({
     id: 'created_source_app',
     serverId,
@@ -1044,7 +1044,7 @@ test('creates the explicit Portal app with the native Portal name and no inline 
   const fixture = await mutationFixture('portal_access_application', 'create');
   const portal = exactOwnedPortal(fixture);
   const app = exactPortalApp();
-  const appsRoot = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+  const appsRoot = `/client/v4/zones/${ZONE_ID}/access/apps`;
   const portalsRoot = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals`;
   const mock = scriptedFetch([
     { method: 'GET', path: `${portalsRoot}/${portal.id}`, response: success(portal) },
@@ -1319,7 +1319,7 @@ for (const policyKind of ['source_access_policy', 'portal_access_policy']) {
     const mock = scriptedFetch([
       { response: success(app) }, { response: success(parent) }, { response: success([]) },
       { response: success(app) }, { response: success(parent) }, { response: success([]) },
-      { method: 'POST', path: `/client/v4/accounts/${ACCOUNT_ID}/access/apps/${appId}/policies`, response: success({ id: policy.id }) },
+      { method: 'POST', path: `/client/v4/zones/${ZONE_ID}/access/apps/${appId}/policies`, response: success({ id: policy.id }) },
     ]);
     await provider(mock.fetchImpl).applyChange(fixture.input);
     const { id: _id, ...expectedBody } = policy;
@@ -1449,7 +1449,7 @@ test('creates an exact source application email policy after exact parent discov
   const parent = sourcePolicyParent(fixture);
   const serverId = parent.serverId;
   const appId = 'app_source_123';
-  const appsRoot = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+  const appsRoot = `/client/v4/zones/${ZONE_ID}/access/apps`;
   const app = exactSourceApp({ id: appId, serverId, marker: parent.marker });
   const mock = scriptedFetch([
     { method: 'GET', path: `${appsRoot}/${appId}`, response: success(app) },
@@ -1496,7 +1496,7 @@ test('creates one exact source Access group selector without exposing it in desi
   });
   const parent = sourcePolicyParent(fixture);
   const appId = 'app_source_123';
-  const appsRoot = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+  const appsRoot = `/client/v4/zones/${ZONE_ID}/access/apps`;
   const app = exactSourceApp({ id: appId, serverId: parent.serverId, marker: parent.marker });
   const mock = scriptedFetch([
     { method: 'GET', path: `${appsRoot}/${appId}`, response: success(app) },
@@ -1842,7 +1842,7 @@ test('source app update retains the strict empty-policy gate', async () => {
 test('creates the Portal policy only under its exact receipt-owned explicit app', async () => {
   const fixture = await mutationFixture('portal_access_policy', 'create');
   const appId = 'app_portal_123';
-  const appsRoot = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+  const appsRoot = `/client/v4/zones/${ZONE_ID}/access/apps`;
   const app = exactPortalApp({ id: appId });
   const portal = exactOwnedPortal(fixture);
   const mock = scriptedFetch([
@@ -2531,7 +2531,7 @@ test('conservatively reports exact receipt IDs and broad same-host residue', asy
     accessPolicy: desired.accessPolicy,
     resources,
   });
-  const appsRoot = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+  const appsRoot = `/client/v4/zones/${ZONE_ID}/access/apps`;
   const mock = scriptedFetch([
     { response: success({ id: server.key, description: 'drifted-marker' }) },
     { response: success({ id: 'source_app', type: 'self_hosted' }) },

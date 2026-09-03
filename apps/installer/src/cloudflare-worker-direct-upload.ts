@@ -31,8 +31,9 @@ const MAX_NAMESPACE_RESPONSE_BYTES = 512 * 1024;
 
 const EXACT_COMPATIBILITY_DATE = '2026-08-08';
 const EXACT_RUN_WORKER_FIRST = Object.freeze(['/__ankka/*', '/api/*'] as const);
-const EXACT_PLAIN_TEXT_BINDINGS = Object.freeze([
+export const EXACT_PLAIN_TEXT_BINDINGS = Object.freeze([
   'ADMIN_EMAILS',
+  'ANKKA_INSTALL_ID',
   'ANKKA_GATEWAY_RELEASE',
   'ANKKA_GATEWAY_RELEASE_SHA256',
   'ANKKA_MANAGEMENT_HOSTNAME',
@@ -105,6 +106,7 @@ const assetFileSchema = v.strictObject({
 });
 const plainTextBindingsSchema = v.strictObject({
   ADMIN_EMAILS: safeBindingValueSchema,
+  ANKKA_INSTALL_ID: safeBindingValueSchema,
   ANKKA_GATEWAY_RELEASE: safeBindingValueSchema,
   ANKKA_GATEWAY_RELEASE_SHA256: safeBindingValueSchema,
   ANKKA_MANAGEMENT_HOSTNAME: safeBindingValueSchema,
@@ -370,7 +372,6 @@ const returnedVersionBindingSchema = v.union([
   }),
   v.strictObject({ name: v.literal('ASSETS'), type: v.literal('assets') }),
   v.strictObject({ name: v.literal('ANKKA_BOOTSTRAP_NONCE'), type: v.literal('secret_text') }),
-  v.strictObject({ name: v.literal('ANKKA_TEAM_MANAGEMENT_TOKEN'), type: v.literal('secret_text') }),
   v.strictObject({
     name: v.picklist(EXACT_PLAIN_TEXT_BINDINGS),
     type: v.literal('plain_text'),
@@ -415,7 +416,6 @@ const versionReleaseContractSchema = v.strictObject({
     runWorkerFirst: exactRunWorkerFirstSchema,
   }),
   bootstrapBinding: v.picklist(['present', 'absent']),
-  teamManagementBinding: v.exactOptional(v.strictObject({ fromVersionId: v.pipe(v.string(), v.regex(UUID_PATTERN)) })),
   compatibilityDate: v.literal(EXACT_COMPATIBILITY_DATE),
   compatibilityFlags: v.tuple([]),
   durableObject: v.strictObject({
@@ -455,11 +455,6 @@ const versionRecoveryRecordSchema = v.strictObject({
   })), v.minLength(1)),
 });
 const submitVersionBindingSchema = v.union([
-  v.strictObject({
-    name: v.literal('ANKKA_TEAM_MANAGEMENT_TOKEN'),
-    type: v.literal('inherit'),
-    version_id: v.pipe(v.string(), v.regex(UUID_PATTERN)),
-  }),
   v.strictObject({
     name: v.literal('ADMIN_STATE'),
     type: v.literal('durable_object_namespace'),
@@ -571,6 +566,7 @@ export type CloudflareDirectUploadStage =
   | 'namespace_verify'
   | 'asset_session'
   | 'asset_bucket'
+  | 'worker_script_upload'
   | 'worker_version'
   | 'version_verify'
   | 'version_recovery'
@@ -768,12 +764,15 @@ export interface PreparedAsset {
   readonly uploadHash: string;
 }
 
-export interface PreparedVerifiedWorkerRelease {
+export interface PreparedWorkerAssets {
   readonly accountId: string;
   readonly workerName: string;
+  readonly assets: readonly PreparedAsset[];
+}
+
+export interface PreparedVerifiedWorkerRelease extends PreparedWorkerAssets {
   readonly release: string;
   readonly modules: readonly PreparedModule[];
-  readonly assets: readonly PreparedAsset[];
   readonly plainTextBindings: GatewayWorkerPlainTextBindings;
   readonly bootstrapNonce: string;
 }
@@ -1006,6 +1005,7 @@ async function prepareInput(
   if (
     parsedInput.plainTextBindings.ANKKA_GATEWAY_RELEASE !== parsedInput.release.release ||
     parsedInput.plainTextBindings.ANKKA_GATEWAY_RELEASE_SHA256 !== `sha256:${parsedInput.release.artifactSha256}` ||
+    !/^acg-[a-f0-9]{24}$/u.test(parsedInput.plainTextBindings.ANKKA_INSTALL_ID) ||
     parsedInput.plainTextBindings.ANKKA_WORKER_NAME !== parsedInput.workerName ||
     !WORKER_NAME_PATTERN.test(parsedInput.plainTextBindings.ANKKA_WORKER_NAME) ||
     !DNS_LABEL_PATTERN.test(parsedInput.plainTextBindings.ANKKA_WORKERS_SUBDOMAIN) ||
@@ -1737,7 +1737,7 @@ interface PreparedAssetManifest {
   readonly assetsByHash: Map<string, PreparedAsset>;
 }
 
-function assetManifest(prepared: PreparedVerifiedWorkerRelease): PreparedAssetManifest {
+function assetManifest(prepared: PreparedWorkerAssets): PreparedAssetManifest {
   const manifest: Record<string, { readonly hash: string; readonly size: number }> = {};
   const assetsByHash = new Map<string, PreparedAsset>();
   for (const asset of prepared.assets) {
@@ -1748,7 +1748,7 @@ function assetManifest(prepared: PreparedVerifiedWorkerRelease): PreparedAssetMa
 }
 
 export async function prepareAssetUploadSessionMutation(
-  prepared: PreparedVerifiedWorkerRelease,
+  prepared: PreparedWorkerAssets,
 ): Promise<AssetUploadSessionMutationIntent> {
   const { manifest } = assetManifest(prepared);
   const body = Object.freeze({ manifest: Object.freeze(manifest) });
@@ -1890,7 +1890,7 @@ async function validAssetBucketIntent(
 export async function submitAssetBucketMutation(
   intent: AssetBucketMutationIntent,
   session: AssetUploadSessionSubmission,
-  prepared: PreparedVerifiedWorkerRelease,
+  prepared: PreparedWorkerAssets,
   callInput: CloudflareDirectUploadCall,
 ): Promise<AssetBucketSubmission> {
   const progress = initialProgress();
@@ -2036,13 +2036,11 @@ export type WorkerVersionBinding =
   | { readonly name: 'ADMIN_STATE'; readonly type: 'durable_object_namespace'; readonly class_name: 'AdminState' }
   | { readonly name: 'ASSETS'; readonly type: 'assets' }
   | { readonly name: GatewayWorkerPlainTextBindingName; readonly type: 'plain_text'; readonly text: string }
-  | { readonly name: 'ANKKA_BOOTSTRAP_NONCE'; readonly type: 'secret_text'; readonly text: string }
-  | { readonly name: 'ANKKA_TEAM_MANAGEMENT_TOKEN'; readonly type: 'inherit'; readonly version_id: string };
+  | { readonly name: 'ANKKA_BOOTSTRAP_NONCE'; readonly type: 'secret_text'; readonly text: string };
 
 function versionBindings(
   prepared: PreparedVerifiedWorkerRelease,
   phase: WorkerVersionPhase,
-  inheritTeamManagementFromVersion?: string,
 ): readonly WorkerVersionBinding[] {
   const bindings: WorkerVersionBinding[] = phase === 'provision'
     ? []
@@ -2055,9 +2053,6 @@ function versionBindings(
   }
   if (phase === 'bootstrap') {
     bindings.push({ name: 'ANKKA_BOOTSTRAP_NONCE', type: 'secret_text', text: prepared.bootstrapNonce });
-  }
-  if (inheritTeamManagementFromVersion !== undefined) {
-    bindings.push({ name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'inherit', version_id: inheritTeamManagementFromVersion });
   }
   return bindings.sort((left, right) => lexicalCompare(left.name, right.name));
 }
@@ -2078,8 +2073,6 @@ export interface WorkerVersionRecoveryRecord {
     };
     /** `phase` determines which value is valid; no credential value is persisted. */
     readonly bootstrapBinding: 'present' | 'absent';
-    /** Explicit existing version only; never carries or provisions a credential. */
-    readonly teamManagementBinding?: { readonly fromVersionId: string };
     readonly compatibilityDate: '2026-08-08';
     readonly compatibilityFlags: readonly [];
     readonly durableObject: {
@@ -2162,8 +2155,7 @@ async function exactVersionResult(
       ? result.assets !== undefined
       : result.assets === undefined) ||
     result.bindings.length !== recovery.plainTextBindingHashes.length +
-      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) +
-      (recovery.releaseContract.teamManagementBinding === undefined ? 0 : 1) ||
+      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) ||
     result.modules.length !== recovery.modules.length ||
     !exactVersionAnnotations(result.annotations, recovery.correlationTag) ||
     !exactExports(result.exports) ||
@@ -2194,9 +2186,6 @@ async function exactVersionResult(
   if (recovery.phase === 'bootstrap') {
     if (redactedBinding?.name !== 'ANKKA_BOOTSTRAP_NONCE') return false;
   } else if (redactedBinding !== undefined) return false;
-  const managementBinding = returnedBindings.get('ANKKA_TEAM_MANAGEMENT_TOKEN');
-  if ((recovery.releaseContract.teamManagementBinding !== undefined) !==
-      (managementBinding?.name === 'ANKKA_TEAM_MANAGEMENT_TOKEN')) return false;
   for (const expected of recovery.plainTextBindingHashes) {
     const binding = returnedBindings.get(expected.name);
     if (
@@ -2230,6 +2219,15 @@ async function exactVersionResult(
 }
 
 export type VersionSubmission = Extract<CloudflareDirectUploadSubmission, { readonly kind: 'version' }>;
+export interface WorkerScriptSubmission {
+  readonly kind: 'worker_script';
+  readonly phase: WorkerVersionPhase;
+  readonly accountId: string;
+  readonly workerName: string;
+  readonly workerId: string;
+  readonly requestHash: string;
+  readonly correlationTag: string;
+}
 
 function versionCorrelationTag(phase: WorkerVersionPhase, requestHash: string): string {
   return `ankka-version-${phase}-sha256:${requestHash}`;
@@ -2253,9 +2251,6 @@ function versionSemanticCommitment(input: WorkerVersionSemanticInput) {
     durableObject: input.releaseContract.durableObject,
     plainText: input.plainTextBindingHashes.map((binding) => ({ ...binding })),
   };
-  const bindings = input.releaseContract.teamManagementBinding === undefined ? baseBindings : {
-    ...baseBindings, teamManagement: input.releaseContract.teamManagementBinding,
-  };
   return {
     accountId: input.accountId,
     assets: {
@@ -2271,7 +2266,7 @@ function versionSemanticCommitment(input: WorkerVersionSemanticInput) {
         byteLength: asset.byteLength,
       })),
     },
-    bindings,
+    bindings: baseBindings,
     compatibilityDate: input.releaseContract.compatibilityDate,
     compatibilityFlags: [...input.releaseContract.compatibilityFlags],
     exports: input.releaseContract.exports,
@@ -2289,7 +2284,6 @@ async function versionSemanticHash(input: WorkerVersionSemanticInput): Promise<s
 
 function versionReleaseContract(
   phase: WorkerVersionPhase,
-  inheritTeamManagementFromVersion?: string,
 ): WorkerVersionRecoveryRecord['releaseContract'] {
   const compatibilityFlags: readonly [] = Object.freeze([]);
   const base = Object.freeze({
@@ -2311,9 +2305,7 @@ function versionReleaseContract(
     }),
     mainModule: 'index.js' as const,
   });
-  return inheritTeamManagementFromVersion === undefined ? base : Object.freeze({
-    ...base, teamManagementBinding: Object.freeze({ fromVersionId: inheritTeamManagementFromVersion }),
-  });
+  return base;
 }
 
 /**
@@ -2325,7 +2317,6 @@ export async function prepareWorkerVersionRecoveryRecord(
   prepared: PreparedVerifiedWorkerRelease,
   worker: WorkerSubmission,
   phase: WorkerVersionPhase,
-  inheritTeamManagementFromVersion?: string,
 ): Promise<WorkerVersionRecoveryRecord> {
   const progress = initialProgress();
   if (
@@ -2339,8 +2330,6 @@ export async function prepareWorkerVersionRecoveryRecord(
     !WORKER_NAME_PATTERN.test(worker.workerName) ||
     !WORKER_ID_PATTERN.test(worker.workerId) ||
     (phase !== 'provision' && phase !== 'bootstrap' && phase !== 'clean') ||
-    (inheritTeamManagementFromVersion !== undefined &&
-      (phase !== 'clean' || !UUID_PATTERN.test(inheritTeamManagementFromVersion))) ||
     !Array.isArray(prepared.assets) ||
     !Array.isArray(prepared.modules) ||
     !isRecord(prepared.plainTextBindings)
@@ -2361,7 +2350,7 @@ export async function prepareWorkerVersionRecoveryRecord(
     contentType: asset.contentType,
     byteLength: asset.bytes.byteLength,
   })));
-  const releaseContract = versionReleaseContract(phase, inheritTeamManagementFromVersion);
+  const releaseContract = versionReleaseContract(phase);
   const semanticInput: WorkerVersionSemanticInput = {
     phase,
     accountId: prepared.accountId,
@@ -2398,7 +2387,6 @@ export async function prepareWorkerVersionMutation(
   worker: WorkerSubmission,
   completionJwt: string | null,
   phase: WorkerVersionPhase,
-  inheritTeamManagementFromVersion?: string,
 ): Promise<WorkerVersionMutationPlan> {
   const progress = initialProgress();
   // The provision version carries no ASSETS binding and therefore no asset
@@ -2406,8 +2394,8 @@ export async function prepareWorkerVersionMutation(
   if (phase === 'provision' ? completionJwt !== null : !safeToken(completionJwt)) {
     fail('invalid_input', 'validate', 'not_sent', progress);
   }
-  const recovery = await prepareWorkerVersionRecoveryRecord(prepared, worker, phase, inheritTeamManagementFromVersion);
-  const bindings = versionBindings(prepared, phase, inheritTeamManagementFromVersion);
+  const recovery = await prepareWorkerVersionRecoveryRecord(prepared, worker, phase);
+  const bindings = versionBindings(prepared, phase);
   const semanticCommitment = Object.freeze(versionSemanticCommitment(recovery));
   const versionBodyCore = {
     bindings,
@@ -2472,8 +2460,7 @@ function validVersionReleaseContract(
 ): value is WorkerVersionRecoveryRecord['releaseContract'] {
   const candidate = v.safeParse(versionReleaseContractSchema, value);
   return candidate.success &&
-    candidate.output.bootstrapBinding === (phase === 'bootstrap' ? 'present' : 'absent') &&
-    (candidate.output.teamManagementBinding === undefined || phase === 'clean');
+    candidate.output.bootstrapBinding === (phase === 'bootstrap' ? 'present' : 'absent');
 }
 
 async function validVersionRecoveryRecord(recovery: WorkerVersionRecoveryRecord): Promise<boolean> {
@@ -2552,7 +2539,7 @@ export async function parseWorkerVersionRecoveryRecord<Input>(
       workerId: input.workerId,
       requestHash: input.requestHash,
       correlationTag: input.correlationTag,
-      releaseContract: versionReleaseContract(phase, input.releaseContract.teamManagementBinding?.fromVersionId),
+      releaseContract: versionReleaseContract(phase),
       assets: Object.freeze(input.assets.map((asset) => Object.freeze({
         path: asset.path,
         uploadHash: asset.uploadHash,
@@ -2590,8 +2577,7 @@ async function validVersionSubmitIntent(
     !canonicalEqual(parsedIntent.semanticCommitment, versionSemanticCommitment(recovery)) ||
     parsedIntent.body.annotations['workers/tag'] !== parsedIntent.correlationTag ||
     parsedIntent.body.bindings.length !== recovery.plainTextBindingHashes.length +
-      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) +
-      (recovery.releaseContract.teamManagementBinding === undefined ? 0 : 1) ||
+      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) ||
     parsedIntent.body.modules.length !== recovery.modules.length ||
     !canonicalEqual(parsedIntent.body.exports, recovery.releaseContract.exports) ||
     // The provision version carries no ASSETS binding and no asset session.
@@ -2616,11 +2602,6 @@ async function validVersionSubmitIntent(
   if (recovery.phase === 'bootstrap') {
     if (redactedBinding?.name !== 'ANKKA_BOOTSTRAP_NONCE') return false;
   } else if (redactedBinding !== undefined) return false;
-  const managementBinding = bindings.get('ANKKA_TEAM_MANAGEMENT_TOKEN');
-  const inherited = recovery.releaseContract.teamManagementBinding;
-  if (inherited === undefined ? managementBinding !== undefined : !canonicalEqual(managementBinding, {
-    name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'inherit', version_id: inherited.fromVersionId,
-  })) return false;
   for (const expected of recovery.plainTextBindingHashes) {
     const binding = bindings.get(expected.name);
     if (
@@ -2666,6 +2647,88 @@ function versionSubmission(recovery: WorkerVersionRecoveryRecord, versionId: str
     requestHash: recovery.requestHash,
     correlationTag: recovery.correlationTag,
   });
+}
+
+function workerScriptSubmission(recovery: WorkerVersionRecoveryRecord): WorkerScriptSubmission {
+  return Object.freeze({
+    kind: 'worker_script',
+    phase: recovery.phase,
+    accountId: recovery.accountId,
+    workerName: recovery.workerName,
+    workerId: recovery.workerId,
+    requestHash: recovery.requestHash,
+    correlationTag: recovery.correlationTag,
+  });
+}
+
+/**
+ * Publish and implicitly activate an exact prepared release through the stable
+ * multipart Worker script endpoint. This is the only production mutation path
+ * qualified for the Stage 1 `workers-scripts.write` grant; the beta Versions
+ * and Deployments endpoints remain read-back/recovery surfaces only.
+ */
+export async function submitWorkerScriptMutation(
+  intent: WorkerVersionSubmitIntent,
+  recovery: WorkerVersionRecoveryRecord,
+  callInput: CloudflareDirectUploadCall,
+): Promise<WorkerScriptSubmission> {
+  const progress = initialProgress();
+  if (!await validVersionSubmitIntent(intent, recovery)) {
+    fail('invalid_input', 'validate', 'not_sent', progress);
+  }
+  const parsed = v.safeParse(versionSubmitIntentSchema, intent);
+  if (!parsed.success) fail('invalid_input', 'validate', 'not_sent', progress);
+  const call = prepareCall(callInput, progress);
+  const form = new FormData();
+  const { modules: _modules, ...metadataBody } = parsed.output.body;
+  const metadata: BoundaryObject = {
+    ...metadataBody,
+    annotations: {
+      'workers/message': recovery.correlationTag,
+      'workers/tag': recovery.correlationTag,
+    },
+  };
+  form.append(
+    'metadata',
+    new Blob([canonicalJson(metadata)], { type: 'application/json' }),
+    'metadata.json',
+  );
+  for (let index = 0; index < parsed.output.body.modules.length; index += 1) {
+    const module = parsed.output.body.modules.at(index);
+    const expected = recovery.modules.at(index);
+    if (module === undefined || expected === undefined) {
+      fail('invalid_input', 'validate', 'not_sent', progress);
+    }
+    const bytes = strictBase64Bytes(module.content_base64, expected.byteLength);
+    if (bytes === null) fail('invalid_input', 'validate', 'not_sent', progress);
+    form.append(
+      module.name,
+      new Blob([new Uint8Array(bytes)], { type: module.content_type }),
+      module.name,
+    );
+    bytes.fill(0);
+  }
+  const submission = workerScriptSubmission(recovery);
+  const response = await performRequest(
+    call,
+    progress,
+    'worker_script_upload',
+    `${CLOUDFLARE_API_ORIGIN}/client/v4/accounts/${intent.accountId}/workers/scripts/${encodeURIComponent(intent.workerName)}`,
+    {
+      method: 'PUT',
+      headers: authHeaders(call.accessToken),
+      body: form,
+    },
+    versionResponseLimit(recovery),
+  );
+  if (response.status !== 200) {
+    rejectForStatus(response.status, response.value, 'worker_script_upload', progress);
+  }
+  if (parseSuccessEnvelope(response.value) === null) {
+    fail('provider_mismatch', 'worker_script_upload', 'submitted', progress);
+  }
+  progress.versionCreated = true;
+  return submission;
 }
 
 export async function submitWorkerVersionMutation(

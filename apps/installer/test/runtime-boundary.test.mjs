@@ -8,14 +8,22 @@ async function source(path) {
 }
 
 describe('compile-time reviewed runtime files', () => {
-  it('keeps the deployed Wrangler main on the default empty-keyring Worker', async () => {
-    const [config, index, release] = await Promise.all([
+  it('keeps the deployed Wrangler main on the disabled two-stage entrypoint with no production route', async () => {
+    const [config, index, release, entrypoint] = await Promise.all([
       source('wrangler.toml'),
       source('src/index.ts'),
       source('src/release.ts'),
+      source('src/reviewed-entrypoint.ts'),
     ]);
 
-    expect(config).toMatch(/^main = "src\/index\.ts"$/mu);
+    expect(config).toMatch(/^main = "src\/reviewed-entrypoint\.ts"$/mu);
+    expect(config).toMatch(/^name = "TWO_STAGE_DEPLOY_SESSION"$/mu);
+    expect(config).toMatch(/^class_name = "TwoStageDeploySession"$/mu);
+    expect(config).toMatch(/^new_sqlite_classes = \["TwoStageDeploySession"\]$/mu);
+    expect(config).not.toContain('GatewayDeploySession');
+    expect(entrypoint).toMatch(/from '\.\/two-stage-runtime'/u);
+    expect(entrypoint).toMatch(/export \{ TwoStageDeploySession \} from '\.\/two-stage-deploy-session'/u);
+    expect(entrypoint).not.toMatch(/reviewed-runtime|\.\/index'|gateway-deploy-session/u);
     expect(config).not.toMatch(/^\[\[routes\]\]$/mu);
     expect(config).not.toMatch(/^route(?:s)?\s*=/mu);
     expect(config).not.toContain('pattern = "deploy.ankka.ai"');

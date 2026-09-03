@@ -19,8 +19,10 @@ import {
   runR2PublicationWorkerGeneratorCli,
 } from '../scripts/generate-r2-publication-worker.mjs';
 import {
+  APPROVED_CLOUDFLARE_CONTRACT,
   canonicalJson,
   prepareSignedReleasePublishPlan,
+  REQUIRED_OAUTH_SCOPES,
   RELEASE_ENVELOPE_SCHEMA_VERSION,
   RELEASE_SIGNATURE_CONTEXT,
   writeSignedReleasePublishDirectory,
@@ -31,115 +33,6 @@ const CHANNEL = 'canary';
 const KEY_ID = 'gateway-release-canary-1';
 const BUCKET = 'ankka-gateway-releases';
 const ACCOUNT_ID = '0123456789abcdef0123456789abcdef';
-
-const REQUIRED_OAUTH_SCOPES = Object.freeze([
-  'access-acct.write',
-  'access.write',
-  'account-settings.read',
-  'dns.write',
-  'mcp-portals.write',
-  'memberships.read',
-  'user-details.read',
-  'workers-routes.read',
-  'workers-scripts.write',
-  'zone.read',
-]);
-
-const CLOUDFLARE = Object.freeze({
-  assets: Object.freeze({
-    binding: 'ASSETS',
-    notFoundHandling: 'single-page-application',
-    payloadDirectory: 'payload/admin',
-    runWorkerFirst: Object.freeze(['/__ankka/*', '/api/*']),
-  }),
-  compatibilityDate: '2026-08-08',
-  compatibilityFlags: Object.freeze([]),
-  dependenciesInstrumentation: Object.freeze({ enabled: false }),
-  durableObjects: Object.freeze({
-    bindings: Object.freeze([Object.freeze({ binding: 'ADMIN_STATE', className: 'AdminState' })]),
-    exports: Object.freeze({
-      AdminState: Object.freeze({ storage: 'sqlite', type: 'durable-object' }),
-    }),
-  }),
-  mainModule: 'index.js',
-  observability: Object.freeze({ enabled: false }),
-  previewUrls: false,
-  publicBindings: Object.freeze({
-    secrets: Object.freeze([
-      Object.freeze({ lifecycle: 'bootstrap-only', name: 'ANKKA_BOOTSTRAP_NONCE' }),
-      Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_TEAM_MANAGEMENT_TOKEN' }),
-    ]),
-    variables: Object.freeze([
-      'ADMIN_EMAILS',
-      'ANKKA_GATEWAY_RELEASE',
-      'ANKKA_GATEWAY_RELEASE_SHA256',
-      'CF_ACCESS_AUD',
-      'CF_ACCESS_ISSUER',
-      'CLOUDFLARE_ACCOUNT_ID',
-      'CLOUDFLARE_ZONE_ID',
-      'CLOUDFLARE_ZONE_NAME',
-      'ANKKA_UPDATE_CHANNEL',
-      'ANKKA_UPDATE_KEY_ID',
-      'ANKKA_UPDATE_PUBLIC_KEY',
-      'ZERO_TRUST_READY',
-    ]),
-  }),
-  sendMetrics: false,
-  workersDev: false,
-  workerVariants: Object.freeze({
-    cleanup: Object.freeze({
-      component: 'workerCleanup',
-      compatibilityDate: '2026-08-08',
-      compatibilityFlags: Object.freeze([]),
-      dependenciesInstrumentation: Object.freeze({ enabled: false }),
-      durableObjects: Object.freeze({
-        bindings: Object.freeze([Object.freeze({ binding: 'ADMIN_STATE', className: 'AdminState' })]),
-        exports: Object.freeze({
-          AdminState: Object.freeze({ storage: 'sqlite', type: 'durable-object' }),
-        }),
-      }),
-      mainModule: 'index.js',
-      observability: Object.freeze({ enabled: false }),
-      payloadDirectory: 'payload/worker-cleanup',
-      previewUrls: false,
-      publicBindings: Object.freeze({
-        secrets: Object.freeze([
-          Object.freeze({ lifecycle: 'uninstall-attempt', name: 'ANKKA_UNINSTALL_NONCE' }),
-        ]),
-        variables: Object.freeze([
-          'ANKKA_GATEWAY_RELEASE',
-          'ANKKA_GATEWAY_RELEASE_SHA256',
-          'CLOUDFLARE_ACCOUNT_ID',
-          'CLOUDFLARE_ZONE_ID',
-          'CLOUDFLARE_ZONE_NAME',
-          'ZERO_TRUST_READY',
-        ]),
-      }),
-      publicPath: '/__ankka/uninstall',
-      sendMetrics: false,
-      workersDev: false,
-    }),
-    retirement: Object.freeze({
-      component: 'workerRetirement',
-      compatibilityDate: '2026-08-08',
-      compatibilityFlags: Object.freeze([]),
-      dependenciesInstrumentation: Object.freeze({ enabled: false }),
-      durableObjects: Object.freeze({
-        bindings: Object.freeze([]),
-        exports: Object.freeze({
-          AdminState: Object.freeze({ state: 'deleted', type: 'durable-object' }),
-        }),
-      }),
-      mainModule: 'index.js',
-      observability: Object.freeze({ enabled: false }),
-      payloadDirectory: 'payload/worker-retirement',
-      previewUrls: false,
-      publicBindings: Object.freeze({ secrets: Object.freeze([]), variables: Object.freeze([]) }),
-      sendMetrics: false,
-      workersDev: false,
-    }),
-  }),
-});
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -189,12 +82,13 @@ function fixtureManifest(files) {
       fileCount: records.length,
       treeSha256: sha256(Buffer.from(canonicalJson(records))),
     },
-    cloudflare: CLOUDFLARE,
+    cloudflare: APPROVED_CLOUDFLARE_CONTRACT,
     controlPlaneOrigin: 'https://deploy.ankka.ai',
     components: {
       admin: component(componentFiles('admin')),
       installer: component(componentFiles('installer')),
       worker: component(componentFiles('worker')),
+      workerBootstrap: component(componentFiles('worker-bootstrap')),
       workerCleanup: component(componentFiles('worker-cleanup')),
       workerRetirement: component(componentFiles('worker-retirement')),
     },
@@ -225,6 +119,11 @@ async function fixture({ totalObjectBytes, extraAdminFiles = 11, fileNamePadding
     await sourceFile('payload/admin/index.html', 'text/html; charset=utf-8', '<main>admin</main>'),
     await sourceFile('payload/installer/index.html', 'text/html; charset=utf-8', '<main>install</main>'),
     await sourceFile(
+      'payload/worker-bootstrap/index.js',
+      'application/javascript+module',
+      'export class AdminState {}; export default {}',
+    ),
+    await sourceFile(
       'payload/worker-cleanup/index.js',
       'application/javascript+module',
       'export class AdminState {}; export default {}',
@@ -234,7 +133,7 @@ async function fixture({ totalObjectBytes, extraAdminFiles = 11, fileNamePadding
       'application/javascript+module',
       'export default {}',
     ),
-    await sourceFile('payload/worker/index.js', 'application/javascript+module', "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default {}"),
+    await sourceFile('payload/worker/index.js', 'application/javascript+module', '// ankka-control-plane-origin:https://deploy.ankka.ai\nexport default {}'),
   ];
   let manifest = fixtureManifest(files);
   if (totalObjectBytes !== undefined) {
@@ -546,11 +445,11 @@ describe('release-specific R2 publication Worker generator', () => {
     }
   });
 
-  it.each([1_777_000, 2_000_000])('generates a bounded signed 16-file release totaling %i object bytes', async (totalObjectBytes) => {
+  it.each([1_777_000, 2_000_000])('generates a bounded signed 17-file release totaling %i object bytes', async (totalObjectBytes) => {
     const input = await fixture({ totalObjectBytes });
     try {
       const plan = await readPlan(input);
-      expect(plan.objectCount).toBe(17);
+      expect(plan.objectCount).toBe(18);
       expect(plan.totalByteSize).toBe(totalObjectBytes);
       expect(Math.max(...plan.objects.map((object) => object.byteSize))).toBeLessThan(1_500_000);
       const output = path.join(input.sandbox, 'operator-large');
@@ -587,7 +486,7 @@ describe('release-specific R2 publication Worker generator', () => {
     const input = await fixture({ totalObjectBytes: 2_000_000, extraAdminFiles: 395, fileNamePadding: 200 });
     try {
       const verified = await loadVerifiedR2PublicationDirectory(input.publishDirectory);
-      expect(verified.plan.objectCount).toBe(401);
+      expect(verified.plan.objectCount).toBe(402);
       expect(verified.plan.totalByteSize).toBe(2_000_000);
       expect(Buffer.byteLength(verified.canonicalPlan)).toBeLessThan(1024 * 1024);
       // The actual module also includes content types, JSON syntax, identity,

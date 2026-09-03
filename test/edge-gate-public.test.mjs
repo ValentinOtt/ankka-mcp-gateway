@@ -57,6 +57,7 @@ function signedDescriptor() {
         treeSha256: 'c'.repeat(64),
       },
       worker: {},
+      workerBootstrap: {},
       workerCleanup: {},
       workerRetirement: {},
     },
@@ -136,10 +137,10 @@ function fullVerifierTransport({
       if (url.pathname === '/client/v4/zones') {
         return json({
           success: true,
-          result: [{ name: 'ankka.ai', account: { id: 'synthetic-account' } }],
+          result: [{ id: 'synthetic-zone', name: 'ankka.ai', account: { id: 'synthetic-account' } }],
         });
       }
-      if (url.pathname === '/client/v4/accounts/synthetic-account/access/apps') {
+      if (url.pathname === '/client/v4/zones/synthetic-zone/access/apps') {
         const page = Number(url.searchParams.get('page'));
         const result = pages[page - 1] ?? [];
         const liveEmpty = emptyAccessUsesLivePagination && page === 1 && result.length === 0;

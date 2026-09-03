@@ -106,6 +106,11 @@ async function signedSnapshotFixture(controlPlaneOrigin = PUBLIC_ORIGIN): Promis
     'application/javascript+module',
     `const CONTROL_PLANE_ORIGIN = '${controlPlaneOrigin}';\nexport default {fetch(){return new Response("customer worker")}};`,
   )];
+  const workerBootstrap = [await source(
+    'payload/worker-bootstrap/index.js',
+    'application/javascript+module',
+    'export class AdminState {}; export default {fetch(){return new Response("bootstrap")}};',
+  )];
   const workerCleanup = [await source(
     'payload/worker-cleanup/index.js',
     'application/javascript+module',
@@ -119,6 +124,7 @@ async function signedSnapshotFixture(controlPlaneOrigin = PUBLIC_ORIGIN): Promis
   const all = Object.freeze([
     ...admin,
     ...installer,
+    ...workerBootstrap,
     ...workerCleanup,
     ...workerRetirement,
     ...worker,
@@ -135,6 +141,7 @@ async function signedSnapshotFixture(controlPlaneOrigin = PUBLIC_ORIGIN): Promis
       admin: await component(admin),
       installer: await component(installer),
       worker: await component(worker),
+      workerBootstrap: await component(workerBootstrap),
       workerCleanup: await component(workerCleanup),
       workerRetirement: await component(workerRetirement),
     },

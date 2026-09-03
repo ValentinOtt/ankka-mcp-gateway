@@ -15,12 +15,13 @@ describe('Team preview', () => {
     window.sessionStorage.removeItem('ankka-gateway-ui-preview-scenario')
   })
 
-  it('offers an explicit read-only release-review scenario with synthetic people', async () => {
+  it('offers an explicit Cloudflare-managed read-only scenario with synthetic people', async () => {
     vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
     window.history.replaceState(null, '', '/team?preview=team-readonly')
     expect(await createPreviewGatewayAdminApi()?.getTeam()).toEqual(expect.objectContaining({
       editingEnabled: false,
-      editingDisabledReason: 'release_review_required',
+      editingDisabledReason: 'managed_in_cloudflare',
+      managementCredentialConfigured: false,
       adminEmails: ['admin@example.com'],
     }))
   })
@@ -46,7 +47,7 @@ describe('Team preview', () => {
     expect((await api.getSourceAction(prepared.actionId)).status).toBe('authorization_required')
     expect((await api.getSourceActions()).blockingAction).toEqual({ kind: 'source', actionId: prepared.actionId, sourceId: source.id })
     expect((await api.getTeam()).members).toEqual(team.members)
-    expect((await api.getTeam()).editingEnabled).toBe(true)
+    expect((await api.getTeam()).editingEnabled).toBe(false)
   })
 
   it('rediscovers slow consent from the preview scenario after a fresh API instance', async () => {
@@ -113,18 +114,21 @@ describe('Team preview', () => {
     expect((await api.getSourceActions()).actions).toEqual([])
   })
 
-  it('resumes only the exact locked recovery proposal through a local Save', async () => {
+  it('retains an exact legacy recovery proposal while refusing gateway policy writes', async () => {
     vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
     window.history.replaceState(null, '', '/team?preview=team-recovery')
     const api = previewApi()
     const saved = await api.getTeam()
-    expect(saved.pendingAction?.canCancel).toBe(false)
-    await expect(api.prepareTeamAction(saved.revision, saved.members)).rejects.toThrow()
+    const pending = saved.pendingAction
+    if (!pending) throw new Error('Expected a retained synthetic action')
+    expect(pending.canCancel).toBe(false)
     if (!saved.proposedMembers) throw new Error('Expected a recorded synthetic proposal')
-    const prepared = await api.prepareTeamAction(saved.revision, saved.proposedMembers)
-    expect(await api.getTeamAction(prepared.action.actionId)).toEqual(expect.objectContaining({ status: 'succeeded', canCancel: false }))
-    await expect(api.cancelTeamAction(prepared.action.actionId)).rejects.toThrow()
-    expect(await api.getTeam()).toEqual(expect.objectContaining({ members: saved.proposedMembers, proposedMembers: null, revision: saved.revision + 1 }))
+    await expect(api.prepareTeamAction(saved.revision, saved.proposedMembers)).rejects.toEqual(
+      expect.objectContaining({ code: 'team_editing_managed_in_cloudflare' }),
+    )
+    expect(await api.getTeamAction(pending.actionId)).toEqual(expect.objectContaining({ status: 'recovery_required', canCancel: false }))
+    await expect(api.cancelTeamAction(pending.actionId)).rejects.toThrow()
+    expect(await api.getTeam()).toEqual(saved)
   })
 
   it('simulates canceling an unstarted recorded change without changing saved permissions', async () => {
@@ -138,13 +142,14 @@ describe('Team preview', () => {
     expect(await api.getTeam()).toEqual(expect.objectContaining({ members: saved.members, proposedMembers: null, revision: saved.revision }))
   })
 
-  it('fails closed without the customer-local management credential', async () => {
+  it('does not expose a permanent management-credential escape hatch', async () => {
     vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
     window.history.replaceState(null, '', '/team?preview=team-no-credential')
     const api = previewApi()
     const saved = await api.getTeam()
     expect(saved.managementCredentialConfigured).toBe(false)
-    await expect(api.prepareTeamAction(saved.revision, saved.members)).rejects.toEqual(expect.objectContaining({ code: 'team_management_credential_missing' }))
+    expect(saved.editingDisabledReason).toBe('managed_in_cloudflare')
+    await expect(api.prepareTeamAction(saved.revision, saved.members)).rejects.toEqual(expect.objectContaining({ code: 'team_editing_managed_in_cloudflare' }))
     expect(await api.getTeam()).toEqual(saved)
   })
 

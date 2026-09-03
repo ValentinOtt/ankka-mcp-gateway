@@ -188,7 +188,11 @@ export interface ReviewedInstallProviderAdapter {
     input: ReviewedInstallProviderCall & { readonly accountId: string },
   ): Promise<AccountWorkersSubdomain>;
   preflightFreshManagementApplication(
-    input: ReviewedInstallProviderCall & { readonly accountId: string; readonly plan: StaticDeployPlan },
+    input: ReviewedInstallProviderCall & {
+      readonly accountId: string;
+      readonly zoneId: string;
+      readonly plan: StaticDeployPlan;
+    },
   ): Promise<void>;
   preflightFreshManagementDomain(
     input: ReviewedInstallProviderCall & {
@@ -224,6 +228,7 @@ export interface ReviewedInstallProviderAdapter {
     intent: ManagementAccessApplicationIntent,
     input: ReviewedInstallProviderCall & {
       readonly accountId: string;
+      readonly zoneId: string;
       readonly plan: StaticDeployPlan;
       readonly allowedIdentityProviderIds: readonly string[];
     },
@@ -232,6 +237,7 @@ export interface ReviewedInstallProviderAdapter {
     intent: ManagementAccessApplicationIntent,
     input: ReviewedInstallProviderCall & {
       readonly accountId: string;
+      readonly zoneId: string;
       readonly plan: StaticDeployPlan;
       readonly allowedIdentityProviderIds: readonly string[];
     },
@@ -240,6 +246,7 @@ export interface ReviewedInstallProviderAdapter {
     locator: ManagementAccessApplicationLocator,
     input: ReviewedInstallProviderCall & {
       readonly accountId: string;
+      readonly zoneId: string;
       readonly plan: StaticDeployPlan;
       readonly allowedIdentityProviderIds: readonly string[];
     },
@@ -249,6 +256,7 @@ export interface ReviewedInstallProviderAdapter {
     intent: ManagementAdminPolicyIntent,
     input: ReviewedInstallProviderCall & {
       readonly accountId: string;
+      readonly zoneId: string;
       readonly applicationId: string;
       readonly plan: StaticDeployPlan;
     },
@@ -257,6 +265,7 @@ export interface ReviewedInstallProviderAdapter {
     intent: ManagementAdminPolicyIntent,
     input: ReviewedInstallProviderCall & {
       readonly accountId: string;
+      readonly zoneId: string;
       readonly applicationId: string;
       readonly plan: StaticDeployPlan;
     },
@@ -265,6 +274,7 @@ export interface ReviewedInstallProviderAdapter {
     locator: ManagementAdminPolicyLocator,
     input: ReviewedInstallProviderCall & {
       readonly accountId: string;
+      readonly zoneId: string;
       readonly applicationId: string;
       readonly plan: StaticDeployPlan;
     },
@@ -980,6 +990,7 @@ async function convergeManagementApplication(
     : identityProviderIds;
   const intent = prepareManagementAccessApplicationIntent({
     accountId: context.target.account.id,
+    zoneId: context.target.zone.id,
     plan: context.plan,
     allowedIdentityProviderIds: ids,
   });
@@ -996,6 +1007,7 @@ async function convergeManagementApplication(
   const operationInput = {
     ...context.call,
     accountId: context.target.account.id,
+    zoneId: context.target.zone.id,
     plan: context.plan,
     allowedIdentityProviderIds: ids,
   };
@@ -1023,6 +1035,7 @@ async function convergeManagementPolicy(
 ): Promise<ManagementAdminPolicyLocator> {
   const intent = prepareManagementAdminPolicyIntent({
     accountId: context.target.account.id,
+    zoneId: context.target.zone.id,
     applicationId: application.applicationId,
     plan: context.plan,
   });
@@ -1040,6 +1053,7 @@ async function convergeManagementPolicy(
   const operationInput = {
     ...context.call,
     accountId: context.target.account.id,
+    zoneId: context.target.zone.id,
     applicationId: application.applicationId,
     plan: context.plan,
   };
@@ -1069,6 +1083,7 @@ function workerPlainTextBindings(
 ): GatewayWorkerPlainTextBindings {
   return Object.freeze({
     ADMIN_EMAILS: context.plan.managementAdminEmails.join(','),
+    ANKKA_INSTALL_ID: context.journal.installationId,
     ANKKA_GATEWAY_RELEASE: context.journal.releasePin.release,
     ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${context.journal.releasePin.artifactSha256}`,
     ANKKA_UPDATE_CHANNEL: context.input.releaseBundle.channel,
@@ -1833,7 +1848,12 @@ async function initializeOrRecoverContext(
     });
     const workerIntent = await prepareWorkerMutationForTarget({ accountId: target.account.id, workerName });
     if (await input.provider.inspectWorker(workerIntent, call)) fail('journal_recovery_mismatch');
-    await input.provider.preflightFreshManagementApplication({ ...call, accountId: target.account.id, plan });
+    await input.provider.preflightFreshManagementApplication({
+      ...call,
+      accountId: target.account.id,
+      zoneId: target.zone.id,
+      plan,
+    });
     await input.provider.preflightFreshManagementDomain({
       ...call,
       accountId: target.account.id,
@@ -1992,6 +2012,7 @@ export async function executeReviewedInstall(
   await context.input.provider.verifyManagementApplication(application, {
     ...context.call,
     accountId: context.target.account.id,
+    zoneId: context.target.zone.id,
     plan: context.plan,
     allowedIdentityProviderIds: initialized.identityProviders,
   });
@@ -2000,6 +2021,7 @@ export async function executeReviewedInstall(
     {
       ...context.call,
       accountId: context.target.account.id,
+      zoneId: context.target.zone.id,
       applicationId: application.applicationId,
       plan: context.plan,
     },

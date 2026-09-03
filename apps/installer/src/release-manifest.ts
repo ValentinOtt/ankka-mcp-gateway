@@ -66,27 +66,83 @@ export const APPROVED_CLOUDFLARE_RELEASE_CONTRACT = Object.freeze({
   previewUrls: false,
   publicBindings: Object.freeze({
     secrets: Object.freeze([
-      Object.freeze({ lifecycle: 'bootstrap-only', name: 'ANKKA_BOOTSTRAP_NONCE' }),
-      Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_TEAM_MANAGEMENT_TOKEN' }),
+      Object.freeze({ lifecycle: 'customer-worker', name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY' }),
     ]),
     variables: Object.freeze([
       'ADMIN_EMAILS',
+      'ANKKA_INSTALL_ID',
       'ANKKA_GATEWAY_RELEASE',
       'ANKKA_GATEWAY_RELEASE_SHA256',
+      'ANKKA_MANAGEMENT_HOSTNAME',
+      'ANKKA_UPDATE_CHANNEL',
+      'ANKKA_UPDATE_KEY_ID',
+      'ANKKA_UPDATE_PUBLIC_KEY',
+      'ANKKA_WORKERS_SUBDOMAIN',
+      'ANKKA_WORKER_NAME',
       'CF_ACCESS_AUD',
       'CF_ACCESS_ISSUER',
       'CLOUDFLARE_ACCOUNT_ID',
       'CLOUDFLARE_ZONE_ID',
       'CLOUDFLARE_ZONE_NAME',
-      'ANKKA_UPDATE_CHANNEL',
-      'ANKKA_UPDATE_KEY_ID',
-      'ANKKA_UPDATE_PUBLIC_KEY',
       'ZERO_TRUST_READY',
     ]),
   }),
   sendMetrics: false,
   workersDev: false,
   workerVariants: Object.freeze({
+    bootstrap: Object.freeze({
+      assets: Object.freeze({
+        binding: 'ASSETS',
+        notFoundHandling: 'single-page-application',
+        payloadDirectory: 'payload/admin',
+        runWorkerFirst: Object.freeze(['/__ankka/*', '/api/*']),
+      }),
+      component: 'workerBootstrap',
+      compatibilityDate: '2026-08-08',
+      compatibilityFlags: Object.freeze([]),
+      dependenciesInstrumentation: Object.freeze({ enabled: false }),
+      durableObjects: Object.freeze({
+        bindings: Object.freeze([
+          Object.freeze({ binding: 'ADMIN_STATE', className: 'AdminState' }),
+        ]),
+        exports: Object.freeze({
+          AdminState: Object.freeze({ storage: 'sqlite', type: 'durable-object' }),
+        }),
+      }),
+      mainModule: 'index.js',
+      observability: Object.freeze({ enabled: false }),
+      payloadDirectory: 'payload/worker-bootstrap',
+      previewUrls: false,
+      publicBindings: Object.freeze({
+        secrets: Object.freeze([
+          Object.freeze({ lifecycle: 'bootstrap-only', name: 'ANKKA_BOOTSTRAP_NONCE' }),
+          Object.freeze({ lifecycle: 'customer-worker', name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY' }),
+        ]),
+        variables: Object.freeze([
+          'ANKKA_BOOTSTRAP_CALLBACK',
+          'ANKKA_BOOTSTRAP_EXPIRES_AT',
+          'ANKKA_BOOTSTRAP_ID',
+          'ANKKA_BOOTSTRAP_SECRET_SHA256',
+          'ANKKA_GATEWAY_RELEASE',
+          'ANKKA_GATEWAY_RELEASE_SHA256',
+          'ANKKA_INSTALL_ID',
+          'ANKKA_INSTALLER_ORIGIN',
+          'ANKKA_MANAGEMENT_HOSTNAME',
+          'ANKKA_PLAN_HASH',
+          'ANKKA_PLAN_ID',
+          'ANKKA_UPDATE_CHANNEL',
+          'ANKKA_UPDATE_KEY_ID',
+          'ANKKA_UPDATE_PUBLIC_KEY',
+          'ANKKA_WORKER_NAME',
+          'CLOUDFLARE_ACCOUNT_ID',
+          'CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID',
+          'CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID',
+          'CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY',
+        ]),
+      }),
+      sendMetrics: false,
+      workersDev: false,
+    }),
     cleanup: Object.freeze({
       component: 'workerCleanup',
       compatibilityDate: '2026-08-08',
@@ -150,6 +206,7 @@ export type ReleaseComponentName =
   | 'admin'
   | 'installer'
   | 'worker'
+  | 'workerBootstrap'
   | 'workerCleanup'
   | 'workerRetirement';
 
@@ -212,6 +269,7 @@ const releaseManifestSchema = v.strictObject({
     admin: releaseComponentSchema,
     installer: releaseComponentSchema,
     worker: releaseComponentSchema,
+    workerBootstrap: releaseComponentSchema,
     workerCleanup: releaseComponentSchema,
     workerRetirement: releaseComponentSchema,
   }),
@@ -262,6 +320,7 @@ function extension(path: string): string {
 }
 
 function componentPayloadDirectory(component: ReleaseComponentName): string {
+  if (component === 'workerBootstrap') return 'worker-bootstrap';
   if (component === 'workerCleanup') return 'worker-cleanup';
   if (component === 'workerRetirement') return 'worker-retirement';
   return component;
@@ -368,6 +427,7 @@ export function parseReleaseManifest<Input>(input: Input): ReleaseManifest {
     admin: parseComponent(value.components.admin, 'admin'),
     installer: parseComponent(value.components.installer, 'installer'),
     worker: parseComponent(value.components.worker, 'worker'),
+    workerBootstrap: parseComponent(value.components.workerBootstrap, 'workerBootstrap'),
     workerCleanup: parseComponent(value.components.workerCleanup, 'workerCleanup'),
     workerRetirement: parseComponent(value.components.workerRetirement, 'workerRetirement'),
   });
@@ -375,6 +435,7 @@ export function parseReleaseManifest<Input>(input: Input): ReleaseManifest {
     ...components.admin.files,
     ...components.installer.files,
     ...components.worker.files,
+    ...components.workerBootstrap.files,
     ...components.workerCleanup.files,
     ...components.workerRetirement.files,
   ].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);

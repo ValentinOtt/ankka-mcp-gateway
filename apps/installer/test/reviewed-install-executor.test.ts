@@ -148,6 +148,11 @@ async function releaseBundle(): Promise<VerifiedReleaseBundle> {
     await releaseFile('payload/admin/index.html', 'text/html; charset=utf-8', '<main>admin</main>'),
     await releaseFile('payload/installer/index.html', 'text/html; charset=utf-8', '<main>installer</main>'),
     await releaseFile(
+      'payload/worker-bootstrap/index.js',
+      'application/javascript+module',
+      'export class AdminState {}; export default { fetch() { return new Response("bootstrap") } };',
+    ),
+    await releaseFile(
       'payload/worker-cleanup/index.js',
       'application/javascript+module',
       'export class AdminState {}; export default { fetch() { return new Response("cleanup") } };',
@@ -174,9 +179,10 @@ async function releaseBundle(): Promise<VerifiedReleaseBundle> {
     components: {
       admin: await component([requiredFixture(records.at(0), 'admin release record')]),
       installer: await component([requiredFixture(records.at(1), 'installer release record')]),
-      worker: await component([requiredFixture(records.at(4), 'worker release record')]),
-      workerCleanup: await component([requiredFixture(records.at(2), 'cleanup release record')]),
-      workerRetirement: await component([requiredFixture(records.at(3), 'retirement release record')]),
+      worker: await component([requiredFixture(records.at(5), 'worker release record')]),
+      workerBootstrap: await component([requiredFixture(records.at(2), 'bootstrap release record')]),
+      workerCleanup: await component([requiredFixture(records.at(3), 'cleanup release record')]),
+      workerRetirement: await component([requiredFixture(records.at(4), 'retirement release record')]),
     },
     artifact: {
       fileCount: records.length,
@@ -781,6 +787,7 @@ describe('isolated reviewed install executor', () => {
       release: direct,
       plainTextBindings: {
         ADMIN_EMAILS: 'owner@example.com',
+        ANKKA_INSTALL_ID: `acg-${'e'.repeat(24)}`,
         ANKKA_GATEWAY_RELEASE: bundle.manifest.release,
         ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${bundle.manifest.artifact.treeSha256}`,
         ANKKA_MANAGEMENT_HOSTNAME: 'manage.example.com',

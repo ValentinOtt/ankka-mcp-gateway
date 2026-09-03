@@ -411,6 +411,7 @@ function releaseRecords(manifest: ReleaseManifest): readonly ReleaseFileRecord[]
     ...manifest.components.admin.files,
     ...manifest.components.installer.files,
     ...manifest.components.worker.files,
+    ...manifest.components.workerBootstrap.files,
     ...manifest.components.workerCleanup.files,
     ...manifest.components.workerRetirement.files,
   ].sort((left, right) => lexicalCompare(left.path, right.path)));
@@ -459,6 +460,7 @@ async function assertManifestTreeDigests(manifest: ReleaseManifest): Promise<voi
     'admin',
     'installer',
     'worker',
+    'workerBootstrap',
     'workerCleanup',
     'workerRetirement',
   ] as const) {

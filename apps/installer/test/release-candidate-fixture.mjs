@@ -8,7 +8,7 @@ export const FIXTURE_PAYLOAD = Object.freeze({
   'payload/installer/index.html': '<main>installer</main>',
   'payload/worker-cleanup/index.js': 'export class AdminState {}\nexport default {};\n',
   'payload/worker-retirement/index.js': 'export default {};\n',
-  'payload/worker/index.js': "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport class AdminState {}\nexport default {};\n",
+  'payload/worker/index.js': "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport class AdminState {}\nexport default { fetch() { return new Response(CONTROL_PLANE_ORIGIN); } };\n",
 });
 
 export const FIXTURE_ADMIN_OUTPUT = Object.freeze({
@@ -58,6 +58,33 @@ export async function releaseCandidateCheckout(files = FIXTURE_PAYLOAD) {
       await readFile(new URL(`../scripts/${path.basename(relative)}`, import.meta.url)),
     );
   }
+
+  const installerRoot = path.join(source, 'apps', 'installer');
+  const installerSourceRoot = path.join(installerRoot, 'src');
+  await mkdir(installerSourceRoot, { recursive: true });
+  await writeFile(path.join(installerRoot, 'package.json'), JSON.stringify({
+    name: '@ankka/gateway-installer',
+    private: true,
+    type: 'module',
+  }));
+  await writeFile(path.join(installerRoot, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: { target: 'ES2022', module: 'ESNext' },
+  }));
+  await writeFile(path.join(installerSourceRoot, 'customer-gateway-entrypoint.ts'), `
+    import runtime, { AdminState } from '../../../payload/worker/index.js';
+    export { AdminState };
+    export default runtime;
+  `);
+  await writeFile(path.join(installerSourceRoot, 'customer-gateway-bootstrap-entrypoint.ts'), `
+    import { AdminState as RuntimeAdminState } from '../../../payload/worker/index.js';
+    declare const __ANKKA_FINAL_RUNTIME_SOURCE__: string;
+    export class AdminState extends RuntimeAdminState {}
+    export default {
+      fetch() {
+        return new Response(String(__ANKKA_FINAL_RUNTIME_SOURCE__.length));
+      },
+    };
+  `);
 
   const adminRoot = path.join(source, 'apps', 'admin');
   await mkdir(adminRoot, { recursive: true });

@@ -34,11 +34,10 @@ reports unconfirmed route cleanup as a failure rather than success.
 Changes outside this boundary require a separately designed and
 operator-approved migration or a fresh installation.
 
-The [reviewed Team upgrade](TEAM_UPGRADE.md) uses a signed compatibility bridge
-before the customer-local Team release. Recognizing the exact optional-secret
-contract does not create or change a secret binding. The management credential
-is a separate administrator-approved setup step in Cloudflare; neither update
-provisions it.
+The V1 release contract has no Team-management secret. A forward update may
+recognize the retired preview binding only to omit it from the candidate; the
+value is never read or inherited. Rollback into or out of a version carrying
+that binding is refused. See the [retirement procedure](TEAM_UPGRADE.md).
 
 ## Release trust
 

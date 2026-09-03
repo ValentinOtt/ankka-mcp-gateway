@@ -106,9 +106,9 @@ async function main() {
   const zones = await cf(`/zones?name=${encodeURIComponent(ZONE)}`);
   const zone = zones.ok ? zones.result?.[0] : null;
   if (!zone) throw new Error(`zone ${ZONE} not readable`);
-  const accountId = zone.account.id;
+  const zoneId = zone.id;
 
-  const apps = await cf(`/accounts/${accountId}/access/apps?per_page=100`);
+  const apps = await cf(`/zones/${zoneId}/access/apps?per_page=100`);
   if (!apps.ok) {
     record(
       'access apps',

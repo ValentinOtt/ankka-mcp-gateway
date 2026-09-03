@@ -104,6 +104,29 @@ const fixture = Object.freeze({
     workersDevEnabled: false,
   } satisfies FinalConvergenceLocator),
   releaseSet: Object.freeze({
+    bootstrap: Object.freeze({
+      verification: 'ed25519',
+      release: 'gateway-v1.2.3',
+      artifactSha256: 'b'.repeat(64),
+      componentSha256: 'f'.repeat(64),
+      worker: Object.freeze({
+        mainModule: 'index.js',
+        compatibilityDate: '2026-08-08',
+        compatibilityFlags: Object.freeze([] as const),
+        modules: Object.freeze([]),
+        assets: Object.freeze({
+          binding: 'ASSETS',
+          notFoundHandling: 'single-page-application',
+          runWorkerFirst: Object.freeze(['/__ankka/*', '/api/*'] as const),
+          files: Object.freeze([]),
+        }),
+        durableObject: Object.freeze({
+          binding: 'ADMIN_STATE',
+          className: 'AdminState',
+          storage: 'sqlite',
+        }),
+      }),
+    }),
     primary: Object.freeze({
       verification: 'ed25519',
       release: 'gateway-v1.2.3',
@@ -212,6 +235,7 @@ const installDeployPlan = Object.freeze({
   releaseId: 'gateway-v1.2.3',
   releaseArtifactSha256: 'b'.repeat(64),
   sourceCommit: 'c'.repeat(40),
+  bootstrapWorkerSourceSha256: 'f'.repeat(64),
   workerBundleSha256: 'd'.repeat(64),
   dashboardAssetsSha256: 'e'.repeat(64),
   managementOwnershipMarker: 'ankka:management:test',

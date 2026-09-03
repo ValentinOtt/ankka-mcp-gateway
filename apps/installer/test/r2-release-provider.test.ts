@@ -127,6 +127,7 @@ async function signedFixture(
   const payload = Object.freeze([
     Object.freeze({ path: 'payload/admin/index.html', bytes: encoder.encode('<!doctype html>admin') }),
     Object.freeze({ path: 'payload/installer/index.html', bytes: encoder.encode('<!doctype html>installer') }),
+    Object.freeze({ path: 'payload/worker-bootstrap/index.js', bytes: encoder.encode('export class AdminState {}; export default { fetch() {} };') }),
     Object.freeze({
       path: 'payload/worker-cleanup/index.js',
       bytes: encoder.encode('export class AdminState {}; export default { fetch() {} };'),
@@ -135,7 +136,7 @@ async function signedFixture(
       path: 'payload/worker-retirement/index.js',
       bytes: encoder.encode('export default { fetch() {} };'),
     }),
-    Object.freeze({ path: 'payload/worker/index.js', bytes: encoder.encode("const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default { fetch() {} };") }),
+    Object.freeze({ path: 'payload/worker/index.js', bytes: encoder.encode('// ankka-control-plane-origin:https://deploy.ankka.ai\nexport default { fetch() {} };') }),
   ]);
   const record = async (
     file: ReleasePayloadFile,
@@ -148,12 +149,14 @@ async function signedFixture(
   });
   const adminFiles = [await record(requiredFixture(payload.at(0), 'admin payload'), 'text/html; charset=utf-8')];
   const installerFiles = [await record(requiredFixture(payload.at(1), 'installer payload'), 'text/html; charset=utf-8')];
-  const workerCleanupFiles = [await record(requiredFixture(payload.at(2), 'cleanup payload'), 'application/javascript+module')];
-  const workerRetirementFiles = [await record(requiredFixture(payload.at(3), 'retirement payload'), 'application/javascript+module')];
-  const workerFiles = [await record(requiredFixture(payload.at(4), 'worker payload'), 'application/javascript+module')];
+  const workerBootstrapFiles = [await record(requiredFixture(payload.at(2), 'bootstrap payload'), 'application/javascript+module')];
+  const workerCleanupFiles = [await record(requiredFixture(payload.at(3), 'cleanup payload'), 'application/javascript+module')];
+  const workerRetirementFiles = [await record(requiredFixture(payload.at(4), 'retirement payload'), 'application/javascript+module')];
+  const workerFiles = [await record(requiredFixture(payload.at(5), 'worker payload'), 'application/javascript+module')];
   const allFiles = [
     ...adminFiles,
     ...installerFiles,
+    ...workerBootstrapFiles,
     ...workerCleanupFiles,
     ...workerRetirementFiles,
     ...workerFiles,
@@ -176,6 +179,7 @@ async function signedFixture(
       admin: await component(adminFiles),
       installer: await component(installerFiles),
       worker: await component(workerFiles),
+      workerBootstrap: await component(workerBootstrapFiles),
       workerCleanup: await component(workerCleanupFiles),
       workerRetirement: await component(workerRetirementFiles),
     },

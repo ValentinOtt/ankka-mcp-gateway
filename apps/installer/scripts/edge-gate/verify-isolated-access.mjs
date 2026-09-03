@@ -102,7 +102,7 @@ async function providerGet(fetchImpl, token, pathname) {
   return body;
 }
 
-async function readAllApplications(fetchImpl, token, accountId) {
+async function readAllApplications(fetchImpl, token, zoneId) {
   const applications = [];
   const ids = new Set();
   let totalPages = null;
@@ -110,7 +110,7 @@ async function readAllApplications(fetchImpl, token, accountId) {
     const body = await providerGet(
       fetchImpl,
       token,
-      `/accounts/${encodeURIComponent(accountId)}/access/apps?per_page=${PAGE_SIZE}&page=${page}`,
+      `/zones/${encodeURIComponent(zoneId)}/access/apps?per_page=${PAGE_SIZE}&page=${page}`,
     );
     if (!Array.isArray(body.result) || !isRecord(body.result_info)) fail('provider_response_invalid');
     const completeEmptyInventory = body.result_info.page === 1 &&
@@ -280,7 +280,7 @@ export async function verifyIsolatedAccess(input) {
   try {
     token = await input.readToken();
     if (!v.is(STRING_SCHEMA, token) || !TOKEN_PATTERN.test(token)) fail('token_invalid');
-    const applications = await readAllApplications(input.fetchImpl, token, target.accountId);
+    const applications = await readAllApplications(input.fetchImpl, token, target.zoneId);
     const configuration = verifyConfiguration(applications, contract);
     const behaviorChecks = await verifyBehavior(input.fetchImpl, contract, input.runtimeMode);
     return Object.freeze({

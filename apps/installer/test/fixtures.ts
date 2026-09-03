@@ -46,8 +46,8 @@ export const selectionInput = {
 
 export const manifest: ReleaseManifest = {
   artifact: {
-    byteSize: 5,
-    fileCount: 5,
+    byteSize: 6,
+    fileCount: 6,
     treeSha256: '9'.repeat(64),
   },
   cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
@@ -85,6 +85,17 @@ export const manifest: ReleaseManifest = {
         sha256: '5'.repeat(64),
       }],
       treeSha256: '6'.repeat(64),
+    },
+    workerBootstrap: {
+      byteSize: 1,
+      fileCount: 1,
+      files: [{
+        byteSize: 1,
+        contentType: 'application/javascript+module',
+        path: 'payload/worker-bootstrap/index.js',
+        sha256: 'c'.repeat(64),
+      }],
+      treeSha256: 'd'.repeat(64),
     },
     workerCleanup: {
       byteSize: 1,

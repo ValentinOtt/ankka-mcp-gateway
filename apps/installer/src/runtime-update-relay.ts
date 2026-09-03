@@ -46,6 +46,7 @@ const VERSION_CREATE_TIMEOUT_MS = 30_000;
 const RUNTIME_PATH = '/__ankka/runtime-action';
 const BINDING_NAMES = Object.freeze([
   'ADMIN_EMAILS',
+  'ANKKA_INSTALL_ID',
   'ANKKA_GATEWAY_RELEASE',
   'ANKKA_GATEWAY_RELEASE_SHA256',
   'ANKKA_MANAGEMENT_HOSTNAME',
@@ -103,10 +104,6 @@ const plainTextBindingSchema = v.strictObject({
   name: v.string(),
   text: v.string(),
   type: v.string(),
-});
-const teamManagementBindingSchema = v.strictObject({
-  name: v.literal('ANKKA_TEAM_MANAGEMENT_TOKEN'),
-  type: v.literal('secret_text'),
 });
 const subdomainStateSchema = v.strictObject({
   enabled: v.boolean(),
@@ -177,7 +174,6 @@ interface CurrentRuntime {
   readonly versionId: string;
   readonly deploymentId: string;
   readonly bindings: GatewayWorkerPlainTextBindings;
-  readonly hasTeamManagementBinding: boolean;
 }
 
 interface ActiveDeployment {
@@ -266,12 +262,9 @@ function activeDeployment(value: BoundaryValue): ActiveDeployment {
   return { deploymentId: active.id, versionId: version.version_id };
 }
 
-function exactCurrentBindings(value: BoundaryValue): Readonly<{
-  bindings: GatewayWorkerPlainTextBindings;
-  hasTeamManagementBinding: boolean;
-}> {
+function exactCurrentBindings(value: BoundaryValue): GatewayWorkerPlainTextBindings {
   const result = v.safeParse(currentBindingsSchema, value);
-  if (!result.success || ![BINDING_NAMES.length + 2, BINDING_NAMES.length + 3].includes(result.output.bindings.length) ||
+  if (!result.success || result.output.bindings.length !== BINDING_NAMES.length + 2 ||
       result.output.main_module !== 'index.js' || result.output.compatibility_date !== '2026-08-08' ||
       Object.hasOwn(result.output, 'migrations') || Object.hasOwn(result.output, 'migration_tag')) {
     invalid('session_conflict');
@@ -282,10 +275,7 @@ function exactCurrentBindings(value: BoundaryValue): Readonly<{
     if (!named.success || bindings.has(named.output.name)) invalid('session_conflict');
     bindings.set(named.output.name, binding);
   }
-  const management = bindings.get('ANKKA_TEAM_MANAGEMENT_TOKEN');
-  const hasTeamManagementBinding = management !== undefined;
-  if ((hasTeamManagementBinding && !v.safeParse(teamManagementBindingSchema, management).success) ||
-      bindings.size !== BINDING_NAMES.length + 2 + Number(hasTeamManagementBinding)) {
+  if (bindings.size !== BINDING_NAMES.length + 2) {
     invalid('session_conflict');
   }
   const admin = v.safeParse(adminStateBindingSchema, bindings.get('ADMIN_STATE'));
@@ -305,6 +295,7 @@ function exactCurrentBindings(value: BoundaryValue): Readonly<{
   };
   const plainTextBindings = Object.freeze({
     ADMIN_EMAILS: bindingText('ADMIN_EMAILS'),
+    ANKKA_INSTALL_ID: bindingText('ANKKA_INSTALL_ID'),
     ANKKA_GATEWAY_RELEASE: bindingText('ANKKA_GATEWAY_RELEASE'),
     ANKKA_GATEWAY_RELEASE_SHA256: bindingText('ANKKA_GATEWAY_RELEASE_SHA256'),
     ANKKA_MANAGEMENT_HOSTNAME: bindingText('ANKKA_MANAGEMENT_HOSTNAME'),
@@ -320,7 +311,7 @@ function exactCurrentBindings(value: BoundaryValue): Readonly<{
     CLOUDFLARE_ZONE_NAME: bindingText('CLOUDFLARE_ZONE_NAME'),
     ZERO_TRUST_READY: bindingText('ZERO_TRUST_READY'),
   });
-  return Object.freeze({ bindings: plainTextBindings, hasTeamManagementBinding });
+  return plainTextBindings;
 }
 
 async function inspectCurrent(input: RuntimeUpdateRelayInput): Promise<CurrentRuntime> {
@@ -342,7 +333,7 @@ async function inspectCurrent(input: RuntimeUpdateRelayInput): Promise<CurrentRu
   if (!versionResult.success || versionResult.output.id !== deployment.versionId) {
     invalid('session_conflict');
   }
-  const { bindings, hasTeamManagementBinding } = exactCurrentBindings(version);
+  const bindings = exactCurrentBindings(version);
   if (bindings.ANKKA_GATEWAY_RELEASE !== input.from.release ||
       bindings.ANKKA_GATEWAY_RELEASE_SHA256 !== input.from.artifactSha256 ||
       bindings.CLOUDFLARE_ACCOUNT_ID !== input.accountId ||
@@ -359,21 +350,18 @@ async function inspectCurrent(input: RuntimeUpdateRelayInput): Promise<CurrentRu
     versionId: deployment.versionId,
     deploymentId: deployment.deploymentId,
     bindings,
-    hasTeamManagementBinding,
   });
 }
 
 async function verifyRollbackBindings(input: RuntimeUpdateRelayInput, current: CurrentRuntime): Promise<void> {
-  // Deploying an older version can restore a rotated/removed credential or drop
-  // current standing authority. Neither is part of the code-only rollback.
-  if (current.hasTeamManagementBinding || !input.to.versionId) invalid('session_conflict');
+  if (!input.to.versionId) invalid('session_conflict');
   const version = await providerResult(
     input, `/workers/workers/${current.worker.workerId}/versions/${input.to.versionId}`,
   );
   const parsed = v.safeParse(currentVersionSchema, version);
-  const target = exactCurrentBindings(version);
-  if (!parsed.success || parsed.output.id !== input.to.versionId || target.hasTeamManagementBinding ||
-      canonicalJson(target.bindings) !== canonicalJson({
+  const targetBindings = exactCurrentBindings(version);
+  if (!parsed.success || parsed.output.id !== input.to.versionId ||
+      canonicalJson(targetBindings) !== canonicalJson({
         ...current.bindings,
         ANKKA_GATEWAY_RELEASE: input.to.release,
         ANKKA_GATEWAY_RELEASE_SHA256: input.to.artifactSha256,
@@ -650,7 +638,6 @@ async function createCandidate(
   await progress(input, 'assets_uploaded', current.versionId, null);
   const mutation = await prepareWorkerVersionMutation(
     prepared, current.worker, completionJwt, 'clean',
-    current.hasTeamManagementBinding ? current.versionId : undefined,
   );
   const submitted = await submitWorkerVersionMutation(mutation.ephemeral, mutation.recovery, {
     ...call,

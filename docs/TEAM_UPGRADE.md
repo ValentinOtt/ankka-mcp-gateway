@@ -1,112 +1,55 @@
-# Upgrade from hosted Team authorization
+# Retiring the Team-credential preview
 
-Status: reviewed upgrade procedure for the customer-local Team candidate, not
-evidence of a published release or completed installation. Each release and
-customer update still requires its normal approval and verification.
+Status: compatibility and cleanup guidance for an earlier canary preview. V1
+does not ship a customer-local Team policy editor or require a permanent
+Cloudflare management credential.
 
-The upgrade uses two ordinary signed updates: the existing runtime to a
-compatibility bridge, then the bridge to the customer-local Team runtime.
-Neither update creates a credential or changes an Access policy. The dedicated
-management credential is provisioned separately in your Cloudflare account.
+The former two-update bridge introduced an optional standing Team secret. That
+contract is no longer a release target. Do not publish, provision, or reactivate
+it as part of a V1 installation.
 
-## Why a bridge is needed
+## Forward-update boundary
 
-`gateway-v0.1.16` accepts only its exact signed Cloudflare deployment contract.
-The customer-local Team contract additionally describes the optional
-`ANKKA_TEAM_MANAGEMENT_TOKEN` secret. The old runtime correctly refuses that
-unrecognized contract, even when no secret has been provisioned.
+The V1 signed release contract contains only the bootstrap secret required by
+the existing deployment lifecycle. It does not declare a Team-management
+binding.
 
-The bridge retains the exact legacy contract in its own signed manifest. Its
-runtime recognizes only two complete contracts: the legacy contract and the
-reviewed contract with this one optional secret. It does not accept arbitrary
-bindings, change signed manifest contents, provision secrets, or activate
-customer-local Team saves. The same signature, origin, artifact, update-action,
-and lifecycle checks remain mandatory.
+The updater may accept the exact retired binding on the currently active
+preview version for one purpose: omit it from a reviewed forward candidate. It
+does not read, copy, inherit, rotate, or expose the secret value. Candidate
+readback fails if Cloudflare returns that binding on the new version.
 
-Using the normal updater for both hops updates the runtime release record and
-public status through genuine completed actions. There is no maintenance
-endpoint, direct Durable Object rewrite, fabricated success, or automatic reset
-of stored release metadata. Deploying the final Worker directly is not this
-procedure and can strand its release bookkeeping at the previous version.
+Rollback is refused when either the current or target version carries the
+retired binding. This prevents a normal code rollback from restoring standing
+authority in the active Worker.
 
-## Before either update
+## Customer cleanup
 
-1. Verify the installed release, exact Worker bytes, current bindings, and sole
-   active deployment. Confirm that temporary `workers.dev` and preview routes
-   are disabled. Keep the original receipt, source configuration, shared
-   authentication, and tool allowlists unchanged.
-2. Inspect pending Team and runtime actions. An expired or browser-blocked
-   OAuth callback does not establish that no provider write occurred. Compare
-   the saved action and its journal with the actual owned Access policies.
-3. If a Team proposal is demonstrably unstarted, obtain the administrator's
-   explicit approval to use **Cancel recorded change**. The normal cancellation
-   retains the action as canceled; do not delete its storage or alter its
-   journal. Keep the intended assignments available to review again after the
-   upgrade, in customer-controlled storage, never in this repository.
-4. If any write is armed, partial, or uncertain, stop this upgrade path and
-   reconcile the existing operation. Do not cancel it, bypass the lifecycle
-   check, or reset saved state. Resolve any pending runtime update too.
+If your team created the old credential:
 
-## Publish and apply the bridge
+1. Revoke the API token in Cloudflare. This is the step that removes provider
+   authority.
+2. Remove the retired Team-management secret from the active Worker.
+3. Review historical Worker versions according to your Cloudflare retention
+   policy; deleting the active binding alone does not erase old versions.
+4. Apply a reviewed forward release and verify that its exact binding list does
+   not contain the retired secret.
 
-Build the bridge from a clean, reviewed public commit through the pinned release
-tooling. Its signed manifest must retain the byte-exact legacy Cloudflare
-contract. Verify that the actual v16 signature/manifest verifier accepts it.
-Use a new, unused release identifier and the established signing-key identity,
-origin, and channel. Do not overwrite existing release objects.
+Do not put a credential value in a repository, command argument, URL, log,
+screenshot, support ticket, or migration record. A forward update cannot revoke
+the separate API token on your behalf.
 
-Publish and activate a legacy-compatible hosted installer pinned to that exact
-bridge. This is distinct from publishing the later Team release: a hosted
-loader accepting only the new contract cannot load a legacy bridge pin.
-Verify the anonymous descriptor, signature, installer HTML, and referenced
-hashed asset against the approved release. Do not change the pin during an
-in-progress update.
+## Retained action state
 
-The administrator approves one fresh normal update. After completion, verify:
+Keep existing Team proposals and journals until their provider outcome is
+known. A definitely unstarted proposal may be canceled through its guarded
+existing endpoint. An armed, partial, or uncertain action requires comparison
+with the actual Cloudflare policies and manual reconciliation; token revocation
+does not prove that an earlier write was rolled back.
 
-- the active Worker bytes and aggregate artifact digest match the signed bridge;
-- its durable update record and public status identify the bridge;
-- the recorded action is completed, not merely authorized or staged;
-- existing policies, receipts, source credentials, and tool selections are
-  unchanged; and
-- temporary routes are disabled.
+The original lifecycle floor remains conservative after a possible Team write.
+Do not delete Durable Object records, rewrite release bookkeeping, or weaken
+receipt checks to make an update, rollback, or teardown proceed.
 
-The bridge includes the updater's post-success redirect correction. Independently
-verify the installed state even if the browser returns successfully.
-
-## Publish and apply customer-local Team
-
-Only after the bridge update is verified, activate the compatible hosted
-installer pinned to the separately signed Team release. The Team release's
-manifest describes the optional management secret; its upload does not supply
-one. The bridge validates that exact new contract and the normal updater stages,
-probes, activates, and records the second update.
-
-Verify the second completed action, exact active release and artifact, public
-status, preserved source configuration, and disabled temporary routes again.
-Opening Team without a management credential must fail closed for writes and
-show the missing setup, not silently fall back to hosted OAuth.
-
-## Provision authority and verify permissions
-
-Provision the distinct secret directly in Cloudflare only after approving its
-standing authority and the compatible deployment. Follow
-[Team credential setup](TEAM_ACCESS.md#customer-owned-management-credential).
-Do not paste it into an assistant, the Gateway dashboard, or the installer.
-Do not use an installer grant, a source-provider credential, or a human Access
-token as the management credential.
-
-Re-enter and review any previously canceled proposal, then save one batch.
-Confirm that only the receipt-owned policies changed, the exact shared tool
-allowlists and `on_behalf: false` were preserved, and no Team-save request went
-through Ankka or a temporary Worker route.
-
-Complete the [two-person acceptance checks](TEAM_ACCESS.md#revocation-and-acceptance)
-with actual direct tool calls and Code Mode. Report observed session/revocation
-propagation; a changed policy or hidden tool list alone is not enforcement proof.
-
-An administrator remains an administrator. No BLS write capability is enabled.
-Source addition, including first-source onboarding for an empty Gateway, remains
-unavailable in this release. Automatic teardown and older-runtime rollback stay
-blocked once a Team policy write is armed. Do not rotate the credential or make
-an unrelated deployment while an update is in progress.
+See [Team access](TEAM_ACCESS.md) for the V1 manual workflow and future editor
+options.

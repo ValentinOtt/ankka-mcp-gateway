@@ -288,17 +288,20 @@ describe('TeamPage', () => {
     expect(window.location.search).toBe('')
   })
 
-  it('blocks Save without a management credential and gives direct Worker-secret setup guidance', async () => {
+  it('keeps V1 Team editing disabled without offering a management-token escape hatch', async () => {
     const user = userEvent.setup()
-    const client = renderTeam(api({ getTeam: vi.fn(async () => ({ ...team, managementCredentialConfigured: false })) }))
+    const client = renderTeam(api({ getTeam: vi.fn(async () => ({
+      ...team,
+      editingEnabled: false,
+      editingDisabledReason: 'managed_in_cloudflare' as const,
+      managementCredentialConfigured: false,
+    })) }))
     const person = await screen.findByRole('group', { name: 'analyst@example.com' })
-    await user.click(within(person).getByRole('checkbox'))
-    expect(screen.getByText(/Team saves need a dedicated Cloudflare management API token/)).toHaveTextContent('Settings → Variables and Secrets')
-    expect(screen.getByText(/Team saves need a dedicated Cloudflare management API token/)).toHaveTextContent('can administer other applications and policies in the same account')
-    expect(screen.getByRole('link', { name: 'Team credential setup guide' })).toHaveAttribute('href', 'https://github.com/ValentinOtt/ankka-mcp-gateway/blob/main/docs/TEAM_ACCESS.md')
-    expect(screen.getByRole('link', { name: 'Team credential setup guide' })).toHaveAttribute('rel', 'noreferrer')
-    expect(screen.getByText('ANKKA_TEAM_MANAGEMENT_TOKEN')).toBeInTheDocument()
-    expect(screen.getByText(/Never paste the token into this dashboard or send it to Ankka/)).toBeInTheDocument()
+    expect(within(person).getByRole('checkbox')).toBeDisabled()
+    expect(screen.getByText(/Team membership is managed directly in Cloudflare/)).toHaveTextContent('does not accept a permanent Cloudflare management credential')
+    expect(screen.getByRole('link', { name: 'Team access guide' })).toHaveAttribute('href', 'https://github.com/ValentinOtt/ankka-mcp-gateway/blob/main/docs/TEAM_ACCESS.md')
+    expect(screen.getByRole('link', { name: 'Team access guide' })).toHaveAttribute('rel', 'noreferrer')
+    expect(screen.queryByText('ANKKA_TEAM_MANAGEMENT_TOKEN')).not.toBeInTheDocument()
     const save = screen.getByRole('button', { name: 'Save' })
     expect(save).toBeDisabled()
     await user.click(save)
@@ -323,25 +326,25 @@ describe('TeamPage', () => {
     expect(window.location.search).toBe('')
   })
 
-  it('gives revoked-credential guidance and retains an uncertain proposal for local recovery', async () => {
-    const user = userEvent.setup()
+  it('directs a retained uncertain legacy proposal to manual Cloudflare reconciliation', async () => {
     const proposedMembers = team.members.map((member) => ({ ...member, sourceIds: member.email === 'analyst@example.com' ? [sourceId] : [] }))
     const pendingAction: TeamAction = { schemaVersion: 1, actionId, status: 'recovery_required', expiresAt, failureCode: 'team_management_credential_invalid', canCancel: false }
-    const getTeam = vi.fn().mockResolvedValueOnce(team).mockResolvedValue({ ...team, pendingAction, proposedMembers })
-    const client = renderTeam(api({ getTeam, prepareTeamAction: vi.fn().mockRejectedValue(new GatewayApiError(409, 'team_management_credential_invalid')) }))
-    await user.click(within(await screen.findByRole('group', { name: 'analyst@example.com' })).getByRole('checkbox'))
-    await user.click(screen.getByRole('button', { name: 'Save' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Check its expiry, account, and Access permissions')
-    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
-    expect(screen.queryByRole('button', { name: /Cloudflare/ })).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Try again' }))
-    expect(await screen.findByText(/Nothing was automatically restored/)).toHaveTextContent('replace ANKKA_TEAM_MANAGEMENT_TOKEN directly')
-    expect(screen.getByRole('button', { name: 'Resume recorded change' })).toBeEnabled()
+    const getTeam = vi.fn(async () => ({
+      ...team,
+      editingEnabled: false,
+      editingDisabledReason: 'managed_in_cloudflare' as const,
+      managementCredentialConfigured: false,
+      pendingAction,
+      proposedMembers,
+    }))
+    const client = renderTeam(api({ getTeam }))
+    expect(await screen.findByText(/Nothing was automatically restored/)).toHaveTextContent('reconcile its Access policies directly in Cloudflare')
+    expect(screen.getByRole('button', { name: 'Resume recorded change' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Cancel recorded change' })).not.toBeInTheDocument()
     expect(within(screen.getByRole('group', { name: 'analyst@example.com' })).getByRole('checkbox')).toBeChecked()
     expect(within(screen.getByRole('group', { name: 'analyst@example.com' })).getByRole('checkbox')).toBeDisabled()
     expect(within(savedAccessList()).getAllByText('No source access')).toHaveLength(2)
-    expect(client.prepareTeamAction).toHaveBeenCalledTimes(1)
+    expect(client.prepareTeamAction).not.toHaveBeenCalled()
   })
 
   it('locks uncertain preparation failures until the error retry checks saved state and never exposes raw exception details', async () => {
@@ -452,7 +455,13 @@ describe('TeamPage', () => {
     const pendingAction: TeamAction = { schemaVersion: 1, actionId, status: actionStatus, expiresAt, failureCode: null, canCancel: true }
     const proposedMembers = [{ email: 'admin@example.com', sourceIds: [sourceId] }]
     const canceled: TeamAction = { ...pendingAction, status: 'failed', failureCode: 'team_action_cancelled', canCancel: false }
-    const getTeam = vi.fn().mockResolvedValueOnce({ ...team, managementCredentialConfigured: false, pendingAction, proposedMembers }).mockResolvedValue({ ...team, managementCredentialConfigured: false, pendingAction: canceled })
+    const managedInCloudflare = {
+      ...team,
+      editingEnabled: false,
+      editingDisabledReason: 'managed_in_cloudflare' as const,
+      managementCredentialConfigured: false,
+    }
+    const getTeam = vi.fn().mockResolvedValueOnce({ ...managedInCloudflare, pendingAction, proposedMembers }).mockResolvedValue({ ...managedInCloudflare, pendingAction: canceled })
     const client = renderTeam(api({ getTeam, cancelTeamAction: vi.fn(async () => canceled) }))
     expect(await screen.findByText('Recorded change')).toBeInTheDocument()
     const record = within(screen.getByRole('group', { name: 'admin@example.com' })).getByRole('checkbox')
@@ -530,18 +539,18 @@ describe('TeamPage', () => {
     expect(client.prepareTeamAction).not.toHaveBeenCalled()
   })
 
-  it('explicitly labels the local synthetic preview and completes its simulated Save on this page', async () => {
+  it('explicitly labels the local synthetic preview and keeps Team writes disabled', async () => {
     vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
     window.history.replaceState(null, '', '/team?preview=ready')
-    const user = userEvent.setup()
     const previewApi = createPreviewGatewayAdminApi()
     if (!previewApi) throw new Error('Expected preview API')
     renderTeam(previewApi)
     expect(screen.getByText(/Local preview — synthetic users; no Cloudflare changes/)).toBeInTheDocument()
     const person = await screen.findByRole('group', { name: 'analyst@example.com' })
-    await user.click(within(person).getByRole('checkbox'))
-    await user.click(screen.getByRole('button', { name: 'Save' }))
-    expect(await screen.findByText(/last recorded team access change was applied and verified/)).toBeInTheDocument()
+    expect(within(person).getByRole('checkbox')).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    expect(screen.getByText(/Team membership is managed directly in Cloudflare/)).toBeInTheDocument()
+    expect(screen.queryByText(/last recorded team access change was applied and verified/)).not.toBeInTheDocument()
     expect(window.location.pathname).toBe('/team')
     expect(screen.queryByText('No unsaved changes')).not.toBeInTheDocument()
     expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument()

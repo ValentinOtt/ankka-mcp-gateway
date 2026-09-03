@@ -24,6 +24,7 @@ const TARGET = Object.freeze({
   oauthClientId: '2'.repeat(32),
   schemaVersion: 1,
   workerName: 'ankka-gateway-deploy-isolated-proof',
+  zoneId: '3'.repeat(32),
 });
 
 function sink() {

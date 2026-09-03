@@ -18,7 +18,7 @@ import {
 } from '../src/release-manifest';
 
 interface FileInput {
-  readonly component: 'admin' | 'installer' | 'worker' | 'workerCleanup' | 'workerRetirement';
+  readonly component: 'admin' | 'installer' | 'worker' | 'workerBootstrap' | 'workerCleanup' | 'workerRetirement';
   readonly path: string;
   readonly contentType: string;
   readonly bytes: Uint8Array;
@@ -54,13 +54,13 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
   workerId: string;
   workerName: string;
   workersSubdomain: string;
-  inheritTeamManagementFromVersion?: string;
 }>): Promise<SourceActionRuntimeFixture> {
   const encoder = new TextEncoder();
   const files: readonly FileInput[] = [
     { component: 'admin', path: 'payload/admin/index.html', contentType: 'text/html; charset=utf-8', bytes: encoder.encode('<!doctype html><title>Gateway</title>') },
     { component: 'installer', path: 'payload/installer/index.html', contentType: 'text/html; charset=utf-8', bytes: encoder.encode('<!doctype html><title>Installer</title>') },
     { component: 'worker', path: 'payload/worker/index.js', contentType: 'application/javascript+module', bytes: encoder.encode("const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default { fetch() { return new Response(\"ok\") } };") },
+    { component: 'workerBootstrap', path: 'payload/worker-bootstrap/index.js', contentType: 'application/javascript+module', bytes: encoder.encode('export class AdminState {}; export default { fetch() { return new Response("bootstrap") } };') },
     { component: 'workerCleanup', path: 'payload/worker-cleanup/index.js', contentType: 'application/javascript+module', bytes: encoder.encode('export default { fetch() { return new Response("cleanup") } };') },
     { component: 'workerRetirement', path: 'payload/worker-retirement/index.js', contentType: 'application/javascript+module', bytes: encoder.encode('export default { fetch() { return new Response("retired") } };') },
   ];
@@ -98,6 +98,7 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
       admin: await component('admin'),
       installer: await component('installer'),
       worker: await component('worker'),
+      workerBootstrap: await component('workerBootstrap'),
       workerCleanup: await component('workerCleanup'),
       workerRetirement: await component('workerRetirement'),
     },
@@ -138,6 +139,7 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
   });
   const bindings: GatewayWorkerPlainTextBindings = Object.freeze({
     ADMIN_EMAILS: input.actorEmail,
+    ANKKA_INSTALL_ID: `acg-${input.accountId.slice(0, 24)}`,
     ANKKA_GATEWAY_RELEASE: identity.release,
     ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${identity.artifactSha256}`,
     ANKKA_MANAGEMENT_HOSTNAME: input.managementHostname,
@@ -166,7 +168,7 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
     accountId: input.accountId,
     workerName: input.workerName,
     workerId: input.workerId,
-  }), 'clean', input.inheritTeamManagementFromVersion);
+  }), 'clean');
   const workerModule = direct.worker.modules.find((module) => module.name === 'index.js');
   if (!workerModule) throw new TypeError('source_action_runtime_fixture');
 
@@ -185,9 +187,6 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
       bindings: Object.freeze([
         Object.freeze({ name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' }),
         Object.freeze({ name: 'ASSETS', type: 'assets' }),
-        ...(input.inheritTeamManagementFromVersion === undefined ? [] : [
-          Object.freeze({ name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'secret_text' }),
-        ]),
         ...Object.entries(bindings).map(([name, text]) => Object.freeze({ name, text, type: 'plain_text' })),
       ]),
       compatibility_date: '2026-08-08',

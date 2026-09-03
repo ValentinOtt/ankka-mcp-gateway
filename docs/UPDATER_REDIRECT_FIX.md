@@ -33,7 +33,7 @@ Team-save behavior are unchanged.
 
 ## Local verification
 
-The [browser regression suite](../test/installer-management-redirect.test.mjs)
+The browser regression suite (`test/installer-management-redirect.test.mjs`, retired with the two-stage installer cutover on 2026-09-03 because deploy.ankka.ai no longer serves `/manage`)
 executes the complete JavaScript asset referenced by the release HTML, with
 controlled load events, context responses, and terminal templates. It covers
 immediate progress, fragmented templates, already-complete documents,

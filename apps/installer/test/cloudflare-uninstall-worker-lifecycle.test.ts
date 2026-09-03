@@ -103,9 +103,35 @@ function expectDeepFrozen<Value>(value: Value, seen = new Set<object>()): void {
 
 async function releaseSet(): Promise<VerifiedGatewayWorkerReleaseSet> {
   const primaryBytes = new TextEncoder().encode('export default {fetch(){return new Response("ok")}};');
+  const bootstrapBytes = new TextEncoder().encode('export class AdminState{}; export default {fetch(){}};');
   const cleanupBytes = new TextEncoder().encode('export class AdminState{}; export default {fetch(){}};');
   const retirementBytes = new TextEncoder().encode('export default {fetch(){return new Response(null,{status:410})}};');
   return Object.freeze({
+    bootstrap: Object.freeze({
+      verification: 'ed25519',
+      release: RELEASE,
+      artifactSha256: ARTIFACT_SHA,
+      componentSha256: '4'.repeat(64),
+      worker: Object.freeze({
+        mainModule: 'index.js',
+        compatibilityDate: '2026-08-08',
+        compatibilityFlags: EMPTY_COMPATIBILITY_FLAGS,
+        modules: Object.freeze([Object.freeze({
+          name: 'index.js', contentType: 'application/javascript+module',
+          sha256: await sha256(bootstrapBytes), bytes: bootstrapBytes,
+        })]),
+        assets: Object.freeze({
+          binding: 'ASSETS', notFoundHandling: 'single-page-application',
+          runWorkerFirst: Object.freeze(['/__ankka/*', '/api/*'] as const),
+          files: Object.freeze([Object.freeze({
+            path: '/index.html', contentType: 'text/html; charset=utf-8',
+            sha256: await sha256(new TextEncoder().encode('<p/>')),
+            bytes: new TextEncoder().encode('<p/>'),
+          })]),
+        }),
+        durableObject: Object.freeze({ binding: 'ADMIN_STATE', className: 'AdminState', storage: 'sqlite' }),
+      }),
+    }),
     primary: Object.freeze({
       verification: 'ed25519',
       release: RELEASE,

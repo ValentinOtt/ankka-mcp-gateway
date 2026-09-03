@@ -232,12 +232,16 @@ export interface ManagementCustomDomainLocator {
 
 export interface ManagementAccessApplicationSpec {
   readonly accountId: string;
+  /** Access applications are zone-owned for the resource-scoped OAuth grant. */
+  readonly zoneId: string;
   readonly plan: StaticDeployPlan;
   readonly allowedIdentityProviderIds: readonly string[];
 }
 
 export interface ManagementAdminPolicySpec {
   readonly accountId: string;
+  /** Must be the same zone that owns the parent Access application. */
+  readonly zoneId: string;
   readonly applicationId: string;
   readonly plan: StaticDeployPlan;
 }
@@ -285,6 +289,7 @@ export interface ManagementAccessApplicationIntent {
   readonly planHash: string;
   readonly ownershipMarker: string;
   readonly accountId: string;
+  readonly zoneId: string;
   readonly request: ManagementAccessApplicationRequestSpec;
 }
 
@@ -295,6 +300,7 @@ export interface ManagementAdminPolicyIntent {
   readonly planHash: string;
   readonly ownershipMarker: string;
   readonly accountId: string;
+  readonly zoneId: string;
   readonly applicationId: string;
   readonly request: ManagementAdminPolicyRequestSpec;
 }
@@ -360,6 +366,7 @@ interface ProviderResponse {
 
 interface ExpectedApplication {
   readonly accountId: string;
+  readonly zoneId: string;
   readonly planId: string;
   readonly planHash: string;
   readonly applicationId: string;
@@ -371,6 +378,7 @@ interface ExpectedApplication {
 
 interface ExpectedPolicy {
   readonly accountId: string;
+  readonly zoneId: string;
   readonly planId: string;
   readonly planHash: string;
   readonly applicationId: string;
@@ -887,7 +895,9 @@ function validateApplicationSpec(
   input: ManagementAccessApplicationSpec,
   stage: CloudflareManagementStage,
 ): Omit<ExpectedApplication, 'applicationId' | 'aud'> {
-  if (!ACCOUNT_ID_PATTERN.test(input.accountId)) fail('invalid_input', stage, 'not_sent');
+  if (!ACCOUNT_ID_PATTERN.test(input.accountId) || !ZONE_ID_PATTERN.test(input.zoneId)) {
+    fail('invalid_input', stage, 'not_sent');
+  }
   const plan = reviewedManagementProjection(input.plan, stage);
   if (!validZoneRelation(plan.managementHostname, plan.zoneName)) fail('invalid_input', stage, 'not_sent');
   const allowedIdentityProviderIds = canonicalStrings(input.allowedIdentityProviderIds);
@@ -896,6 +906,7 @@ function validateApplicationSpec(
   }
   return {
     accountId: input.accountId,
+    zoneId: input.zoneId,
     planId: plan.planId,
     planHash: plan.planHash,
     domain: plan.managementHostname,
@@ -904,8 +915,8 @@ function validateApplicationSpec(
   };
 }
 
-function applicationsListUrl(accountId: string, hostname: string, page: number, perPage: number): URL {
-  const url = accountUrl(accountId, '/access/apps');
+function applicationsListUrl(zoneId: string, hostname: string, page: number, perPage: number): URL {
+  const url = zoneUrl(zoneId, '/access/apps');
   url.searchParams.set('domain', hostname);
   url.searchParams.set('page', String(page));
   url.searchParams.set('per_page', String(perPage));
@@ -933,6 +944,7 @@ function exactApplication(value: BoundaryValue, expected: ExpectedApplication): 
 export async function preflightFreshManagementAccessApplication(
   input: CloudflareManagementCall & {
     readonly accountId: string;
+    readonly zoneId: string;
     readonly plan: StaticDeployPlan;
   },
 ): Promise<{ readonly clear: true }> {
@@ -942,7 +954,7 @@ export async function preflightFreshManagementAccessApplication(
   const plan = reviewedManagementProjection(input.plan, stage);
   if (!validZoneRelation(plan.managementHostname, plan.zoneName)) fail('invalid_input', stage, 'not_sent');
   const values = await collectPaginated(call, stage, LIST_PAGE_SIZE, (page, perPage) =>
-    applicationsListUrl(input.accountId, plan.managementHostname, page, perPage));
+    applicationsListUrl(input.zoneId, plan.managementHostname, page, perPage));
   if (values.length > 1) fail('provider_ambiguous', stage, 'rejected');
   if (values.length === 1) {
     const value = v.safeParse(v.looseObject({ domain: v.string(), id: providerIdSchema }), values[0]);
@@ -980,6 +992,7 @@ export function prepareManagementAccessApplicationIntent(
     planHash: expected.planHash,
     ownershipMarker: managementOwnershipMarker(input.plan),
     accountId: expected.accountId,
+    zoneId: expected.zoneId,
     request: applicationBody(expected),
   });
 }
@@ -1002,7 +1015,7 @@ export async function createManagementAccessApplication(
   const stage = 'management_app_create';
   const call = commonInput(input, stage);
   const { intent } = requireApplicationIntent(input, stage);
-  const response = await performRequest(call, stage, accountUrl(input.accountId, '/access/apps'), {
+  const response = await performRequest(call, stage, zoneUrl(input.zoneId, '/access/apps'), {
     method: 'POST',
     headers: jsonHeaders(call.accessToken),
     body: JSON.stringify(intent.request),
@@ -1032,7 +1045,7 @@ export async function verifyManagementAccessApplicationGet(
   const response = await performRequest(
     call,
     stage,
-    accountUrl(input.accountId, `/access/apps/${encodeURIComponent(input.applicationId)}`),
+    zoneUrl(input.zoneId, `/access/apps/${encodeURIComponent(input.applicationId)}`),
     { method: 'GET', headers: authHeaders(call.accessToken) },
   );
   const result = requireSuccess(response, stage).result;
@@ -1047,7 +1060,7 @@ export async function verifyManagementAccessApplicationList(
   const call = commonInput(input, stage);
   const expected = expectedApplication(input, stage);
   const values = await collectPaginated(call, stage, LIST_PAGE_SIZE, (page, perPage) =>
-    applicationsListUrl(input.accountId, expected.domain, page, perPage));
+    applicationsListUrl(input.zoneId, expected.domain, page, perPage));
   if (values.length > 1) fail('provider_ambiguous', stage, 'rejected');
   if (values.length !== 1 || !exactApplication(values[0], expected)) {
     fail('late_drift', stage, 'rejected');
@@ -1064,7 +1077,7 @@ export async function recoverManagementAccessApplication(
   const call = commonInput(input, stage);
   const { expected } = requireApplicationIntent(input, stage);
   const values = await collectPaginated(call, stage, LIST_PAGE_SIZE, (page, perPage) =>
-    applicationsListUrl(input.accountId, expected.domain, page, perPage));
+    applicationsListUrl(input.zoneId, expected.domain, page, perPage));
   const matches: ManagementAccessApplicationLocator[] = [];
   for (const value of values) {
     const parsed = v.safeParse(applicationLocatorResultSchema, value);
@@ -1101,6 +1114,7 @@ function validatePolicySpec(
 ): Omit<ExpectedPolicy, 'policyId'> {
   if (
     !ACCOUNT_ID_PATTERN.test(input.accountId) ||
+    !ZONE_ID_PATTERN.test(input.zoneId) ||
     !providerId(input.applicationId)
   ) fail('invalid_input', stage, 'not_sent');
   const plan = reviewedManagementProjection(input.plan, stage);
@@ -1110,6 +1124,7 @@ function validatePolicySpec(
   }
   return {
     accountId: input.accountId,
+    zoneId: input.zoneId,
     planId: plan.planId,
     planHash: plan.planHash,
     applicationId: input.applicationId,
@@ -1159,6 +1174,7 @@ export function prepareManagementAdminPolicyIntent(
     planHash: expected.planHash,
     ownershipMarker: managementOwnershipMarker(input.plan),
     accountId: expected.accountId,
+    zoneId: expected.zoneId,
     applicationId: expected.applicationId,
     request: Object.freeze(policyBody(expected)),
   });
@@ -1185,7 +1201,7 @@ export async function createManagementAdminAllowPolicy(
   const response = await performRequest(
     call,
     stage,
-    accountUrl(input.accountId, `/access/apps/${encodeURIComponent(input.applicationId)}/policies`),
+    zoneUrl(input.zoneId, `/access/apps/${encodeURIComponent(input.applicationId)}/policies`),
     {
       method: 'POST',
       headers: jsonHeaders(call.accessToken),
@@ -1215,8 +1231,8 @@ export async function verifyManagementAdminAllowPolicyGet(
   const response = await performRequest(
     call,
     stage,
-    accountUrl(
-      input.accountId,
+    zoneUrl(
+      input.zoneId,
       `/access/apps/${encodeURIComponent(input.applicationId)}/policies/${encodeURIComponent(input.policyId)}`,
     ),
     { method: 'GET', headers: authHeaders(call.accessToken) },
@@ -1232,7 +1248,7 @@ export async function verifyManagementAdminAllowPolicyList(
   const call = commonInput(input, stage);
   const expected = expectedPolicy(input, stage);
   const values = await collectPaginated(call, stage, LIST_PAGE_SIZE, (page, perPage) => {
-    const url = accountUrl(input.accountId, `/access/apps/${encodeURIComponent(input.applicationId)}/policies`);
+    const url = zoneUrl(input.zoneId, `/access/apps/${encodeURIComponent(input.applicationId)}/policies`);
     url.searchParams.set('page', String(page));
     url.searchParams.set('per_page', String(perPage));
     return url;
@@ -1253,7 +1269,7 @@ export async function recoverManagementAdminAllowPolicy(
   const call = commonInput(input, stage);
   const { expected } = requirePolicyIntent(input, stage);
   const values = await collectPaginated(call, stage, LIST_PAGE_SIZE, (page, perPage) => {
-    const url = accountUrl(input.accountId, `/access/apps/${encodeURIComponent(input.applicationId)}/policies`);
+    const url = zoneUrl(input.zoneId, `/access/apps/${encodeURIComponent(input.applicationId)}/policies`);
     url.searchParams.set('page', String(page));
     url.searchParams.set('per_page', String(perPage));
     return url;

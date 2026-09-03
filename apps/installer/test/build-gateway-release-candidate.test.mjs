@@ -61,22 +61,17 @@ describe('build-gateway-release-candidate', () => {
       const parsed = parseCanonicalReleaseManifest(serialized);
       expect(parsed.release).toBe(RELEASE);
       expect(parsed.sourceCommit).toBe(checkout.commit);
-      expect(parsed.artifact.fileCount).toBe(Object.keys(RELEASE_FILES).length);
+      expect(parsed.artifact.fileCount).toBe(Object.keys(RELEASE_FILES).length + 1);
       expect(parsed.artifact.byteSize).toBe(
-        Object.values(RELEASE_FILES).reduce((total, contents) => total + Buffer.byteLength(contents), 0),
+        candidate.files.reduce((total, file) => total + file.bytes.byteLength, 0),
       );
 
       // Independent digest computation with the signer's definition.
-      const records = Object.entries(RELEASE_FILES).map(([relative, contents]) => ({
-        byteSize: Buffer.byteLength(contents),
-        contentType: parsed.components[
-          relative.startsWith('payload/admin/') ? 'admin'
-            : relative.startsWith('payload/installer/') ? 'installer'
-              : relative.startsWith('payload/worker-cleanup/') ? 'workerCleanup'
-                : relative.startsWith('payload/worker-retirement/') ? 'workerRetirement' : 'worker'
-        ].files.find((file) => file.path === relative).contentType,
-        path: relative,
-        sha256: sha256(Buffer.from(contents)),
+      const records = candidate.files.map(({ bytes, record }) => ({
+        byteSize: bytes.byteLength,
+        contentType: record.contentType,
+        path: record.path,
+        sha256: sha256(bytes),
       })).sort((left, right) => (left.path < right.path ? -1 : 1));
       expect(parsed.artifact.treeSha256).toBe(sha256(Buffer.from(canonicalJson(records))));
       for (const [name, component] of Object.entries(parsed.components)) {
@@ -91,6 +86,8 @@ describe('build-gateway-release-candidate', () => {
         'text/plain; charset=utf-8',
       ].sort());
       expect(parsed.components.worker.files[0].contentType).toBe('application/javascript+module');
+      expect(parsed.components.workerBootstrap.files[0].contentType)
+        .toBe('application/javascript+module');
       expect(candidate.manifestSha256).toBe(sha256(candidate.manifestBytes));
       expect(candidateSummary(candidate)).toMatchObject({
         schemaVersion: 1,
@@ -117,11 +114,12 @@ describe('build-gateway-release-candidate', () => {
       });
       const worker = candidate.files.find(({ record }) => record.path === 'payload/worker/index.js');
       expect(worker).toBeDefined();
+      expect(worker.bytes.toString('utf8')).toContain(`// ankka-control-plane-origin:${isolatedOrigin}`);
       expect(worker.bytes.toString('utf8')).toContain(
-        `const CONTROL_PLANE_ORIGIN = '${isolatedOrigin}';`,
+        `var CONTROL_PLANE_ORIGIN = "${isolatedOrigin}";`,
       );
       expect(worker.bytes.toString('utf8')).not.toContain(
-        "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';",
+        'ankka-control-plane-origin:https://deploy.ankka.ai',
       );
       expect(candidate.manifest.controlPlaneOrigin).toBe(isolatedOrigin);
       expect(worker.record.sha256).toBe(sha256(worker.bytes));
@@ -182,8 +180,11 @@ describe('build-gateway-release-candidate', () => {
       expect((await readdir(outputRoot)).sort()).toEqual(['manifest.json', 'payload']);
       expect((await readFile(path.join(outputRoot, 'manifest.json'))).equals(first.manifestBytes)).toBe(true);
       for (const [relative, contents] of Object.entries(RELEASE_FILES)) {
+        if (relative === 'payload/worker/index.js') continue;
         expect((await readFile(path.join(outputRoot, ...relative.split('/')))).toString()).toBe(contents);
       }
+      expect(await readFile(path.join(outputRoot, 'payload/worker-bootstrap/index.js'), 'utf8'))
+        .toContain('ankka-bootstrap-runtime:v1');
 
       // The exact signer prepare step accepts the candidate with an in-test
       // throwaway key. Nothing here is a release signature: the seed is

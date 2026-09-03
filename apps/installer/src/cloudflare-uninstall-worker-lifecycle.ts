@@ -313,6 +313,12 @@ const verifiedReleaseModuleSchema = v.strictObject({
   sha256: sha256Schema,
 });
 const releaseSetIdentitySchema = v.strictObject({
+  bootstrap: v.object({
+    verification: v.literal('ed25519'),
+    release: v.pipe(v.string(), v.regex(RELEASE)),
+    artifactSha256: sha256Schema,
+    componentSha256: sha256Schema,
+  }),
   primary: v.object({
     verification: v.literal('ed25519'),
     release: v.pipe(v.string(), v.regex(RELEASE)),
@@ -1183,9 +1189,11 @@ async function verifiedModules(
 
 function releaseSetIdentityValid(releaseSet: VerifiedGatewayWorkerReleaseSet): boolean {
   if (!v.is(releaseSetIdentitySchema, releaseSet)) return false;
-  const { primary, cleanup, retirement } = releaseSet;
+  const { bootstrap, primary, cleanup, retirement } = releaseSet;
   if (
-    cleanup.release !== primary.release || retirement.release !== primary.release ||
+    bootstrap.release !== primary.release || cleanup.release !== primary.release ||
+    retirement.release !== primary.release ||
+    bootstrap.artifactSha256 !== primary.artifactSha256 ||
     cleanup.artifactSha256 !== primary.artifactSha256 ||
     retirement.artifactSha256 !== primary.artifactSha256 ||
     cleanup.variant !== 'cleanup' || retirement.variant !== 'retirement'

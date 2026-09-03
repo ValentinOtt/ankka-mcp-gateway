@@ -41,6 +41,7 @@ function envelope<Result>(result: Result, status = 200): Response {
 function runtimeBindings(overrides: Readonly<Record<string, string>> = {}) {
   const values = {
     ADMIN_EMAILS: 'admin@example.com',
+    ANKKA_INSTALL_ID: INSTALLATION_ID,
     ANKKA_GATEWAY_RELEASE: 'gateway-v1.0.0',
     ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${'1'.repeat(64)}`,
     ANKKA_MANAGEMENT_HOSTNAME: 'manage.example.com',

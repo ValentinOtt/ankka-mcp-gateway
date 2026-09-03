@@ -7,6 +7,7 @@ export const CLOUDFLARE_API_ORIGIN = 'https://api.cloudflare.com';
 
 export const SESSION_COOKIE = '__Host-ankka_gateway_deploy';
 export const OAUTH_COOKIE = '__Host-ankka_gateway_deploy_oauth';
+export const BOOTSTRAP_COOKIE = '__Host-ankka_gateway_bootstrap';
 
 export const SESSION_TTL_MS = 30 * 60 * 1000;
 export const OAUTH_ATTEMPT_TTL_MS = 10 * 60 * 1000;
@@ -26,13 +27,10 @@ export type DiscoveryOauthScope = (typeof DISCOVERY_OAUTH_SCOPES)[number];
 // This list is an application security boundary, not release-manifest input.
 // A release is accepted only when it requests this exact set.
 export const REQUIRED_OAUTH_SCOPES = Object.freeze([
-  'access-acct.write',
-  'access.write',
-  'account-settings.read',
+  'access-acct.read',
+  'zone-access.write',
   'dns.write',
   'mcp-portals.write',
-  'memberships.read',
-  'user-details.read',
   'workers-routes.read',
   'workers-scripts.write',
   'zone.read',

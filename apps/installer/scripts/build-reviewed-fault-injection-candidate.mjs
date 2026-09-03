@@ -30,7 +30,7 @@ import {
 const RELEASE_PATTERN = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const WORKER_ENTRY = 'payload/worker/index.js';
 const SOURCE_TOOL_PATH = 'apps/installer/scripts/build-reviewed-fault-injection-candidate.mjs';
-const PROBE_ANCHOR = "    if (control?.command === 'probe') {\n";
+const PROBE_ANCHOR = '  if (control?.command === "probe") {\n';
 const INJECTED_PROBE =
   "    if (control?.command === 'probe') {\n" +
   `      ${REVIEWED_FAULT_INJECTION_MARKER}\n` +

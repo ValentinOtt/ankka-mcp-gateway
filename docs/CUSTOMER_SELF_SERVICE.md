@@ -65,14 +65,11 @@ Compare Cloudflare's consent screen with these lists. Stop if a permission is
 missing or unexpected; the installer also rejects any release that asks for a
 different set.
 
-Team permission saves use a distinct customer-owned Worker secret, never one of
-these OAuth grants. The runtime token needs only account-scoped **Access: Apps
-and Policies — Edit** and **MCP Portals — Read**, restricted to the gateway's
-account. The Access permission permits broader account Access administration;
-it is not isolated to this gateway's policies. Read the exact endpoint evidence,
-direct Cloudflare provisioning, rotation/revocation, and migration steps in
-[Team access](TEAM_ACCESS.md#customer-owned-management-credential) before
-approving this standing authority.
+V1 Team membership is managed directly in Cloudflare. Do not create or add a
+Team-management API token to the gateway. Cloudflare does not support scoping
+an API token to one reusable Access policy, so an account token would widen the
+credential boundary instead of completing this flow. See
+[Team access](TEAM_ACCESS.md).
 
 ## Installation flow
 
@@ -120,11 +117,10 @@ separate steps. Gateways still on the published v19 preview cannot add sources.
   runtime enables installation, save and authorize a reviewed draft here.
   New sources start denied; old prepared installation links cannot silently
   acquire the new default-deny authorization profile.
-- **Team** manages users and their source access in one list, with an Add user
-  dialog. Administrator rights remain fixed; tool allowlists are shared per source.
-  One Save sends the complete batch to your own Worker, which updates and
-  verifies your Access policies without contacting Ankka or starting OAuth.
-  See [Team access](TEAM_ACCESS.md) for verification and recovery limits.
+- **Team** is read-only in V1. It shows the gateway's saved access snapshot and
+  shared source tools; manage membership and source audiences directly in
+  Cloudflare. Administrator rights remain fixed. See
+  [Team access](TEAM_ACCESS.md) for the manual workflow and recovery limits.
 - **Settings** checks the installed signed release channel, prepares an
   update or rollback, and contains the removal entry point in its danger zone.
   The sidebar footer shows the installed version and any available update. Older canary
@@ -132,14 +128,12 @@ separate steps. Gateways still on the published v19 preview cannot add sources.
   `/updates` as a redirect to `/settings`.
 
 Updates, rollback, and removal require a new short-lived Cloudflare
-authorization. Team saves require the separately provisioned
-`ANKKA_TEAM_MANAGEMENT_TOKEN` Worker secret and fail closed with setup guidance
-if it is missing or invalid; they never fall back to hosted OAuth. Source
-installation uses a separate short-lived installer authorization. Source draft
-saves do not request OAuth or grant access. The complete secret-free source-state
-record is bounded to 1 MiB of canonical UTF-8 JSON; a save that would cross the
-bound in its worst-case installed projection is rejected before Durable Object
-storage is changed.
+authorization. Team writes are rejected in V1 and never fall back to hosted
+OAuth or a standing Worker credential. Source installation uses a separate
+short-lived installer authorization. Source draft saves do not request OAuth or
+grant access. The complete secret-free source-state record is bounded to 1 MiB
+of canonical UTF-8 JSON; a save that would cross the bound in its worst-case
+installed projection is rejected before Durable Object storage is changed.
 
 For a protected source, the Portal mapping sets **Require user auth** off. A
 gateway operator connects the source once, the credential stays in your
@@ -195,16 +189,12 @@ receipts, and team data. Rollback restores a previous Worker version without
 rolling back application data. See [Gateway updates and rollback](UPDATES.md)
 for the temporary, authenticated action route used during the operation.
 
-The customer-local Team release changes the optional secret-binding contract.
-An installed v16 gateway first needs a reviewed signed compatibility bridge,
-then a second normal update to the Team release. Neither update provisions the
-credential; that remains a separate administrator action in Cloudflare.
-Compatible later forward updates preserve the secret by inheriting it from the
-verified deployed version. Rollback is blocked when the current or target
-version has the management secret. Follow the
-[bridge upgrade procedure](TEAM_UPGRADE.md), preserving source credentials and
-application data. It requires explicit normal cancellation of any provably
-unstarted Team proposal; an armed or uncertain proposal must be reconciled first.
+The V1 release contract does not include a Team-management secret. A reviewed
+forward update can remove the retired preview binding by omitting it from the
+new version; it never reads or inherits the value. Rollback is blocked when the
+current or target version carries that legacy binding. Follow the
+[retirement procedure](TEAM_UPGRADE.md), preserving source credentials,
+application data, and any uncertain action journal.
 
 After a Team policy write or new-profile source creation may have occurred,
 rollback below the recorded runtime floor is blocked. Rolling back code would
@@ -242,10 +232,10 @@ Other unrelated Cloudflare resources and upstream provider accounts are not
 removed. Provider-side credentials or OAuth clients configured outside the
 gateway may need separate revocation.
 
-The Team management API token is created outside the installer and must be
-revoked separately in Cloudflare. Removing its Worker binding does not revoke
-it or erase historical versions. Neither step clears the restrictions caused
-by a possibly applied Team policy write.
+If you created the retired preview Team token, revoke it separately in
+Cloudflare and remove its Worker binding. Removing the binding does not revoke
+the token or erase historical versions. Neither step clears restrictions caused
+by a possibly applied legacy Team policy write.
 
 ## Experimental browser tools
 
@@ -257,22 +247,21 @@ Installer tools are `begin_cloudflare_discovery`, `configure_gateway`,
 `create_review_plan`, `get_installer_status`, `begin_authorization`,
 `create_removal_plan`, and `begin_removal`.
 
-Dashboard tools cover Gateway capabilities and status, sources, Team
-read/save/recovery, signed update review and handoffs, and recorded action
-status. See [the complete WebMCP tool contract](WEBMCP.md) for exact names,
-inputs, safe recovery, and browser-test instructions. No separate management
-MCP connection is required.
+Dashboard tools cover Gateway capabilities and status, sources, read-only Team
+state and retained-action recovery, signed update review and handoffs, and
+recorded action status. See [the complete WebMCP tool contract](WEBMCP.md) for
+exact names, inputs, safe recovery, and browser-test instructions. No separate
+management MCP connection is required.
 
 The source draft/apply tools follow the installed runtime's capability state,
 just like the dashboard. Published v19 gateways keep them paused; the default-deny
 candidate restores them without granting source access automatically.
 
 These tools call the same same-origin APIs as the visible interface. They add
-no independent mutation authority. Team Save applies the complete reviewed
-change directly through your Gateway's management credential; it is not a
-preview. Install/update/removal tools retain their reviewed short-lived
-authorization handoffs. An agent must not request or receive the user's token
-or substitute tool metadata for required consent.
+no independent mutation authority. V1 exposes Team state read-only and leaves
+membership changes in Cloudflare. Install/update/removal tools retain their
+reviewed short-lived authorization handoffs. An agent must not request or
+receive the user's token or substitute tool metadata for required consent.
 
 ## Troubleshooting safely
 

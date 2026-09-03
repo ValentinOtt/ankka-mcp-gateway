@@ -228,6 +228,8 @@ const FAILURE_COPY: Readonly<Record<DeployErrorCode, {
     repairTarget: null,
   },
   bad_request: { title: 'Deployment request rejected', detail: 'Review the installer inputs and create a new plan.', repairTarget: null },
+  bootstrap_failed: { title: 'Gateway bootstrap could not be verified', detail: 'Restart the secure setup or remove the incomplete Worker from Cloudflare.', repairTarget: null },
+  bootstrap_not_ready: { title: 'Gateway bootstrap is still starting', detail: 'Keep this page open while Cloudflare starts the customer-owned Worker.', repairTarget: null },
   callback_invalid: { title: 'Cloudflare callback rejected', detail: 'Restart authorization from the exact approved plan.', repairTarget: null },
   csrf_invalid: { title: 'Installer session expired', detail: 'Reload the installer and create a new plan.', repairTarget: null },
   existing_gateway_detected: {

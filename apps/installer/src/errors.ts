@@ -3,6 +3,8 @@ import * as v from 'valibot';
 export type DeployErrorCode =
   | 'abuse_controls_unavailable'
   | 'bad_request'
+  | 'bootstrap_failed'
+  | 'bootstrap_not_ready'
   | 'callback_invalid'
   | 'csrf_invalid'
   | 'existing_gateway_detected'
@@ -27,6 +29,8 @@ export type DeployErrorCode =
 export const DEPLOY_ERROR_CODES: ReadonlySet<string> = new Set<DeployErrorCode>([
   'abuse_controls_unavailable',
   'bad_request',
+  'bootstrap_failed',
+  'bootstrap_not_ready',
   'callback_invalid',
   'csrf_invalid',
   'existing_gateway_detected',

@@ -42,24 +42,20 @@ discarded.
 Revocation is a provider operation and may be unconfirmed. Discarding a local
 copy does not prove provider-side revocation.
 
-Customer-local Team saves use a third, distinct credential:
-`ANKKA_TEAM_MANAGEMENT_TOKEN`, a Cloudflare API token provisioned directly as a
-Secret in the customer's gateway Worker. It is optional until the customer
-explicitly approves standing management authority. It never transits Ankka or
-the gateway browser API and must not enter Durable Object state, configuration
-files, logs, telemetry, exceptions, deployment output, or support evidence.
-Installer grants, source credentials, and inbound Access tokens cannot be used
-for this purpose.
+V1 has no permanent Cloudflare management credential. Team membership and
+source audiences are managed directly in Cloudflare; the gateway does not
+accept a standing API token for Team policy writes. Installer OAuth grants,
+source credentials, and inbound Access tokens cannot be repurposed for that
+work.
 
-The current minimum is **Access: Apps and Policies — Edit/Write** and **MCP
-Portals — Read**, scoped to the gateway's one account. Cloudflare does not
-document per-policy API-token isolation for these account permissions: the
-credential allows broader Access application and policy administration in that
-account. Exact runtime ownership checks constrain this implementation, not a
-stolen credential. Provisioning, rotation, revocation, endpoint evidence, and
-remaining live validation are documented in [Team access](TEAM_ACCESS.md).
-Deleting a Worker binding does not revoke its API token or remove the value from
-historical versions; the customer must revoke the token in Cloudflare.
+Cloudflare support confirmed that account-owned and user-owned API tokens can
+scope resources only at User, Account, or Zone level. **Access: Policies
+Write** on one account therefore authorizes every Access policy in that account;
+it cannot be restricted to one reusable Ankka policy. Per-policy Access Policy
+Admin scoping belongs to the human/member IAM model, whose resource-scoped OAuth
+path currently has a beta gap for individual policy API requests. See
+[Team access](TEAM_ACCESS.md) for the V1 manual workflow and the two future
+options that remain under consideration.
 
 ## Authorization
 
@@ -91,13 +87,13 @@ The gateway Durable Object stores secret-free configuration, exact source
 allowlists, action journals, release state, and ownership receipts. It must not
 store Cloudflare OAuth grants or upstream tokens.
 
-Team Save calls only the same-origin customer Worker, which uses its separate
-management secret to verify the complete owned application/policy graph and
-Portal mappings before and after exact policy writes. Fixed administrators,
-same-origin/CSRF checks, revision checks, default-deny empty audiences, bounded
-provider requests, and durable write intent remain required. Missing or invalid
-credentials and provider drift fail closed without a hosted OAuth fallback.
-An uncertain write retains its proposal and journal; it is not called a rollback.
+The Team page is read-only in V1. It can show the gateway's saved snapshot and
+any retained legacy proposal, but changes made directly in Cloudflare are not
+projected back into that snapshot. The Worker rejects new Team policy-write
+requests and does not read a standing management credential. A definitely
+unstarted legacy proposal may still be canceled through its existing guarded
+path; uncertain writes retain their evidence for manual reconciliation rather
+than being called a rollback.
 
 The default-deny source-onboarding candidate creates each new source with one
 exact deny-Everyone policy and verifies the complete policy list before Portal
@@ -109,8 +105,9 @@ source actions cannot silently become new-profile authorizations.
 
 Legacy Team authorization and callbacks are refused by the installer before
 OAuth code exchange. The relay and new Worker also reject the old Team grant
-submission. No temporary `workers.dev` route is needed for a Team save. Other
-installer action callbacks retain their existing operation-scoped grant handling.
+submission. Team management does not enable a temporary `workers.dev` route.
+Other installer action callbacks retain their existing operation-scoped grant
+handling.
 
 ## Ownership, recovery, and removal
 
@@ -141,15 +138,16 @@ Normal updates are limited to Worker code and management assets. Changes to
 permissions, bindings, migrations, compatibility settings, signing keys, or
 provider resources require a separately designed and approved release path.
 
-The customer-local Team release adds an explicitly optional secret contract.
-The [reviewed bridge sequence](TEAM_UPGRADE.md) crosses the v16 contract boundary
-using two normal signed updates, without out-of-band rewrites of durable release
-records or provisioning the secret. Normal updater actions maintain their own
-release records and status. Compatible subsequent forward updates preserve the
-secret from the exact verified current Worker version without revealing its
-value. Rollback is refused when the current or target version carries this secret. The original
-teardown restrictions remain, including after token revocation or binding
-deletion if any Team policy write may have occurred.
+The V1 signed release contract declares no Team-management secret. A forward
+update may recognize the one retired preview binding only so it can omit that
+binding from the new version; it never reads or inherits the value. Rollback
+into or out of a version carrying the retired binding is refused. Anyone who
+created the old API token must revoke it separately in Cloudflare because
+removing a Worker binding does not revoke provider authority or erase historical
+versions. See the preserved [retirement procedure](TEAM_UPGRADE.md).
+
+The original teardown restrictions remain if a legacy Team policy write may
+have occurred, even after token revocation or binding removal.
 New-profile source creation uses the same conservative floor/removal safeguard
 before its first provider mutation. Source discovery, draft saving, and action
 review do not arm it. This restriction is disclosed before source authorization
@@ -194,7 +192,7 @@ guarantee does not claim that those providers process no metadata.
   enforcement.
 - Worker rollback does not roll back Durable Object data.
 - Automatic teardown is unavailable after a potentially applied Team policy
-  write or new-profile source creation. Revoking the management credential or
+  write or new-profile source creation. Revoking a retired preview token or
   restoring the original roster does not clear the recorded restriction.
 - Provider APIs can return ambiguous outcomes; the system stops for recovery
   instead of claiming success.

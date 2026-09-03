@@ -159,6 +159,11 @@ async function fixture(): Promise<{
     await record('payload/admin/index.html', 'text/html; charset=utf-8', '<main>admin</main>'),
     await record('payload/installer/index.html', 'text/html; charset=utf-8', '<main>installer</main>'),
     await record(
+      'payload/worker-bootstrap/index.js',
+      'application/javascript+module',
+      'export class AdminState {}; export default {}',
+    ),
+    await record(
       'payload/worker-cleanup/index.js',
       'application/javascript+module',
       'export class AdminState {}; export default {}',
@@ -192,9 +197,10 @@ async function fixture(): Promise<{
     components: {
       admin: await component(files.slice(0, 1)),
       installer: await component(files.slice(1, 2)),
-      worker: await component(files.slice(4, 5)),
-      workerCleanup: await component(files.slice(2, 3)),
-      workerRetirement: await component(files.slice(3, 4)),
+      worker: await component(files.slice(5, 6)),
+      workerBootstrap: await component(files.slice(2, 3)),
+      workerCleanup: await component(files.slice(3, 4)),
+      workerRetirement: await component(files.slice(4, 5)),
     },
     oauthScopeIds: REQUIRED_OAUTH_SCOPES,
     release: RELEASE,

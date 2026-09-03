@@ -42,7 +42,7 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
 const MAX_CONTROL_PLANE_ORIGIN_LENGTH = 2_048;
 const WORKER_CONTROL_PLANE_ORIGIN_DECLARATION =
-  /^const CONTROL_PLANE_ORIGIN = '(https:\/\/[^'\r\n]+)';$/gmu;
+  /^\/\/ ankka-control-plane-origin:(https:\/\/[^\r\n]+)$/gmu;
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/u;
 const CREDENTIAL_NAME = /(?:^|[-_.])(?:api[-_.]?key|client[-_.]?secret|credential|credentials|password|passwd|private[-_.]?key|secret|secrets|token|tokens)(?:[-_.]|$)/iu;
 const DISALLOWED_CREDENTIAL_SEGMENT = new Set([
@@ -79,13 +79,10 @@ export const RELEASE_ENVELOPE_SCHEMA_VERSION = 2;
 export const RELEASE_SIGNATURE_CONTEXT = 'ankka-mcp-gateway-release-envelope-v2';
 
 export const REQUIRED_OAUTH_SCOPES = Object.freeze([
-  'access-acct.write',
-  'access.write',
-  'account-settings.read',
+  'access-acct.read',
+  'zone-access.write',
   'dns.write',
   'mcp-portals.write',
-  'memberships.read',
-  'user-details.read',
   'workers-routes.read',
   'workers-scripts.write',
   'zone.read',
@@ -112,27 +109,83 @@ export const APPROVED_CLOUDFLARE_CONTRACT = Object.freeze({
   previewUrls: false,
   publicBindings: Object.freeze({
     secrets: Object.freeze([
-      Object.freeze({ lifecycle: 'bootstrap-only', name: 'ANKKA_BOOTSTRAP_NONCE' }),
-      Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_TEAM_MANAGEMENT_TOKEN' }),
+      Object.freeze({ lifecycle: 'customer-worker', name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY' }),
     ]),
     variables: Object.freeze([
       'ADMIN_EMAILS',
+      'ANKKA_INSTALL_ID',
       'ANKKA_GATEWAY_RELEASE',
       'ANKKA_GATEWAY_RELEASE_SHA256',
+      'ANKKA_MANAGEMENT_HOSTNAME',
+      'ANKKA_UPDATE_CHANNEL',
+      'ANKKA_UPDATE_KEY_ID',
+      'ANKKA_UPDATE_PUBLIC_KEY',
+      'ANKKA_WORKERS_SUBDOMAIN',
+      'ANKKA_WORKER_NAME',
       'CF_ACCESS_AUD',
       'CF_ACCESS_ISSUER',
       'CLOUDFLARE_ACCOUNT_ID',
       'CLOUDFLARE_ZONE_ID',
       'CLOUDFLARE_ZONE_NAME',
-      'ANKKA_UPDATE_CHANNEL',
-      'ANKKA_UPDATE_KEY_ID',
-      'ANKKA_UPDATE_PUBLIC_KEY',
       'ZERO_TRUST_READY',
     ]),
   }),
   sendMetrics: false,
   workersDev: false,
   workerVariants: Object.freeze({
+    bootstrap: Object.freeze({
+      assets: Object.freeze({
+        binding: 'ASSETS',
+        notFoundHandling: 'single-page-application',
+        payloadDirectory: 'payload/admin',
+        runWorkerFirst: Object.freeze(['/__ankka/*', '/api/*']),
+      }),
+      component: 'workerBootstrap',
+      compatibilityDate: '2026-08-08',
+      compatibilityFlags: Object.freeze([]),
+      dependenciesInstrumentation: Object.freeze({ enabled: false }),
+      durableObjects: Object.freeze({
+        bindings: Object.freeze([
+          Object.freeze({ binding: 'ADMIN_STATE', className: 'AdminState' }),
+        ]),
+        exports: Object.freeze({
+          AdminState: Object.freeze({ storage: 'sqlite', type: 'durable-object' }),
+        }),
+      }),
+      mainModule: 'index.js',
+      observability: Object.freeze({ enabled: false }),
+      payloadDirectory: 'payload/worker-bootstrap',
+      previewUrls: false,
+      publicBindings: Object.freeze({
+        secrets: Object.freeze([
+          Object.freeze({ lifecycle: 'bootstrap-only', name: 'ANKKA_BOOTSTRAP_NONCE' }),
+          Object.freeze({ lifecycle: 'customer-worker', name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY' }),
+        ]),
+        variables: Object.freeze([
+          'ANKKA_BOOTSTRAP_CALLBACK',
+          'ANKKA_BOOTSTRAP_EXPIRES_AT',
+          'ANKKA_BOOTSTRAP_ID',
+          'ANKKA_BOOTSTRAP_SECRET_SHA256',
+          'ANKKA_GATEWAY_RELEASE',
+          'ANKKA_GATEWAY_RELEASE_SHA256',
+          'ANKKA_INSTALL_ID',
+          'ANKKA_INSTALLER_ORIGIN',
+          'ANKKA_MANAGEMENT_HOSTNAME',
+          'ANKKA_PLAN_HASH',
+          'ANKKA_PLAN_ID',
+          'ANKKA_UPDATE_CHANNEL',
+          'ANKKA_UPDATE_KEY_ID',
+          'ANKKA_UPDATE_PUBLIC_KEY',
+          'ANKKA_WORKER_NAME',
+          'CLOUDFLARE_ACCOUNT_ID',
+          'CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID',
+          'CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID',
+          'CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY',
+        ]),
+      }),
+      sendMetrics: false,
+      workersDev: false,
+    }),
     cleanup: Object.freeze({
       component: 'workerCleanup',
       compatibilityDate: '2026-08-08',
@@ -382,6 +435,7 @@ export function classifyReviewedFaultWorker(bytes) {
 }
 
 function componentPayloadDirectory(component) {
+  if (component === 'workerBootstrap') return 'worker-bootstrap';
   if (component === 'workerCleanup') return 'worker-cleanup';
   if (component === 'workerRetirement') return 'worker-retirement';
   return component;
@@ -578,6 +632,7 @@ function parseCanonicalManifest(bytes, expectedRelease) {
       'admin',
       'installer',
       'worker',
+      'workerBootstrap',
       'workerCleanup',
       'workerRetirement',
     ])
@@ -587,6 +642,7 @@ function parseCanonicalManifest(bytes, expectedRelease) {
     admin: parseComponent(raw.components.admin, 'admin'),
     installer: parseComponent(raw.components.installer, 'installer'),
     worker: parseComponent(raw.components.worker, 'worker'),
+    workerBootstrap: parseComponent(raw.components.workerBootstrap, 'workerBootstrap'),
     workerCleanup: parseComponent(raw.components.workerCleanup, 'workerCleanup'),
     workerRetirement: parseComponent(raw.components.workerRetirement, 'workerRetirement'),
   });
@@ -594,6 +650,7 @@ function parseCanonicalManifest(bytes, expectedRelease) {
     ...components.admin.files,
     ...components.installer.files,
     ...components.worker.files,
+    ...components.workerBootstrap.files,
     ...components.workerCleanup.files,
     ...components.workerRetirement.files,
   ].sort((left, right) => lexicalCompare(left.path, right.path)));
@@ -607,6 +664,7 @@ function parseCanonicalManifest(bytes, expectedRelease) {
     'admin',
     'installer',
     'worker',
+    'workerBootstrap',
     'workerCleanup',
     'workerRetirement',
   ]) {

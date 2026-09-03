@@ -149,9 +149,9 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     this.#team = {
       schemaVersion: 1,
       revision: 2,
-      editingEnabled: scenario !== 'team-readonly' && scenario !== 'team-lifecycle',
-      editingDisabledReason: scenario === 'team-readonly' ? 'release_review_required' : scenario === 'team-lifecycle' ? 'lifecycle_action_pending' : null,
-      managementCredentialConfigured: scenario !== 'team-no-credential',
+      editingEnabled: false,
+      editingDisabledReason: scenario === 'team-lifecycle' ? 'lifecycle_action_pending' : 'managed_in_cloudflare',
+      managementCredentialConfigured: false,
       adminEmails: ['admin@example.com'],
       members: [
         { email: 'admin@example.com', sourceIds: scenario === 'empty' ? [] : ['source-1111111111111111'] },
@@ -182,8 +182,9 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   }
 
   async prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult> {
-    if (!this.#team.editingEnabled) throw new GatewayApiError(403, this.#team.editingDisabledReason === 'release_review_required' ? 'team_release_review_required' : 'team_action_conflict')
-    if (!this.#team.managementCredentialConfigured) throw new GatewayApiError(409, 'team_management_credential_missing')
+    if (!this.#team.editingEnabled) throw new GatewayApiError(403, this.#team.editingDisabledReason === 'managed_in_cloudflare'
+      ? 'team_editing_managed_in_cloudflare'
+      : this.#team.editingDisabledReason === 'release_review_required' ? 'team_release_review_required' : 'team_action_conflict')
     if (expectedRevision !== this.#team.revision) throw new GatewayApiError(409, 'team_access_revision_conflict')
     const pending = this.#team.pendingAction
     const continuing = pending && ['authorization_required', 'applying', 'recovery_required'].includes(pending.status)

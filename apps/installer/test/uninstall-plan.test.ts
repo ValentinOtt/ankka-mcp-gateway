@@ -90,6 +90,7 @@ function workerName(plan: StaticDeployPlan): string {
 
 const PLAIN_BINDING_NAMES = Object.freeze([
   'ADMIN_EMAILS',
+  'ANKKA_INSTALL_ID',
   'ANKKA_GATEWAY_RELEASE',
   'ANKKA_GATEWAY_RELEASE_SHA256',
   'ANKKA_MANAGEMENT_HOSTNAME',
@@ -135,6 +136,7 @@ async function applicationRecord(plan: StaticDeployPlan): Promise<InstallActionR
   const allowedIdentityProviderIds = Object.freeze(['b'.repeat(32)]);
   const intent = prepareManagementAccessApplicationIntent({
     accountId: ACCOUNT_ID,
+    zoneId: ZONE_ID,
     plan,
     allowedIdentityProviderIds,
   });
@@ -153,6 +155,7 @@ async function applicationRecord(plan: StaticDeployPlan): Promise<InstallActionR
 async function policyRecord(plan: StaticDeployPlan): Promise<InstallActionRecord> {
   const intent = prepareManagementAdminPolicyIntent({
     accountId: ACCOUNT_ID,
+    zoneId: ZONE_ID,
     applicationId: APPLICATION_ID,
     plan,
   });
@@ -728,7 +731,7 @@ describe('provider-ID-free reviewed static uninstall plan', () => {
       scope: STATIC_UNINSTALL_RESIDUE_SCOPE,
       advancedCertificate: 'provider_retained_out_of_scope_manual',
     });
-    expect(STATIC_UNINSTALL_OAUTH_SCOPES).toHaveLength(10);
+    expect(STATIC_UNINSTALL_OAUTH_SCOPES).toHaveLength(4);
     expect(allFrozen(plan)).toBe(true);
   });
 
@@ -981,16 +984,10 @@ describe('provider-ID-free reviewed static uninstall plan', () => {
 
   it('keeps the exact scope, notice, executor lifecycle order, and no-managed-residue boundary frozen', () => {
     expect(STATIC_UNINSTALL_OAUTH_SCOPES).toEqual([
-      'access-acct.write',
-      'access.write',
-      'account-settings.read',
       'dns.write',
       'mcp-portals.write',
-      'memberships.read',
-      'user-details.read',
-      'workers-routes.read',
       'workers-scripts.write',
-      'zone.read',
+      'zone-access.write',
     ]);
     expect(STATIC_UNINSTALL_STEP_ORDER).toEqual([
       'temporary_cleanup_workers_dev_bridge',

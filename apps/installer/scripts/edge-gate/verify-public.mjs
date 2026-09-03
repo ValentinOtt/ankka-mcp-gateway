@@ -168,11 +168,13 @@ async function readAllAccessApplications(fetchImpl, token) {
   const zones = await cloudflareGet(fetchImpl, `/zones?name=${encodeURIComponent(ZONE)}`, token);
   if (!Array.isArray(zones.result)) fail('access_configuration_unavailable');
   const matchingZones = zones.result.filter((zone) => (
-    isRecord(zone) && zone.name === ZONE && isRecord(zone.account) &&
+    isRecord(zone) && zone.name === ZONE &&
+    v.is(STRING_SCHEMA, zone.id) && /^[A-Za-z0-9_-]{1,128}$/u.test(zone.id) &&
+    isRecord(zone.account) &&
     v.is(STRING_SCHEMA, zone.account.id) && /^[A-Za-z0-9_-]{1,128}$/u.test(zone.account.id)
   ));
   if (matchingZones.length !== 1) fail('access_configuration_unavailable');
-  const accountId = matchingZones[0].account.id;
+  const zoneId = matchingZones[0].id;
 
   const applications = [];
   const seenIds = new Set();
@@ -180,7 +182,7 @@ async function readAllAccessApplications(fetchImpl, token) {
   for (let page = 1; page <= (totalPages ?? 1); page += 1) {
     const body = await cloudflareGet(
       fetchImpl,
-      `/accounts/${encodeURIComponent(accountId)}/access/apps?per_page=${ACCESS_PAGE_SIZE}&page=${page}`,
+      `/zones/${encodeURIComponent(zoneId)}/access/apps?per_page=${ACCESS_PAGE_SIZE}&page=${page}`,
       token,
     );
     if (!Array.isArray(body.result) || !isRecord(body.result_info)) {
@@ -236,7 +238,7 @@ function exactPublicReleaseManifest(serialized, expected) {
     !Number.isSafeInteger(manifest.artifact.fileCount) || manifest.artifact.fileCount < 1 ||
     !isRecord(manifest.cloudflare) ||
     !exactKeys(manifest.components, [
-      'admin', 'installer', 'worker', 'workerCleanup', 'workerRetirement',
+      'admin', 'installer', 'worker', 'workerBootstrap', 'workerCleanup', 'workerRetirement',
     ]) ||
     !Array.isArray(manifest.oauthScopeIds)
   ) fail('public_release_invalid');

@@ -121,6 +121,7 @@ function allFileRecords(manifest: ReleaseManifest): readonly ReleaseFileRecord[]
     ...manifest.components.admin.files,
     ...manifest.components.installer.files,
     ...manifest.components.worker.files,
+    ...manifest.components.workerBootstrap.files,
     ...manifest.components.workerCleanup.files,
     ...manifest.components.workerRetirement.files,
   ].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0));

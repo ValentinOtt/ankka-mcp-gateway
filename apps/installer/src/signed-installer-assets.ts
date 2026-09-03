@@ -129,6 +129,7 @@ function expectedPayload(manifest: ReleaseManifest): readonly ExpectedPayloadRec
     'admin',
     'installer',
     'worker',
+    'workerBootstrap',
     'workerCleanup',
     'workerRetirement',
   ] as const) {

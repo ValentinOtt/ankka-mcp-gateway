@@ -34,16 +34,10 @@ const EMAIL_LIKE = /(?:^|[^A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])[A-Za-z0-9.!#$%&'*+/=?
 export const MAX_STATIC_UNINSTALL_PLAN_TTL_MS = 10 * 60 * 1_000;
 
 export const STATIC_UNINSTALL_OAUTH_SCOPES = Object.freeze([
-  'access-acct.write',
-  'access.write',
-  'account-settings.read',
   'dns.write',
   'mcp-portals.write',
-  'memberships.read',
-  'user-details.read',
-  'workers-routes.read',
   'workers-scripts.write',
-  'zone.read',
+  'zone-access.write',
 ] as const satisfies readonly RequiredOauthScope[]);
 
 export const STATIC_UNINSTALL_GATEWAY_RESOURCE_ORDER = Object.freeze([

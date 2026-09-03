@@ -8,13 +8,10 @@ import { pathToFileURL } from 'node:url';
 import * as v from 'valibot';
 
 export const REQUIRED_SCOPE_IDS = Object.freeze([
-  'access-acct.write',
-  'access.write',
-  'account-settings.read',
+  'access-acct.read',
+  'zone-access.write',
   'dns.write',
   'mcp-portals.write',
-  'memberships.read',
-  'user-details.read',
   'workers-routes.read',
   'workers-scripts.write',
   'zone.read',
