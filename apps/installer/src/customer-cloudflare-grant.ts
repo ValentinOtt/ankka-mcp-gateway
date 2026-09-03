@@ -1,7 +1,7 @@
 import * as v from 'valibot';
 
 import { boundaryObjectSchema, boundaryValueSchema, type BoundaryValue } from './boundary';
-import { CLOUDFLARE_API_ORIGIN, OAUTH_REVOKE_URL, OAUTH_TOKEN_URL } from './constants';
+import { CLOUDFLARE_API_ORIGIN, OAUTH_REVOKE_URL, OAUTH_EXCHANGE_URL } from './constants';
 import { CLOUDFLARE_CODE_RELAY_CALLBACK } from './cloudflare-code-relay';
 import {
   exactOperationScopes,
@@ -222,7 +222,7 @@ export async function exchangeCustomerCloudflareAuthorizationCode(input: {
   if (expectedScopes.length === 0) invalid();
   let response: Response;
   try {
-    response = await withDeadline((signal) => input.transport(OAUTH_TOKEN_URL, {
+    response = await withDeadline((signal) => input.transport(OAUTH_EXCHANGE_URL, {
       method: 'POST',
       headers: {
         accept: 'application/json',

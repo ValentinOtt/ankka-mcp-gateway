@@ -9,7 +9,7 @@ import {
   type EphemeralCloudflareGrant,
   type FetchTransport,
 } from './oauth';
-import { OAUTH_TOKEN_URL } from './constants';
+import { OAUTH_EXCHANGE_URL } from './constants';
 import { resolveSingleAuthorizedCloudflareAccount } from './customer-cloudflare-grant';
 import { DeployError } from './errors';
 import { readBoundedText } from './http';
@@ -49,7 +49,7 @@ export async function executeHostedBootstrapGrant<Deployment>(input: {
     const url = request instanceof Request
       ? request.url
       : request instanceof URL ? request.toString() : request;
-    if (url === OAUTH_TOKEN_URL && response.ok) {
+    if (url === OAUTH_EXCHANGE_URL && response.ok) {
       try {
         const serialized = await readBoundedText(
           response.clone(), 'oauth_exchange_failed', 128 * 1024,
