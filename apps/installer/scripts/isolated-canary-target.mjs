@@ -79,11 +79,13 @@ export function parseIsolatedCanaryTarget(input) {
     'oauthClientId',
     'schemaVersion',
     'workerName',
+    'zoneId',
   ])) fail();
   if (
     input.schemaVersion !== 1 ||
     input.kind !== 'ankka-gateway-deploy-isolated-target' ||
     !v.is(STRING_SCHEMA, input.accountId) || !ACCOUNT_ID_PATTERN.test(input.accountId) ||
+    !v.is(STRING_SCHEMA, input.zoneId) || !ACCOUNT_ID_PATTERN.test(input.zoneId) ||
     !isIsolatedCanaryHostname(input.hostname) ||
     !v.is(STRING_SCHEMA, input.oauthClientId) ||
     !OAUTH_CLIENT_ID_PATTERN.test(input.oauthClientId) ||
@@ -98,6 +100,7 @@ export function parseIsolatedCanaryTarget(input) {
     oauthClientId: input.oauthClientId,
     schemaVersion: 1,
     workerName: input.workerName,
+    zoneId: input.zoneId,
   });
 }
 

@@ -19,6 +19,15 @@ export const SESSION_MUTATION_RATE_LIMIT = Object.freeze({ limit: 30, period: 60
 
 export type HostedAbuseControlPolicy = 'disabled' | 'required';
 
+/** The exact bindings the abuse controls read; any hosted runtime env satisfies it structurally. */
+export type AbuseControlEnv = Pick<
+  GatewayDeployEnv,
+  | 'DEPLOY_SESSION_ENCRYPTION_KEY'
+  | 'ANONYMOUS_SESSION_RATE_LIMIT'
+  | 'SESSION_READ_RATE_LIMIT'
+  | 'SESSION_MUTATION_RATE_LIMIT'
+>;
+
 type RateLimitPurpose =
   | 'anonymous-mutation-v1'
   | 'anonymous-session-v1'
@@ -192,7 +201,7 @@ async function consume(
 
 export async function enforceAnonymousSessionRateLimit(
   request: Request,
-  env: GatewayDeployEnv,
+  env: AbuseControlEnv,
 ): Promise<void> {
   const key = await opaqueKey(
     env.DEPLOY_SESSION_ENCRYPTION_KEY,
@@ -204,7 +213,7 @@ export async function enforceAnonymousSessionRateLimit(
 
 export async function enforceSessionMutationRateLimit(
   request: Request,
-  env: GatewayDeployEnv,
+  env: AbuseControlEnv,
   sessionId: string | null,
 ): Promise<void> {
   const hasSession = sessionId !== null && SESSION_ID_PATTERN.test(sessionId);
@@ -217,7 +226,7 @@ export async function enforceSessionMutationRateLimit(
 }
 
 export async function enforceSessionReadRateLimit(
-  env: GatewayDeployEnv,
+  env: AbuseControlEnv,
   sessionId: string,
 ): Promise<void> {
   const key = await opaqueKey(

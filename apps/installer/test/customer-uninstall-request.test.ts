@@ -115,6 +115,7 @@ function workerName(plan: StaticDeployPlan): string {
 
 const PLAIN_BINDING_NAMES = Object.freeze([
   'ADMIN_EMAILS',
+  'ANKKA_INSTALL_ID',
   'ANKKA_GATEWAY_RELEASE',
   'ANKKA_GATEWAY_RELEASE_SHA256',
   'ANKKA_MANAGEMENT_HOSTNAME',
@@ -160,6 +161,7 @@ async function applicationRecord(plan: StaticDeployPlan): Promise<InstallActionR
   const allowedIdentityProviderIds = Object.freeze(['b'.repeat(32)]);
   const intent = prepareManagementAccessApplicationIntent({
     accountId: TARGET.account.id,
+    zoneId: TARGET.zone.id,
     plan,
     allowedIdentityProviderIds,
   });
@@ -178,6 +180,7 @@ async function applicationRecord(plan: StaticDeployPlan): Promise<InstallActionR
 async function policyRecord(plan: StaticDeployPlan): Promise<InstallActionRecord> {
   const intent = prepareManagementAdminPolicyIntent({
     accountId: TARGET.account.id,
+    zoneId: TARGET.zone.id,
     applicationId: APPLICATION_ID,
     plan,
   });

@@ -203,7 +203,7 @@ async function hash<Value>(value: Value): Promise<string> {
 }
 
 const PLAIN_BINDING_NAMES = Object.freeze([
-  'ADMIN_EMAILS', 'ANKKA_GATEWAY_RELEASE', 'ANKKA_GATEWAY_RELEASE_SHA256',
+  'ADMIN_EMAILS', 'ANKKA_INSTALL_ID', 'ANKKA_GATEWAY_RELEASE', 'ANKKA_GATEWAY_RELEASE_SHA256',
   'ANKKA_MANAGEMENT_HOSTNAME', 'ANKKA_UPDATE_CHANNEL', 'ANKKA_UPDATE_KEY_ID', 'ANKKA_UPDATE_PUBLIC_KEY',
   'ANKKA_WORKERS_SUBDOMAIN', 'ANKKA_WORKER_NAME', 'CF_ACCESS_AUD',
   'CF_ACCESS_ISSUER', 'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_ZONE_ID', 'CLOUDFLARE_ZONE_NAME',
@@ -228,14 +228,14 @@ async function installRecord(action: InstallActionName, phase?: 'provision' | 'b
   if (action === 'management_access_application_create') {
     const allowedIdentityProviderIds = Object.freeze([IDP_ONE]);
     const intent = prepareManagementAccessApplicationIntent({
-      accountId: ACCOUNT_ID, plan: installPlan, allowedIdentityProviderIds,
+      accountId: ACCOUNT_ID, zoneId: ZONE_ID, plan: installPlan, allowedIdentityProviderIds,
     });
     return { schemaVersion: 1, kind: action, accountId: ACCOUNT_ID, planId: installPlan.planId,
       planHash: installPlan.planHash, ownershipMarker: managementOwnershipMarker(installPlan),
       allowedIdentityProviderIds, intentHash: await hash(intent) };
   }
   if (action === 'management_admin_policy_create') {
-    const intent = prepareManagementAdminPolicyIntent({ accountId: ACCOUNT_ID, applicationId: APPLICATION_ID,
+    const intent = prepareManagementAdminPolicyIntent({ accountId: ACCOUNT_ID, zoneId: ZONE_ID, applicationId: APPLICATION_ID,
       plan: installPlan });
     return { schemaVersion: 1, kind: action, accountId: ACCOUNT_ID, planId: installPlan.planId,
       planHash: installPlan.planHash, ownershipMarker: managementOwnershipMarker(installPlan),
@@ -715,9 +715,24 @@ async function bytesHash(bytes: Uint8Array): Promise<string> {
 
 async function uninstallReleaseSet(): Promise<VerifiedGatewayWorkerReleaseSet> {
   const primaryBytes = new TextEncoder().encode('export default {fetch(){return new Response("ok")}};');
+  const bootstrapBytes = new TextEncoder().encode('export class AdminState{}; export default {fetch(){}};');
   const cleanupBytes = new TextEncoder().encode('export class AdminState{}; export default {fetch(){}};');
   const retirementBytes = new TextEncoder().encode('export default {fetch(){return new Response(null,{status:410})}};');
   return Object.freeze({
+    bootstrap: Object.freeze({
+      verification: 'ed25519', release: manifest.release, artifactSha256: manifest.artifact.treeSha256,
+      componentSha256: manifest.components.workerBootstrap.treeSha256,
+      worker: Object.freeze({
+        mainModule: 'index.js', compatibilityDate: '2026-08-08', compatibilityFlags: NO_COMPATIBILITY_FLAGS,
+        modules: Object.freeze([Object.freeze({ name: 'index.js', contentType: 'application/javascript+module',
+          sha256: await bytesHash(bootstrapBytes), bytes: bootstrapBytes })]),
+        assets: Object.freeze({ binding: 'ASSETS', notFoundHandling: 'single-page-application',
+          runWorkerFirst: Object.freeze(['/__ankka/*', '/api/*'] as const),
+          files: Object.freeze([Object.freeze({ path: '/index.html', contentType: 'text/html; charset=utf-8',
+            sha256: await bytesHash(new TextEncoder().encode('<p/>')), bytes: new TextEncoder().encode('<p/>') })]) }),
+        durableObject: Object.freeze({ binding: 'ADMIN_STATE', className: 'AdminState', storage: 'sqlite' }),
+      }),
+    }),
     primary: Object.freeze({
       verification: 'ed25519', release: manifest.release, artifactSha256: manifest.artifact.treeSha256,
       worker: Object.freeze({

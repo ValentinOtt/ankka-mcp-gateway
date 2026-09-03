@@ -69,6 +69,7 @@ const ISOLATED_TARGET = Object.freeze({
   oauthClientId: '2'.repeat(32),
   schemaVersion: 1,
   workerName: 'ankka-gateway-deploy-isolated-proof',
+  zoneId: '3'.repeat(32),
 });
 const ISOLATED_PIN = Object.freeze({
   ...PIN,
@@ -153,14 +154,17 @@ describe('offline reviewed canary artifact generator', () => {
         objectPlanSha256: PUBLICATION.objectPlanSha256,
         release: PIN.release,
       });
-      expect(active).toContain('GatewayDeploySession');
+      expect(active).toContain('TwoStageDeploySession');
+      expect(active).not.toContain('GatewayDeploySession');
+      expect(active).not.toContain('HOSTED_INSTALLER_ANALYTICS');
       expect(active).toContain(PIN.release);
       expect(active).toContain(PIN.publicKey);
       expect(active).toContain(PIN.artifactSha256);
       expect(active).not.toMatch(/(?:^|\n)\s*import(?:\s|\()/mu);
       expect(active).not.toContain('sourceMappingURL=');
 
-      expect(rollbackModule).toContain('GatewayDeploySession');
+      expect(rollbackModule).toContain('TwoStageDeploySession');
+      expect(rollbackModule).not.toContain('GatewayDeploySession');
       expect(rollbackModule).toContain('enabled: false');
       expect(rollbackModule).toContain('pin: null');
       expect(rollbackModule).not.toMatch(/(?:^|\n)\s*import(?:\s|\()/mu);
@@ -175,9 +179,11 @@ describe('offline reviewed canary artifact generator', () => {
         expect(config).toMatch(/^preview_urls = false$/mu);
         expect(config).toContain('pattern = "deploy.ankka.ai"');
         expect(config).toContain('custom_domain = true');
-        expect(config).toContain('name = "GATEWAY_DEPLOY_SESSION"');
-        expect(config).toContain('class_name = "GatewayDeploySession"');
-        expect(config).toContain('new_sqlite_classes = ["GatewayDeploySession"]');
+        expect(config).toContain('name = "TWO_STAGE_DEPLOY_SESSION"');
+        expect(config).toContain('class_name = "TwoStageDeploySession"');
+        expect(config).toContain('new_sqlite_classes = ["TwoStageDeploySession"]');
+        expect(config).not.toContain('GatewayDeploySession');
+        expect(config).not.toContain('analytics_engine_datasets');
         expect(config.match(/^enabled = false$/gmu)).toHaveLength(3);
         expect(config).toContain('invocation_logs = false');
         expect(config.match(/^persist = false$/gmu)).toHaveLength(2);
@@ -186,11 +192,20 @@ describe('offline reviewed canary artifact generator', () => {
       expect(canary).toContain('binding = "GATEWAY_RELEASE_BUCKET"');
       expect(canary).toContain(`bucket_name = "${PUBLICATION.bucketName}"`);
       expect(canary).toContain('CLOUDFLARE_OAUTH_CLIENT_ID = "6ace98c3cfe05f58a7fbe18f88390bfc"');
-      expect(canary).toContain('HOSTED_INSTALLER_ANALYTICS_CHANNEL = "canary"');
-      expect(canary).toContain(`HOSTED_INSTALLER_ANALYTICS_RELEASE = "${PIN.release}"`);
-      expect(canary.match(/^\[\[analytics_engine_datasets\]\]$/gmu)).toHaveLength(1);
-      expect(canary).toContain('binding = "HOSTED_INSTALLER_ANALYTICS"');
-      expect(canary).toContain('dataset = "ankka_installer_funnel_v2"');
+      expect(canary).not.toContain('HOSTED_INSTALLER_ANALYTICS');
+      // The request-time bindings are provisioned with `wrangler secret put`;
+      // the config names them in a comment only and assigns none of them.
+      for (const binding of [
+        'CLOUDFLARE_OAUTH_CLIENT_SECRET',
+        'DEPLOY_SESSION_ENCRYPTION_KEY',
+        'CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID',
+        'CLOUDFLARE_OWNERSHIP_ISSUER_PRIVATE_KEY',
+        'CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY',
+        'CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID',
+      ]) {
+        expect(canary).toMatch(new RegExp(`^# ${binding}$`, 'mu'));
+        expect(canary).not.toMatch(new RegExp(`^${binding}\\s*=`, 'mu'));
+      }
       expect(canary.match(/^\[\[ratelimits\]\]$/gmu)).toHaveLength(3);
       expect(canary).toContain('name = "ANONYMOUS_SESSION_RATE_LIMIT"');
       expect(canary).toContain('namespace_id = "588230349"');
@@ -204,14 +219,17 @@ describe('offline reviewed canary artifact generator', () => {
       expect(rollback).toMatch(/^main = "reviewed-rollback-worker\.mjs"$/mu);
       expect(rollback).not.toContain('GATEWAY_RELEASE_BUCKET');
       expect(rollback).not.toContain('CLOUDFLARE_OAUTH_CLIENT_ID');
-      expect(rollback).not.toContain('HOSTED_INSTALLER_ANALYTICS');
-      expect(rollback).not.toContain('analytics_engine_datasets');
+      expect(rollback).not.toContain('CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID');
+      expect(rollback).not.toContain('CLOUDFLARE_OWNERSHIP_ISSUER');
       expect(rollback).not.toContain('[[ratelimits]]');
 
       for (const contents of [canary, rollback, recordText]) {
         expect(contents).not.toMatch(
-          /CLOUDFLARE_OAUTH_CLIENT_SECRET|DEPLOY_SESSION_ENCRYPTION_KEY|BOOTSTRAP_NONCE_DERIVATION_KEY/u,
+          /^(?:CLOUDFLARE_OAUTH_CLIENT_SECRET|DEPLOY_SESSION_ENCRYPTION_KEY|BOOTSTRAP_NONCE_DERIVATION_KEY|CLOUDFLARE_OWNERSHIP_ISSUER_PRIVATE_KEY)\s*=/mu,
         );
+      }
+      for (const contents of [rollback, recordText]) {
+        expect(contents).not.toMatch(/CLOUDFLARE_OAUTH_CLIENT_SECRET|DEPLOY_SESSION_ENCRYPTION_KEY|OWNERSHIP_ISSUER/u);
       }
       expect(record).toMatchObject({
         kind: 'ankka-gateway-deploy-reviewed-canary',
@@ -246,13 +264,18 @@ describe('offline reviewed canary artifact generator', () => {
         expect(bundle.sourceInputs.map((entry) => entry.path)).toContain(
           'node_modules/valibot/dist/index.mjs',
         );
-        expect(bundle.sourceInputs.map((entry) => entry.path)).toContain('src/reviewed-runtime.ts');
-        expect(bundle.sourceInputs.map((entry) => entry.path)).toContain(
-          'src/durable/gateway-deploy-session.ts',
-        );
-        expect(bundle.sourceInputs.map((entry) => entry.path)).not.toContain(
+        const sourcePaths = bundle.sourceInputs.map((entry) => entry.path);
+        expect(sourcePaths).toContain('src/two-stage-runtime.ts');
+        expect(sourcePaths).toContain('src/two-stage-deploy-session.ts');
+        for (const legacy of [
           'src/r2-publication-operator.ts',
-        );
+          'src/reviewed-runtime.ts',
+          'src/durable/gateway-deploy-session.ts',
+          'src/hosted-installer-analytics.ts',
+          'src/index.ts',
+        ]) {
+          expect(sourcePaths).not.toContain(legacy);
+        }
       }
       await expect(validateGeneratedReviewedCanaryDirectory(fixture.output)).resolves.toMatchObject({
         accountId: ACCOUNT_ID,

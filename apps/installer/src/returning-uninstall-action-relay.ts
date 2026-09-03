@@ -174,7 +174,8 @@ function validateRuntimeBindings(
   bindings: CurrentRuntimeBindings,
 ): void {
   const admins = bindings.ADMIN_EMAILS.split(',');
-  if (!RELEASE.test(bindings.ANKKA_GATEWAY_RELEASE) ||
+  if (bindings.ANKKA_INSTALL_ID !== input.installationId ||
+    !RELEASE.test(bindings.ANKKA_GATEWAY_RELEASE) ||
     !ARTIFACT.test(bindings.ANKKA_GATEWAY_RELEASE_SHA256) ||
     !['canary', 'stable'].includes(bindings.ANKKA_UPDATE_CHANNEL) ||
     !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(bindings.ANKKA_UPDATE_KEY_ID) ||

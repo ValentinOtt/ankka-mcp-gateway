@@ -138,6 +138,7 @@ function call(transport: CloudflareManagementTransport) {
 function applicationSpec() {
   return {
     accountId: ACCOUNT_ID,
+    zoneId: ZONE_ID,
     allowedIdentityProviderIds: [IDP_ONE, IDP_TWO],
     plan: PLAN,
   } as const;
@@ -159,7 +160,7 @@ function exactApplication(id = APP_ID, aud = AUD) {
 }
 
 function policySpec() {
-  return { accountId: ACCOUNT_ID, applicationId: APP_ID, plan: PLAN } as const;
+  return { accountId: ACCOUNT_ID, zoneId: ZONE_ID, applicationId: APP_ID, plan: PLAN } as const;
 }
 
 function exactPolicy(id = POLICY_ID) {
@@ -297,6 +298,7 @@ describe('Cloudflare management-surface prerequisite', () => {
     await expect(preflightFreshManagementAccessApplication({
       ...call(provider.transport),
       accountId: ACCOUNT_ID,
+      zoneId: ZONE_ID,
       plan: PLAN,
     })).resolves.toEqual({ clear: true });
     expect(provider.requests).toHaveLength(1);
@@ -369,6 +371,7 @@ describe('Cloudflare management-surface prerequisite', () => {
     await expect(preflightFreshManagementAccessApplication({
       ...call(transport),
       accountId: ACCOUNT_ID,
+      zoneId: ZONE_ID,
       plan: driftedPlan,
     })).rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, {
       code: 'invalid_input',
@@ -383,6 +386,7 @@ describe('Cloudflare management-surface prerequisite', () => {
     await expect(preflightFreshManagementAccessApplication({
       ...call(app.transport),
       accountId: ACCOUNT_ID,
+      zoneId: ZONE_ID,
       plan: PLAN,
     })).resolves.toEqual({ clear: true });
     const domain = sequenced([success([]), success([]), success([])]);
@@ -411,6 +415,7 @@ describe('Cloudflare management-surface prerequisite', () => {
     })).resolves.toEqual({ applicationId: APP_ID, aud: AUD });
     const createRequest = requiredFixture(provider.requests.at(0), 'application create request');
     expect(createRequest.method).toBe('POST');
+    expect(new URL(createRequest.url).pathname).toBe(`/client/v4/zones/${ZONE_ID}/access/apps`);
     await expect(createRequest.json()).resolves.toEqual(intent.request);
 
     let calls = 0;
@@ -497,7 +502,11 @@ describe('Cloudflare management-surface prerequisite', () => {
       ...spec,
       intent,
     })).resolves.toEqual({ policyId: POLICY_ID });
-    await expect(requiredFixture(create.requests.at(0), 'policy create request').json()).resolves.toEqual(intent.request);
+    const createRequest = requiredFixture(create.requests.at(0), 'policy create request');
+    expect(new URL(createRequest.url).pathname).toBe(
+      `/client/v4/zones/${ZONE_ID}/access/apps/${APP_ID}/policies`,
+    );
+    await expect(createRequest.json()).resolves.toEqual(intent.request);
 
     const recover = recorded(success([exactPolicy()]));
     await expect(recoverManagementAdminAllowPolicy({

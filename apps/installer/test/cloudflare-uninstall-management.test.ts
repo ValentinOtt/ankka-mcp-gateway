@@ -111,7 +111,7 @@ async function fixtureHash<Input>(value: Input): Promise<string> {
 }
 
 const PLAIN_BINDING_NAMES = [
-  'ADMIN_EMAILS', 'ANKKA_GATEWAY_RELEASE', 'ANKKA_GATEWAY_RELEASE_SHA256',
+  'ADMIN_EMAILS', 'ANKKA_INSTALL_ID', 'ANKKA_GATEWAY_RELEASE', 'ANKKA_GATEWAY_RELEASE_SHA256',
   'ANKKA_MANAGEMENT_HOSTNAME', 'ANKKA_UPDATE_CHANNEL', 'ANKKA_UPDATE_KEY_ID', 'ANKKA_UPDATE_PUBLIC_KEY',
   'ANKKA_WORKERS_SUBDOMAIN', 'ANKKA_WORKER_NAME', 'CF_ACCESS_AUD',
   'CF_ACCESS_ISSUER', 'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_ZONE_ID', 'CLOUDFLARE_ZONE_NAME',
@@ -135,12 +135,12 @@ async function fixtureRecord(action: InstallActionName, phase?: 'provision' | 'b
   }
   if (action === 'management_access_application_create') {
     const allowedIdentityProviderIds = Object.freeze([IDP_ONE, IDP_TWO]);
-    const intent = prepareManagementAccessApplicationIntent({ accountId: ACCOUNT_ID, plan, allowedIdentityProviderIds });
+    const intent = prepareManagementAccessApplicationIntent({ accountId: ACCOUNT_ID, zoneId: ZONE_ID, plan, allowedIdentityProviderIds });
     return { schemaVersion: 1, kind: action, accountId: ACCOUNT_ID, planId: plan.planId, planHash: plan.planHash,
       ownershipMarker: managementOwnershipMarker(plan), allowedIdentityProviderIds, intentHash: await fixtureHash(intent) };
   }
   if (action === 'management_admin_policy_create') {
-    const intent = prepareManagementAdminPolicyIntent({ accountId: ACCOUNT_ID, applicationId: APPLICATION_ID, plan });
+    const intent = prepareManagementAdminPolicyIntent({ accountId: ACCOUNT_ID, zoneId: ZONE_ID, applicationId: APPLICATION_ID, plan });
     return { schemaVersion: 1, kind: action, accountId: ACCOUNT_ID, planId: plan.planId, planHash: plan.planHash,
       ownershipMarker: managementOwnershipMarker(plan), applicationId: APPLICATION_ID, intentHash: await fixtureHash(intent) };
   }
@@ -583,9 +583,9 @@ function expectedDeletePath(action: HostedUninstallManagementDeleteAction): stri
     return `/client/v4/accounts/${ACCOUNT_ID}/workers/domains/${DOMAIN_ID}`;
   }
   if (action === 'management_admin_policy_delete') {
-    return `/client/v4/accounts/${ACCOUNT_ID}/access/apps/${APPLICATION_ID}/policies/${POLICY_ID}`;
+    return `/client/v4/zones/${ZONE_ID}/access/apps/${APPLICATION_ID}/policies/${POLICY_ID}`;
   }
-  return `/client/v4/accounts/${ACCOUNT_ID}/access/apps/${APPLICATION_ID}`;
+  return `/client/v4/zones/${ZONE_ID}/access/apps/${APPLICATION_ID}`;
 }
 
 function deleteSuccess(action: HostedUninstallManagementDeleteAction): Response {
@@ -726,10 +726,10 @@ describe('private hosted-uninstall Cloudflare management boundary', () => {
     expect(provider.requests.map((request) => new URL(request.url).pathname)).toEqual([
       `/client/v4/accounts/${ACCOUNT_ID}/workers/domains/${DOMAIN_ID}`,
       `/client/v4/accounts/${ACCOUNT_ID}/workers/domains`,
-      `/client/v4/accounts/${ACCOUNT_ID}/access/apps/${APPLICATION_ID}/policies/${POLICY_ID}`,
-      `/client/v4/accounts/${ACCOUNT_ID}/access/apps/${APPLICATION_ID}/policies`,
-      `/client/v4/accounts/${ACCOUNT_ID}/access/apps/${APPLICATION_ID}`,
-      `/client/v4/accounts/${ACCOUNT_ID}/access/apps`,
+      `/client/v4/zones/${ZONE_ID}/access/apps/${APPLICATION_ID}/policies/${POLICY_ID}`,
+      `/client/v4/zones/${ZONE_ID}/access/apps/${APPLICATION_ID}/policies`,
+      `/client/v4/zones/${ZONE_ID}/access/apps/${APPLICATION_ID}`,
+      `/client/v4/zones/${ZONE_ID}/access/apps`,
       `/client/v4/accounts/${ACCOUNT_ID}/workers/workers/${WORKER_ID}`,
       `/client/v4/accounts/${ACCOUNT_ID}/workers/workers`,
       `/client/v4/accounts/${ACCOUNT_ID}/workers/scripts/${workerName}/subdomain`,

@@ -60,7 +60,7 @@ export const MANAGED_OAUTH = Object.freeze({
 const API = 'https://api.cloudflare.com';
 const SERVERS = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/servers`;
 const PORTALS = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals`;
-const APPS = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+const APPS = `/client/v4/zones/${ZONE_ID}/access/apps`;
 const DNS = `/client/v4/zones/${ZONE_ID}/dns_records`;
 const canonicalPrimitiveSchema = v.union([v.null(), v.boolean(), v.string()]);
 const canonicalNumberSchema = v.pipe(v.number(), v.finite());
@@ -155,6 +155,7 @@ export function primaryEnvironment({ objects, bindings = {} } = {}) {
     CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
     CLOUDFLARE_ZONE_ID: ZONE_ID,
     CLOUDFLARE_ZONE_NAME: ZONE_NAME,
+    ANKKA_INSTALL_ID: INSTALLATION_ID,
     ANKKA_GATEWAY_RELEASE: RELEASE,
     ANKKA_GATEWAY_RELEASE_SHA256: RELEASE_SHA256,
     ANKKA_MANAGEMENT_HOSTNAME: 'manage.example.com',
@@ -179,6 +180,7 @@ export function cleanupEnvironment(extra = {}) {
     CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
     CLOUDFLARE_ZONE_ID: ZONE_ID,
     CLOUDFLARE_ZONE_NAME: ZONE_NAME,
+    ANKKA_INSTALL_ID: INSTALLATION_ID,
     ANKKA_GATEWAY_RELEASE: RELEASE,
     ANKKA_GATEWAY_RELEASE_SHA256: RELEASE_SHA256,
     ZERO_TRUST_READY: 'true',

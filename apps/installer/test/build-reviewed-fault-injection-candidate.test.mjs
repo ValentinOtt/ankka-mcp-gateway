@@ -36,7 +36,10 @@ const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';
 function fixedJson(status, value) {
   return new Response(JSON.stringify(value), { status });
 }
-function parseManagementEnvironment(env) { return env; }
+function parseManagementEnvironment(env) {
+  if (!CONTROL_PLANE_ORIGIN) return null;
+  return env;
+}
 async function handleRuntimeActionApply(request, env) {
   const control = { command: 'probe' };
   let internal = request;

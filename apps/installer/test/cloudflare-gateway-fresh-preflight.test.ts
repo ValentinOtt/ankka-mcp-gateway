@@ -125,7 +125,7 @@ function expectPreflightError<ErrorInput>(
 }
 
 const SERVER_PATH = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/servers`;
-const APPS_PATH = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+const APPS_PATH = `/client/v4/zones/${ZONE_ID}/access/apps`;
 const PORTALS_PATH = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals`;
 const DNS_PATH = `/client/v4/zones/${ZONE_ID}/dns_records`;
 

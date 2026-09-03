@@ -34,8 +34,8 @@ describe('live OAuth scope catalogue verification', () => {
       },
     });
     assert.deepEqual(result, {
-      catalogueScopeCount: 11,
-      requiredScopeCount: 10,
+      catalogueScopeCount: 8,
+      requiredScopeCount: 7,
       schemaVersion: 1,
       status: 'verified',
     });

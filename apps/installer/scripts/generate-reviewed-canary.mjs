@@ -35,10 +35,8 @@ const EXPECTED_ESBUILD_VERSION = '0.28.1';
 const EXPECTED_VALIBOT_VERSION = '1.4.2';
 const EXPECTED_WRANGLER_VERSION = '4.127.0';
 const RELEASE_BUCKET_BINDING = 'GATEWAY_RELEASE_BUCKET';
-const HOSTED_ANALYTICS_BINDING = 'HOSTED_INSTALLER_ANALYTICS';
-const HOSTED_ANALYTICS_DATASET = 'ankka_installer_funnel_v2';
-const SESSION_BINDING = 'GATEWAY_DEPLOY_SESSION';
-const SESSION_CLASS = 'GatewayDeploySession';
+const SESSION_BINDING = 'TWO_STAGE_DEPLOY_SESSION';
+const SESSION_CLASS = 'TwoStageDeploySession';
 const SESSION_MIGRATION_TAG = 'v1';
 const ANONYMOUS_SESSION_RATE_LIMIT_BINDING = 'ANONYMOUS_SESSION_RATE_LIMIT';
 const ANONYMOUS_SESSION_RATE_LIMIT_NAMESPACE_ID = '588230349';
@@ -60,7 +58,30 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const BUCKET_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/u;
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/u;
 const EVIDENCE_SEGMENT = /^[A-Za-z0-9@._-]+$/u;
-const SECRET_ASSIGNMENT = /^(?:CLOUDFLARE_OAUTH_CLIENT_SECRET|DEPLOY_SESSION_ENCRYPTION_KEY|BOOTSTRAP_NONCE_DERIVATION_KEY)\s*=/mu;
+// Bindings the two-stage runtime reads at request time that are provisioned
+// outside the repository (`wrangler secret put`), never written into a
+// generated file. The customer client id, issuer public key, and key id are
+// not secrets, but they are provisioned the same way so the artifact stays
+// bound to the pin alone and a deploy never removes them.
+const PROVISIONED_BINDINGS = Object.freeze([
+  'CLOUDFLARE_OAUTH_CLIENT_SECRET',
+  'DEPLOY_SESSION_ENCRYPTION_KEY',
+  'CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID',
+  'CLOUDFLARE_OWNERSHIP_ISSUER_PRIVATE_KEY',
+  'CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY',
+  'CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID',
+]);
+const SECRET_ASSIGNMENT = new RegExp(`^(?:${PROVISIONED_BINDINGS.join('|')}|BOOTSTRAP_NONCE_DERIVATION_KEY)\\s*=`, 'mu');
+const LEGACY_RUNTIME_SOURCES = Object.freeze([
+  'src/durable/gateway-deploy-session.ts',
+  'src/hosted-installer-analytics.ts',
+  'src/index.ts',
+  'src/reviewed-runtime.ts',
+]);
+const REQUIRED_RUNTIME_SOURCES = Object.freeze([
+  'src/two-stage-deploy-session.ts',
+  'src/two-stage-runtime.ts',
+]);
 const VALIBOT_RUNTIME_LOGICAL_PATH = '/node_modules/valibot/dist/index.mjs';
 const BOOLEAN_SCHEMA = v.boolean();
 const NUMBER_SCHEMA = v.number();
@@ -315,8 +336,8 @@ async function readRegularJson(filename) {
 }
 
 function activeEntrypointSource(pin) {
-  return `import { GatewayDeploySession } from './src/durable/gateway-deploy-session';\n` +
-    `import { createReviewedGatewayDeployRuntime } from './src/reviewed-runtime';\n\n` +
+  return `import { TwoStageDeploySession } from './src/two-stage-deploy-session';\n` +
+    `import { createTwoStageDeployRuntime } from './src/two-stage-runtime';\n\n` +
     `const REVIEWED_CANARY_PIN = Object.freeze({\n` +
     `  schemaVersion: 1,\n` +
     `  channel: ${JSON.stringify(pin.channel)},\n` +
@@ -326,16 +347,16 @@ function activeEntrypointSource(pin) {
     `  publicKey: ${JSON.stringify(pin.publicKey)},\n` +
     `  artifactSha256: ${JSON.stringify(pin.artifactSha256)},\n` +
     `} as const);\n\n` +
-    `export { GatewayDeploySession };\n` +
-    `export default createReviewedGatewayDeployRuntime(REVIEWED_CANARY_PIN);\n`;
+    `export { TwoStageDeploySession };\n` +
+    `export default createTwoStageDeployRuntime(REVIEWED_CANARY_PIN);\n`;
 }
 
 function rollbackEntrypointSource() {
-  return `import { GatewayDeploySession } from './src/durable/gateway-deploy-session';\n` +
-    `import { createReviewedGatewayDeployEntrypoint } from './src/reviewed-runtime';\n\n` +
+  return `import { TwoStageDeploySession } from './src/two-stage-deploy-session';\n` +
+    `import { createTwoStageDeployEntrypoint } from './src/two-stage-runtime';\n\n` +
     `const ROLLBACK_ACTIVATION = Object.freeze({ enabled: false, pin: null } as const);\n\n` +
-    `export { GatewayDeploySession };\n` +
-    `export default createReviewedGatewayDeployEntrypoint(ROLLBACK_ACTIVATION);\n`;
+    `export { TwoStageDeploySession };\n` +
+    `export default createTwoStageDeployEntrypoint(ROLLBACK_ACTIVATION);\n`;
 }
 
 async function readRegularBytes(absolutePath, maximumBytes) {
@@ -758,16 +779,16 @@ function baseWrangler(accountId, main, deploymentTarget) {
     observabilityConfig();
 }
 
-function canaryWrangler(pin, publication, deploymentTarget) {
+function canaryWrangler(publication, deploymentTarget) {
   return baseWrangler(publication.accountId, 'reviewed-canary-worker.mjs', deploymentTarget) +
     `\n[vars]\n` +
-    `CLOUDFLARE_OAUTH_CLIENT_ID = ${JSON.stringify(deploymentTarget.oauthClientId)}\n` +
-    `HOSTED_INSTALLER_ANALYTICS_CHANNEL = ${JSON.stringify(pin.channel)}\n` +
-    `HOSTED_INSTALLER_ANALYTICS_RELEASE = ${JSON.stringify(pin.release)}\n\n` +
-    `[[analytics_engine_datasets]]\n` +
-    `binding = ${JSON.stringify(HOSTED_ANALYTICS_BINDING)}\n` +
-    `dataset = ${JSON.stringify(HOSTED_ANALYTICS_DATASET)}\n\n` +
-    `[[ratelimits]]\n` +
+    `CLOUDFLARE_OAUTH_CLIENT_ID = ${JSON.stringify(deploymentTarget.oauthClientId)}\n\n` +
+    `# Provision these bindings outside the repository with \`wrangler secret put\`\n` +
+    `# before deploying; the runtime fails closed (500 runtime_config_invalid)\n` +
+    `# while any is missing. The issuer public key and key id must match the\n` +
+    `# values provisioned on the auth.ankka.ai relay:\n` +
+    PROVISIONED_BINDINGS.map((binding) => `# ${binding}\n`).join('') +
+    `\n[[ratelimits]]\n` +
     `name = ${JSON.stringify(ANONYMOUS_SESSION_RATE_LIMIT_BINDING)}\n` +
     `namespace_id = ${JSON.stringify(ANONYMOUS_SESSION_RATE_LIMIT_NAMESPACE_ID)}\n` +
     `simple = { limit = 6, period = 60 }\n\n` +
@@ -798,7 +819,9 @@ function assertSelfContainedModule(contents, kind, pin, deploymentTarget) {
     /sourceMappingURL\s*=/u.test(contents) ||
     /(?:^|\n)\s*import(?:\s|\()/mu.test(contents) ||
     /(?:^|\n)\s*export[^;\n]*\sfrom\s*["']/mu.test(contents) ||
-    !/export\s*\{[^}]*GatewayDeploySession[^}]*\}/su.test(contents) ||
+    !/export\s*\{[^}]*TwoStageDeploySession[^}]*\}/su.test(contents) ||
+    contents.includes('GatewayDeploySession') ||
+    contents.includes('HOSTED_INSTALLER_ANALYTICS') ||
     !contents.includes(publicOrigin) ||
     (deploymentTarget.hostname !== PUBLIC_HOSTNAME && contents.includes(`https://${PUBLIC_HOSTNAME}`))
   ) fail();
@@ -819,7 +842,7 @@ async function materializeGeneratedArtifacts(pin, publication, deploymentTarget)
   const built = await materializeWorkerModules(pin, deploymentTarget);
   const files = Object.freeze({
     ...built.modules,
-    'wrangler.canary.toml': canaryWrangler(pin, publication, deploymentTarget),
+    'wrangler.canary.toml': canaryWrangler(publication, deploymentTarget),
     'wrangler.rollback.toml': rollbackWrangler(publication.accountId, deploymentTarget),
   });
   if (!exactKeys(files, GENERATED_FILES)) fail();
@@ -869,7 +892,6 @@ function generatedRecord(pin, publication, files, buildProvenance, isolatedTarge
 async function assertWranglerSchemaContract() {
   const schema = await readToolJson('node_modules/wrangler/config-schema.json', REPOSITORY_ROOT);
   const raw = schema?.definitions?.RawConfig?.properties;
-  const analytics = raw?.analytics_engine_datasets?.items;
   const r2 = raw?.r2_buckets?.items;
   const rateLimit = raw?.ratelimits?.items;
   const observability = schema?.definitions?.Observability?.properties;
@@ -877,10 +899,6 @@ async function assertWranglerSchemaContract() {
   const migration = schema?.definitions?.DurableObjectMigration;
   if (
     !isPlainRecord(raw) ||
-    !isPlainRecord(analytics) ||
-    !isPlainRecord(analytics.properties) ||
-    !Object.hasOwn(analytics.properties, 'binding') ||
-    !Object.hasOwn(analytics.properties, 'dataset') ||
     !isPlainRecord(r2) ||
     !isPlainRecord(r2.properties) ||
     !Object.hasOwn(r2.properties, 'binding') ||
@@ -910,7 +928,6 @@ async function assertWranglerSchemaContract() {
   ) fail();
   for (const field of [
     'account_id',
-    'analytics_engine_datasets',
     'durable_objects',
     'find_additional_modules',
     'main',
@@ -1056,7 +1073,8 @@ function parseBundleProvenance(input, expectedKind, pin, outputFile) {
     if (
       (!installerSource && !reviewedDependency) ||
       parsed.path === 'src/r2-publication-operator.ts' ||
-      parsed.path === 'src/r2-release-publisher.ts'
+      parsed.path === 'src/r2-release-publisher.ts' ||
+      LEGACY_RUNTIME_SOURCES.includes(parsed.path)
     ) fail();
     return parsed;
   });
@@ -1065,8 +1083,7 @@ function parseBundleProvenance(input, expectedKind, pin, outputFile) {
     new Set(sourcePaths).size !== sourcePaths.length ||
     sourcePaths.some((entry, index) => index > 0 && sourcePaths[index - 1] >= entry) ||
     !sourcePaths.includes(VALIBOT_RUNTIME_LOGICAL_PATH.slice(1)) ||
-    !sourcePaths.includes('src/durable/gateway-deploy-session.ts') ||
-    !sourcePaths.includes('src/reviewed-runtime.ts')
+    !REQUIRED_RUNTIME_SOURCES.every((source) => sourcePaths.includes(source))
   ) fail();
   const expectedEntry = expectedKind === 'active'
     ? activeEntrypointSource(pin)
@@ -1265,7 +1282,7 @@ export async function validateGeneratedReviewedCanaryDirectory(outputDirectory) 
   const { deploymentTarget, record } = parsedRecord;
 
   const expectedTextFiles = Object.freeze({
-    'wrangler.canary.toml': canaryWrangler(record.pin, record.publication, deploymentTarget),
+    'wrangler.canary.toml': canaryWrangler(record.publication, deploymentTarget),
     'wrangler.rollback.toml': rollbackWrangler(record.publication.accountId, deploymentTarget),
   });
   for (const fileRecord of record.outputFiles) {

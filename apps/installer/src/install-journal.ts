@@ -820,6 +820,7 @@ export interface AppendCustomerBootstrapAttemptInput extends InstallJournalCasIn
 
 const GATEWAY_BINDINGS = Object.freeze([
   'ADMIN_EMAILS',
+  'ANKKA_INSTALL_ID',
   'ANKKA_GATEWAY_RELEASE',
   'ANKKA_GATEWAY_RELEASE_SHA256',
   'ANKKA_MANAGEMENT_HOSTNAME',
@@ -943,15 +944,6 @@ function managementWorkerName(plan: StaticDeployPlan): string | null {
   const values = plan.managementResources.filter((resource) => resource.kind === 'management_worker');
   const worker = values.at(0);
   return values.length === 1 && worker !== undefined && WORKER_NAME.test(worker.name) ? worker.name : null;
-}
-
-async function stableInstallationId(selection: DeploySelection, target: AuthorizedTarget): Promise<string> {
-  const digest = await sha256Hex(canonicalJson({
-    accountId: target.account.id,
-    hostname: selection.basics.portalHostname,
-    zoneId: target.zone.id,
-  }));
-  return `acg-${digest.slice(0, 24)}`;
 }
 
 export async function computeInstallJournalBindingHash(input: {
@@ -1078,6 +1070,7 @@ async function parseApplicationRecord<Input>(
   try {
     const intent = prepareManagementAccessApplicationIntent({
       accountId: journal.target.account.id,
+      zoneId: journal.target.zone.id,
       plan: journal.plan,
       allowedIdentityProviderIds: ids,
     });
@@ -1115,6 +1108,7 @@ async function parsePolicyRecord<Input>(
   try {
     const intent = prepareManagementAdminPolicyIntent({
       accountId: journal.target.account.id,
+      zoneId: journal.target.zone.id,
       applicationId,
       plan: journal.plan,
     });
@@ -1967,7 +1961,7 @@ async function parseJournal<Input>(value: Input): Promise<InstallJournal | null>
   const target = authorizedTarget(journalInput.target, selection);
   if (
     !pin || !target || pin.release !== plan.releaseId || pin.artifactSha256 !== plan.releaseArtifactSha256 ||
-    journalInput.installationId !== await stableInstallationId(selection, target)
+    journalInput.installationId !== plan.managementOwnershipMarker
   ) return null;
   const expectedBinding = await computeInstallJournalBindingHash({
     selection, plan, releasePin: pin, target, installationId: journalInput.installationId,
@@ -2143,7 +2137,7 @@ export async function createInstallJournal<Input>(
     journalInput.recoverUntil > sessionExpiresAt + MAX_INSTALL_RECOVERY_RETENTION_MS ||
     !exactJson(selection, sessionSelection) || !exactJson(plan, sessionPlan) || !pin || !target ||
     pin.release !== plan.releaseId || pin.artifactSha256 !== plan.releaseArtifactSha256 ||
-    journalInput.installationId !== await stableInstallationId(selection, target)
+    journalInput.installationId !== plan.managementOwnershipMarker
   ) invalid(400);
   const expectedBinding = await computeInstallJournalBindingHash({
     selection, plan, releasePin: pin, target, installationId: journalInput.installationId,

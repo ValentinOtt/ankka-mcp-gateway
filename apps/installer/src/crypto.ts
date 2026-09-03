@@ -10,7 +10,15 @@ import { isPlainDataTree } from './plain-data';
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const OAUTH_COOKIE_AAD = encoder.encode('ankka-gateway-deploy-oauth-cookie-v2');
+const BOOTSTRAP_COOKIE_AAD = encoder.encode('ankka-gateway-deploy-bootstrap-cookie-v1');
 const BASE64_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
+const HOSTED_STAGE1_SESSION_ID = /^s1s_[A-Za-z0-9_-]{24}$/u;
+const HOSTED_STAGE1_ATTEMPT_ID = /^attempt_[A-Za-z0-9_-]{24}$/u;
+const BOOTSTRAP_ID = /^boot_[A-Za-z0-9_-]{24}$/u;
+const PLAN_ID = /^plan-[a-f0-9]{24}$/u;
+
+/** The bootstrap cookie can never outlive one Stage 1 authorization and capability window. */
+export const HOSTED_STAGE1_COOKIE_TTL_MS = 10 * 60 * 1_000;
 const ATTEMPT_ID = /^att_[A-Za-z0-9_-]{32}$/u;
 const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u;
 const EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u;
@@ -191,6 +199,39 @@ const sealedOauthCookieSchema = v.variant('schemaVersion', [
   sealedOauthCookieV8Schema,
   sealedOauthCookieV9Schema,
 ]);
+
+const sealedBootstrapCapabilitySchema = v.strictObject({
+  bootstrapId: v.pipe(v.string(), v.regex(BOOTSTRAP_ID)),
+  capabilitySecret: base64TokenSchema,
+  capabilityExpiresAt: expiresAtSchema,
+  bootstrapNonce: base64TokenSchema,
+  ownershipWrapKey: base64TokenSchema,
+});
+/**
+ * Schema 10: the only browser-side holder of the raw Stage 1 redirect secrets.
+ * It is sealed under its own additional data so neither the legacy OAuth
+ * cookie nor this one can be opened by the other path. A `bootstrap` attempt
+ * carries the one-time capability material; a `cleanup` attempt carries none.
+ */
+const sealedBootstrapCookieSchema = v.pipe(
+  v.strictObject({
+    schemaVersion: v.literal(10),
+    purpose: v.literal('bootstrap'),
+    kind: v.picklist(['bootstrap', 'cleanup']),
+    sessionId: v.pipe(v.string(), v.regex(HOSTED_STAGE1_SESSION_ID)),
+    attemptId: v.pipe(v.string(), v.regex(HOSTED_STAGE1_ATTEMPT_ID)),
+    state: base64TokenSchema,
+    verifier: base64TokenSchema,
+    expiresAt: v.pipe(expiresAtSchema, v.minValue(0)),
+    planId: v.pipe(v.string(), v.regex(PLAN_ID)),
+    planHash: v.pipe(v.string(), v.regex(HASH)),
+    capability: v.union([sealedBootstrapCapabilitySchema, v.null()]),
+  }),
+  v.check((cookie) => cookie.kind === 'bootstrap'
+    ? cookie.capability !== null && cookie.capability.capabilityExpiresAt === cookie.expiresAt
+    : cookie.capability === null),
+  v.check((cookie) => cookie.state !== cookie.verifier),
+);
 
 export function base64UrlEncode(bytes: Uint8Array): string {
   let binary = '';
@@ -412,42 +453,129 @@ function parseSealedPayload<Input>(input: Input): SealedOauthCookie {
   return result.output;
 }
 
-export async function sealOauthCookie<Input>(
-  encodedKey: string,
-  payload: Input,
-): Promise<string> {
-  const parsed = parseSealedPayload(payload);
+async function sealSerialized(encodedKey: string, aad: Uint8Array<ArrayBuffer>, serialized: string): Promise<string> {
   const iv = new Uint8Array(12);
   crypto.getRandomValues(iv);
-  const plaintext = encoder.encode(JSON.stringify(parsed));
+  const plaintext = encoder.encode(serialized);
   const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv, additionalData: OAUTH_COOKIE_AAD },
+    { name: 'AES-GCM', iv, additionalData: aad },
     await aesKey(encodedKey),
     plaintext,
   );
+  plaintext.fill(0);
   const combined = new Uint8Array(iv.byteLength + ciphertext.byteLength);
   combined.set(iv);
   combined.set(new Uint8Array(ciphertext), iv.byteLength);
   return base64UrlEncode(combined);
 }
 
-export async function openOauthCookie(
-  encodedKey: string,
-  sealed: string,
-): Promise<SealedOauthCookie> {
+async function openSerialized(encodedKey: string, aad: Uint8Array<ArrayBuffer>, sealed: string): Promise<string> {
   try {
     const bytes = base64UrlDecode(sealed);
     if (bytes.byteLength < 12 + 16) throw new DeployError(400, 'session_invalid');
     const plaintext = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: bytes.slice(0, 12), additionalData: OAUTH_COOKIE_AAD },
+      { name: 'AES-GCM', iv: bytes.slice(0, 12), additionalData: aad },
       await aesKey(encodedKey),
       bytes.slice(12),
     );
-    return parseSealedPayload(JSON.parse(decoder.decode(plaintext)));
+    return decoder.decode(plaintext);
   } catch (error) {
     if (error instanceof DeployError) throw error;
     throw new DeployError(400, 'session_invalid');
   }
+}
+
+function parseSerializedJson(serialized: string): SealedOauthCookie {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(serialized);
+  } catch {
+    throw new DeployError(400, 'session_invalid');
+  }
+  return parseSealedPayload(decoded);
+}
+
+export async function sealOauthCookie<Input>(
+  encodedKey: string,
+  payload: Input,
+): Promise<string> {
+  const parsed = parseSealedPayload(payload);
+  return sealSerialized(encodedKey, OAUTH_COOKIE_AAD, JSON.stringify(parsed));
+}
+
+export async function openOauthCookie(
+  encodedKey: string,
+  sealed: string,
+): Promise<SealedOauthCookie> {
+  return parseSerializedJson(await openSerialized(encodedKey, OAUTH_COOKIE_AAD, sealed));
+}
+
+export interface SealedBootstrapCapability {
+  readonly bootstrapId: string;
+  readonly capabilitySecret: string;
+  readonly capabilityExpiresAt: number;
+  readonly bootstrapNonce: string;
+  readonly ownershipWrapKey: string;
+}
+
+/**
+ * Raw Stage 1 redirect material for exactly one attempt. It exists only inside
+ * the encrypted `__Host-` bootstrap cookie and in request-local memory; the
+ * durable session stores hashes and commitments for every field here.
+ */
+export interface SealedBootstrapCookie {
+  readonly schemaVersion: 10;
+  readonly purpose: 'bootstrap';
+  readonly kind: 'bootstrap' | 'cleanup';
+  readonly sessionId: string;
+  readonly attemptId: string;
+  readonly state: string;
+  readonly verifier: string;
+  readonly expiresAt: number;
+  readonly planId: string;
+  readonly planHash: string;
+  readonly capability: SealedBootstrapCapability | null;
+}
+
+function parseSealedBootstrapPayload<Input>(input: Input, now: number): SealedBootstrapCookie {
+  if (!Number.isSafeInteger(now) || now < 0 || !isPlainDataTree(input)) {
+    throw new DeployError(400, 'session_invalid');
+  }
+  const result = v.safeParse(sealedBootstrapCookieSchema, input);
+  if (!result.success) throw new DeployError(400, 'session_invalid');
+  const cookie = result.output;
+  if (cookie.expiresAt > now + HOSTED_STAGE1_COOKIE_TTL_MS) throw new DeployError(400, 'session_invalid');
+  if (cookie.expiresAt <= now) throw new DeployError(400, 'session_expired');
+  return Object.freeze({
+    ...cookie,
+    capability: cookie.capability === null ? null : Object.freeze(cookie.capability),
+  });
+}
+
+/** Seals the bootstrap cookie; the payload must already be within its ten-minute window. */
+export async function sealHostedStage1Cookie<Input>(
+  encodedKey: string,
+  payload: Input,
+  now: number,
+): Promise<string> {
+  const parsed = parseSealedBootstrapPayload(payload, now);
+  return sealSerialized(encodedKey, BOOTSTRAP_COOKIE_AAD, JSON.stringify(parsed));
+}
+
+/** Opens the bootstrap cookie and rejects anything expired, foreign, or not schema 10. */
+export async function openHostedStage1Cookie(
+  encodedKey: string,
+  sealed: string,
+  now: number,
+): Promise<SealedBootstrapCookie> {
+  const serialized = await openSerialized(encodedKey, BOOTSTRAP_COOKIE_AAD, sealed);
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(serialized);
+  } catch {
+    throw new DeployError(400, 'session_invalid');
+  }
+  return parseSealedBootstrapPayload(decoded, now);
 }
 
 export async function deriveCsrfToken(encodedKey: string, sessionId: string): Promise<string> {

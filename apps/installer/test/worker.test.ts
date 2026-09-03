@@ -209,12 +209,7 @@ async function recoveryFixture(armFirstWrite: boolean): Promise<RecoveryFixture>
   const consumedBody = await responseJson(consumed, boundaryObjectSchema);
   const plan = parseStaticDeployPlan(consumedBody.plan);
   const selection = parseDeploySelection(selectionInput);
-  const installationDigest = await sha256Hex(canonicalJson({
-    accountId: RECOVERY_TARGET.account.id,
-    hostname: selection.basics.portalHostname,
-    zoneId: RECOVERY_TARGET.zone.id,
-  }));
-  const installationId = `acg-${installationDigest.slice(0, 24)}`;
+  const installationId = plan.managementOwnershipMarker;
   const bindingHash = await computeInstallJournalBindingHash({
     selection,
     plan,
@@ -1161,7 +1156,7 @@ describe('hosted deploy Worker boundary', () => {
 
   it('accepts the scope Cloudflare echoes on the authorization response only when it is the exact required set', async () => {
     const exactScope = encodeURIComponent(REQUIRED_OAUTH_SCOPES.join(' '));
-    const shortScope = encodeURIComponent(REQUIRED_OAUTH_SCOPES.slice(0, 9).join(' '));
+    const shortScope = encodeURIComponent(REQUIRED_OAUTH_SCOPES.slice(0, -1).join(' '));
     for (const [scopeQuery, expectedStatus] of [[`&scope=${shortScope}`, 400], [`&scope=${exactScope}`, 303]] as const) {
       const namespace = new FakeDeploySessionNamespace(() => NOW);
       const workerEnv = env(namespace);

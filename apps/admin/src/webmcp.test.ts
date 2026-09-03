@@ -31,7 +31,7 @@ const names = [
   'discover_mcp_source', 'save_mcp_source_draft', 'apply_mcp_source',
   'get_mcp_source_action', 'cancel_mcp_source_action', 'get_gateway_team',
   'list_mcp_source_actions',
-  'save_gateway_team', 'get_gateway_team_action', 'cancel_gateway_team_action',
+  'get_gateway_team_action', 'cancel_gateway_team_action',
   'check_gateway_update', 'review_gateway_update', 'apply_gateway_update',
   'rollback_gateway_update', 'get_gateway_runtime_action',
   'review_gateway_teardown', 'get_gateway_teardown_action',
@@ -75,8 +75,8 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     }],
   }
   const team: Team = {
-    schemaVersion: 1, revision: 7, editingEnabled: true, editingDisabledReason: null,
-    managementCredentialConfigured: true, members, adminEmails: ['operator@example.com'],
+    schemaVersion: 1, revision: 7, editingEnabled: false, editingDisabledReason: 'managed_in_cloudflare',
+    managementCredentialConfigured: false, members, adminEmails: ['operator@example.com'],
     sources: [{ id: sourceId, label: 'Example source', enabledTools: ['search'], status: 'installed' }],
     pendingAction: null, proposedMembers: null,
   }
@@ -204,10 +204,10 @@ describe('Gateway WebMCP tool contracts', () => {
     expect(refresh).not.toHaveBeenCalled()
   })
 
-  it('offers exactly twenty non-generic tools when installation is enabled', () => {
+  it('offers exactly nineteen non-generic tools when installation is enabled', () => {
     const { tools } = fixture()
     expect(tools.map((tool) => tool.name).sort()).toEqual([...names].sort())
-    expect(new Set(tools.map((tool) => tool.name)).size).toBe(20)
+    expect(new Set(tools.map((tool) => tool.name)).size).toBe(19)
     for (const tool of tools) {
       expect(tool.inputSchema.additionalProperties).toBe(false)
       for (const forbidden of ['token', 'headers', 'accountId', 'apiPath', 'actor', 'role', 'credential']) {
@@ -219,10 +219,10 @@ describe('Gateway WebMCP tool contracts', () => {
 
   it('does not label immediate writes or action preparation as read-only or idempotent', () => {
     const { tool } = fixture()
-    for (const name of ['save_gateway_team', 'cancel_gateway_team_action', 'cancel_mcp_source_action', 'save_mcp_source_draft', 'apply_mcp_source', 'apply_gateway_update', 'rollback_gateway_update', 'review_gateway_teardown']) {
+    for (const name of ['cancel_gateway_team_action', 'cancel_mcp_source_action', 'save_mcp_source_draft', 'apply_mcp_source', 'apply_gateway_update', 'rollback_gateway_update', 'review_gateway_teardown']) {
       expect(tool(name).annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false })
     }
-    for (const name of ['save_gateway_team', 'rollback_gateway_update', 'review_gateway_teardown']) {
+    for (const name of ['rollback_gateway_update', 'review_gateway_teardown']) {
       expect(tool(name).annotations.destructiveHint).toBe(true)
     }
     for (const name of ['get_gateway_status', 'get_gateway_capabilities', 'get_gateway_team', 'get_gateway_team_action', 'get_mcp_source_action', 'list_mcp_source_actions', 'get_gateway_runtime_action', 'get_gateway_teardown_action', 'review_gateway_update']) {
@@ -241,11 +241,17 @@ describe('Gateway WebMCP tool contracts', () => {
   it('reports compact current capabilities without exposing the roster or claiming health', async () => {
     const { api, call, team, sources } = fixture()
     api.getSources.mockResolvedValue({ ...sources, installationEnabled: false, revision: 19 })
-    api.getTeam.mockResolvedValue({ ...team, managementCredentialConfigured: false, revision: 21 })
+    api.getTeam.mockResolvedValue({ ...team, revision: 21 })
     const result = await call('get_gateway_capabilities')
     expect(result).toMatchObject({ ok: true, result: {
       sourceInstallation: { available: false, reason: 'source_addition_paused', revision: 19 },
-      team: { revision: 21, managementCredentialConfigured: false },
+      team: {
+        editingEnabled: false,
+        editingDisabledReason: 'managed_in_cloudflare',
+        management: 'cloudflare_dashboard',
+        revision: 21,
+        pendingAction: null,
+      },
       runtimeActions: { authorization: 'fresh_cloudflare_oauth' },
       sourceAuthenticationManagement: { available: false },
       installedSourceAllowlistEditing: { available: false },
@@ -254,85 +260,6 @@ describe('Gateway WebMCP tool contracts', () => {
     expect(JSON.stringify(result)).not.toContain('operator@example.com')
     expect(JSON.stringify(result)).not.toContain('teammate@example.com')
     expect(api.prepareTeamAction).not.toHaveBeenCalled()
-  })
-})
-
-describe('revision-bound complete Team actions', () => {
-  const invalidInputs: { name: string; input: WebMcpInput }[] = [
-    { name: 'missing revision', input: { members } },
-    { name: 'negative revision', input: { expectedRevision: -1, members } },
-    { name: 'fractional revision', input: { expectedRevision: 1.5, members } },
-    { name: 'unsafe revision', input: { expectedRevision: Number.MAX_SAFE_INTEGER, members } },
-    { name: 'unknown top-level field', input: { expectedRevision: 7, members, token: syntheticSensitiveText } },
-    { name: 'unknown nested field', input: { expectedRevision: 7, members: [{ email: 'operator@example.com', sourceIds: [], administrator: true }] } },
-    { name: 'unknown deep source object', input: { expectedRevision: 7, members: [{ email: 'operator@example.com', sourceIds: [{ id: sourceId }] }] } },
-    { name: 'empty email', input: { expectedRevision: 7, members: [{ email: '', sourceIds: [] }] } },
-    { name: 'oversized email', input: { expectedRevision: 7, members: [{ email: 'a'.repeat(255), sourceIds: [] }] } },
-    { name: 'missing sourceIds', input: { expectedRevision: 7, members: [{ email: 'operator@example.com' }] } },
-    { name: 'duplicate source IDs', input: { expectedRevision: 7, members: [{ email: 'operator@example.com', sourceIds: [sourceId, sourceId] }] } },
-    { name: 'malformed source ID', input: { expectedRevision: 7, members: [{ email: 'operator@example.com', sourceIds: ['../other'] }] } },
-    { name: 'too many source assignments', input: { expectedRevision: 7, members: [{ email: 'operator@example.com', sourceIds: Array.from({ length: 33 }, (_, i) => `source-${i}`) }] } },
-  ]
-
-  it.each(invalidInputs)('rejects $name without reading or writing', async ({ input }) => {
-    const { api, call } = fixture()
-    expect(await call('save_gateway_team', input)).toMatchObject({ ok: false, error: { code: 'webmcp_input_invalid' } })
-    expectNoApiCalls(api)
-  })
-
-  it('passes only the exact complete reviewed roster and revision to the normal API', async () => {
-    const { api, call, teamResult } = fixture()
-    const input = structuredClone({ expectedRevision: 7, members })
-    expect(await call('save_gateway_team', input)).toEqual({ ok: true, result: teamResult })
-    expect(api.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, members)
-    expect(input).toEqual({ expectedRevision: 7, members })
-    expect(api.prepareRuntimeAction).not.toHaveBeenCalled()
-    expect(api.prepareSourceAction).not.toHaveBeenCalled()
-    expect(api.prepareTeardownAction).not.toHaveBeenCalled()
-  })
-
-  it('accepts a reviewed roster larger than 51 users', async () => {
-    const { api, call, tool, teamResult } = fixture()
-    const largerTeam = [...members, ...Array.from({ length: 60 }, (_, i) => ({ email: `user${i}@example.com`, sourceIds: [] }))]
-    expect(tool('save_gateway_team').inputSchema.properties.members).not.toHaveProperty('maxItems')
-    expect(await call('save_gateway_team', { expectedRevision: 7, members: largerTeam })).toEqual({ ok: true, result: teamResult })
-    expect(api.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, largerTeam)
-  })
-
-  it('rechecks the current revision before a save instead of overwriting newer state', async () => {
-    const { api, call, team } = fixture()
-    api.getTeam.mockResolvedValue({ ...team, revision: 8 })
-    expect(await call('save_gateway_team', { expectedRevision: 7, members })).toMatchObject({ ok: false, error: { code: 'team_access_revision_conflict' } })
-    expect(api.prepareTeamAction).not.toHaveBeenCalled()
-  })
-
-  it.each([
-    { label: 'missing credential', changes: { managementCredentialConfigured: false }, code: 'team_management_credential_missing' },
-    { label: 'unreviewed release', changes: { editingEnabled: false, editingDisabledReason: 'release_review_required' as const }, code: 'team_release_review_required' },
-    { label: 'active lifecycle', changes: { editingEnabled: false, editingDisabledReason: 'lifecycle_action_pending' as const }, code: 'team_action_conflict' },
-  ])('does not mutate for $label', async ({ changes, code }) => {
-    const { api, call, team } = fixture()
-    api.getTeam.mockResolvedValue({ ...team, ...changes })
-    expect(await call('save_gateway_team', { expectedRevision: 7, members })).toMatchObject({ ok: false, error: { code } })
-    expect(api.prepareTeamAction).not.toHaveBeenCalled()
-    expect(api.prepareRuntimeAction).not.toHaveBeenCalled()
-  })
-
-  it('preserves server rejection of missing administrators instead of inventing a role or roster', async () => {
-    const { api, call } = fixture()
-    api.prepareTeamAction.mockRejectedValue(new GatewayApiError(400, 'team_access_admin_required'))
-    const proposed = [{ email: 'teammate@example.com', sourceIds: [sourceId] }]
-    expect(await call('save_gateway_team', { expectedRevision: 7, members: proposed })).toMatchObject({ ok: false, error: { code: 'team_access_admin_required' } })
-    expect(api.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, proposed)
-  })
-
-  it('resumes only through the existing exact proposal API and preserves recovery status', async () => {
-    const { api, call, team, teamResult } = fixture()
-    api.getTeam.mockResolvedValue({ ...team, proposedMembers: members, pendingAction: { ...teamResult.action, status: 'recovery_required' } })
-    api.prepareTeamAction.mockResolvedValue({ ...teamResult, action: { ...teamResult.action, status: 'recovery_required' } })
-    expect(await call('save_gateway_team', { expectedRevision: 7, members })).toMatchObject({ ok: true, result: { action: { actionId, status: 'recovery_required' } } })
-    expect(api.prepareTeamAction).toHaveBeenCalledTimes(1)
-    expect(api.cancelTeamAction).not.toHaveBeenCalled()
   })
 })
 
@@ -477,10 +404,8 @@ describe('source pause and current state', () => {
     expect(tool('apply_mcp_source').description).toContain('denied to everyone')
     expect(tool('apply_mcp_source').description).toContain('explicit Team grant')
     expect(tool('apply_mcp_source').description).toContain('preparation alone does not')
-    for (const name of ['apply_mcp_source', 'save_gateway_team']) {
-      expect(tool(name).description).toContain('disables automatic teardown')
-      expect(tool(name).description).toContain('blocks older-runtime rollback')
-    }
+    expect(tool('apply_mcp_source').description).toContain('disables automatic teardown')
+    expect(tool('apply_mcp_source').description).toContain('blocks older-runtime rollback')
     expectNoApiCalls(api)
   })
 
@@ -604,7 +529,7 @@ describe('safe errors and verified handoffs', () => {
 
   it('does not leak synchronous validation issues, stack traces, or supplied arguments', async () => {
     const { api, tool } = fixture()
-    const response = await tool('save_gateway_team').execute({ expectedRevision: syntheticSensitiveText, members: [] })
+    const response = await tool('save_mcp_source_draft').execute({ ...sourceDraft, token: syntheticSensitiveText })
     expect(JSON.parse(response)).toMatchObject({ ok: false, error: { code: 'webmcp_input_invalid' } })
     expect(response).not.toContain(syntheticSensitiveText)
     expect(response).not.toContain('stack')
@@ -657,17 +582,17 @@ describe('browser cancellation is not durable rollback', () => {
     expectNoApiCalls(api)
   })
 
-  it('does not pretend an in-flight durable Team write was canceled when its browser call aborts', async () => {
-    const { api, tool, teamResult } = fixture()
+  it('does not pretend an in-flight durable source-draft write was canceled when its browser call aborts', async () => {
+    const { api, tool, sources } = fixture()
     const controller = new AbortController()
-    let complete: (result: TeamActionResult) => void = () => { throw new Error('Synthetic operation not started') }
-    api.prepareTeamAction.mockImplementation(() => new Promise<TeamActionResult>((resolve) => { complete = resolve }))
-    const pending = tool('save_gateway_team').execute({ expectedRevision: 7, members }, { signal: controller.signal })
-    await vi.waitFor(() => expect(api.prepareTeamAction).toHaveBeenCalledTimes(1))
+    let complete: (result: ManagedSources) => void = () => { throw new Error('Synthetic operation not started') }
+    api.saveSourceDraft.mockImplementation(() => new Promise<ManagedSources>((resolve) => { complete = resolve }))
+    const pending = tool('save_mcp_source_draft').execute(sourceDraft, { signal: controller.signal })
+    await vi.waitFor(() => expect(api.saveSourceDraft).toHaveBeenCalledTimes(1))
     controller.abort()
-    complete(teamResult)
-    expect(JSON.parse(await pending)).toEqual({ ok: true, result: teamResult })
-    expect(api.cancelTeamAction).not.toHaveBeenCalled()
-    expect(api.prepareTeamAction).toHaveBeenCalledTimes(1)
+    complete(sources)
+    expect(JSON.parse(await pending)).toEqual({ ok: true, result: sources })
+    expect(api.cancelSourceAction).not.toHaveBeenCalled()
+    expect(api.saveSourceDraft).toHaveBeenCalledTimes(1)
   })
 })

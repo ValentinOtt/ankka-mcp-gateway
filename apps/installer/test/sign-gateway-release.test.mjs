@@ -14,6 +14,8 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import {
+  APPROVED_CLOUDFLARE_CONTRACT,
+  REQUIRED_OAUTH_SCOPES,
   RELEASE_ENVELOPE_SCHEMA_VERSION,
   RELEASE_SIGNATURE_CONTEXT,
   canonicalJson,
@@ -27,114 +29,8 @@ const RELEASE = 'gateway-v1.2.3';
 const CHANNEL = 'canary';
 const KEY_ID = 'gateway-release-canary-1';
 
-const EXPECTED_CLOUDFLARE_SCOPE_IDS = Object.freeze([
-  'access-acct.write',
-  'access.write',
-  'account-settings.read',
-  'dns.write',
-  'mcp-portals.write',
-  'memberships.read',
-  'user-details.read',
-  'workers-routes.read',
-  'workers-scripts.write',
-  'zone.read',
-]);
-
-const CLOUDFLARE = Object.freeze({
-  assets: Object.freeze({
-    binding: 'ASSETS',
-    notFoundHandling: 'single-page-application',
-    payloadDirectory: 'payload/admin',
-    runWorkerFirst: Object.freeze(['/__ankka/*', '/api/*']),
-  }),
-  compatibilityDate: '2026-08-08',
-  compatibilityFlags: Object.freeze([]),
-  dependenciesInstrumentation: Object.freeze({ enabled: false }),
-  durableObjects: Object.freeze({
-    bindings: Object.freeze([Object.freeze({ binding: 'ADMIN_STATE', className: 'AdminState' })]),
-    exports: Object.freeze({
-      AdminState: Object.freeze({ storage: 'sqlite', type: 'durable-object' }),
-    }),
-  }),
-  mainModule: 'index.js',
-  observability: Object.freeze({ enabled: false }),
-  previewUrls: false,
-  publicBindings: Object.freeze({
-    secrets: Object.freeze([
-      Object.freeze({ lifecycle: 'bootstrap-only', name: 'ANKKA_BOOTSTRAP_NONCE' }),
-      Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_TEAM_MANAGEMENT_TOKEN' }),
-    ]),
-    variables: Object.freeze([
-      'ADMIN_EMAILS',
-      'ANKKA_GATEWAY_RELEASE',
-      'ANKKA_GATEWAY_RELEASE_SHA256',
-      'CF_ACCESS_AUD',
-      'CF_ACCESS_ISSUER',
-      'CLOUDFLARE_ACCOUNT_ID',
-      'CLOUDFLARE_ZONE_ID',
-      'CLOUDFLARE_ZONE_NAME',
-      'ANKKA_UPDATE_CHANNEL',
-      'ANKKA_UPDATE_KEY_ID',
-      'ANKKA_UPDATE_PUBLIC_KEY',
-      'ZERO_TRUST_READY',
-    ]),
-  }),
-  sendMetrics: false,
-  workersDev: false,
-  workerVariants: Object.freeze({
-    cleanup: Object.freeze({
-      component: 'workerCleanup',
-      compatibilityDate: '2026-08-08',
-      compatibilityFlags: Object.freeze([]),
-      dependenciesInstrumentation: Object.freeze({ enabled: false }),
-      durableObjects: Object.freeze({
-        bindings: Object.freeze([Object.freeze({ binding: 'ADMIN_STATE', className: 'AdminState' })]),
-        exports: Object.freeze({
-          AdminState: Object.freeze({ storage: 'sqlite', type: 'durable-object' }),
-        }),
-      }),
-      mainModule: 'index.js',
-      observability: Object.freeze({ enabled: false }),
-      payloadDirectory: 'payload/worker-cleanup',
-      previewUrls: false,
-      publicBindings: Object.freeze({
-        secrets: Object.freeze([
-          Object.freeze({ lifecycle: 'uninstall-attempt', name: 'ANKKA_UNINSTALL_NONCE' }),
-        ]),
-        variables: Object.freeze([
-          'ANKKA_GATEWAY_RELEASE',
-          'ANKKA_GATEWAY_RELEASE_SHA256',
-          'CLOUDFLARE_ACCOUNT_ID',
-          'CLOUDFLARE_ZONE_ID',
-          'CLOUDFLARE_ZONE_NAME',
-          'ZERO_TRUST_READY',
-        ]),
-      }),
-      publicPath: '/__ankka/uninstall',
-      sendMetrics: false,
-      workersDev: false,
-    }),
-    retirement: Object.freeze({
-      component: 'workerRetirement',
-      compatibilityDate: '2026-08-08',
-      compatibilityFlags: Object.freeze([]),
-      dependenciesInstrumentation: Object.freeze({ enabled: false }),
-      durableObjects: Object.freeze({
-        bindings: Object.freeze([]),
-        exports: Object.freeze({
-          AdminState: Object.freeze({ state: 'deleted', type: 'durable-object' }),
-        }),
-      }),
-      mainModule: 'index.js',
-      observability: Object.freeze({ enabled: false }),
-      payloadDirectory: 'payload/worker-retirement',
-      previewUrls: false,
-      publicBindings: Object.freeze({ secrets: Object.freeze([]), variables: Object.freeze([]) }),
-      sendMetrics: false,
-      workersDev: false,
-    }),
-  }),
-});
+const EXPECTED_CLOUDFLARE_SCOPE_IDS = REQUIRED_OAUTH_SCOPES;
+const CLOUDFLARE = APPROVED_CLOUDFLARE_CONTRACT;
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -189,6 +85,11 @@ async function releaseFixture(overrides = {}) {
     await file('payload/installer/assets/app-E5f6G7h8.js', 'text/javascript; charset=utf-8', 'installer'),
     await file('payload/installer/index.html', 'text/html; charset=utf-8', '<main>installer</main>'),
     await file(
+      'payload/worker-bootstrap/index.js',
+      'application/javascript+module',
+      'export class AdminState {}; export default {}',
+    ),
+    await file(
       'payload/worker-cleanup/index.js',
       'application/javascript+module',
       'export class AdminState {}; export default {}',
@@ -198,14 +99,15 @@ async function releaseFixture(overrides = {}) {
       'application/javascript+module',
       'export default {}',
     ),
-    await file('payload/worker/index.js', 'application/javascript+module', "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default {}"),
+    await file('payload/worker/index.js', 'application/javascript+module', '// ankka-control-plane-origin:https://deploy.ankka.ai\nexport default {}'),
   ];
   const components = {
     admin: component(source.slice(0, 2)),
     installer: component(source.slice(2, 4)),
-    worker: component(source.slice(6, 7)),
-    workerCleanup: component(source.slice(4, 5)),
-    workerRetirement: component(source.slice(5, 6)),
+    worker: component(source.slice(7, 8)),
+    workerBootstrap: component(source.slice(4, 5)),
+    workerCleanup: component(source.slice(5, 6)),
+    workerRetirement: component(source.slice(6, 7)),
   };
   const records = source.map((entry) => entry.record);
   const manifestObject = {
@@ -263,6 +165,7 @@ async function replacePayloadAndRebuildManifest(input, targetPath, contents) {
     'admin',
     'installer',
     'worker',
+    'workerBootstrap',
     'workerCleanup',
     'workerRetirement',
   ]) {
@@ -280,6 +183,7 @@ async function replacePayloadAndRebuildManifest(input, targetPath, contents) {
   const records = [
     ...raw.components.admin.files,
     ...raw.components.installer.files,
+    ...raw.components.workerBootstrap.files,
     ...raw.components.workerCleanup.files,
     ...raw.components.workerRetirement.files,
     ...raw.components.worker.files,

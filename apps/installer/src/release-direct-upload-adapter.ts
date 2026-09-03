@@ -1,5 +1,6 @@
 import { DeployError } from './errors';
 import type { VerifiedWorkerDirectUploadRelease } from './cloudflare-worker-direct-upload';
+import type { VerifiedCustomerBootstrapWorkerRelease } from './customer-bootstrap-worker-deployment';
 import {
   verifyReleaseManifestDigests,
 } from './release';
@@ -17,6 +18,7 @@ import {
 } from './verified-release-bundle';
 
 const WORKER_PREFIX = 'payload/worker/';
+const WORKER_BOOTSTRAP_PREFIX = 'payload/worker-bootstrap/';
 const WORKER_CLEANUP_PREFIX = 'payload/worker-cleanup/';
 const WORKER_RETIREMENT_PREFIX = 'payload/worker-retirement/';
 const ADMIN_PREFIX = 'payload/admin/';
@@ -56,6 +58,7 @@ export interface VerifiedRetirementWorkerRelease {
  * returned, then discarded.
  */
 export interface VerifiedGatewayWorkerReleaseSet {
+  readonly bootstrap: VerifiedCustomerBootstrapWorkerRelease;
   readonly primary: VerifiedWorkerDirectUploadRelease;
   readonly cleanup: VerifiedCleanupWorkerRelease;
   readonly retirement: VerifiedRetirementWorkerRelease;
@@ -97,6 +100,7 @@ function expectedPayload(manifest: ReleaseManifest): readonly ExpectedPayloadRec
     'admin',
     'installer',
     'worker',
+    'workerBootstrap',
     'workerCleanup',
     'workerRetirement',
   ] as const) {
@@ -210,6 +214,7 @@ export async function adaptVerifiedReleaseBundleForGatewayDeployments<Input>(
   const expected = expectedPayload(manifest);
   const snapshots = snapshotPayload(input.payload, expected, manifest);
   const modules: Array<VerifiedWorkerDirectUploadRelease['worker']['modules'][number]> = [];
+  const bootstrapModules: Array<VerifiedWorkerDirectUploadRelease['worker']['modules'][number]> = [];
   const cleanupModules: Array<VerifiedWorkerDirectUploadRelease['worker']['modules'][number]> = [];
   const retirementModules: Array<VerifiedWorkerDirectUploadRelease['worker']['modules'][number]> = [];
   const assets: Array<VerifiedWorkerDirectUploadRelease['worker']['assets']['files'][number]> = [];
@@ -225,6 +230,13 @@ export async function adaptVerifiedReleaseBundleForGatewayDeployments<Input>(
     if (snapshot.component === 'worker') {
       modules.push(Object.freeze({
         name: workerModuleName(snapshot.record.path, WORKER_PREFIX),
+        contentType: snapshot.record.contentType,
+        sha256: snapshot.record.sha256,
+        bytes,
+      }));
+    } else if (snapshot.component === 'workerBootstrap') {
+      bootstrapModules.push(Object.freeze({
+        name: workerModuleName(snapshot.record.path, WORKER_BOOTSTRAP_PREFIX),
         contentType: snapshot.record.contentType,
         sha256: snapshot.record.sha256,
         bytes,
@@ -259,22 +271,53 @@ export async function adaptVerifiedReleaseBundleForGatewayDeployments<Input>(
   if (
     readBytes !== manifest.artifact.byteSize ||
     modules.length !== manifest.components.worker.fileCount ||
+    bootstrapModules.length !== manifest.components.workerBootstrap.fileCount ||
     cleanupModules.length !== manifest.components.workerCleanup.fileCount ||
     retirementModules.length !== manifest.components.workerRetirement.fileCount ||
     assets.length !== manifest.components.admin.fileCount ||
     !modules.some((module) => module.name === manifest.cloudflare.mainModule) ||
+    !bootstrapModules.some((module) =>
+      module.name === manifest.cloudflare.workerVariants.bootstrap.mainModule) ||
     !cleanupModules.some((module) => module.name === manifest.cloudflare.workerVariants.cleanup.mainModule) ||
     !retirementModules.some((module) => module.name === manifest.cloudflare.workerVariants.retirement.mainModule) ||
     !assets.some((asset) => asset.path === '/index.html')
   ) invalid();
 
   modules.sort((left, right) => lexicalCompare(left.name, right.name));
+  bootstrapModules.sort((left, right) => lexicalCompare(left.name, right.name));
   cleanupModules.sort((left, right) => lexicalCompare(left.name, right.name));
   retirementModules.sort((left, right) => lexicalCompare(left.name, right.name));
   assets.sort((left, right) => lexicalCompare(left.path, right.path));
   const durableObjectBinding = manifest.cloudflare.durableObjects.bindings[0];
   const durableObjectExport = manifest.cloudflare.durableObjects.exports.AdminState;
   if (durableObjectBinding === undefined) invalid();
+  const bootstrapContract = manifest.cloudflare.workerVariants.bootstrap;
+  const bootstrapDurableObjectBinding = bootstrapContract.durableObjects.bindings[0];
+  const bootstrapDurableObjectExport = bootstrapContract.durableObjects.exports.AdminState;
+  if (bootstrapDurableObjectBinding === undefined) invalid();
+  const bootstrap: VerifiedCustomerBootstrapWorkerRelease = Object.freeze({
+    verification: 'ed25519',
+    release: manifest.release,
+    artifactSha256: manifest.artifact.treeSha256,
+    componentSha256: manifest.components.workerBootstrap.treeSha256,
+    worker: Object.freeze({
+      mainModule: bootstrapContract.mainModule,
+      compatibilityDate: bootstrapContract.compatibilityDate,
+      compatibilityFlags: Object.freeze([] as const),
+      modules: Object.freeze(bootstrapModules),
+      assets: Object.freeze({
+        binding: bootstrapContract.assets.binding,
+        notFoundHandling: bootstrapContract.assets.notFoundHandling,
+        runWorkerFirst: Object.freeze(['/__ankka/*', '/api/*'] as const),
+        files: Object.freeze(assets),
+      }),
+      durableObject: Object.freeze({
+        binding: bootstrapDurableObjectBinding.binding,
+        className: bootstrapDurableObjectBinding.className,
+        storage: bootstrapDurableObjectExport.storage,
+      }),
+    }),
+  });
   const primary: VerifiedWorkerDirectUploadRelease = Object.freeze({
     verification: 'ed25519',
     release: manifest.release,
@@ -319,5 +362,5 @@ export async function adaptVerifiedReleaseBundleForGatewayDeployments<Input>(
       modules: Object.freeze(retirementModules),
     }),
   });
-  return Object.freeze({ primary, cleanup, retirement });
+  return Object.freeze({ bootstrap, primary, cleanup, retirement });
 }

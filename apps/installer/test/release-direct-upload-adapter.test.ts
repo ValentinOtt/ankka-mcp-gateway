@@ -80,6 +80,11 @@ async function fixture(): Promise<Fixture> {
       encoder.encode('<!doctype html><main>installer-only-marker</main>'),
     ),
     await file(
+      'payload/worker-bootstrap/index.js',
+      'application/javascript+module',
+      encoder.encode('export class AdminState {}; export default { fetch() { return new Response("bootstrap"); } };'),
+    ),
+    await file(
       'payload/worker-cleanup/index.js',
       'application/javascript+module',
       encoder.encode('export class AdminState {}; export default { fetch() { return new Response("cleanup"); } };'),
@@ -92,7 +97,7 @@ async function fixture(): Promise<Fixture> {
     await file(
       'payload/worker/index.js',
       'application/javascript+module',
-      encoder.encode("const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default { fetch() { return new Response(\"ok\"); } };"),
+      encoder.encode('// ankka-control-plane-origin:https://deploy.ankka.ai\nexport default { fetch() { return new Response("ok"); } };'),
     ),
     await file(
       'payload/worker/support.wasm',
@@ -102,9 +107,10 @@ async function fixture(): Promise<Fixture> {
   ] as const;
   const admin = await component(source.slice(0, 2).map((entry) => entry.record));
   const installer = await component(source.slice(2, 3).map((entry) => entry.record));
-  const workerCleanup = await component(source.slice(3, 4).map((entry) => entry.record));
-  const workerRetirement = await component(source.slice(4, 5).map((entry) => entry.record));
-  const worker = await component(source.slice(5).map((entry) => entry.record));
+  const workerBootstrap = await component(source.slice(3, 4).map((entry) => entry.record));
+  const workerCleanup = await component(source.slice(4, 5).map((entry) => entry.record));
+  const workerRetirement = await component(source.slice(5, 6).map((entry) => entry.record));
+  const worker = await component(source.slice(6).map((entry) => entry.record));
   const records = source.map((entry) => entry.record);
   const manifest = parseReleaseManifest({
     artifact: {
@@ -114,7 +120,7 @@ async function fixture(): Promise<Fixture> {
     },
     cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
     controlPlaneOrigin: 'https://deploy.ankka.ai',
-    components: { admin, installer, worker, workerCleanup, workerRetirement },
+    components: { admin, installer, worker, workerBootstrap, workerCleanup, workerRetirement },
     oauthScopeIds: REQUIRED_OAUTH_SCOPES,
     release: 'gateway-v1.2.3',
     schemaVersion: 1,
@@ -228,6 +234,7 @@ describe('verified release bundle direct-upload adapter', () => {
       release,
       plainTextBindings: {
         ADMIN_EMAILS: 'admin@example.com',
+        ANKKA_INSTALL_ID: `acg-${'e'.repeat(24)}`,
         ANKKA_GATEWAY_RELEASE: release.release,
         ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${release.artifactSha256}`,
         ANKKA_MANAGEMENT_HOSTNAME: 'manage.example.com',
@@ -254,6 +261,16 @@ describe('verified release bundle direct-upload adapter', () => {
     const releases = await adaptVerifiedReleaseBundleForGatewayDeployments(input.bundle);
 
     expect(releases.primary.artifactSha256).toBe(input.manifest.artifact.treeSha256);
+    expect(releases.bootstrap).toMatchObject({
+      verification: 'ed25519',
+      release: input.manifest.release,
+      artifactSha256: input.manifest.artifact.treeSha256,
+      componentSha256: input.manifest.components.workerBootstrap.treeSha256,
+      worker: {
+        mainModule: 'index.js',
+        durableObject: { binding: 'ADMIN_STATE', className: 'AdminState', storage: 'sqlite' },
+      },
+    });
     expect(releases.cleanup).toMatchObject({
       verification: 'ed25519',
       release: input.manifest.release,
@@ -294,6 +311,7 @@ describe('verified release bundle direct-upload adapter', () => {
     const exposedText = [
       ...releases.primary.worker.modules,
       ...releases.primary.worker.assets.files,
+      ...releases.bootstrap.worker.modules,
       ...releases.cleanup.worker.modules,
       ...releases.retirement.worker.modules,
     ].map((entry) => decoder.decode(entry.bytes)).join('\n');

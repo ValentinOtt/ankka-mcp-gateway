@@ -21,6 +21,7 @@ import {
 import {
   ACCOUNT_ID,
   BOOTSTRAP_NONCE,
+  ZONE_ID,
   CONFIGURATION_HASH,
   DESIRED_HASH,
   DURABLE_OBJECT_NAME,
@@ -117,6 +118,7 @@ const UPDATE_COMPONENTS = Object.freeze([
   ['admin', 'admin'],
   ['installer', 'installer'],
   ['worker', 'worker'],
+  ['workerBootstrap', 'worker-bootstrap', 'worker'],
   ['workerCleanup', 'worker-cleanup'],
   ['workerRetirement', 'worker-retirement'],
 ]);
@@ -143,8 +145,8 @@ async function signedUpdateChannel(
 ) {
   const components = {};
   const allFiles = [];
-  for (const [name, directory] of UPDATE_COMPONENTS) {
-    const sourceRoot = updateComponentRoot(name, directory);
+  for (const [name, directory, sourceDirectory = directory] of UPDATE_COMPONENTS) {
+    const sourceRoot = updateComponentRoot(name, sourceDirectory);
     const files = [];
     const visit = async (relative = '') => {
       const root = new URL(relative, sourceRoot);
@@ -638,6 +640,7 @@ test('bootstrap accepts a large canonical envelope above 51 users and cancels li
     environmentBindings: {
       CLOUDFLARE_ZONE_NAME: maximumClaim.target.zoneName,
       ANKKA_GATEWAY_RELEASE: maximumClaim.release.id,
+      ANKKA_INSTALL_ID: maximumClaim.expected.installationId,
     },
   });
 
@@ -816,7 +819,7 @@ test('bootstrap fails closed when Cloudflare generates a source application for 
   assert.deepEqual([...cloudflare.state.apps.keys()], ['g'.repeat(32)]);
 });
 
-test('team inspection requires an administrator and permission preparation rejects unknown fields', async () => {
+test('team inspection requires an administrator and V1 rejects policy preparation', async () => {
   const { env, objects } = await installReadyGateway();
   const originalFetch = globalThis.fetch;
   const keys = await crypto.subtle.generateKey(
@@ -850,8 +853,9 @@ test('team inspection requires an administrator and permission preparation rejec
     assert.equal(body.sources.length, 1);
     assert.ok(body.members.every((person) => canonicalJson(person.sourceIds) === canonicalJson([body.sources[0].id])));
     assert.equal(body.sources[0].status, 'installed');
-    assert.equal(body.editingEnabled, true);
-    assert.equal(body.editingDisabledReason, null);
+    assert.equal(body.editingEnabled, false);
+    assert.equal(body.editingDisabledReason, 'managed_in_cloudflare');
+    assert.equal(body.managementCredentialConfigured, false);
     assert.equal(body.pendingAction, null);
     assert.equal(body.proposedMembers, null);
     assert.doesNotMatch(JSON.stringify(body), /provider|accountId|zoneId|receipt|actionKey|synthetic-cloudflare-grant/iu);
@@ -863,8 +867,8 @@ test('team inspection requires an administrator and permission preparation rejec
       method: 'POST', headers: { ...headers, origin: 'https://manage.example.com', 'content-type': 'application/json' },
       body: JSON.stringify({ schemaVersion: 1, expectedRevision: body.revision, members: body.members, editingEnabled: true }),
     }), { ...env, TEAM_ACCESS_ENABLED: 'true' });
-    assert.equal(save.status, 400);
-    assert.equal((await save.json()).error, 'team_access_invalid_request');
+    assert.equal(save.status, 409);
+    assert.equal((await save.json()).error, 'team_editing_managed_in_cloudflare');
     assert.equal((await worker.fetch(new Request('https://other.example.com/api/team', { headers }), env)).status, 503);
     assert.equal((await worker.fetch(new Request('https://manage.example.com/api/team', { method: 'DELETE', headers }), env)).status, 405);
     assert.equal((await worker.fetch(new Request(`https://manage.example.com/api/team-actions/action_${'A'.repeat(32)}`, { headers }), env)).status, 404);
@@ -1958,10 +1962,10 @@ test('management API preserves bounded discovery, draft capacity and shared oper
         return `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals/${resource.provider.id}`;
       }
       if (resource.kind.endsWith('_access_application')) {
-        return `/client/v4/accounts/${ACCOUNT_ID}/access/apps/${resource.provider.id}`;
+        return `/client/v4/zones/${ZONE_ID}/access/apps/${resource.provider.id}`;
       }
       if (resource.kind.endsWith('_access_policy')) {
-        return `/client/v4/accounts/${ACCOUNT_ID}/access/apps/${resource.provider.parentId}/policies/${resource.provider.id}`;
+        return `/client/v4/zones/${ZONE_ID}/access/apps/${resource.provider.parentId}/policies/${resource.provider.id}`;
       }
       return `/client/v4/zones/${env.CLOUDFLARE_ZONE_ID}/dns_records/${resource.provider.id}`;
     };

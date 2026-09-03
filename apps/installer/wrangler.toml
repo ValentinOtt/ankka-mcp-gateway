@@ -1,5 +1,5 @@
 name = "ankka-gateway-deploy"
-main = "src/index.ts"
+main = "src/reviewed-entrypoint.ts"
 compatibility_date = "2026-08-14"
 workers_dev = false
 preview_urls = false
@@ -18,12 +18,12 @@ enabled = false
 head_sampling_rate = 0
 
 [[durable_objects.bindings]]
-name = "GATEWAY_DEPLOY_SESSION"
-class_name = "GatewayDeploySession"
+name = "TWO_STAGE_DEPLOY_SESSION"
+class_name = "TwoStageDeploySession"
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["GatewayDeploySession"]
+new_sqlite_classes = ["TwoStageDeploySession"]
 
 # Declare the reviewed binding shape for schema checks and local experiments.
 # The checked-in entrypoint remains disabled and does not require or consume it.

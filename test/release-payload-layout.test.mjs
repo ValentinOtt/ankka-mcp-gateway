@@ -13,7 +13,7 @@ const COMPONENTS = Object.freeze({
   installer: [
     'assets/ankka-85bfe235.svg',
     'assets/installer-953fc6de.css',
-    'assets/installer-bee893ae.js',
+    'assets/installer-cafdf608.js',
     'index.html',
   ],
   worker: ['index.js'],
@@ -21,13 +21,13 @@ const COMPONENTS = Object.freeze({
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: '62bf5fa871eb4ba3e95d0101346966e045736afcf8c089f5e5a8f5d0fdc7c318',
-  worker: 'cdfa485182c736927c21e6f11c32a6ecb7cbdb37f0f8818e3b7a8bba0d704d58',
-  'worker-cleanup': '417ff8beb85d4c7122d57052f873914173b9b37456bc0d134c69dd0dbdccdf1d',
+  installer: 'ece161a6849085ad5e06b3c8813b4ea92c54eaa1403942ee95b2ce286f4e7a1b',
+  worker: '375f851318bd604c158b1045a457d2ee949f5adb75493640a3df535a06e63c4b',
+  'worker-cleanup': '04e8730405917fac4bd53e6fdc81c00520d939ae798775ed2ca4ff38e60d30ad',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
 const FROZEN_LIFECYCLE_SHA256 = Object.freeze({
-  'worker-cleanup/index.js': '5e6f32d9d578bb2facb58f7ff6a8d244db2538a55d76c439027413b7226a9261',
+  'worker-cleanup/index.js': 'bf15c48c9db10119cc836d0591f5bd67701815700143d175d3e27008fdc90804',
   'worker-retirement/index.js': '506e91323d6f6c89398a15799bfcde6cb4d271a5d6bf28a4fbbd422331751bda',
 });
 const CONTENT_TYPES = Object.freeze({
@@ -211,51 +211,54 @@ test('admin and installer package the supplied Ankka favicon as a same-origin SV
   }
 });
 
-test('installer assets cover the exact hosted session, plan, deploy, result, and removal contract', async () => {
+test('installer assets cover the exact hosted two-stage session, plan, approval, callback, handoff, and cleanup contract', async () => {
   const html = await readFile(new URL('installer/index.html', ROOT), 'utf8');
-  const script = await readFile(new URL('installer/assets/installer-bee893ae.js', ROOT), 'utf8');
-  assert.doesNotMatch(`${html}\n${script}`, /\bcustomers?\b/iu);
-  for (const route of ['/', '/gateway', '/review', '/deploy', '/manage', '/oauth/handoff', '/oauth/callback', '/result']) {
-    if (route !== '/') assert.match(`${html}\n${script}`, new RegExp(route.replace('/', '\\/'), 'u'));
+  const asset = html.match(/<script src="(\/assets\/installer-[a-f0-9]{8}\.js)"><\/script>/u)?.[1];
+  assert.ok(asset, 'the installer HTML selects one hashed script');
+  const script = await readFile(new URL(`installer${asset}`, ROOT), 'utf8');
+  const combined = `${html}\n${script}`;
+  assert.doesNotMatch(combined, /\bcustomers?\b/iu);
+  for (const route of ['/gateway', '/review', '/deploy', '/result', '/__ankka/install']) {
+    assert.match(combined, new RegExp(route.replaceAll('/', '\\/'), 'u'));
   }
   for (const endpoint of [
-    '/api/session', '/api/discovery', '/api/selection', '/api/plan', '/api/deploy', '/api/oauth/handoff',
-    '/api/management/authorize', '/api/management/context', '/api/uninstall/plan', '/api/uninstall',
-    '/api/returning-uninstall', '/api/returning-uninstall/recovery/plan',
-    '/api/returning-uninstall/recovery',
-  ]) assert.ok(script.includes(`'${endpoint}'`));
+    '/api/session', '/api/selection', '/api/plan', '/api/bootstrap', '/api/bootstrap/handoff', '/api/cleanup',
+  ]) assert.ok(script.includes(`'${endpoint}'`), endpoint);
+  for (const legacy of [
+    '/api/discovery', '/api/deploy', '/api/oauth/handoff', '/api/management', '/api/uninstall',
+    '/api/returning-uninstall', '/manage', 'ankka-runtime-callback-state', 'read-only',
+  ]) assert.equal(combined.includes(legacy), false, legacy);
   assert.match(script, /'x-csrf-token'/u);
   assert.match(script, /credentials: 'same-origin'/u);
   assert.match(script, /redirect: 'error'/u);
   assert.match(script, /origin === 'https:\/\/dash\.cloudflare\.com'/u);
-  assert.match(script, /origin === window\.location\.origin/u);
+  assert.match(script, /url\.origin === expected\.origin/u);
   assert.match(script, /!url\.username && !url\.password && !url\.port/u);
+  assert.match(script, /url\.pathname === CUSTOMER_INSTALL_PATH && url\.search === ''/u);
   assert.match(script, /status: 'user_authorization_required'/u);
-  assert.match(script, /const management = await managementCallbackContext\(\)/u);
-  assert.match(script, /window\.location\.replace\(management\.managementUrl\)/u);
-  assert.match(script, /state\.callbackStreamActive \|\| state\.discovery/u);
-  assert.match(`${html}\n${script}`, /Create Cloudflare sign-in link/u);
-  assert.match(`${html}\n${script}`, /Continue to Cloudflare/u);
-  assert.doesNotMatch(html, /target="_blank"/u);
-  assert.doesNotMatch(script, /window\.open/u);
-  assert.match(script, /suggestedGatewayName\(target\.accountName\)/u);
-  assert.doesNotMatch(script, /`\$\{target\.accountName\} Gateway`/u);
   assert.match(script, /window\.location\.assign\(handoff\)/u);
+  assert.match(script, /window\.location\.assign\(prepared\.authorizationUrl\)/u);
   assert.match(script, /document\.modelContext/u);
   for (const tool of [
-    'begin_cloudflare_discovery', 'configure_gateway', 'create_review_plan', 'get_installer_status',
-    'begin_authorization', 'create_removal_plan', 'begin_removal',
-  ]) assert.ok(script.includes(`name: '${tool}'`));
-  assert.match(script, /failure: deployment\.failure/u);
-  assert.match(script, /Diagnostic: \$\{text\(code\) \|\| 'internal_error'\}/u);
-  assert.match(script, /oauth_exchange_failed: 'Cloudflare returned to the installer/u);
-  assert.match(script, /admin_email_invalid/u);
-  assert.match(script, /plan_hash_mismatch/u);
+    'get_installer_status', 'configure_gateway', 'begin_authorization', 'finish_secure_setup', 'begin_cleanup',
+  ]) assert.ok(script.includes(`name: '${tool}'`), tool);
+  assert.match(script, /The one-time handoff is never returned to the caller/u);
+  for (const copy of [
+    'Connect Cloudflare', 'Continue to Cloudflare', 'Finish secure setup', 'Start a fresh approval',
+    'Remove the incomplete install',
+  ]) assert.match(combined, new RegExp(copy, 'u'));
+  assert.match(html, /Approval 1/u);
+  assert.match(html, /Approval 2/u);
+  assert.match(html, /No Cloudflare token is stored anywhere/u);
+  assert.match(html, /Team membership is managed in Cloudflare Access/u);
+  assert.match(html, /stores no Cloudflare token and sends no analytics/u);
+  assert.doesNotMatch(html, /target="_blank"/u);
+  assert.doesNotMatch(script, /window\.open/u);
   assert.match(script, /rate_limited: 'This installer is receiving too many requests/u);
   assert.match(script, /abuse_controls_unavailable: 'The installer request protection/u);
-  assert.match(script, /error\.code === 'rate_limited' \|\| error\.status >= 500/u);
+  assert.match(script, /error\.code === 'rate_limited' \|\| error\.code === 'bootstrap_not_ready' \|\| error\.status >= 500/u);
   assert.doesNotMatch(script, /(?:localStorage|sessionStorage|document\.cookie|innerHTML|insertAdjacentHTML|eval\s*\()/u);
-  assert.doesNotMatch(`${html}\n${script}`, /(?:provider.?id|journal|tombstone|cloudflareAccessToken|client.?secret)/iu);
+  assert.doesNotMatch(combined, /(?:provider.?id|journal|tombstone|cloudflareAccessToken|client.?secret|capabilitySecret|bootstrapNonce|ownershipWrapKey|stateHash|verifierHash)/iu);
 });
 
 // Provider names in setup guidance are not telemetry. Reject executable SDK
@@ -287,13 +290,14 @@ test('admin assets provide safe source discovery, signed updates, one-time apply
   for (const tool of [
     'list_mcp_sources', 'discover_mcp_source', 'save_mcp_source_draft', 'apply_mcp_source',
     'check_gateway_update', 'review_gateway_update', 'apply_gateway_update', 'rollback_gateway_update',
-    'get_gateway_status', 'get_gateway_capabilities', 'get_gateway_team', 'save_gateway_team',
+    'get_gateway_status', 'get_gateway_capabilities', 'get_gateway_team',
     'get_gateway_team_action', 'cancel_gateway_team_action', 'get_mcp_source_action',
     'cancel_mcp_source_action', 'get_gateway_runtime_action', 'review_gateway_teardown',
     'get_gateway_teardown_action',
   ]) {
     assert.ok(script.includes(tool));
   }
+  assert.equal(script.includes('save_gateway_team'), false);
   assert.match(script, /one-time OAuth handoff/iu);
   assert.match(script, /No sources yet/u);
   assert.match(script, /release channel/u);

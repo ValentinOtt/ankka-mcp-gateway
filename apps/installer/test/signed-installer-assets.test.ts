@@ -92,6 +92,11 @@ async function fixture(installerOverrides?: readonly SourceFile[]): Promise<Fixt
     'application/javascript+module',
     "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default { fetch() { return new Response(\"worker only\"); } };",
   )];
+  const workerBootstrap = [await file(
+    'payload/worker-bootstrap/index.js',
+    'application/javascript+module',
+    'export class AdminState {}; export default { fetch() { return new Response("bootstrap only"); } };',
+  )];
   const workerCleanup = [await file(
     'payload/worker-cleanup/index.js',
     'application/javascript+module',
@@ -105,6 +110,7 @@ async function fixture(installerOverrides?: readonly SourceFile[]): Promise<Fixt
   const source = Object.freeze([
     ...admin,
     ...installer,
+    ...workerBootstrap,
     ...workerCleanup,
     ...workerRetirement,
     ...worker,
@@ -122,6 +128,7 @@ async function fixture(installerOverrides?: readonly SourceFile[]): Promise<Fixt
       admin: await component(admin.map((entry) => entry.record)),
       installer: await component(installer.map((entry) => entry.record)),
       worker: await component(worker.map((entry) => entry.record)),
+      workerBootstrap: await component(workerBootstrap.map((entry) => entry.record)),
       workerCleanup: await component(workerCleanup.map((entry) => entry.record)),
       workerRetirement: await component(workerRetirement.map((entry) => entry.record)),
     },

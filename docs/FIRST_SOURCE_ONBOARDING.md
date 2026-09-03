@@ -10,17 +10,17 @@ client-side capability flag alone is not sufficient.
 1. Install an empty gateway and sign in as its administrator.
 2. In Sources, discover one supported HTTPS MCP endpoint and review its exact
    read-only tool selection. Save the secret-free draft.
-3. Review and authorize that draft's source installation. The existing
-   short-lived Cloudflare installer grant creates the exact source resources.
-   This grant is not the Team-management credential or an upstream credential.
+3. Review and authorize that draft's source installation. The short-lived
+   Cloudflare installer grant creates the exact source resources. It is not an
+   upstream credential and is not retained for Team management.
 4. The new source starts with a single deny-Everyone Access policy. Installing
    it grants nobody access, including administrators and existing team members.
 5. Connect the upstream once through Cloudflare's operator authentication flow.
    Keep Require user auth off. Source credentials stay in your Cloudflare
    account; do not paste them into Ankka or the gateway dashboard.
-6. In Team, review the complete roster and explicitly grant the installed source
-   to the intended people. This save uses the separately provisioned
-   `ANKKA_TEAM_MANAGEMENT_TOKEN` and does not start installer OAuth.
+6. In Cloudflare, update the receipt-owned reusable Access policy to grant the
+   installed source to the intended people. The gateway Team page is read-only
+   in V1; do not create a standing API token to enable it.
 7. Verify an allowed read through the Portal, and verify that a person without
    the source assignment cannot invoke its tools directly or through Code Mode.
 
@@ -74,8 +74,9 @@ is a separate follow-up.
   capability, so saving a draft does not hide Apply or unregister WebMCP tools.
 - Dashboard, WebMCP, authenticated API, and direct Durable Object checks agree.
   No caller field or environment variable can select an older audience policy.
-- Unknown tool arguments, stale revisions, missing credentials, and malformed
-  provider results fail with bounded messages and no secret or result logging.
+- Unknown tool arguments, stale revisions, unavailable Team editing, and
+  malformed provider results fail with bounded messages and no secret or result
+  logging.
 
 ## Required live acceptance
 

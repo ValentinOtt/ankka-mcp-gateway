@@ -6,12 +6,11 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#14130f">
     <meta name="robots" content="noindex, nofollow">
-    <title>Deploy Ankka MCP Gateway</title>
+    <title>Install Ankka MCP Gateway</title>
     <link rel="icon" type="image/svg+xml" sizes="any" href="/assets/ankka-85bfe235.svg">
     <link rel="stylesheet" href="/assets/installer-953fc6de.css">
   </head>
   <body>
-    <!-- ankka-runtime-callback-state -->
     <header class="site-header">
       <a class="brand" href="/" data-route-link="/" aria-label="Ankka MCP Gateway installer home">
         <svg class="wordmark" viewBox="0 0 175 19" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -25,128 +24,85 @@
       <main id="main" tabindex="-1">
         <nav class="step-indicators" aria-label="Installation progress">
           <ol class="steps">
-            <li><a href="/" data-route-link="/" data-step="connect" aria-label="Connect Cloudflare"><span class="step-dot" aria-hidden="true"></span></a></li>
-            <li><a href="/gateway" data-route-link="/gateway" data-step="gateway" aria-label="Configure gateway"><span class="step-dot" aria-hidden="true"></span></a></li>
-            <li><a href="/review" data-route-link="/review" data-step="review" aria-label="Review plan"><span class="step-dot" aria-hidden="true"></span></a></li>
-            <li><a href="/deploy" data-route-link="/deploy" data-step="deploy" aria-label="Authorize deployment"><span class="step-dot" aria-hidden="true"></span></a></li>
+            <li><a href="/" data-route-link="/" data-step="describe" aria-label="Describe your gateway"><span class="step-dot" aria-hidden="true"></span></a></li>
+            <li><a href="/review" data-route-link="/review" data-step="review" aria-label="Review and connect Cloudflare"><span class="step-dot" aria-hidden="true"></span></a></li>
+            <li><a href="/deploy" data-route-link="/deploy" data-step="approve" aria-label="Approve in Cloudflare"><span class="step-dot" aria-hidden="true"></span></a></li>
+            <li><a href="/result" data-route-link="/result" data-step="finish" aria-label="Finish secure setup"><span class="step-dot" aria-hidden="true"></span></a></li>
           </ol>
         </nav>
         <div id="live-notice" class="notice" role="status" aria-live="polite">Loading installer…</div>
 
         <section class="panel" data-route="/" aria-labelledby="welcome-title" hidden>
-          <p class="eyebrow">MCP Gateway canary</p>
-          <h1 id="welcome-title">One approved gateway for your team’s agents</h1>
-          <p class="lede">Start with a read-only Cloudflare sign-in so the installer can find your accounts and active zones. The installer attempts immediate revocation and always discards its local copy; deployment still requires a separate authorization after you review the exact plan.</p>
-          <div class="promise-grid">
-            <article><h2>In your account</h2><p>Runtime state and access controls remain inside your Cloudflare account.</p></article>
-            <article><h2>Ready for sources</h2><p>The portal starts empty. Add sources and explicit tool allowlists later from your management page.</p></article>
-            <article><h2>Reversible canary</h2><p>The retained result offers a bounded removal plan during the recovery window.</p></article>
+          <p class="eyebrow">Ankka MCP Gateway</p>
+          <h1 id="welcome-title">One approved gateway for your team’s agents, inside your own Cloudflare account</h1>
+          <p class="lede">Installation takes two short Cloudflare approvals. Neither leaves a permanent permission with Ankka.</p>
+          <div class="summary-card">
+            <div class="summary-row"><span>Approval 1</span><strong>Installs the small Gateway shell. Ankka asks for one temporary permission to edit Workers, uses it once, and revokes it before anything else happens.</strong></div>
+            <div class="summary-row"><span>Approval 2</span><strong>Lets your own Gateway finish its setup. It asks Cloudflare directly; Ankka never holds that permission.</strong></div>
+            <div class="summary-row"><span>Afterwards</span><strong>No Cloudflare token is stored anywhere. Team membership is managed in Cloudflare Access.</strong></div>
           </div>
-          <div class="callout" role="note"><strong>Hosted analytics</strong><p>Ankka keeps setup funnel events—page view and setup steps with public release/channel, coarse outcome and flow, a per-session key, country, browser family, and, for page views, the referring site—for three months in Cloudflare Analytics Engine. Analytics set no cookies and store no IP address, raw user agent, or identifier that outlives the session. Cloudflare separately processes hosted-zone reliability data. Self-hosted gateways do not report usage to Ankka. Prefer no analytics? Deploy from the public source repository instead.</p></div>
-          <div class="button-row"><button id="discover-cloudflare" class="primary-button" type="button">Connect Cloudflare</button></div>
-          <div id="discovery-handoff" class="callout" hidden><strong>Continue to Cloudflare</strong><p>If Cloudflare does not open automatically, use this short-lived read-only discovery link.</p><a id="discovery-link" class="primary-button" hidden>Continue to Cloudflare</a></div>
-        </section>
-
-        <section class="panel" data-route="/gateway" aria-labelledby="gateway-title" hidden>
-          <h1 id="gateway-title">Name your gateway</h1>
-          <p class="lede">Choose two unused hostnames beneath one active Cloudflare zone. The management hostname is for administrators; the portal hostname is the MCP connection.</p>
-          <div id="no-zones-notice" class="callout" role="note" hidden><strong>This account has no active zones</strong><p>The management and MCP portal hostnames live beneath a domain you host on Cloudflare, so the installer needs one active zone. Add a domain to Cloudflare first, then connect again to rediscover zones.</p><div class="button-row"><button class="secondary-button" type="button" data-go="/">Back to Cloudflare connect</button></div></div>
           <form id="gateway-form" novalidate>
             <div class="field-grid">
-              <label class="wide-field"><span>Cloudflare account and zone</span><select id="cloudflare-target" required></select><small>Discovered with a short-lived read-only grant.</small></label>
-              <label><span>Gateway name</span><input id="gateway-name" name="gatewayName" autocomplete="organization" maxlength="80" required><small>Shown in Cloudflare and your gateway dashboard.</small></label>
-              <label><span>Active zone</span><input id="zone-name" name="zoneName" inputmode="url" autocomplete="off" readonly required><small>Fetched from Cloudflare.</small></label>
-              <label><span>Primary administrator</span><input id="admin-email" name="adminEmail" type="email" autocomplete="email" readonly required><small>Fetched from the Cloudflare identity that connected.</small></label>
-              <label><span>Additional administrators</span><textarea id="additional-admins" name="additionalAdminEmails" rows="3" placeholder="admin@example.com"></textarea><small>One email per line; optional.</small></label>
-              <label><span>Management hostname</span><input id="management-hostname" name="managementHostname" inputmode="url" autocomplete="off" placeholder="manage.example.com" required></label>
-              <label><span>Portal hostname</span><input id="portal-hostname" name="portalHostname" inputmode="url" autocomplete="off" placeholder="mcp.example.com" required></label>
+              <label><span>Gateway name</span><input id="gateway-name" name="gatewayName" autocomplete="organization" maxlength="80" required><small>Shown in Cloudflare and on your gateway’s management page.</small></label>
+              <label><span>Storefront domain</span><input id="zone-name" name="zoneName" inputmode="url" autocomplete="off" placeholder="example.com" required><small>A domain you host on Cloudflare. Your gateway lives beneath it.</small></label>
+              <label><span>Administrator email</span><input id="admin-email" name="adminEmail" type="email" autocomplete="email" required><small>The Cloudflare user who approves the installation and administers the gateway.</small></label>
+              <label><span>Management page</span><input id="management-hostname" name="managementHostname" inputmode="url" autocomplete="off" placeholder="manage.example.com"><small>Derived from your domain. Change it if you prefer another hostname.</small></label>
+              <label><span>MCP portal</span><input id="portal-hostname" name="portalHostname" inputmode="url" autocomplete="off" placeholder="mcp.example.com"><small>Derived from your domain. This is what your agents connect to.</small></label>
             </div>
-            <div class="button-row"><button class="primary-button" type="submit">Save and review</button></div>
+            <div class="button-row"><button id="save-gateway" class="primary-button" type="submit">Save and review</button></div>
           </form>
         </section>
 
         <section class="panel" data-route="/review" aria-labelledby="review-title" hidden>
-          <h1 id="review-title">Review before Cloudflare authorization</h1>
-          <p class="lede">Creating a plan performs no writes. Authorization begins only after you approve the exact plan shown here.</p>
-          <div id="selection-summary" class="summary-card"></div>
-          <div id="plan-groups" class="resource-groups"></div>
+          <h1 id="review-title">Review, then connect Cloudflare</h1>
+          <p class="lede">Nothing has been created yet. Connecting starts the first of two short approvals.</p>
+          <div id="review-summary" class="summary-card"></div>
           <p id="plan-expiry" class="caption tabular"></p>
-          <div class="button-row split"><button class="secondary-button" type="button" data-go="/gateway">Back</button><button id="create-plan" class="primary-button" type="button">Create review plan</button></div>
+          <div id="review-missing" class="callout" role="note" hidden><strong>Describe your gateway first</strong><p>The review plan is created from the gateway name, storefront domain, and administrator email.</p><div class="button-row"><button class="secondary-button" type="button" data-go="/">Describe your gateway</button></div></div>
+          <div class="callout"><strong>What Cloudflare will ask</strong><p>Choose exactly one account and approve a single temporary permission to edit Workers. Ankka uses it once to install the small Gateway shell in that account, then revokes it. You will see the exact permission on Cloudflare’s screen.</p></div>
+          <div class="button-row split"><button class="secondary-button" type="button" data-go="/">Back</button><button id="connect-cloudflare" class="primary-button" type="button">Connect Cloudflare</button></div>
         </section>
 
         <section class="panel" data-route="/deploy" aria-labelledby="deploy-title" hidden>
-          <h1 id="deploy-title">Authorize the reviewed plan</h1>
-          <p class="lede">Cloudflare will show the exact short-lived permission grant. Ankka never receives your Cloudflare password and never persists the OAuth token; the token exists only in this connected callback while the reviewed deployment runs.</p>
-          <div id="deploy-summary" class="summary-card"></div>
-          <div class="callout"><strong>Before you continue</strong><p>Sign in as the same Cloudflare user. The write grant is checked against the exact account and zone discovered above.</p></div>
-          <div class="button-row split"><button class="secondary-button" type="button" data-go="/review">Back</button><button id="authorize" class="primary-button" type="button">Create Cloudflare sign-in link</button></div>
-          <div id="authorization-handoff" class="callout" hidden><strong>Continue to Cloudflare</strong><p>If Cloudflare does not open automatically, use this short-lived authorization link.</p><a id="authorization-link" class="primary-button" hidden>Continue to Cloudflare</a></div>
+          <h1 id="deploy-title">Approve the first step in Cloudflare</h1>
+          <p id="deploy-lede" class="lede">Cloudflare will ask for one temporary permission to edit Workers and for you to pick exactly one account. Ankka uses it once to install the small Gateway shell, then revokes it before anything else happens.</p>
+          <p id="approval-expiry" class="caption tabular"></p>
+          <div id="authorization-handoff" class="callout" hidden><strong>Continue to Cloudflare</strong><p>If Cloudflare did not open automatically, use this short-lived approval link. Sign in as the administrator you named.</p><a id="authorization-link" class="primary-button" hidden>Continue to Cloudflare</a></div>
+          <div class="callout"><strong>Away from the computer?</strong><p>Approval links expire after ten minutes and leave nothing behind when they lapse. Come back to this page any time and start a fresh approval; your setup is kept.</p></div>
+          <div class="button-row split"><button class="secondary-button" type="button" data-go="/review">Back</button><button id="restart-approval" class="secondary-button" type="button">Start a fresh approval</button></div>
         </section>
 
         <section class="panel" data-route="/result" aria-labelledby="result-title" hidden>
-          <p class="eyebrow">Installation result</p>
-          <h1 id="result-title">Gateway status</h1>
-          <p id="result-intro" class="lede">Checking the retained installation result…</p>
-          <div id="stream-note" class="callout" hidden><strong>Keep this tab open</strong><p>The short-lived Cloudflare grant exists only in the callback invocation serving this page. Closing or reloading it before completion requires a fresh authorization.</p></div>
+          <p id="result-eyebrow" class="eyebrow">Installation status</p>
+          <h1 id="result-title">Checking your installation</h1>
+          <p id="result-intro" class="lede">Reading the saved setup…</p>
+          <div id="result-summary" class="summary-card" hidden></div>
           <div id="operation-stage" class="operation-stage" role="status" aria-live="polite" hidden>
             <span class="stage-indicator" aria-hidden="true"><span></span></span>
-            <div id="operation-copy" class="operation-copy">
-              <p id="operation-position" class="stage-position tabular"></p>
-              <h2 id="operation-title">Preparing installation</h2>
-              <p id="operation-detail">Waiting for the first Cloudflare operation…</p>
-            </div>
-          </div>
-          <div id="result-actions" class="button-row"></div>
-
-          <section id="existing-gateway-section" class="existing-gateway-card" aria-labelledby="existing-gateway-title" hidden>
-            <p class="eyebrow">Existing gateway</p>
-            <h2 id="existing-gateway-title"><span id="existing-gateway-name">Ankka MCP Gateway</span> is already running</h2>
-            <p>The preflight made no Cloudflare changes and the inspection grant was revoked. Teardown starts in your gateway dashboard so its stored receipt—not a hostname match—authorizes the removal plan.</p>
-            <div class="summary-card">
-              <div class="summary-row"><span>Portal</span><strong id="existing-gateway-portal"></strong></div>
-              <div class="summary-row"><span>Management</span><strong id="existing-gateway-management"></strong></div>
-            </div>
-            <div class="button-row"><a id="existing-gateway-teardown" class="danger-button" rel="noreferrer">Review teardown in dashboard</a></div>
-          </section>
-
-          <section id="removal-section" class="danger-zone" aria-labelledby="removal-title" hidden>
-            <p class="eyebrow">Gateway teardown</p>
-            <h2 id="removal-title">Remove this gateway</h2>
-            <p>Removal is available only during the retained recovery window. It removes the exact receipt-owned gateway resources; your Cloudflare zone and unrelated resources remain.</p>
-            <div id="removal-plan" hidden></div>
-            <div class="button-row"><button id="preview-removal" class="danger-button" type="button">Review removal plan</button><button id="confirm-removal" class="danger-button" type="button" hidden>Create removal sign-in link</button><a id="removal-authorization-link" class="danger-button" hidden>Continue to Cloudflare</a></div>
-          </section>
-        </section>
-
-        <section class="panel" data-route="/manage" aria-labelledby="manage-action-title" hidden>
-          <p id="manage-action-eyebrow" class="eyebrow">Gateway action authorization</p>
-          <h1 id="manage-action-title">Authorize the approved action in Cloudflare</h1>
-          <p id="manage-action-intro" class="lede">After consent, this page keeps the short-lived grant only in the connected callback while your gateway Worker performs the exact action you reviewed.</p>
-          <div id="manage-action-stage" class="operation-stage" role="status" aria-live="polite" hidden>
-            <span class="stage-indicator" aria-hidden="true"><span></span></span>
             <div class="operation-copy">
-              <h2 id="manage-action-stage-title">Applying and checking the update</h2>
-              <p id="manage-action-stage-detail">Keep this tab open. You’ll return to your gateway once verification and cleanup finish.</p>
+              <h2 id="operation-title">Waiting for your Gateway to answer</h2>
+              <p id="operation-detail">This page checks every few seconds without any Cloudflare permission.</p>
             </div>
           </div>
-          <div id="manage-action-links" class="button-row" hidden><a id="manage-action-return" class="secondary-button" rel="noreferrer">Return to gateway</a></div>
-          <div class="callout"><strong>Live action</strong><p>The temporary workers.dev route is enabled only for the signed action, then disabled and verified before grant revocation is attempted and the local copy is discarded.</p></div>
+          <p id="result-detail" class="caption"></p>
+          <div id="result-actions" class="button-row" hidden>
+            <button id="finish-setup" class="primary-button" type="button" hidden>Finish secure setup</button>
+            <a id="continue-gateway" class="primary-button" rel="noreferrer" hidden>Open your Gateway</a>
+            <button id="fresh-approval" class="primary-button" type="button" hidden>Start a fresh approval</button>
+            <button id="begin-cleanup" class="danger-button" type="button" hidden>Remove the incomplete install</button>
+            <a id="cleanup-link" class="danger-button" hidden>Continue to Cloudflare</a>
+            <button id="describe-again" class="secondary-button" type="button" data-go="/" hidden>Describe a gateway</button>
+          </div>
         </section>
 
         <noscript><p class="notice notice-error">JavaScript is required for this installer.</p></noscript>
       </main>
     </div>
 
-    <footer><p>The hosted installer keeps setup funnel events—page view and setup
-      steps with public release/channel, coarse outcome and flow, a per-session key,
-      country, browser family, and, for page views, the referring site—for three
-      months. Analytics set no cookies and store no IP address, raw user agent, or
-      identifier that outlives the session. Cloudflare separately processes
-      hosted-zone reliability data. Self-hosted gateways do not report usage to Ankka.
-      Prefer no analytics? Deploy from the public source repository instead. Session
-      data expires automatically.</p></footer>
-    <!-- Classic and parser-blocking by design: it starts progress polling while
-         the OAuth callback keeps streaming heartbeats after this HTML shell. -->
-    <script src="/assets/installer-bee893ae.js"></script>
+    <footer><p>This installer keeps only the setup you type here, for one hour, plus the
+      short-lived approval material needed to hand your Gateway its one-time key. It
+      stores no Cloudflare token and sends no analytics. Prefer to run everything
+      yourself? Deploy from the public source repository instead.</p></footer>
+    <script src="/assets/installer-cafdf608.js"></script>
   </body>
 </html>

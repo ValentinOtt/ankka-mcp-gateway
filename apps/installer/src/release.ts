@@ -11,7 +11,7 @@ import {
 } from './release-manifest';
 
 const WORKER_CONTROL_PLANE_ORIGIN_DECLARATION =
-  /^const CONTROL_PLANE_ORIGIN = '(https:\/\/[^'\r\n]+)';$/gmu;
+  /^\/\/ ankka-control-plane-origin:(https:\/\/[^\r\n]+)$/gmu;
 
 export interface ReleaseEnvironment {
   GATEWAY_RELEASE_ENVELOPE_JSON?: string;
@@ -173,6 +173,7 @@ function allFileRecords(manifest: ReleaseManifest): ReleaseFileRecord[] {
     ...manifest.components.admin.files,
     ...manifest.components.installer.files,
     ...manifest.components.worker.files,
+    ...manifest.components.workerBootstrap.files,
     ...manifest.components.workerCleanup.files,
     ...manifest.components.workerRetirement.files,
   ].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
@@ -183,6 +184,7 @@ export async function verifyReleaseManifestDigests(manifest: ReleaseManifest): P
     'admin',
     'installer',
     'worker',
+    'workerBootstrap',
     'workerCleanup',
     'workerRetirement',
   ] as const) {

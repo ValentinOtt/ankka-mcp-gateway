@@ -495,6 +495,7 @@ function installedWorkerPlainTextBindings(
 ): GatewayWorkerPlainTextBindings {
   return Object.freeze({
     ADMIN_EMAILS: authority.control.audienceEmails.join(','),
+    ANKKA_INSTALL_ID: authority.control.installationId,
     ANKKA_GATEWAY_RELEASE: authority.runtime.release,
     ANKKA_GATEWAY_RELEASE_SHA256: authority.runtime.artifactSha256,
     ANKKA_MANAGEMENT_HOSTNAME: authority.runtime.managementHostname,
@@ -574,7 +575,7 @@ async function inspectManagement(
   if (!domain) throw new DeployError(409, 'session_conflict', 'returning_management_domain_ambiguous');
   const applications = await paginated(
     call,
-    `/accounts/${authority.runtime.accountId}/access/apps`,
+    `/zones/${authority.runtime.zoneId}/access/apps`,
     new URLSearchParams({ domain: authority.runtime.managementHostname }),
   );
   const applicationMatches: ParsedApplication[] = [];
@@ -591,7 +592,7 @@ async function inspectManagement(
   }
   const policies = await paginated(
     call,
-    `/accounts/${authority.runtime.accountId}/access/apps/${encodeURIComponent(application.id)}/policies`,
+    `/zones/${authority.runtime.zoneId}/access/apps/${encodeURIComponent(application.id)}/policies`,
     new URLSearchParams(),
   );
   const policyMatches: ParsedPolicy[] = [];
@@ -1007,21 +1008,21 @@ function managementDeleteSpec(
     list: () => customDomains(call, authority.runtime.accountId, authority.runtime.managementHostname),
   };
   if (name === 'management_admin_policy_delete') return {
-    path: `/accounts/${authority.runtime.accountId}/access/apps/${encodeURIComponent(surface.application.id)}` +
+    path: `/zones/${authority.runtime.zoneId}/access/apps/${encodeURIComponent(surface.application.id)}` +
       `/policies/${encodeURIComponent(surface.policy.id)}`,
     id: surface.policy.id,
     domain: false,
     matches: (value) => exactPolicy(value, authority, surface.marker),
     list: () => paginated(call,
-      `/accounts/${authority.runtime.accountId}/access/apps/${encodeURIComponent(surface.application.id)}/policies`,
+      `/zones/${authority.runtime.zoneId}/access/apps/${encodeURIComponent(surface.application.id)}/policies`,
       new URLSearchParams()),
   };
   return {
-    path: `/accounts/${authority.runtime.accountId}/access/apps/${encodeURIComponent(surface.application.id)}`,
+    path: `/zones/${authority.runtime.zoneId}/access/apps/${encodeURIComponent(surface.application.id)}`,
     id: surface.application.id,
     domain: false,
     matches: (value) => exactApplication(value, authority, surface.marker),
-    list: () => paginated(call, `/accounts/${authority.runtime.accountId}/access/apps`,
+    list: () => paginated(call, `/zones/${authority.runtime.zoneId}/access/apps`,
       new URLSearchParams({ domain: authority.runtime.managementHostname })),
   };
 }

@@ -221,6 +221,22 @@ export interface CustomerGatewayFreshPreflightInput extends PrepareCustomerBoots
   readonly timeoutMs?: number;
 }
 
+export interface CustomerGatewayFreshProjectionPreflightInput {
+  /** Ephemeral customer-Worker grant, passed for this call and never retained. */
+  readonly accessToken: string;
+  readonly transport: CustomerGatewayFreshPreflightTransport;
+  readonly timeoutMs?: number;
+  readonly projection: CustomerGatewayDesiredProjection;
+  readonly managementHostname: string;
+  readonly nowMs?: number;
+}
+
+/** Optional call controls forwarded only when the caller supplied them. */
+interface OptionalFreshPreflightControls {
+  timeoutMs?: number;
+  nowMs?: number;
+}
+
 export interface CustomerGatewayFreshPreflightAttestation {
   readonly schemaVersion: 1;
   readonly kind: 'customer_gateway_fresh_preflight';
@@ -335,7 +351,10 @@ function requireTimeout<Value>(value: Value): number {
   return result.output;
 }
 
-function requireCall(input: CustomerGatewayFreshPreflightInput): PreflightCall {
+function requireCall(input: Pick<
+  CustomerGatewayFreshPreflightInput,
+  'accessToken' | 'transport' | 'timeoutMs'
+>): PreflightCall {
   if (
     !v.is(v.function(), input.transport) || !ACCESS_TOKEN.test(input.accessToken)
   ) fail('invalid_input', 'validate');
@@ -542,6 +561,13 @@ function accountListUrl(accountId: string, path: string, page: number): URL {
   return url;
 }
 
+function zoneListUrl(zoneId: string, path: string, page: number): URL {
+  const url = new URL(`/client/v4/zones/${zoneId}${path}`, CLOUDFLARE_API_ORIGIN);
+  url.searchParams.set('page', String(page));
+  url.searchParams.set('per_page', String(PAGE_SIZE));
+  return url;
+}
+
 function dnsListUrl(zoneId: string, hostname: string, page: number): URL {
   const url = new URL(`/client/v4/zones/${zoneId}/dns_records`, CLOUDFLARE_API_ORIGIN);
   url.searchParams.set('name.exact', hostname);
@@ -701,7 +727,7 @@ async function assertZeroCandidates(
     await collectPaginated(
       call,
       'access_application_list',
-      (page) => accountListUrl(accountId, '/access/apps', page),
+      (page) => zoneListUrl(zoneId, '/access/apps', page),
       true,
     ),
     parseAccessApplication,
@@ -820,7 +846,6 @@ async function attestationHash<Value>(value: Value): Promise<string> {
 export async function preflightFreshCustomerGateway(
   input: CustomerGatewayFreshPreflightInput,
 ): Promise<CustomerGatewayFreshPreflightAttestation> {
-  const call = requireCall(input);
   let projection: CustomerGatewayDesiredProjection;
   let managementHostname: string;
   try {
@@ -830,10 +855,34 @@ export async function preflightFreshCustomerGateway(
   } catch {
     fail('invalid_input', 'validate');
   }
+  const controls: OptionalFreshPreflightControls = {};
+  if (input.timeoutMs !== undefined) controls.timeoutMs = input.timeoutMs;
+  if (input.nowMs !== undefined) controls.nowMs = input.nowMs;
+  return preflightFreshCustomerGatewayProjection({
+    accessToken: input.accessToken,
+    transport: input.transport,
+    projection,
+    managementHostname,
+    ...controls,
+  });
+}
+
+/**
+ * Stage 2 variant for a projection rebuilt from the signed static plan inside
+ * the customer Worker. It performs the same two complete provider scans as the
+ * full release-input wrapper and has no mutation path.
+ */
+export async function preflightFreshCustomerGatewayProjection(
+  input: CustomerGatewayFreshProjectionPreflightInput,
+): Promise<CustomerGatewayFreshPreflightAttestation> {
+  const call = requireCall(input);
+  const projection = input.projection;
+  const managementHostname = normalizeHostname(input.managementHostname);
   const expectedKinds = projection.candidates.mcpServer === null
     ? PORTAL_RESOURCE_KINDS
     : RESOURCE_KINDS;
   if (
+    managementHostname === null || managementHostname !== input.managementHostname ||
     !ACCOUNT_ID.test(projection.target.accountId) || !ZONE_ID.test(projection.target.zoneId) ||
     projection.resourceKinds.length !== expectedKinds.length ||
     projection.resourceKinds.some((kind, index) => kind !== expectedKinds[index])

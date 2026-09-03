@@ -166,10 +166,10 @@ export function TeamPage() {
   const installed = team?.sources.filter((source) => source.status === 'installed') ?? []
   const message = actionMessage(action)
   const disabled = isBusy || saving || loading || needsRefresh || callbackId !== null || recorded || team?.editingEnabled !== true
-  const canCancel = team?.editingEnabled === true && (action?.status === 'authorization_required' || action?.status === 'recovery_required') && action.canCancel === true
+  const canCancel = (action?.status === 'authorization_required' || action?.status === 'recovery_required') && action.canCancel === true
 
   const save = async () => {
-    if (!team?.editingEnabled || !team.managementCredentialConfigured || loading || isBusy || needsRefresh || callbackId !== null || actionInFlight.current || action?.status === 'applying' || (!recorded && !changed)) return
+    if (!team?.editingEnabled || loading || isBusy || needsRefresh || callbackId !== null || actionInFlight.current || action?.status === 'applying' || (!recorded && !changed)) return
     const members = recorded ? team.proposedMembers : canonicalMembers(draft)
     if (!members) return
     actionInFlight.current = true
@@ -209,7 +209,7 @@ export function TeamPage() {
     <div>
       <PageHeader title="Team" />
 
-      {preview ? <p role="status" className="notice-banner notice-neutral mt-6">Local preview — synthetic users; no Cloudflare changes. Saving is simulated and stays on this page.</p> : null}
+      {preview ? <p role="status" className="notice-banner notice-neutral mt-6">Local preview — synthetic users; no Cloudflare changes.</p> : null}
       {error ? (
         <div className="mt-6">
           <p role="alert" className="notice-banner notice-error">{error}</p>
@@ -221,8 +221,7 @@ export function TeamPage() {
       {message ? <p role="status" className={`notice-banner mt-6 notice-${action?.status === 'succeeded' ? 'success' : action?.status === 'failed' || action?.status === 'recovery_required' ? 'error' : 'neutral'}`}>{message}</p> : null}
       {!team ? <p className="mt-8 text-sm text-kumo-subtle">{loading ? 'Loading team access…' : 'No team access information is available.'}</p> : (
         <>
-          {!team.editingEnabled ? <p role="status" className="notice-banner notice-warning mt-6">{team.editingDisabledReason === 'lifecycle_action_pending' ? 'Another source, update, or teardown action is in progress. Finish or safely cancel that action, then refresh to edit team access.' : 'Team access changes are disabled until this gateway release is reviewed and approved.'} You can still inspect the saved access configuration and shared tools.</p> : null}
-          {!team.managementCredentialConfigured ? <p role="status" className="notice-banner notice-warning mt-6">Team saves need a dedicated Cloudflare management API token. Its Access permission can administer other applications and policies in the same account. Follow the <a href="https://github.com/ValentinOtt/ankka-mcp-gateway/blob/main/docs/TEAM_ACCESS.md" target="_blank" rel="noreferrer" className="underline underline-offset-4">Team credential setup guide</a> for required permissions, rotation, and revocation. In your Cloudflare account, open this gateway Worker’s Settings → Variables and Secrets and add it as the encrypted secret <code>ANKKA_TEAM_MANAGEMENT_TOKEN</code>, then refresh. Never paste the token into this dashboard or send it to Ankka. Adding the secret does not apply a recorded change; review it here before saving.</p> : null}
+          {!team.editingEnabled ? <p role="status" className="notice-banner notice-warning mt-6">{team.editingDisabledReason === 'lifecycle_action_pending' ? 'Another source, update, or teardown action is in progress. Finish or safely cancel that action, then refresh.' : team.editingDisabledReason === 'managed_in_cloudflare' ? <>Team membership is managed directly in Cloudflare for this release. This gateway does not accept a permanent Cloudflare management credential. Follow the <a href="https://github.com/ValentinOtt/ankka-mcp-gateway/blob/main/docs/TEAM_ACCESS.md" target="_blank" rel="noreferrer" className="underline underline-offset-4">Team access guide</a> to review the owned Access policies.</> : 'Team access changes are disabled until this gateway release is reviewed and approved.'} You can still inspect the saved access configuration and shared tools.</p> : null}
           {sources && sources.installationEnabled !== true ? <p role="status" className="notice-banner notice-warning mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} {team.editingEnabled ? 'You can grant or revoke access to the installed sources below.' : 'This restriction does not change saved access.'}</p> : null}
           {needsRefresh ? <p role="status" className="notice-banner notice-warning mt-6">Editing is paused until the recorded state can be checked. Trying again reloads the saved configuration and discards unsaved selections; it does not resubmit a change.</p> : null}
           <section className="mt-7" aria-labelledby="edit-access-title">
@@ -275,7 +274,7 @@ export function TeamPage() {
             {installed.length === 0 ? <p className="mt-3 text-sm text-kumo-subtle">{sources?.installationEnabled === true ? 'Install a source before granting source access.' : 'No installed sources are available to assign. New-source installation is paused.'}</p> : null}
 
             <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-kumo-line pt-5">
-              <Button variant="primary" className="pressable inline-flex items-center gap-2" loading={isBusy || saving} disabled={!team.editingEnabled || !team.managementCredentialConfigured || loading || saving || isBusy || needsRefresh || callbackId !== null || action?.status === 'applying' || (recorded ? team.proposedMembers === null : !changed)} onClick={() => void save()}>
+              <Button variant="primary" className="pressable inline-flex items-center gap-2" loading={isBusy || saving} disabled={!team.editingEnabled || loading || saving || isBusy || needsRefresh || callbackId !== null || action?.status === 'applying' || (recorded ? team.proposedMembers === null : !changed)} onClick={() => void save()}>
                 <Check size={16} /> {action?.status === 'recovery_required' ? 'Resume recorded change' : recorded ? 'Save recorded change' : 'Save'}
               </Button>
               {canCancel ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving || loading || needsRefresh || callbackId !== null} onClick={() => void cancelRecordedChange()}><X size={16} /> Cancel recorded change</Button> : null}

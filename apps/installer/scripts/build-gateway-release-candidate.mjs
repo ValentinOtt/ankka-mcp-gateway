@@ -2,9 +2,9 @@
  * Offline, secret-free builder for an exact MCP Gateway release candidate.
  *
  * Input: a public `ankka-mcp-gateway` checkout whose release sources are
- * exactly the committed bytes of one stated commit. The React/Kumo admin is
- * built deterministically from `apps/admin`; the other four components come
- * from `payload/`. Output: a brand-new
+ * exactly the committed bytes of one stated commit. The React/Kumo admin and
+ * the final/bootstrap customer Worker entrypoints are built deterministically;
+ * the remaining payload components come from `payload/`. Output: a brand-new
  * directory holding the canonical `manifest.json` and a create-only copy of
  * `payload/` — precisely the `--release-dir` shape `sign-gateway-release.mjs`
  * consumes. The builder never signs, never publishes, never touches the
@@ -24,6 +24,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { build as esbuildBuild, version as esbuildRuntimeVersion } from 'esbuild';
 import * as v from 'valibot';
 
 import {
@@ -43,6 +44,8 @@ const COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
 const MAX_CONTROL_PLANE_ORIGIN_LENGTH = 2_048;
 const CONTROL_PLANE_ORIGIN_DECLARATION =
   "const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';";
+const CONTROL_PLANE_ORIGIN_MARKER = 'ankka-control-plane-origin:';
+const EXPECTED_ESBUILD_VERSION = '0.28.1';
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/u;
 const STRING_SCHEMA = v.string();
 const RELEASE_TOOL_PATHS = Object.freeze([
@@ -52,7 +55,8 @@ const RELEASE_TOOL_PATHS = Object.freeze([
 const COMPONENTS = Object.freeze([
   Object.freeze({ name: 'admin', directory: 'admin', source: ['apps', 'admin', 'dist'], web: true, required: 'index.html' }),
   Object.freeze({ name: 'installer', directory: 'installer', source: ['payload', 'installer'], web: true, required: 'index.html' }),
-  Object.freeze({ name: 'worker', directory: 'worker', source: ['payload', 'worker'], web: false, required: 'index.js' }),
+  Object.freeze({ name: 'worker', directory: 'worker', generated: 'final', web: false, required: 'index.js' }),
+  Object.freeze({ name: 'workerBootstrap', directory: 'worker-bootstrap', generated: 'bootstrap', web: false, required: 'index.js' }),
   Object.freeze({ name: 'workerCleanup', directory: 'worker-cleanup', source: ['payload', 'worker-cleanup'], web: false, required: 'index.js' }),
   Object.freeze({ name: 'workerRetirement', directory: 'worker-retirement', source: ['payload', 'worker-retirement'], web: false, required: 'index.js' }),
 ]);
@@ -150,7 +154,14 @@ export function parseControlPlaneOrigin(value) {
   return value;
 }
 
-function compileWorkerControlPlaneOrigin(bytes, controlPlaneOrigin) {
+async function validatedWorkerSource(sourceRoot) {
+  let bytes;
+  try {
+    bytes = await readFile(path.join(sourceRoot, 'payload', 'worker', 'index.js'));
+  } catch {
+    fail('worker_control_plane_origin_anchor_invalid');
+  }
+  assertNormalizedText(bytes, 'application/javascript+module');
   let source;
   try {
     source = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -165,10 +176,7 @@ function compileWorkerControlPlaneOrigin(bytes, controlPlaneOrigin) {
       first + CONTROL_PLANE_ORIGIN_DECLARATION.length,
     ) !== -1
   ) fail('worker_control_plane_origin_anchor_invalid');
-  return Buffer.from(source.replace(
-    CONTROL_PLANE_ORIGIN_DECLARATION,
-    `const CONTROL_PLANE_ORIGIN = '${controlPlaneOrigin}';`,
-  ), 'utf8');
+  return source;
 }
 
 async function git(sourceRoot, args) {
@@ -196,7 +204,8 @@ async function assertExactSourceCommit(sourceRoot, sourceCommit) {
   if (head !== sourceCommit) fail('source_commit_mismatch');
   const status = await git(sourceRoot, [
     'status', '--porcelain=v1', '--untracked-files=all', '--',
-    'apps/admin', 'package.json', 'package-lock.json', 'LICENSE',
+    'apps/admin', 'apps/installer/package.json', 'apps/installer/src',
+    'apps/installer/tsconfig.json', 'package.json', 'package-lock.json', 'LICENSE',
     'scripts/write-admin-license-bundle.mjs',
     'third_party/licenses',
     'apps/installer/scripts/build-reviewed-fault-injection-candidate.mjs',
@@ -242,7 +251,98 @@ async function buildAdminApplication(sourceRoot) {
   }
 }
 
-async function enumerateComponent(sourceRoot, component, controlPlaneOrigin) {
+function customerWorkerOriginPlugin(sourceRoot, controlPlaneOrigin, workerSource) {
+  const payloadPath = path.join(sourceRoot, 'payload', 'worker', 'index.js');
+  return Object.freeze({
+    name: 'ankka-customer-worker-origin',
+    setup(build) {
+      build.onLoad({ filter: /payload\/worker\/index\.js$/ }, async (args) => {
+        if (path.resolve(args.path) !== payloadPath) fail('worker_control_plane_origin_anchor_invalid');
+        return {
+          contents: workerSource.replace(
+            CONTROL_PLANE_ORIGIN_DECLARATION,
+            `const CONTROL_PLANE_ORIGIN = '${controlPlaneOrigin}';`,
+          ),
+          loader: 'js',
+        };
+      });
+    },
+  });
+}
+
+async function bundleCustomerWorker(sourceRoot, controlPlaneOrigin, variant, finalRuntimeSource) {
+  if (esbuildRuntimeVersion !== EXPECTED_ESBUILD_VERSION) fail('worker_build_tool_invalid');
+  const workerSource = await validatedWorkerSource(sourceRoot);
+  const entry = variant === 'final'
+    ? path.join(sourceRoot, 'apps', 'installer', 'src', 'customer-gateway-entrypoint.ts')
+    : path.join(sourceRoot, 'apps', 'installer', 'src', 'customer-gateway-bootstrap-entrypoint.ts');
+  let result;
+  try {
+    result = await esbuildBuild({
+      absWorkingDir: sourceRoot,
+      banner: { js: `// ${variant === 'final' ? CONTROL_PLANE_ORIGIN_MARKER + controlPlaneOrigin : 'ankka-bootstrap-runtime:v1'}` },
+      bundle: true,
+      charset: 'utf8',
+      define: variant === 'bootstrap'
+        ? { __ANKKA_FINAL_RUNTIME_SOURCE__: JSON.stringify(finalRuntimeSource) }
+        : {},
+      entryPoints: [entry],
+      format: 'esm',
+      legalComments: 'none',
+      logLevel: 'silent',
+      minify: false,
+      platform: 'browser',
+      sourcemap: false,
+      target: 'es2022',
+      treeShaking: true,
+      write: false,
+      plugins: [customerWorkerOriginPlugin(sourceRoot, controlPlaneOrigin, workerSource)],
+    });
+  } catch {
+    return fail('worker_build_failed');
+  }
+  if (result.outputFiles.length !== 1) fail('worker_build_failed');
+  const output = result.outputFiles[0];
+  if (!output || output.contents.byteLength < 1 || output.contents.byteLength > MAX_FILE_BYTES) {
+    fail('worker_build_failed');
+  }
+  const bytes = Buffer.from(output.contents);
+  assertNormalizedText(bytes, 'application/javascript+module');
+  if (variant === 'final') {
+    const marker = `// ${CONTROL_PLANE_ORIGIN_MARKER}${controlPlaneOrigin}\n`;
+    const text = bytes.toString('utf8');
+    if (
+      !text.startsWith(marker) ||
+      text.indexOf(marker, marker.length) !== -1 ||
+      !text.includes(`var CONTROL_PLANE_ORIGIN = "${controlPlaneOrigin}";`)
+    ) {
+      bytes.fill(0);
+      fail('worker_control_plane_origin_anchor_invalid');
+    }
+  }
+  return bytes;
+}
+
+function enumerateGeneratedComponent(component, bytes) {
+  const contentType = WORKER_CONTENT_TYPES['.js'];
+  const record = Object.freeze({
+    byteSize: bytes.byteLength,
+    contentType,
+    path: `payload/${component.directory}/${component.required}`,
+    sha256: sha256Hex(bytes),
+  });
+  return Object.freeze({
+    files: Object.freeze([Object.freeze({ bytes, record })]),
+    component: Object.freeze({
+      byteSize: record.byteSize,
+      fileCount: 1,
+      files: Object.freeze([record]),
+      treeSha256: sha256Hex(Buffer.from(canonicalJson([record]), 'utf8')),
+    }),
+  });
+}
+
+async function enumerateComponent(sourceRoot, component) {
   const componentRoot = path.join(sourceRoot, ...component.source);
   const rootStat = await lstat(componentRoot).catch(() => null);
   if (!rootStat || rootStat.isSymbolicLink() || !rootStat.isDirectory()) fail('payload_component_missing');
@@ -268,10 +368,7 @@ async function enumerateComponent(sourceRoot, component, controlPlaneOrigin) {
       const manifestPath = `payload/${component.directory}/${relative}`;
       const contentType = (component.web ? WEB_CONTENT_TYPES : WORKER_CONTENT_TYPES)[extension(manifestPath)];
       if (!contentType) fail('payload_content_type_unknown');
-      let bytes = await readFile(path.join(componentRoot, relative));
-      if (component.name === 'worker' && relative === component.required) {
-        bytes = compileWorkerControlPlaneOrigin(bytes, controlPlaneOrigin);
-      }
+      const bytes = await readFile(path.join(componentRoot, relative));
       if (bytes.byteLength === 0 || bytes.byteLength > MAX_FILE_BYTES) fail('payload_file_size');
       assertNormalizedText(bytes, contentType);
       files.push(Object.freeze({
@@ -310,10 +407,7 @@ async function assertExactPayloadRoot(sourceRoot) {
   if (!payloadStat || payloadStat.isSymbolicLink() || !payloadStat.isDirectory()) fail('payload_missing');
   const entries = await readdir(payloadRoot, { withFileTypes: true });
   const names = entries.map((entry) => entry.name).sort(lexicalCompare);
-  const expected = COMPONENTS
-    .filter((component) => component.name !== 'admin')
-    .map((component) => component.directory)
-    .sort(lexicalCompare);
+  const expected = ['installer', 'worker', 'worker-cleanup', 'worker-retirement'].sort(lexicalCompare);
   if (names.length !== expected.length || names.some((name, index) => name !== expected[index])) {
     fail('payload_layout_unexpected');
   }
@@ -338,13 +432,38 @@ export async function buildReleaseCandidate({ controlPlaneOrigin, sourceDirector
   await assertExactSourceCommit(sourceRoot, sourceCommit);
   await assertReleaseToolingMatchesSource(sourceRoot);
   await assertExactPayloadRoot(sourceRoot);
+  await enumerateComponent(sourceRoot, Object.freeze({
+    name: 'worker-source',
+    directory: 'worker',
+    source: ['payload', 'worker'],
+    web: false,
+    required: 'index.js',
+  }));
   await buildAdminApplication(sourceRoot);
   await assertExactSourceCommit(sourceRoot, sourceCommit);
   await assertReleaseToolingMatchesSource(sourceRoot);
 
+  const finalRuntime = await bundleCustomerWorker(
+    sourceRoot,
+    parsedControlPlaneOrigin,
+    'final',
+    '',
+  );
+  const bootstrapRuntime = await bundleCustomerWorker(
+    sourceRoot,
+    parsedControlPlaneOrigin,
+    'bootstrap',
+    finalRuntime.toString('utf8'),
+  );
   const enumerated = {};
   for (const component of COMPONENTS) {
-    enumerated[component.name] = await enumerateComponent(sourceRoot, component, parsedControlPlaneOrigin);
+    if (component.generated === 'final') {
+      enumerated[component.name] = enumerateGeneratedComponent(component, finalRuntime);
+    } else if (component.generated === 'bootstrap') {
+      enumerated[component.name] = enumerateGeneratedComponent(component, bootstrapRuntime);
+    } else {
+      enumerated[component.name] = await enumerateComponent(sourceRoot, component);
+    }
   }
   await assertExactSourceCommit(sourceRoot, sourceCommit);
   await assertReleaseToolingMatchesSource(sourceRoot);

@@ -104,7 +104,7 @@ async function providerCall(fetchImpl, token, pathname, init = {}) {
   }
 }
 
-async function readAllApplications(fetchImpl, token, accountId) {
+async function readAllApplications(fetchImpl, token, zoneId) {
   const applications = [];
   const ids = new Set();
   let totalPages = null;
@@ -112,7 +112,7 @@ async function readAllApplications(fetchImpl, token, accountId) {
     const body = await providerCall(
       fetchImpl,
       token,
-      `/accounts/${encodeURIComponent(accountId)}/access/apps?per_page=${PAGE_SIZE}&page=${page}`,
+      `/zones/${encodeURIComponent(zoneId)}/access/apps?per_page=${PAGE_SIZE}&page=${page}`,
     );
     if (!Array.isArray(body.result) || !isRecord(body.result_info)) fail('provider_response_invalid');
     const completeEmptyInventory = body.result_info.page === 1 &&
@@ -248,7 +248,7 @@ export async function applyIsolatedAccess(input) {
   try {
     token = await input.readToken();
     if (!v.is(STRING_SCHEMA, token) || !TOKEN_PATTERN.test(token)) fail('token_invalid');
-    let applications = await readAllApplications(input.fetchImpl, token, target.accountId);
+    let applications = await readAllApplications(input.fetchImpl, token, target.zoneId);
     const identityProviderId = await accountMemberIdentityProvider(
       input.fetchImpl,
       token,
@@ -268,13 +268,13 @@ export async function applyIsolatedAccess(input) {
       await providerCall(
         input.fetchImpl,
         token,
-        `/accounts/${encodeURIComponent(target.accountId)}/access/apps`,
+        `/zones/${encodeURIComponent(target.zoneId)}/access/apps`,
         { method: 'POST', body: JSON.stringify(contract.bypassApplicationBody(specification)) },
       );
       createdApplications += 1;
     }
 
-    applications = await readAllApplications(input.fetchImpl, token, target.accountId);
+    applications = await readAllApplications(input.fetchImpl, token, target.zoneId);
     byDomain = existingContract(
       applications,
       contract,
@@ -286,7 +286,7 @@ export async function applyIsolatedAccess(input) {
       await providerCall(
         input.fetchImpl,
         token,
-        `/accounts/${encodeURIComponent(target.accountId)}/access/apps`,
+        `/zones/${encodeURIComponent(target.zoneId)}/access/apps`,
         {
           method: 'POST',
           body: JSON.stringify(contract.protectedInstallerApplicationBody({
@@ -299,7 +299,7 @@ export async function applyIsolatedAccess(input) {
       createdApplications += 1;
     }
 
-    applications = await readAllApplications(input.fetchImpl, token, target.accountId);
+    applications = await readAllApplications(input.fetchImpl, token, target.zoneId);
     byDomain = existingContract(
       applications,
       contract,

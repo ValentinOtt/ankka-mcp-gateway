@@ -7,6 +7,7 @@ import {
   deriveCustomerGatewayInstallationReceiptExpectation,
   prepareCustomerGatewayDesiredProjection,
   prepareCustomerBootstrapClaim,
+  prepareCustomerBootstrapClaimFromPlan,
   submitCustomerBootstrap,
 } from '../src/customer-bootstrap-request';
 import type {
@@ -36,8 +37,8 @@ const INTERNAL_PLAN = `plan-${'7'.repeat(24)}`;
 
 // Golden evidence generated independently by the public provider-neutral
 // planner in ankka-mcp-gateway for this exact selection and target.
-const GOLDEN_INSTALLATION_ID = 'acg-361551cea347ce8d598c04f7';
-const GOLDEN_DESIRED_HASH = 'sha256:51f2a522d9dc537459a36ac5d70af04c61556da0c9a3d2964b0b7b97f86de93b';
+const GOLDEN_INSTALLATION_ID = 'acg-7e82d1f0a97de350e59c86d7';
+const GOLDEN_DESIRED_HASH = 'sha256:1992d0899e947b390e23f0ea0265c18b785bbec1ff8e21bda4827d63358eb454';
 const GOLDEN_CONFIGURATION_HASH = 'sha256:adef4aee1b0500faf61c3d169c3ed0a0554ba0848e703ee3fa727fcd12a782cc';
 
 const target: AuthorizedTarget = {
@@ -215,6 +216,23 @@ function expectError(
 }
 
 describe('hosted customer bootstrap request', () => {
+  it('derives the identical customer-owned claim from the signed Stage 1 plan', async () => {
+    const reviewed = await approvedPlan();
+    const hosted = await prepareCustomerBootstrapClaim(await input({ plan: reviewed }));
+    const customerOwned = await prepareCustomerBootstrapClaimFromPlan({
+      plan: reviewed,
+      target: {
+        accountId: target.account.id,
+        zoneId: target.zone.id,
+        zoneName: target.zone.name,
+      },
+      nowMs: NOW,
+      randomBytes: deterministicRandom,
+    });
+    expect(customerOwned).toEqual(hosted);
+    expect(customerOwned.expected.installationId).toBe(reviewed.managementOwnershipMarker);
+  });
+
   it('builds the public verifier-compatible canonical claim and signs exact raw UTF-8 bytes', async () => {
     const requestId = base64UrlEncode(REQUEST_BYTES);
     const prepared = await prepareCustomerBootstrapClaim(await input());

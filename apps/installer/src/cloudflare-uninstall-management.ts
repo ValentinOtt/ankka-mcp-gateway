@@ -1449,7 +1449,7 @@ function domainListUrl(expected: Projection): URL {
 
 function applicationListUrl(expected: Projection, page: number): URL {
   return filteredListUrl(
-    accountUrl(expected.accountId, '/access/apps'),
+    zoneUrl(expected.zoneId, '/access/apps'),
     'domain',
     expected.managementHostname,
     page,
@@ -1457,7 +1457,7 @@ function applicationListUrl(expected: Projection, page: number): URL {
 }
 
 function policyListUrl(expected: Projection, page: number): URL {
-  const url = accountUrl(expected.accountId, `/access/apps/${encodeURIComponent(expected.applicationId)}/policies`);
+  const url = zoneUrl(expected.zoneId, `/access/apps/${encodeURIComponent(expected.applicationId)}/policies`);
   url.searchParams.set('page', String(page));
   url.searchParams.set('per_page', String(PAGE_SIZE));
   return url;
@@ -1665,7 +1665,7 @@ export async function preflightHostedUninstallManagement(
   await requireExactGet(
     call,
     'fresh_admin_policy_get',
-    accountUrl(expected.accountId, `/access/apps/${encodeURIComponent(expected.applicationId)}/policies/${encodeURIComponent(expected.policyId)}`),
+    zoneUrl(expected.zoneId, `/access/apps/${encodeURIComponent(expected.applicationId)}/policies/${encodeURIComponent(expected.policyId)}`),
     (value) => exactPolicy(value, expected),
   );
   await requireExactSingletonList(
@@ -1678,7 +1678,7 @@ export async function preflightHostedUninstallManagement(
   await requireExactGet(
     call,
     'fresh_access_application_get',
-    accountUrl(expected.accountId, `/access/apps/${encodeURIComponent(expected.applicationId)}`),
+    zoneUrl(expected.zoneId, `/access/apps/${encodeURIComponent(expected.applicationId)}`),
     (value) => exactApplication(value, expected),
   );
   await requireExactSingletonList(
@@ -2177,12 +2177,12 @@ function deleteUrl(expected: Projection, action: HostedUninstallManagementDelete
     return accountUrl(expected.accountId, `/workers/domains/${encodeURIComponent(expected.domainId)}`);
   }
   if (action === 'management_admin_policy_delete') {
-    return accountUrl(
-      expected.accountId,
+    return zoneUrl(
+      expected.zoneId,
       `/access/apps/${encodeURIComponent(expected.applicationId)}/policies/${encodeURIComponent(expected.policyId)}`,
     );
   }
-  return accountUrl(expected.accountId, `/access/apps/${encodeURIComponent(expected.applicationId)}`);
+  return zoneUrl(expected.zoneId, `/access/apps/${encodeURIComponent(expected.applicationId)}`);
 }
 
 function exactDeleteResult(result: BoundaryValue, intent: HostedUninstallManagementDeleteIntent): boolean {
@@ -2234,7 +2234,7 @@ async function requireFreshDeletePrerequisites(
   await requireExactGet(
     call,
     'fresh_access_application_get',
-    accountUrl(expected.accountId, `/access/apps/${encodeURIComponent(expected.applicationId)}`),
+    zoneUrl(expected.zoneId, `/access/apps/${encodeURIComponent(expected.applicationId)}`),
     (value) => exactApplication(value, expected),
   );
   await requireExactSingletonList(
@@ -2249,7 +2249,7 @@ async function requireFreshDeletePrerequisites(
     await requireExactGet(
       call,
       'fresh_admin_policy_get',
-      accountUrl(expected.accountId, `/access/apps/${encodeURIComponent(expected.applicationId)}/policies/${encodeURIComponent(expected.policyId)}`),
+      zoneUrl(expected.zoneId, `/access/apps/${encodeURIComponent(expected.applicationId)}/policies/${encodeURIComponent(expected.policyId)}`),
       (value) => exactPolicy(value, expected),
     );
     await requireExactSingletonList(
@@ -2373,12 +2373,12 @@ async function requireId404AndListAbsence(
   if (action === 'management_custom_domain_delete') {
     getUrl = accountUrl(expected.accountId, `/workers/domains/${encodeURIComponent(expected.domainId)}`);
   } else if (action === 'management_admin_policy_delete') {
-    getUrl = accountUrl(
-      expected.accountId,
+    getUrl = zoneUrl(
+      expected.zoneId,
       `/access/apps/${encodeURIComponent(expected.applicationId)}/policies/${encodeURIComponent(expected.policyId)}`,
     );
   } else {
-    getUrl = accountUrl(expected.accountId, `/access/apps/${encodeURIComponent(expected.applicationId)}`);
+    getUrl = zoneUrl(expected.zoneId, `/access/apps/${encodeURIComponent(expected.applicationId)}`);
   }
 
   const getResponse = await request(call, getStage, getUrl, 'GET');
@@ -2435,12 +2435,12 @@ function recoveryGetUrl(expected: Projection, action: HostedUninstallManagementD
     return accountUrl(expected.accountId, `/workers/domains/${encodeURIComponent(expected.domainId)}`);
   }
   if (action === 'management_admin_policy_delete') {
-    return accountUrl(
-      expected.accountId,
+    return zoneUrl(
+      expected.zoneId,
       `/access/apps/${encodeURIComponent(expected.applicationId)}/policies/${encodeURIComponent(expected.policyId)}`,
     );
   }
-  return accountUrl(expected.accountId, `/access/apps/${encodeURIComponent(expected.applicationId)}`);
+  return zoneUrl(expected.zoneId, `/access/apps/${encodeURIComponent(expected.applicationId)}`);
 }
 
 function exactRecoveryOwnership(

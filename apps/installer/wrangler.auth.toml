@@ -1,0 +1,34 @@
+name = "ankka-cloudflare-auth"
+main = "src/auth-entrypoint.ts"
+compatibility_date = "2026-08-14"
+workers_dev = false
+preview_urls = false
+
+# The only route. The relay refuses every other origin (workers.dev alias,
+# http, or a port) with 503, so this Custom Domain is the whole public surface.
+[[routes]]
+pattern = "auth.ankka.ai"
+custom_domain = true
+
+# This service receives short-lived OAuth codes. Request and query data must
+# never enter Cloudflare logs or traces.
+[observability.logs]
+enabled = false
+invocation_logs = false
+
+[observability.traces]
+enabled = false
+head_sampling_rate = 0
+
+[[durable_objects.bindings]]
+name = "GATEWAY_OWNERSHIP_CHALLENGE"
+class_name = "CloudflareGatewayOwnershipChallenge"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CloudflareGatewayOwnershipChallenge"]
+
+# Provision these bindings outside the repository before deployment:
+# CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID, CLOUDFLARE_RELAY_STATE_KEY,
+# CLOUDFLARE_RELAY_TICKET_KEY, CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY,
+# CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID.

@@ -159,11 +159,12 @@ export function createCloudflareClient(options: CloudflareClientOptions) {
   const apiBase = DEFAULT_BASE_URL;
 
   const account = ['accounts', accountId];
+  const zone = ['zones', zoneId];
   const aiMcp = [...account, 'access', 'ai-controls', 'mcp'];
   const mcpServers = [...aiMcp, 'servers'];
   const portals = [...aiMcp, 'portals'];
-  const accessApps = [...account, 'access', 'apps'];
-  const dnsRecords = ['zones', zoneId, 'dns_records'];
+  const accessApps = [...zone, 'access', 'apps'];
+  const dnsRecords = [...zone, 'dns_records'];
 
   const request = async (
     operation: string,

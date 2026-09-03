@@ -250,6 +250,7 @@ export interface StaticDeployPlan {
   releaseId: string;
   releaseArtifactSha256: string;
   sourceCommit: string;
+  bootstrapWorkerSourceSha256: string;
   workerBundleSha256: string;
   dashboardAssetsSha256: string;
   managementOwnershipMarker: string;
@@ -338,6 +339,7 @@ const staticDeployPlanSchema = v.strictObject({
   releaseId: stringSchema,
   releaseArtifactSha256: stringSchema,
   sourceCommit: stringSchema,
+  bootstrapWorkerSourceSha256: stringSchema,
   workerBundleSha256: stringSchema,
   dashboardAssetsSha256: stringSchema,
   managementOwnershipMarker: stringSchema,
@@ -372,6 +374,14 @@ export async function buildStaticDeployPlan(
   expiresAt: number,
 ): Promise<StaticDeployPlan> {
   if (!Number.isSafeInteger(expiresAt) || expiresAt <= 0) throw new DeployError(500, 'release_invalid');
+  const bootstrapWorkerSource = manifest.components.workerBootstrap.files.filter(
+    (file) => file.path === 'payload/worker-bootstrap/index.js',
+  );
+  if (bootstrapWorkerSource.length !== 1) throw new DeployError(500, 'release_invalid');
+  const bootstrapWorkerSourceSha256 = bootstrapWorkerSource[0]?.sha256;
+  if (bootstrapWorkerSourceSha256 === undefined || !SHA256_PATTERN.test(bootstrapWorkerSourceSha256)) {
+    throw new DeployError(500, 'release_invalid');
+  }
   const slug = selectionResourceSlug(selection);
   const managementOwnershipDigest = await sha256Hex(JSON.stringify({
     schemaVersion: 1,
@@ -412,6 +422,7 @@ export async function buildStaticDeployPlan(
     releaseId: manifest.release,
     releaseArtifactSha256: manifest.artifact.treeSha256,
     sourceCommit: manifest.sourceCommit,
+    bootstrapWorkerSourceSha256,
     workerBundleSha256: manifest.components.worker.treeSha256,
     dashboardAssetsSha256: manifest.components.admin.treeSha256,
     managementOwnershipMarker,
@@ -489,6 +500,7 @@ export function parseStaticDeployPlan<Input>(value: Input): StaticDeployPlan {
     !RELEASE_PATTERN.test(input.releaseId) ||
     !SHA256_PATTERN.test(input.releaseArtifactSha256) ||
     !COMMIT_PATTERN.test(input.sourceCommit) ||
+    !SHA256_PATTERN.test(input.bootstrapWorkerSourceSha256) ||
     !SHA256_PATTERN.test(input.workerBundleSha256) ||
     !SHA256_PATTERN.test(input.dashboardAssetsSha256) ||
     !MANAGEMENT_OWNERSHIP_MARKER_PATTERN.test(input.managementOwnershipMarker) ||
@@ -578,6 +590,74 @@ export function parseStaticDeployPlan<Input>(value: Input): StaticDeployPlan {
     throw new DeployError(500, 'session_invalid');
   }
   return Object.freeze(input);
+}
+
+/** Rebuild the customer-facing selection carried by an exact static plan. */
+export function deploySelectionFromStaticPlan(plan: StaticDeployPlan): DeploySelection {
+  const parsed = parseStaticDeployPlan(plan);
+  const config = parsed.gatewayConfiguration;
+  return parseDeploySelection({
+    schemaVersion: 1,
+    basics: {
+      gatewayName: config.gatewayName,
+      zoneName: config.zoneName,
+      adminEmail: parsed.primaryAdminEmail,
+      additionalAdminEmails: parsed.managementAdminEmails
+        .filter((email) => email !== parsed.primaryAdminEmail),
+      managementHostname: config.managementHostname,
+      portalHostname: config.portalHostname,
+    },
+    firstSource: config.firstSource === null ? null : {
+      name: config.firstSource.name,
+      url: config.firstSource.url,
+      enabledTools: config.firstSource.enabledTools,
+      portalUserEmails: parsed.portalAudienceEmails,
+    },
+  });
+}
+
+/**
+ * Recompute both static-plan commitments before the plan crosses into the
+ * customer Worker. Expiry is deliberately excluded, matching plan renewal.
+ */
+export async function verifyStaticDeployPlanIntegrity<Input>(
+  value: Input,
+): Promise<StaticDeployPlan> {
+  const plan = parseStaticDeployPlan(value);
+  const selection = deploySelectionFromStaticPlan(plan);
+  const ownershipDigest = await sha256Hex(JSON.stringify({
+    schemaVersion: 1,
+    releaseId: plan.releaseId,
+    releaseArtifactSha256: plan.releaseArtifactSha256,
+    sourceCommit: plan.sourceCommit,
+    selection,
+  }));
+  if (plan.managementOwnershipMarker !== `acg-${ownershipDigest.slice(0, 24)}`) {
+    throw new DeployError(500, 'session_invalid');
+  }
+  const boundPlan = {
+    schemaVersion: 1,
+    releaseId: plan.releaseId,
+    releaseArtifactSha256: plan.releaseArtifactSha256,
+    sourceCommit: plan.sourceCommit,
+    bootstrapWorkerSourceSha256: plan.bootstrapWorkerSourceSha256,
+    workerBundleSha256: plan.workerBundleSha256,
+    dashboardAssetsSha256: plan.dashboardAssetsSha256,
+    managementOwnershipMarker: plan.managementOwnershipMarker,
+    actorRole: plan.actorRole,
+    primaryAdminEmail: plan.primaryAdminEmail,
+    managementAdminEmails: plan.managementAdminEmails,
+    portalAudienceEmails: plan.portalAudienceEmails,
+    gatewayConfiguration: plan.gatewayConfiguration,
+    managementResources: plan.managementResources,
+    gatewayResources: plan.gatewayResources,
+    requiredScopes: plan.requiredScopes,
+  };
+  const digest = await sha256Hex(JSON.stringify(boundPlan));
+  if (plan.planId !== `plan-${digest.slice(0, 24)}` || plan.planHash !== `sha256:${digest}`) {
+    throw new DeployError(500, 'session_invalid');
+  }
+  return plan;
 }
 
 const FORBIDDEN_STORED_KEYS = new Set([

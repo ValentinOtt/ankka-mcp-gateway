@@ -199,11 +199,14 @@ async function generatedWorker(outputDirectory) {
   return (await import(`${moduleUrl.href}?offline-lifecycle=${path.basename(outputDirectory)}`)).default;
 }
 
+// The two-stage hosted environment. Every value besides the bucket is a
+// synthetic placeholder: the descriptor route reads only the pinned bundle,
+// so the lifecycle never reaches a session, grant, or issuer binding.
 function reviewedEnvironment(bucket) {
   const rateLimit = Object.freeze({ async limit() { return { success: true }; } });
   return {
     GATEWAY_RELEASE_BUCKET: bucket,
-    GATEWAY_DEPLOY_SESSION: {
+    TWO_STAGE_DEPLOY_SESSION: {
       idFromName() { throw new Error('offline lifecycle did not create a hosted session'); },
       get() { throw new Error('offline lifecycle did not create a hosted session'); },
     },
@@ -212,37 +215,11 @@ function reviewedEnvironment(bucket) {
     SESSION_MUTATION_RATE_LIMIT: rateLimit,
     CLOUDFLARE_OAUTH_CLIENT_ID: '3'.repeat(32),
     CLOUDFLARE_OAUTH_CLIENT_SECRET: 'synthetic-test-only',
+    CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID: '6'.repeat(32),
     DEPLOY_SESSION_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64url'),
-    BOOTSTRAP_NONCE_DERIVATION_KEY: Buffer.alloc(32, 8).toString('base64url'),
-  };
-}
-
-function managementRequest(claim) {
-  return new Request(`${CONTROL_PLANE_ORIGIN}/api/management/authorize`, {
-    method: 'POST',
-    headers: {
-      'cf-connecting-ip': '192.0.2.10',
-      'content-type': JSON_CONTENT_TYPE,
-      origin: CONTROL_PLANE_ORIGIN,
-      'sec-fetch-site': 'same-origin',
-    },
-    body: JSON.stringify({
-      handoff: Buffer.from(JSON.stringify(claim)).toString('base64url'),
-    }),
-  });
-}
-
-function sharedManagementClaim(actionCharacter) {
-  return {
-    actionId: `action_${actionCharacter.repeat(32)}`,
-    actionKey: Buffer.alloc(32, actionCharacter.charCodeAt(0)).toString('base64url'),
-    actorEmail: 'admin@example.com',
-    accountId: ACCOUNT_ID,
-    controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
-    workerName: 'ankka-gateway-offline',
-    workersSubdomain: 'offline-tenant',
-    managementOrigin: MANAGEMENT_ORIGIN,
-    expiresAt: Date.now() + 5 * 60 * 1000,
+    CLOUDFLARE_OWNERSHIP_ISSUER_PRIVATE_KEY: Buffer.alloc(32, 8).toString('base64url'),
+    CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY: Buffer.alloc(32, 9).toString('base64url'),
+    CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID: 'offline-issuer-key-1',
   };
 }
 
@@ -268,7 +245,7 @@ async function accessAssertion(privateKey, kid) {
 }
 
 describe('offline two-release signed origin lifecycle', () => {
-  it('publishes A/B create-only, repins to B, discovers B from A, retains exact A rollback, and origin-binds handoffs', async () => {
+  it('publishes A/B create-only, repins to B, discovers B from A over the two-stage descriptor, and retains exact A rollback', async () => {
     const checkout = await releaseCandidateCheckout({
       ...FIXTURE_PAYLOAD,
       'payload/worker/index.js': await readFile(new URL('../../../payload/worker/index.js', import.meta.url), 'utf8'),
@@ -362,6 +339,7 @@ describe('offline two-release signed origin lifecycle', () => {
         oauthClientId: '3'.repeat(32),
         schemaVersion: 1,
         workerName: 'ankka-gateway-deploy-isolated-lifecycle-proof',
+        zoneId: '4'.repeat(32),
       });
       const reviewedA = path.join(checkout.sandbox, 'reviewed-a');
       const reviewedB = path.join(checkout.sandbox, 'reviewed-b');
@@ -393,6 +371,17 @@ describe('offline two-release signed origin lifecycle', () => {
       expect(descriptorB.release.id).toBe(RELEASE_B);
       expect(parseCanonicalReleaseManifest(descriptorB.verification.manifest).controlPlaneOrigin)
         .toBe(CONTROL_PLANE_ORIGIN);
+      expect(descriptorBResponse.headers.get('set-cookie')).toBeNull();
+      const otherChannel = await workerB.fetch(
+        new Request(`${CONTROL_PLANE_ORIGIN}/api/releases/stable`), reviewedEnv,
+      );
+      expect(otherChannel.status).toBe(404);
+      expect(await otherChannel.json()).toEqual({ code: 'release_unavailable' });
+      const retiredManagement = await workerB.fetch(new Request(
+        `${CONTROL_PLANE_ORIGIN}/api/management/authorize`,
+        { method: 'POST', headers: { 'content-type': JSON_CONTENT_TYPE }, body: '{}' },
+      ), reviewedEnv);
+      expect(retiredManagement.status).toBe(404);
 
       const workerPayloadA = bundleA.payload.find(({ path: payloadPath }) => (
         payloadPath === 'payload/worker/index.js'
@@ -418,6 +407,7 @@ describe('offline two-release signed origin lifecycle', () => {
         CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
         CLOUDFLARE_ZONE_ID: ZONE_ID,
         CLOUDFLARE_ZONE_NAME: 'example.com',
+        ANKKA_INSTALL_ID: `acg-${'5'.repeat(24)}`,
         ANKKA_GATEWAY_RELEASE: RELEASE_A,
         ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${pinA.artifactSha256}`,
         ANKKA_MANAGEMENT_HOSTNAME: 'manage.example.com',
@@ -467,57 +457,6 @@ describe('offline two-release signed origin lifecycle', () => {
       expect([...bucket.objects.keys()].some((key) => key.startsWith(
         `ankka-mcp-gateway/releases/${CHANNEL}/${RELEASE_A}/`,
       ))).toBe(true);
-
-      const rollback = await workerB.fetch(managementRequest({
-        schemaVersion: 2,
-        actionType: 'runtime_update',
-        ...sharedManagementClaim('R'),
-        operation: 'rollback',
-        from: {
-          release: RELEASE_B,
-          artifactSha256: `sha256:${pinB.artifactSha256}`,
-          versionId: null,
-        },
-        to: {
-          release: RELEASE_A,
-          artifactSha256: `sha256:${pinA.artifactSha256}`,
-          versionId: null,
-        },
-      }), reviewedEnv);
-      expect(rollback.status).toBe(200);
-
-      const sourceClaim = {
-        schemaVersion: 1,
-        ...sharedManagementClaim('S'),
-        releaseIdentity: pinA,
-      };
-      const source = await workerB.fetch(managementRequest(sourceClaim), reviewedEnv);
-      expect(source.status).toBe(200);
-      expect(new URL((await source.json()).authorizationUrl).origin).toBe('https://dash.cloudflare.com');
-      const crossedSourceIdentity = await workerB.fetch(managementRequest({
-        ...sourceClaim,
-        releaseIdentity: { ...pinA, controlPlaneOrigin: 'https://foreign-control.example' },
-      }), reviewedEnv);
-      expect(crossedSourceIdentity.status).toBe(400);
-      expect(await crossedSourceIdentity.json()).toEqual({ code: 'bad_request' });
-
-      const removalClaim = {
-        schemaVersion: 3,
-        actionType: 'gateway_teardown',
-        ...sharedManagementClaim('T'),
-        installationId: `acg-${'d'.repeat(24)}`,
-        gatewayName: 'Offline gateway',
-        portalHostname: 'mcp.example.com',
-      };
-      const boundRemoval = await workerB.fetch(managementRequest(removalClaim), reviewedEnv);
-      expect(boundRemoval.status).toBe(401);
-      expect(await boundRemoval.json()).toEqual({ code: 'session_invalid' });
-      const crossedRemoval = await workerB.fetch(managementRequest({
-        ...removalClaim,
-        controlPlaneOrigin: 'https://foreign-control.example',
-      }), reviewedEnv);
-      expect(crossedRemoval.status).toBe(400);
-      expect(await crossedRemoval.json()).toEqual({ code: 'bad_request' });
     } finally {
       globalThis.fetch = originalFetch;
       material.seed.fill(0);

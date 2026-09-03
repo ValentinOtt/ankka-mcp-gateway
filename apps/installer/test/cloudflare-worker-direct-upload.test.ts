@@ -19,6 +19,7 @@ import {
   proveActiveWorkerVersionRecovery,
   submitWorkerDeploymentMutation,
   submitWorkerMutation,
+  submitWorkerScriptMutation,
   submitWorkerVersionMutation,
   verifyActiveWorkerDeployment,
   verifyWorkerSubmission,
@@ -35,7 +36,7 @@ import {
   type VerifiedWorkerDirectUploadRelease,
   type WorkerSubmission,
 } from '../src/cloudflare-worker-direct-upload';
-import { boundaryObjectSchema } from '../src/boundary';
+import { boundaryObjectSchema, type BoundaryObject } from '../src/boundary';
 import { requestJson } from './boundary';
 
 const ACCOUNT_ID = 'a'.repeat(32);
@@ -204,6 +205,7 @@ async function releaseFixture(moduleBytes?: Uint8Array): Promise<ReleaseFixture>
 function plainTextBindings(release: VerifiedWorkerDirectUploadRelease): GatewayWorkerPlainTextBindings {
   return {
     ADMIN_EMAILS: 'admin@example.com',
+    ANKKA_INSTALL_ID: `acg-${'e'.repeat(24)}`,
     ANKKA_GATEWAY_RELEASE: release.release,
     ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${release.artifactSha256}`,
     ANKKA_MANAGEMENT_HOSTNAME: 'manage.example.com',
@@ -653,6 +655,68 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
       ...notReadyInput,
       plainTextBindings: { ...notReadyInput.plainTextBindings, ZERO_TRUST_READY: 'false' },
     })).rejects.toMatchObject({ code: 'invalid_input', stage: 'validate', outcome: 'not_sent' });
+  });
+
+  it('publishes through the stable direct script endpoint with exact multipart metadata', async () => {
+    const fixture = await releaseFixture();
+    const prepared = await prepareVerifiedWorkerRelease(prepareInput(fixture.release));
+    const worker: WorkerSubmission = {
+      kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID,
+    };
+    const plan = await prepareWorkerVersionMutation(
+      prepared,
+      worker,
+      COMPLETION_JWT,
+      'bootstrap',
+    );
+    let metadata: BoundaryObject | null = null;
+    let moduleText = '';
+    const sequence = sequencedTransport([async (request) => {
+      const form = await request.formData();
+      const metadataPart = form.get('metadata');
+      const modulePart = form.get('index.js');
+      expect(metadataPart).toBeInstanceOf(File);
+      expect(modulePart).toBeInstanceOf(File);
+      if (!(metadataPart instanceof File) || !(modulePart instanceof File)) {
+        throw new Error('direct script upload must carry File multipart parts');
+      }
+      metadata = v.parse(boundaryObjectSchema, JSON.parse(await metadataPart.text()));
+      moduleText = await modulePart.text();
+      return success({ id: VERSION_ID });
+    }]);
+
+    await expect(submitWorkerScriptMutation(
+      plan.ephemeral,
+      plan.recovery,
+      call(sequence.transport),
+    )).resolves.toEqual({
+      kind: 'worker_script',
+      phase: 'bootstrap',
+      accountId: ACCOUNT_ID,
+      workerName: WORKER_NAME,
+      workerId: WORKER_ID,
+      requestHash: plan.recovery.requestHash,
+      correlationTag: plan.recovery.correlationTag,
+    });
+
+    const request = required(sequence.requests.at(0), 'direct script request');
+    const url = new URL(request.url);
+    expect(request.method).toBe('PUT');
+    expect(url.pathname).toBe(`/client/v4/accounts/${ACCOUNT_ID}/workers/scripts/${WORKER_NAME}`);
+    expect(url.search).toBe('');
+    expect(request.headers.get('authorization')).toBe(`Bearer ${ACCESS_TOKEN}`);
+    expect(request.headers.get('content-type')).toMatch(/^multipart\/form-data; boundary=/u);
+    expect(metadata).toMatchObject({
+      annotations: {
+        'workers/message': plan.recovery.correlationTag,
+        'workers/tag': plan.recovery.correlationTag,
+      },
+      main_module: 'index.js',
+      compatibility_date: '2026-08-08',
+    });
+    expect(metadata).not.toHaveProperty('modules');
+    expect(moduleText).toContain('export class AdminState');
+    expect(sequence.callCount()).toBe(1);
   });
 
   it('keeps recovery correlation stable across fresh asset credentials and bootstrap values', async () => {
@@ -1223,39 +1287,32 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     )).resolves.toEqual(restartedSubmission);
   });
 
-  it('commits exact-version inheritance without accepting or serializing a management credential', async () => {
+  it('rejects the retired management binding from clean versions and recovery records', async () => {
     const fixture = await releaseFixture();
     const prepared = await prepareVerifiedWorkerRelease(prepareInput(fixture.release));
     const worker: WorkerSubmission = {
       kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID,
     };
-    const plan = await prepareWorkerVersionMutation(prepared, worker, COMPLETION_JWT, 'clean', OTHER_VERSION_ID);
-    expect(plan.ephemeral.body.bindings).toContainEqual({
-      name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'inherit', version_id: OTHER_VERSION_ID,
-    });
+    const plan = await prepareWorkerVersionMutation(prepared, worker, COMPLETION_JWT, 'clean');
+    expect(plan.ephemeral.body.bindings).not.toContainEqual(expect.objectContaining({
+      name: 'ANKKA_TEAM_MANAGEMENT_TOKEN',
+    }));
     expect(JSON.stringify(plan.recovery)).not.toMatch(/jwt|nonce|token|secret/iu);
     expect(await recoveryClone(plan.recovery)).toEqual(plan.recovery);
     expect(await parseWorkerVersionRecoveryRecord({
       ...plan.recovery,
       releaseContract: { ...plan.recovery.releaseContract, teamManagementBinding: { fromVersionId: VERSION_ID } },
     })).toBeNull();
-    const submitTransport = sequencedTransport([() => success({ id: VERSION_ID }, 201)]);
-    const submission = await submitWorkerVersionMutation(plan.ephemeral, plan.recovery, call(submitTransport.transport));
-    const verifyTransport = sequencedTransport([() => success(versionResultFromBody(plan.ephemeral.body))]);
-    await expect(verifyWorkerVersionSubmission(plan.recovery, submission, call(verifyTransport.transport))).resolves.toEqual(submission);
-
     const wrongBindingTransport = sequencedTransport([]);
     const body = v.parse(versionSubmitBodySchema, plan.ephemeral.body);
     const credentialWrite = {
       ...plan.ephemeral,
-      body: { ...body, bindings: body.bindings.map((binding) => binding.name === 'ANKKA_TEAM_MANAGEMENT_TOKEN'
-        ? { name: binding.name, type: 'secret_text', text: 'unaccepted-synthetic-credential' } : binding) },
+      body: { ...body, bindings: [...body.bindings, {
+        name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'inherit', version_id: OTHER_VERSION_ID,
+      }] },
     };
     await expect(submitWorkerVersionMutation(credentialWrite, plan.recovery, call(wrongBindingTransport.transport))).rejects.toThrow();
     expect(wrongBindingTransport.requests).toHaveLength(0);
-    for (const phase of ['bootstrap', 'provision'] as const) {
-      await expect(prepareWorkerVersionRecoveryRecord(prepared, worker, phase, OTHER_VERSION_ID)).rejects.toThrow();
-    }
   });
 
   it('rejects a contradictory optional version namespace_id against the list-bound ID', async () => {

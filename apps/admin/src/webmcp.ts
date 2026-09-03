@@ -50,10 +50,8 @@ declare global { interface Document { modelContext?: WebMcpModelContext } }
 
 const ACTION_ID = '^action_[A-Za-z0-9_-]{32}$'
 const SOURCE_ID = '^source-[a-f0-9]{16}$'
-const TEAM_SOURCE_ID = '^[a-z][a-z0-9-]{0,31}$'
 const RELEASE = '^gateway-v(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)$'
 const DIGEST = '^sha256:[a-f0-9]{64}$'
-const revision = v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(Number.MAX_SAFE_INTEGER - 1))
 const empty = v.strictObject({})
 const noInput: InputSchema = { type: 'object', properties: {}, additionalProperties: false }
 const actionInput: InputSchema = {
@@ -132,7 +130,7 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
   }
   const tools = [
     tool('get_gateway_status', 'Read the saved Gateway configuration and release. This is not a fresh upstream health test.', noInput, empty, readOnly, () => api.getStatus()),
-    tool('get_gateway_capabilities', 'Read current management availability and recovery pointers. Credential configured means present, not verified. No credentials are returned.', noInput, empty, readOnly, async () => {
+    tool('get_gateway_capabilities', 'Read current management availability and recovery pointers. No credentials are returned.', noInput, empty, readOnly, async () => {
       const [sources, team, sourceActions] = await Promise.all([api.getSources(), api.getTeam(), api.getSourceActions()])
       return {
         sourceInstallation: {
@@ -143,8 +141,7 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
         },
         team: {
           editingEnabled: team.editingEnabled, editingDisabledReason: team.editingDisabledReason,
-          managementCredentialConfigured: team.managementCredentialConfigured, revision: team.revision,
-          pendingAction: team.pendingAction,
+          management: 'cloudflare_dashboard', revision: team.revision, pendingAction: team.pendingAction,
         },
         runtimeActions: { authorization: 'fresh_cloudflare_oauth', statusTool: 'get_gateway_runtime_action' },
         sourceAuthenticationManagement: { available: false, reason: 'not_supported_by_gateway_api' },
@@ -158,30 +155,6 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
       v.strictObject({ url: v.pipe(v.string(), v.maxLength(2048), v.url()) }),
       { ...readOnly, openWorldHint: true, untrustedContentHint: true }, ({ url }) => api.discoverSource(url)),
     tool('get_gateway_team', 'Read the saved Team roster, fixed administrators, installed-source selections, revision, and any recorded proposal. Saved state is not a fresh live Access check.', noInput, empty, readOnly, () => api.getTeam()),
-    tool('save_gateway_team', 'APPLY a complete reviewed Team roster immediately using your Gateway management credential. This grants/revokes access, not a draft or preview. Before attempting a policy write, the Gateway disables automatic teardown and blocks older-runtime rollback. Include fixed administrators and every person to retain. Use get_gateway_team revision. For recovery, submit only the exact recorded proposedMembers; inspect status after uncertain errors before retrying.',
-      {
-        type: 'object', additionalProperties: false, required: ['expectedRevision', 'members'],
-        properties: {
-          expectedRevision: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER - 1 },
-          members: { type: 'array', items: {
-            type: 'object', additionalProperties: false, required: ['email', 'sourceIds'], properties: {
-              email: { type: 'string', minLength: 1, maxLength: 254 },
-              sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: { type: 'string', pattern: TEAM_SOURCE_ID } },
-            },
-          } },
-        },
-      },
-      v.strictObject({ expectedRevision: revision, members: v.array(v.strictObject({
-        email: v.pipe(v.string(), v.minLength(1), v.maxLength(254)),
-        sourceIds: v.pipe(v.array(v.pipe(v.string(), v.regex(new RegExp(TEAM_SOURCE_ID, 'u')))), v.maxLength(32), v.check((ids) => new Set(ids).size === ids.length)),
-      })) }),
-      { ...mutation, destructiveHint: true }, async ({ expectedRevision, members }) => {
-        const current = await api.getTeam()
-        if (current.revision !== expectedRevision) throw new GatewayApiError(409, 'team_access_revision_conflict')
-        if (!current.editingEnabled) throw new GatewayApiError(409, current.editingDisabledReason === 'release_review_required' ? 'team_release_review_required' : 'team_action_conflict')
-        if (!current.managementCredentialConfigured) throw new GatewayApiError(409, 'team_management_credential_missing')
-        return api.prepareTeamAction(expectedRevision, members)
-      }),
     tool('get_gateway_team_action', 'Read a recorded Team action. Partial/unknown outcomes are not a rollback; inspect get_gateway_team before exact recovery.', actionInput, actionSchema, readOnly, ({ actionId }) => api.getTeamAction(actionId)),
     tool('cancel_gateway_team_action', 'Cancel only a recorded, explicitly cancelable zero-write Team proposal. Does not undo policy writes or restore old access.', actionInput, actionSchema, mutation, async ({ actionId }) => {
       const action = await api.getTeamAction(actionId)

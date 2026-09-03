@@ -11,8 +11,10 @@ import type { AccountWorkersSubdomain } from './cloudflare-management-surface';
 import { base64UrlEncode } from './crypto';
 import {
   buildStaticDeployPlan,
+  deploySelectionFromStaticPlan,
   parseDeploySelection,
   parseStaticDeployPlan,
+  verifyStaticDeployPlanIntegrity,
 } from './schema';
 import type { DeploySelection, GatewayResourceKind, StaticDeployPlan } from './schema';
 import { parseReleaseManifest } from './release-manifest';
@@ -353,12 +355,27 @@ export interface PrepareCustomerBootstrapClaimInput {
   readonly randomBytes?: (length: number) => Uint8Array;
 }
 
+export interface PrepareCustomerBootstrapClaimFromPlanInput {
+  readonly plan: StaticDeployPlan;
+  readonly target: CustomerBootstrapTarget;
+  readonly nowMs?: number;
+  readonly randomBytes?: (length: number) => Uint8Array;
+}
+
 export interface SubmitCustomerBootstrapInput extends PrepareCustomerBootstrapClaimInput {
   /** Pass the authorized provider result directly; do not reconstruct it. */
   readonly accountWorkersSubdomain: AccountWorkersSubdomain;
   /** Fresh 32-byte base64url secret already installed in the temporary Worker. */
   readonly bootstrapNonce: string;
   /** Cloudflare OAuth grant. It is used only while composing this one request. */
+  readonly cloudflareAccessToken: string;
+  readonly transport: CustomerBootstrapTransport;
+  readonly timeoutMs?: number;
+}
+
+export interface SubmitCustomerBootstrapFromPlanInput extends PrepareCustomerBootstrapClaimFromPlanInput {
+  readonly accountWorkersSubdomain: AccountWorkersSubdomain;
+  readonly bootstrapNonce: string;
   readonly cloudflareAccessToken: string;
   readonly transport: CustomerBootstrapTransport;
   readonly timeoutMs?: number;
@@ -600,8 +617,9 @@ async function configurationEvidence(
   settings: CustomerGatewaySettings,
   target: CustomerBootstrapTarget,
   release: CustomerBootstrapReleaseEvidence,
+  installationId: string,
 ): Promise<CustomerBootstrapExpectedEvidence> {
-  const installationId = await stableInstallationId(settings.connect.hostname, target);
+  if (!INSTALLATION_ID.test(installationId)) fail('plan_mismatch', 'claim', 'not_sent');
   const resources = await buildDesiredResources(settings, installationId);
   const desiredHash = await hashCanonical({ schemaVersion: 1, installationId, resources });
   const configurationHash = await hashCanonical({
@@ -612,18 +630,6 @@ async function configurationEvidence(
     release,
   });
   return Object.freeze({ configurationHash, installationId, desiredHash });
-}
-
-async function stableInstallationId(
-  hostname: string,
-  target: CustomerBootstrapTarget,
-): Promise<string> {
-  const digest = await hashHex({
-    hostname,
-    accountId: target.accountId,
-    zoneId: target.zoneId,
-  });
-  return `acg-${digest.slice(0, 24)}`;
 }
 
 async function stableResourceKey(
@@ -916,17 +922,37 @@ export async function deriveCustomerGatewayExpectedProjection(
         plan.gatewayConfiguration.firstSource.url !== selection.firstSource.url ||
         canonicalJson(plan.gatewayConfiguration.firstSource.enabledTools) !== canonicalJson(selection.firstSource.enabledTools))
   ) fail('plan_mismatch', 'claim', 'not_sent');
+  return buildCustomerGatewayDesiredProjection({
+    selection,
+    plan,
+    target: {
+      accountId: authorizedTarget.account.id,
+      zoneId: authorizedTarget.zone.id,
+      zoneName: authorizedTarget.zone.name,
+    },
+    release: releaseInput.output,
+  });
+}
+
+async function buildCustomerGatewayDesiredProjection(input: {
+  readonly selection: DeploySelection;
+  readonly plan: StaticDeployPlan;
+  readonly target: CustomerBootstrapTarget;
+  readonly release: { readonly id: string; readonly artifactSha256: string };
+}): Promise<CustomerGatewayDesiredProjection> {
+  const { selection, plan } = input;
   const settings = gatewaySettings(selection);
-  const target = Object.freeze({
-    accountId: authorizedTarget.account.id,
-    zoneId: authorizedTarget.zone.id,
-    zoneName: authorizedTarget.zone.name,
-  });
+  const target = Object.freeze({ ...input.target });
   const releaseEvidence = Object.freeze({
-    id: releaseInput.output.id,
-    artifactSha256: `sha256:${releaseInput.output.artifactSha256}`,
+    id: input.release.id,
+    artifactSha256: `sha256:${input.release.artifactSha256}`,
   });
-  const expected = await configurationEvidence(settings, target, releaseEvidence);
+  const expected = await configurationEvidence(
+    settings,
+    target,
+    releaseEvidence,
+    plan.managementOwnershipMarker,
+  );
   const resources = await buildDesiredResources(settings, expected.installationId);
   const mcpServer = selection.firstSource === null ? null : exactDesiredResource(resources, 'mcp_server');
   const sourceApplication = selection.firstSource === null
@@ -1021,6 +1047,35 @@ export async function deriveCustomerGatewayExpectedProjection(
   });
 }
 
+/** Build the exact desired projection from the deploy-signed plan in the customer Worker. */
+export async function prepareCustomerGatewayDesiredProjectionFromPlan(input: {
+  readonly plan: StaticDeployPlan;
+  readonly target: CustomerBootstrapTarget;
+}): Promise<CustomerGatewayDesiredProjection> {
+  let plan: StaticDeployPlan;
+  let selection: DeploySelection;
+  try {
+    plan = await verifyStaticDeployPlanIntegrity(input.plan);
+    selection = deploySelectionFromStaticPlan(plan);
+  } catch {
+    fail('plan_mismatch', 'validate', 'not_sent');
+  }
+  const target = v.safeParse(v.strictObject({
+    accountId: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
+    zoneId: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
+    zoneName: v.string(),
+  }), input.target);
+  if (!target.success || target.output.zoneName !== selection.basics.zoneName) {
+    fail('invalid_input', 'validate', 'not_sent');
+  }
+  return buildCustomerGatewayDesiredProjection({
+    selection,
+    plan,
+    target: target.output,
+    release: { id: plan.releaseId, artifactSha256: plan.releaseArtifactSha256 },
+  });
+}
+
 /**
  * Rebuild the exact credential-free desired projection used by the public
  * customer Worker. This performs no provider I/O and allocates no request ID.
@@ -1071,7 +1126,12 @@ async function prepareBootstrap(
     id: context.release.manifest.release,
     artifactSha256: `sha256:${context.release.manifest.artifact.treeSha256}`,
   });
-  const expected = await configurationEvidence(settings, target, release);
+  const expected = await configurationEvidence(
+    settings,
+    target,
+    release,
+    context.plan.managementOwnershipMarker,
+  );
   const claim = Object.freeze({
     schemaVersion: 1,
     requestId,
@@ -1090,6 +1150,69 @@ export async function prepareCustomerBootstrapClaim(
   input: PrepareCustomerBootstrapClaimInput,
 ): Promise<PreparedCustomerBootstrapClaim> {
   return (await prepareBootstrap(input)).claim;
+}
+
+/**
+ * Build the same canonical payload claim from the signed Stage 1 plan after
+ * the customer Worker has resolved the authorized zone. No release bytes,
+ * actor identity, or hosted credential are needed inside the Gateway.
+ */
+export async function prepareCustomerBootstrapClaimFromPlan(
+  input: PrepareCustomerBootstrapClaimFromPlanInput,
+): Promise<PreparedCustomerBootstrapClaim> {
+  let plan: StaticDeployPlan;
+  let selection: DeploySelection;
+  try {
+    plan = await verifyStaticDeployPlanIntegrity(input.plan);
+    selection = deploySelectionFromStaticPlan(plan);
+  } catch {
+    fail('plan_mismatch', 'validate', 'not_sent');
+  }
+  const targetResult = v.safeParse(v.strictObject({
+    accountId: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
+    zoneId: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
+    zoneName: v.string(),
+  }), input.target);
+  if (!targetResult.success || targetResult.output.zoneName !== selection.basics.zoneName) {
+    fail('invalid_input', 'validate', 'not_sent');
+  }
+  const nowMs = input.nowMs ?? Date.now();
+  if (!v.is(safeNonnegativeIntegerSchema, nowMs) || plan.expiresAt <= nowMs) {
+    fail('request_expired', 'claim', 'not_sent');
+  }
+  const issuedAt = Math.floor(nowMs / 1000);
+  const expiresAt = Math.min(
+    issuedAt + MAX_REQUEST_LIFETIME_SECONDS,
+    Math.floor(plan.expiresAt / 1000),
+  );
+  if (expiresAt <= issuedAt) fail('request_expired', 'claim', 'not_sent');
+  const requestIdBytes = requireFreshRandomBytes(input.randomBytes, REQUEST_ID_BYTES);
+  const requestId = base64UrlEncode(requestIdBytes);
+  requestIdBytes.fill(0);
+  if (!REQUEST_ID.test(requestId)) fail('invalid_input', 'claim', 'not_sent');
+  const settings = gatewaySettings(selection);
+  const target = Object.freeze({ ...targetResult.output });
+  const release = Object.freeze({
+    id: plan.releaseId,
+    artifactSha256: `sha256:${plan.releaseArtifactSha256}`,
+  });
+  const expected = await configurationEvidence(
+    settings,
+    target,
+    release,
+    plan.managementOwnershipMarker,
+  );
+  return Object.freeze({
+    schemaVersion: 1,
+    requestId,
+    issuedAt,
+    expiresAt,
+    settingsRevision: 1,
+    settings,
+    target,
+    release,
+    expected,
+  });
 }
 
 async function signRawBody(rawBody: string, nonceBytes: Uint8Array): Promise<string> {
@@ -1272,22 +1395,30 @@ export function customerBootstrapUrl(input: {
   return requireBootstrapUrl(input.accountWorkersSubdomain, input.workerName, input.accountId).toString();
 }
 
-export async function submitCustomerBootstrap<AccountWorkersSubdomainCandidate>(
-  input: Omit<SubmitCustomerBootstrapInput, 'accountWorkersSubdomain'> & {
-    readonly accountWorkersSubdomain: AccountWorkersSubdomainCandidate;
-  },
-): Promise<CustomerBootstrapResult> {
+/** Optional call controls forwarded only when the caller supplied them. */
+interface OptionalBootstrapControls {
+  timeoutMs?: number;
+}
+
+async function submitPreparedCustomerBootstrap<AccountWorkersSubdomainCandidate>(input: {
+  readonly claim: PreparedCustomerBootstrapClaim;
+  readonly workerName: string;
+  readonly accountWorkersSubdomain: AccountWorkersSubdomainCandidate;
+  readonly bootstrapNonce: string;
+  readonly cloudflareAccessToken: string;
+  readonly transport: CustomerBootstrapTransport;
+  readonly timeoutMs?: number;
+}): Promise<CustomerBootstrapResult> {
   if (!v.is(v.function(), input.transport)) fail('invalid_input', 'validate', 'not_sent');
   const timeoutMs = requireTimeout(input.timeoutMs);
   const token = requireAccessToken(input.cloudflareAccessToken);
   const nonceBytes = requireNonce(input.bootstrapNonce);
   let rawBody = '';
   try {
-    const prepared = await prepareBootstrap(input);
-    const claim = prepared.claim;
+    const claim = input.claim;
     const requestUrl = requireBootstrapUrl(
       input.accountWorkersSubdomain,
-      prepared.workerName,
+      input.workerName,
       claim.target.accountId,
     );
     rawBody = canonicalJson({ ...claim, cloudflareAccessToken: token });
@@ -1333,6 +1464,45 @@ export async function submitCustomerBootstrap<AccountWorkersSubdomainCandidate>(
     rawBody = '';
   }
   fail('outcome_unknown', 'submit', 'unknown');
+}
+
+export async function submitCustomerBootstrap<AccountWorkersSubdomainCandidate>(
+  input: Omit<SubmitCustomerBootstrapInput, 'accountWorkersSubdomain'> & {
+    readonly accountWorkersSubdomain: AccountWorkersSubdomainCandidate;
+  },
+): Promise<CustomerBootstrapResult> {
+  const prepared = await prepareBootstrap(input);
+  const controls: OptionalBootstrapControls = {};
+  if (input.timeoutMs !== undefined) controls.timeoutMs = input.timeoutMs;
+  return submitPreparedCustomerBootstrap({
+    claim: prepared.claim,
+    workerName: prepared.workerName,
+    accountWorkersSubdomain: input.accountWorkersSubdomain,
+    bootstrapNonce: input.bootstrapNonce,
+    cloudflareAccessToken: input.cloudflareAccessToken,
+    transport: input.transport,
+    ...controls,
+  });
+}
+
+/** Run the same signed payload bootstrap from the plan adopted by the customer Worker. */
+export async function submitCustomerBootstrapFromPlan(
+  input: SubmitCustomerBootstrapFromPlanInput,
+): Promise<CustomerBootstrapResult> {
+  const plan = await verifyStaticDeployPlanIntegrity(input.plan).catch(() =>
+    fail('plan_mismatch', 'validate', 'not_sent'));
+  const claim = await prepareCustomerBootstrapClaimFromPlan(input);
+  const controls: OptionalBootstrapControls = {};
+  if (input.timeoutMs !== undefined) controls.timeoutMs = input.timeoutMs;
+  return submitPreparedCustomerBootstrap({
+    claim,
+    workerName: managementWorkerName(plan),
+    accountWorkersSubdomain: input.accountWorkersSubdomain,
+    bootstrapNonce: input.bootstrapNonce,
+    cloudflareAccessToken: input.cloudflareAccessToken,
+    transport: input.transport,
+    ...controls,
+  });
 }
 
 export function canonicalCustomerBootstrapJson<Value>(value: Value): string {
