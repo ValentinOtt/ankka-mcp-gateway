@@ -273,11 +273,15 @@ describe('hosted Stage 1 session model', () => {
     });
     const failed = failHostedStage1Attempt({
       current: start.next, attemptId: start.attemptId, code: 'authorization_rejected', now: NOW + 50,
+      reason: 'account_worker_subdomain_get_rejected',
     });
     expect(failed).toMatchObject({
       phase: 'failed',
       attempt: null,
-      failure: { code: 'authorization_rejected', attemptId: start.attemptId, at: NOW + 50 },
+      failure: {
+        code: 'authorization_rejected', attemptId: start.attemptId, at: NOW + 50,
+        reason: 'account_worker_subdomain_get_rejected',
+      },
       plan: fixture.plan,
     });
     expect(() => failHostedStage1Attempt({

@@ -2,6 +2,7 @@ import * as v from 'valibot';
 
 import { boundaryObjectSchema, type BoundaryObject } from './boundary';
 import { canonicalJson } from './canonical-json';
+import { FAILURE_REASON_PATTERN, isFailureReason } from './errors';
 import {
   base64UrlEncode,
   constantTimeEqual,
@@ -95,6 +96,8 @@ const failureSchema = v.strictObject({
   code: failureCodeSchema,
   attemptId: v.union([v.pipe(v.string(), v.regex(ATTEMPT_ID)), v.null()]),
   at: timestampSchema,
+  /** Secret-free stage/outcome or stable code of the failure; absent on records written before it existed. */
+  reason: v.optional(v.union([v.pipe(v.string(), v.regex(FAILURE_REASON_PATTERN)), v.null()])),
 });
 const cleanupSchema = v.strictObject({
   reason: cleanupReasonSchema,
@@ -545,6 +548,7 @@ export function failHostedStage1Attempt(input: {
   readonly current: HostedStage1Session;
   readonly attemptId: string;
   readonly code: HostedStage1FailureCode;
+  readonly reason?: string | null | undefined;
   readonly now: number;
 }): HostedStage1Session {
   const current = currentSession(input.current, input.now);
@@ -555,6 +559,7 @@ export function failHostedStage1Attempt(input: {
     code: input.code,
     attemptId: attempt.attemptId,
     at: input.now,
+    reason: isFailureReason(input.reason) ? input.reason : null,
   });
   if (attempt.kind === 'cleanup') {
     if (current.phase !== 'cleanup_required') wrongPhase();

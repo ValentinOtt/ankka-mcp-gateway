@@ -697,7 +697,11 @@ export function createTwoStageDeployRuntime(
       provisionError = stableError(error);
     }
     if (provisionError !== null) {
-      await session.client.failAttempt({ attemptId: match.attemptId, code: provisionFailureCode(provisionError) });
+      await session.client.failAttempt({
+        attemptId: match.attemptId,
+        code: provisionFailureCode(provisionError),
+        reason: provisionError.reason ?? provisionError.code,
+      });
       return redirectToResult(cleared);
     }
     // The cookie stays: it still holds the capability for the token-free handoff.
