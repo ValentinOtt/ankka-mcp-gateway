@@ -2,7 +2,7 @@ import * as v from 'valibot';
 
 import { boundaryObjectSchema, type BoundaryObject } from './boundary';
 import type { BootstrapRandomBytes } from './customer-bootstrap-state';
-import { DeployError, isDeployErrorCode, type DeployErrorCode, FAILURE_REASON_PATTERN } from './errors';
+import { DeployError, isDeployErrorCode, isFailureReason, type DeployErrorCode, FAILURE_REASON_PATTERN } from './errors';
 import { parseHostedStage1Provision, type HostedStage1Provision } from './hosted-stage1-bootstrap';
 import {
   HOSTED_STAGE1_CLEANUP_REASONS,
@@ -99,7 +99,7 @@ const startSchema = v.strictObject({
   challenge: v.pipe(v.string(), v.regex(TOKEN)),
   expiresAt: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
 });
-const errorBodySchema = v.object({ error: v.object({ code: v.string() }) });
+const errorBodySchema = v.object({ error: v.object({ code: v.string(), reason: v.optional(v.string()) }) });
 const sessionBodySchema = v.object({ session: v.union([boundaryObjectSchema, v.null()]) });
 const startBodySchema = v.object({ session: boundaryObjectSchema, start: startSchema });
 
@@ -168,11 +168,29 @@ function sessionErrorToDeployError(error: HostedStage1SessionError): DeployError
   }
 }
 
-function errorResponse<Thrown>(error: Thrown): Response {
+/**
+ * Secret-free tag for an error this object did not classify: the route that
+ * threw plus the error kind. Provider text, ids, and stored values never
+ * appear; without it an unexpected throw reaches the operator as a bare
+ * "internal_error" with no way to tell parsing from storage.
+ */
+function unexpectedReason<Thrown>(error: Thrown, route: string): string {
+  const step = route.replace(/^\//u, '').replace(/[^a-z0-9]+/gu, '_');
+  const kind = error instanceof Error && error.name === 'ValiError' ? 'schema' : 'unexpected';
+  return `${step}_${kind}`.slice(0, 64);
+}
+
+function errorResponse<Thrown>(error: Thrown, route = 'session'): Response {
   const deployError = error instanceof HostedStage1SessionError
     ? sessionErrorToDeployError(error)
-    : error instanceof DeployError ? error : new DeployError(500, 'internal_error');
-  return Response.json({ error: { code: deployError.code } }, { status: deployError.status });
+    : error instanceof DeployError ? error : new DeployError(500, 'internal_error', unexpectedReason(error, route));
+  if (deployError.reason === null) {
+    return Response.json({ error: { code: deployError.code } }, { status: deployError.status });
+  }
+  return Response.json(
+    { error: { code: deployError.code, reason: deployError.reason } },
+    { status: deployError.status },
+  );
 }
 
 function withoutNext(start: HostedStage1AuthorizationStart): Omit<HostedStage1AuthorizationStart, 'next'> {
@@ -223,7 +241,7 @@ export class TwoStageDeploySession {
       const result = await this.apply(path, body);
       return Response.json(result);
     } catch (error) {
-      return errorResponse(error);
+      return errorResponse(error, new URL(request.url).pathname);
     }
   }
 
@@ -406,6 +424,13 @@ function internalErrorCode<Input>(input: Input): DeployErrorCode | null {
   return isDeployErrorCode(code) ? code : null;
 }
 
+/** The object's secret-free diagnostic, when it sent one. */
+function internalErrorReason<Input>(input: Input): string | null {
+  const result = v.safeParse(errorBodySchema, input);
+  const reason = result.success ? result.output.error.reason ?? null : null;
+  return isFailureReason(reason) ? reason : null;
+}
+
 /** Typed same-release client for the hosted Worker runtime; every response is re-parsed by its owner. */
 export class TwoStageDeploySessionClient {
   constructor(private readonly stub: TwoStageDeploySessionStub) {}
@@ -425,7 +450,13 @@ export class TwoStageDeploySessionClient {
     } catch {
       throw new DeployError(500, 'session_invalid');
     }
-    if (!response.ok) throw new DeployError(response.status, internalErrorCode(decoded) ?? 'session_invalid');
+    if (!response.ok) {
+      throw new DeployError(
+        response.status,
+        internalErrorCode(decoded) ?? 'session_invalid',
+        internalErrorReason(decoded),
+      );
+    }
     const parsed = v.safeParse(boundaryObjectSchema, decoded);
     if (!parsed.success) throw new DeployError(500, 'session_invalid');
     return parsed.output;

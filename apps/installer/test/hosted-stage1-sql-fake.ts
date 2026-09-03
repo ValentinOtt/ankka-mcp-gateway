@@ -15,10 +15,13 @@ export class FakeHostedStage1SqlStorage {
   state: StoredState | null = null;
   lastChanges = 0;
 
+  failNextExec = false;
+
   exec<Row extends Record<string, SqlStorageValue>>(
     query: string,
     ...bindings: unknown[]
   ): SqlStorageCursor<Row> {
+    if (this.failNextExec) { this.failNextExec = false; throw new RangeError('storage fault'); }
     const normalized = query.replace(/\s+/gu, ' ').trim();
     let rows: Record<string, SqlStorageValue>[] = [];
     if (normalized.startsWith('CREATE TABLE IF NOT EXISTS ankka_stage1_schema')) {
