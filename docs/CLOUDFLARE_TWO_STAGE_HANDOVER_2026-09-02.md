@@ -1210,3 +1210,24 @@ deploying the production relay. Both are operator steps.
   `no-store` and `no-referrer`; unknown paths 404 `no-store` with no cookie
   or CORS header; the workers.dev alias answers 404. Pending: deploy Worker
   cut decision, its six bindings, release ceremony, second-account install.
+- 2026-09-03: release gateway-v0.1.21 cut from main `868e9c6` (candidate
+  manifest `cb63c204…`, artifact `1f53c568…`, deterministic across two
+  builds). Two tooling defects surfaced on the way and were fixed on main:
+  the signer's secret scan misread two constant names as credentials
+  (PR #50) and the local R2 publisher capped a release at 2 MB while the
+  source-built customer bundles put v0.1.21 at 3.6 MB (PR #51, cap now
+  6 MB with a derived module cap). Signed by the operator, published
+  create-only to R2 (receipt `status: published`, envelope digest verified
+  by direct object read), temporary publisher removed.
+- 2026-09-03: the legacy `ankka-gateway-deploy` Worker was deleted (its
+  `v1` migration for the legacy class would have blocked the new binding)
+  and the reviewed canary artifact deployed fresh: two-stage runtime,
+  `TwoStageDeploySession`, release bucket, three rate limits, Custom Domain.
+  Live checks: `/health` `{ok:true, mutationsEnabled:true}`,
+  `/api/releases/canary` reports gateway-v0.1.21, `/` serves the new
+  installer page, `/api/releases/stable` 404, `/api/session` 500
+  `internal_error` (fail-closed until the six bindings are provisioned).
+  Pending: the six deploy-Worker bindings (Stage 1 client secret must be
+  regenerated, the old one died with the Worker), the GitHub release
+  (prepare/validate/publish refused to the assistant by the classifier),
+  and the second-account install test.
