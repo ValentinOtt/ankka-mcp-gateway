@@ -26,9 +26,14 @@ const OPERATOR_BINDING = 'RELEASE_BUCKET';
 const OPERATOR_PORT = 5732;
 const COMPATIBILITY_DATE = '2026-08-14';
 const MAX_PLAN_BYTES = 1 * 1024 * 1024;
-const MAX_OPERATOR_RELEASE_BYTES = 2_000_000;
+// Raw signed object bytes one local publisher may carry. The two customer
+// Worker bundles are built from source since the two-stage runtime, which put
+// a release at ~3.6 MB; 6 MB leaves room without approaching Worker limits.
+const MAX_OPERATOR_RELEASE_BYTES = 6_000_000;
 const MAX_OPERATOR_OBJECTS = 512;
-const MAX_GENERATED_DATA_MODULE_BYTES = 3_000_000;
+// Base64 expansion of the raw cap plus a fixed allowance for keys, content
+// types, the canonical plan, identity, and decoder code.
+const MAX_GENERATED_DATA_MODULE_BYTES = Math.ceil(MAX_OPERATOR_RELEASE_BYTES * 4 / 3) + 333_332;
 const MAX_R2_KEY_BYTES = 1_024;
 const MAX_SOURCE_PATH_BYTES = 1_040;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;

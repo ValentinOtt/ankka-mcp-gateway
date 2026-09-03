@@ -445,7 +445,7 @@ describe('release-specific R2 publication Worker generator', () => {
     }
   });
 
-  it.each([1_777_000, 2_000_000])('generates a bounded signed 17-file release totaling %i object bytes', async (totalObjectBytes) => {
+  it.each([1_777_000, 6_000_000])('generates a bounded signed 17-file release totaling %i object bytes', async (totalObjectBytes) => {
     const input = await fixture({ totalObjectBytes });
     try {
       const plan = await readPlan(input);
@@ -456,8 +456,8 @@ describe('release-specific R2 publication Worker generator', () => {
       const generated = await generateR2PublicationWorker(generationArgs(input, output));
       expect(generated.objectPlanSha256).toBe(input.objectPlanSha256);
       const dataModule = await readFile(path.join(output, 'src/release-data.ts'), 'utf8');
-      expect(Buffer.byteLength(dataModule)).toBeGreaterThan(2_250_000);
-      expect(Buffer.byteLength(dataModule)).toBeLessThanOrEqual(3_000_000);
+      expect(Buffer.byteLength(dataModule)).toBeGreaterThan(Math.floor(totalObjectBytes * 4 / 3));
+      expect(Buffer.byteLength(dataModule)).toBeLessThanOrEqual(8_333_332);
       for (const object of plan.objects) {
         const bytes = await readFile(path.join(input.publishDirectory, object.sourcePath));
         expect(dataModule).toContain(bytes.toString('base64'));
@@ -468,10 +468,10 @@ describe('release-specific R2 publication Worker generator', () => {
   });
 
   it('rejects a valid signed release one byte above the raw aggregate limit before creating output', async () => {
-    const input = await fixture({ totalObjectBytes: 2_000_001 });
+    const input = await fixture({ totalObjectBytes: 6_000_001 });
     try {
       const plan = await readPlan(input);
-      expect(plan.totalByteSize).toBe(2_000_001);
+      expect(plan.totalByteSize).toBe(6_000_001);
       const output = path.join(input.sandbox, 'operator-oversize');
       await expectGenerationFailure(generateR2PublicationWorker(
         generationArgs(input, output),
@@ -483,18 +483,18 @@ describe('release-specific R2 publication Worker generator', () => {
   });
 
   it('retains the independent generated-module cap when permitted paths expand metadata', async () => {
-    const input = await fixture({ totalObjectBytes: 2_000_000, extraAdminFiles: 395, fileNamePadding: 200 });
+    const input = await fixture({ totalObjectBytes: 6_000_000, extraAdminFiles: 395, fileNamePadding: 200 });
     try {
       const verified = await loadVerifiedR2PublicationDirectory(input.publishDirectory);
       expect(verified.plan.objectCount).toBe(402);
-      expect(verified.plan.totalByteSize).toBe(2_000_000);
+      expect(verified.plan.totalByteSize).toBe(6_000_000);
       expect(Buffer.byteLength(verified.canonicalPlan)).toBeLessThan(1024 * 1024);
       // The actual module also includes content types, JSON syntax, identity,
       // and decoder code, so this is a conservative lower bound.
       const minimumModuleBytes = Buffer.byteLength(verified.canonicalPlan) + verified.objects.reduce(
         (total, object) => total + 4 * Math.ceil(object.byteSize / 3) + Buffer.byteLength(object.key), 0,
       );
-      expect(minimumModuleBytes).toBeGreaterThan(3_000_000);
+      expect(minimumModuleBytes).toBeGreaterThan(8_333_332);
       const output = path.join(input.sandbox, 'operator-expanded-metadata');
       await expectGenerationFailure(generateR2PublicationWorker(generationArgs(input, output)));
       expect(await readdir(output)).toEqual([]);
