@@ -1231,3 +1231,16 @@ deploying the production relay. Both are operator steps.
   regenerated, the old one died with the Worker), the GitHub release
   (prepare/validate/publish refused to the assistant by the classifier),
   and the second-account install test.
+- 2026-09-03: GitHub release `gateway-v0.1.21` published (immutable
+  prerelease, five assets). The operator provisioned the deploy Worker's six
+  bindings; the issuer pair was regenerated as
+  `ankka-ownership-issuer-2026-09-v2` (the v1 seed was never stored) and the
+  relay updated to the same public key and key id. Live: `/api/session`
+  issues a session; a token-free probe walked selection → plan (pinned to
+  v0.1.21) → bootstrap and received the Stage 1 authorization URL
+  (`dash.cloudflare.com/oauth2/auth`, client `6ace98c3…`, scope
+  `workers-scripts.write` only, S256, callback `/oauth/callback`). Ceremony
+  evidence and the rollback artifact live in
+  `~/Documents/ankka-releases/gateway-v0.1.21/` (`live-activation/`).
+  Remaining before the install is declared production-ready: one complete
+  install from a second Cloudflare account owning a real zone.
