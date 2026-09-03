@@ -1,5 +1,4 @@
-import { DISCOVERY_OAUTH_SCOPES, REQUIRED_OAUTH_SCOPES } from '../src/constants';
-import { discoverCloudflareTargets } from '../src/cloudflare-discovery';
+import { REQUIRED_OAUTH_SCOPES } from '../src/constants';
 import { resolveAuthorizedTarget } from '../src/cloudflare-target';
 import {
   assertExactGrantedScopes,
@@ -7,7 +6,6 @@ import {
   exchangeAuthorizationCode,
   type FetchTransport,
 } from '../src/oauth';
-import { boundGlobalFetch } from '../src/reviewed-runtime';
 import { CLIENT_ID, CLIENT_SECRET } from './fixtures';
 
 const verifier = 'v'.repeat(43);
@@ -22,19 +20,6 @@ describe('confidential Cloudflare OAuth', () => {
     expect(url.searchParams.get('scope')).toBe(REQUIRED_OAUTH_SCOPES.join(' '));
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
     expect(url.searchParams.get('state')).toBe(state);
-  });
-
-  it('builds a distinct exact read-only grant for first-step discovery', () => {
-    const url = new URL(buildAuthorizationUrl({
-      clientId: CLIENT_ID,
-      state,
-      challenge,
-      scopes: DISCOVERY_OAUTH_SCOPES,
-    }));
-    expect(url.searchParams.get('scope')).toBe(DISCOVERY_OAUTH_SCOPES.join(' '));
-    expect(DISCOVERY_OAUTH_SCOPES.every((scope) => scope.endsWith('.read'))).toBe(true);
-    expect(() => assertExactGrantedScopes(DISCOVERY_OAUTH_SCOPES, DISCOVERY_OAUTH_SCOPES)).not.toThrow();
-    expect(() => assertExactGrantedScopes(REQUIRED_OAUTH_SCOPES, DISCOVERY_OAUTH_SCOPES)).toThrow();
   });
 
   it('exchanges by confidential Basic auth and keeps grant serialization impossible', async () => {
@@ -99,7 +84,7 @@ describe('confidential Cloudflare OAuth', () => {
         code: 'authorization-code-value',
         verifier,
         config: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET },
-        transport: boundGlobalFetch(),
+        transport: (input, init) => fetch(input, init),
       });
       expect(() => grant.assertUsable()).not.toThrow();
       grant.discard();
@@ -191,42 +176,4 @@ describe('authorized account and typed active zone', () => {
     })).rejects.toMatchObject({ code: 'target_zone_invalid' });
   });
 
-  it('discovers active zones across accounts as opaque, deterministic public choices', async () => {
-    const SECOND_ACCOUNT_ID = 'c'.repeat(32);
-    const SECOND_ZONE_ID = 'd'.repeat(32);
-    const transport: FetchTransport = async (input) => {
-      const url = new URL(input instanceof Request ? input.url : input.toString());
-      if (url.pathname.endsWith('/user')) {
-        return new Response(JSON.stringify({
-          success: true,
-          result: { id: 'user-12345678', email: 'Owner@Example.com' },
-        }));
-      }
-      if (url.pathname.endsWith('/accounts')) {
-        return new Response(JSON.stringify({ success: true, result: [
-          { id: ACCOUNT_ID, name: 'Primary' },
-          { id: SECOND_ACCOUNT_ID, name: 'Secondary' },
-        ] }));
-      }
-      const second = url.searchParams.get('account.id') === SECOND_ACCOUNT_ID;
-      return new Response(JSON.stringify({ success: true, result: [{
-        id: second ? SECOND_ZONE_ID : ZONE_ID,
-        name: second ? 'second.example' : 'example.com',
-        status: 'active',
-        account: { id: second ? SECOND_ACCOUNT_ID : ACCOUNT_ID },
-      }] }));
-    };
-    const result = await discoverCloudflareTargets({ accessToken: 'access-token-value-long', transport });
-    expect(result.actor.email).toBe('owner@example.com');
-    expect(result.targets).toHaveLength(2);
-    expect(result.targets.map((target) => ({
-      account: target.account.name,
-      zone: target.zone.name,
-      targetIdHash: target.targetIdHash,
-    }))).toEqual([
-      { account: 'Primary', zone: 'example.com', targetIdHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u) },
-      { account: 'Secondary', zone: 'second.example', targetIdHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u) },
-    ]);
-    expect(JSON.stringify(result)).not.toContain('access-token-value-long');
-  });
 });

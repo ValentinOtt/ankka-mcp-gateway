@@ -1,5 +1,4 @@
 import { base64UrlDecode, base64UrlEncode } from './crypto';
-import type { GatewayDeployEnv } from './env';
 import { DeployError } from './errors';
 import * as v from 'valibot';
 
@@ -20,13 +19,13 @@ export const SESSION_MUTATION_RATE_LIMIT = Object.freeze({ limit: 30, period: 60
 export type HostedAbuseControlPolicy = 'disabled' | 'required';
 
 /** The exact bindings the abuse controls read; any hosted runtime env satisfies it structurally. */
-export type AbuseControlEnv = Pick<
-  GatewayDeployEnv,
-  | 'DEPLOY_SESSION_ENCRYPTION_KEY'
-  | 'ANONYMOUS_SESSION_RATE_LIMIT'
-  | 'SESSION_READ_RATE_LIMIT'
-  | 'SESSION_MUTATION_RATE_LIMIT'
->;
+/** The session key and the three rate-limit bindings every hosted runtime must declare. */
+export interface AbuseControlEnv {
+  DEPLOY_SESSION_ENCRYPTION_KEY: string;
+  ANONYMOUS_SESSION_RATE_LIMIT?: RateLimit;
+  SESSION_READ_RATE_LIMIT?: RateLimit;
+  SESSION_MUTATION_RATE_LIMIT?: RateLimit;
+}
 
 type RateLimitPurpose =
   | 'anonymous-mutation-v1'

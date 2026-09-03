@@ -12,7 +12,7 @@ explicit success result. Load or EOF alone never establishes success.
 
 ## Completion and authority
 
-The reviewed [`runtimeUpdateOauthCallback()`](../apps/installer/src/index.ts)
+The reviewed `runtimeUpdateOauthCallback()` (in the since-retired hosted runtime `src/index.ts`)
 streams its verified pending shell before the memoized `executeOnce()`
 operation finishes. The early response clears the OAuth cookie; it does not
 issue verified result context. Only after execution and cleanup—including the
@@ -51,7 +51,7 @@ synthetic; these tests do not run a customer update.
 
 The [candidate builder](../apps/installer/scripts/build-gateway-release-candidate.mjs)
 copies committed `payload/installer` files. The
-[reviewed hosted runtime](../apps/installer/src/reviewed-runtime.ts) serves its
+reviewed hosted runtime (then `src/reviewed-runtime.ts`, now `src/two-stage-runtime.ts`) serves its
 management shell and assets from one verified, isolate-cached R2 snapshot,
 selected by its exact pin to a signed release. A hosted Worker rebuild retaining
 the old pin still serves the old installer asset.
