@@ -85,8 +85,8 @@ stable promotion are separate maintainer-approved operations.
 GitHub's release attestation can verify a release and a downloaded asset:
 
 ```sh
-gh release verify <tag> --repo ValentinOtt/ankka-mcp-gateway
-gh release verify-asset <tag> <downloaded-file> --repo ValentinOtt/ankka-mcp-gateway
+gh release verify <tag> --repo ankka-ai/ankka-mcp-gateway
+gh release verify-asset <tag> <downloaded-file> --repo ankka-ai/ankka-mcp-gateway
 ```
 
 That verifies GitHub's release provenance and asset digest. The installer

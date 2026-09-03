@@ -40,7 +40,7 @@ identifiers, or raw provider responses in a report.
 ## Reporting
 
 - Non-security problems: open a
-  [GitHub issue](https://github.com/ValentinOtt/ankka-mcp-gateway/issues)
+  [GitHub issue](https://github.com/ankka-ai/ankka-mcp-gateway/issues)
   using synthetic values and fixed public error codes only.
 - Vulnerabilities: report privately as described in [SECURITY.md](SECURITY.md).
 

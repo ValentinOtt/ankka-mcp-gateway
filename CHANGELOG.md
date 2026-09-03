@@ -2,6 +2,15 @@
 
 Notable public product and repository changes are recorded here.
 
+## Unreleased
+
+- Retire the legacy hosted installer runtime, its Durable Object, journals,
+  executors, management handoffs, and analytics sink. The two-stage runtime
+  shipped in gateway-v0.1.21 is the only hosted mutation path.
+- The hosted installer records no analytics; the former funnel documentation
+  is removed and the architecture and security-model notes now say so.
+- Repository references point at `ankka-ai/ankka-mcp-gateway`.
+
 ## gateway-v0.1.16 (canary)
 
 - Keep the exact candidate-version override on the external update probe, but

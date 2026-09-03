@@ -1,7 +1,7 @@
 # Ankka MCP Gateway documentation
 
 Start with the task you want to complete. Ankka MCP Gateway is a canary preview:
-check the [release notes](https://github.com/ValentinOtt/ankka-mcp-gateway/releases)
+check the [release notes](https://github.com/ankka-ai/ankka-mcp-gateway/releases)
 for the version you intend to use. Main-branch source can be ahead of an
 installed release; a document or fixture is not a compatibility certification.
 
@@ -40,8 +40,6 @@ installed release; a document or fixture is not a compatibility certification.
 
 - [Security model](SECURITY_MODEL.md): provider credentials, authorization,
   release integrity, logging, and known limitations.
-- [Hosted installer analytics](HOSTED_INSTALLER_ANALYTICS.md): the fixed,
-  session-scoped installer funnel, separate from the gateway's no-telemetry boundary.
 - [Release integrity](RELEASING.md): manifests, signatures, pinned authority,
   and publication requirements.
 - [Support policy](../SUPPORT.md): best-effort support, latest-release-only
