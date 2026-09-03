@@ -1,6 +1,6 @@
 import * as v from 'valibot';
 
-import { boundaryValueSchema, type BoundaryObject, type BoundaryValue } from './boundary';
+import { boundaryObjectSchema, boundaryValueSchema, type BoundaryObject, type BoundaryValue } from './boundary';
 import { canonicalJson } from './canonical-json';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 import type {
@@ -49,6 +49,7 @@ const deploymentsSchema = v.looseObject({
   })),
 });
 const namedBindingSchema = v.looseObject({ name: v.string(), type: v.string() });
+const plainTextBindingValueSchema = v.pipe(v.string(), v.minLength(1), v.maxLength(4096));
 const moduleSchema = v.looseObject({
   name: v.string(),
   content_type: v.string(),
@@ -136,8 +137,7 @@ function validateInspection(input: CustomerWorkerFinalRuntimeInspectionInput): v
       !SOURCE_SHA256.test(input.finalRuntimeSha256) ||
       bindingNames.length !== EXACT_PLAIN_TEXT_BINDINGS.length ||
       EXACT_PLAIN_TEXT_BINDINGS.some((name) => !Object.hasOwn(input.bindings, name)) ||
-      bindingValues.some((value) =>
-        typeof value !== 'string' || value.length < 1 || value.length > 4096)) {
+      bindingValues.some((value) => !v.is(plainTextBindingValueSchema, value))) {
     fail('invalid', 'validate', 'not_sent');
   }
 }
@@ -275,9 +275,10 @@ function exactBindings(
   const bindings = new Map<string, BoundaryObject>();
   for (const value of values) {
     const named = v.safeParse(namedBindingSchema, value);
-    if (!named.success || bindings.has(named.output.name) ||
-        typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-    bindings.set(named.output.name, value as BoundaryObject);
+    const object = v.safeParse(boundaryObjectSchema, value);
+    if (!named.success || !object.success || Array.isArray(value) ||
+        bindings.has(named.output.name)) return false;
+    bindings.set(named.output.name, object.output);
   }
   if (bindings.size !== Object.keys(expected).length + INHERITED_BINDINGS.length) return false;
   const admin = bindings.get('ADMIN_STATE');

@@ -56,8 +56,7 @@ export async function executeHostedBootstrapGrant<Deployment>(input: {
         );
         const parsed = v.safeParse(boundaryObjectSchema, JSON.parse(serialized));
         refreshTokenReturned = parsed.success &&
-          typeof parsed.output.refresh_token === 'string' &&
-          parsed.output.refresh_token.length > 0;
+          v.is(v.pipe(v.string(), v.minLength(1)), parsed.output.refresh_token);
       } catch {
         // The normal exchange parser owns malformed-response classification.
       }

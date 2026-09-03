@@ -82,11 +82,11 @@ interface BootstrapEnv extends Record<string, unknown> {
   ANKKA_BOOTSTRAP_NONCE: string;
 }
 
+const namespaceSchema = v.object({ idFromName: v.function(), get: v.function() });
+
 function parsedEnv(env: BootstrapEnv) {
   const parsed = v.safeParse(envSchema, env);
-  if (!parsed.success || !env.ADMIN_STATE ||
-      typeof env.ADMIN_STATE.idFromName !== 'function' ||
-      typeof env.ADMIN_STATE.get !== 'function') throw new Error('bootstrap_config_invalid');
+  if (!parsed.success || !v.is(namespaceSchema, env.ADMIN_STATE)) throw new Error('bootstrap_config_invalid');
   const expiresAt = Number(parsed.output.ANKKA_BOOTSTRAP_EXPIRES_AT);
   const callback = new URL(parsed.output.ANKKA_BOOTSTRAP_CALLBACK);
   const managementHostname = parsed.output.ANKKA_MANAGEMENT_HOSTNAME;

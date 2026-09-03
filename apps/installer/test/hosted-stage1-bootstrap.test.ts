@@ -41,7 +41,7 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 async function sha256(value: Uint8Array | string): Promise<string> {
-  const bytes = typeof value === 'string' ? encoder.encode(value) : value;
+  const bytes = v.is(v.string(), value) ? encoder.encode(value) : value;
   const owned = new Uint8Array(new ArrayBuffer(bytes.byteLength));
   owned.set(bytes);
   return bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', owned)));
@@ -225,6 +225,7 @@ async function setup() {
   });
   const plan = await buildStaticDeployPlan(selection, bundle.manifest, NOW + 20 * 60_000);
   const secrets = await createHostedStage1Secrets({ now: NOW });
+  // SAFETY: Ed25519 generateKey always yields a key pair; the union only exists for symmetric algorithms.
   const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']) as CryptoKeyPair;
   const publicKey = base64UrlEncode(new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey)));
   const events: string[] = [];

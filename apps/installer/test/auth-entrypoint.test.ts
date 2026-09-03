@@ -17,7 +17,13 @@ function environment(
   const namespace: CloudflareAuthDurableObjectNamespace = {
     idFromName(name) {
       requestedNames.push(name);
-      return { name } as unknown as DurableObjectId;
+      const id: DurableObjectId = Object.create(null);
+      Object.defineProperties(id, {
+        toString: { value: () => name },
+        equals: { value: (other: DurableObjectId) => other.toString() === name },
+        name: { value: name },
+      });
+      return id;
     },
     get() {
       return {

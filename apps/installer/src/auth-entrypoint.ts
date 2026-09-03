@@ -54,11 +54,11 @@ interface ParsedCloudflareAuthConfig {
   readonly issuerKeyId: string;
 }
 
+const namespaceSchema = v.object({ idFromName: v.function(), get: v.function() });
+
 function parseConfig(env: CloudflareAuthEnv): ParsedCloudflareAuthConfig | null {
   const parsed = v.safeParse(authConfigSchema, env);
-  if (!parsed.success || !env.GATEWAY_OWNERSHIP_CHALLENGE ||
-      typeof env.GATEWAY_OWNERSHIP_CHALLENGE.idFromName !== 'function' ||
-      typeof env.GATEWAY_OWNERSHIP_CHALLENGE.get !== 'function') return null;
+  if (!parsed.success || !v.is(namespaceSchema, env.GATEWAY_OWNERSHIP_CHALLENGE)) return null;
   return Object.freeze({
     publicClientId: parsed.output.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
     relayStateKey: parsed.output.CLOUDFLARE_RELAY_STATE_KEY,

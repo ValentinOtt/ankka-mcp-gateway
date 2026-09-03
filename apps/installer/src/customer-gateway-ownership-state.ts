@@ -66,13 +66,13 @@ function invalid(): never {
   throw new Error('customer_gateway_ownership_invalid');
 }
 
-function parseState(value: unknown): CustomerGatewayOwnershipState {
+function parseState<Value>(value: Value): CustomerGatewayOwnershipState {
   const parsed = v.safeParse(stateSchema, value);
   if (!parsed.success) invalid();
   return Object.freeze(parsed.output);
 }
 
-function exact(left: unknown, right: unknown): boolean {
+function exact<Left, Right>(left: Left, right: Right): boolean {
   try {
     return canonicalJson(left) === canonicalJson(right);
   } catch {

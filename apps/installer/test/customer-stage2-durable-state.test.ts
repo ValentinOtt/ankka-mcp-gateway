@@ -54,6 +54,7 @@ class FakeSqlStorage {
       throw new Error('unexpected SQL');
     }
     const cursor: SqlStorageCursor<Row> = Object.create(null);
+    // SAFETY: every branch above builds rows with exactly the columns the queried Row type declares.
     Object.defineProperties(cursor, {
       toArray: { value: () => rows as Row[] },
       rowsWritten: { value: 0 },

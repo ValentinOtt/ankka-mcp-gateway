@@ -1,6 +1,7 @@
+import * as v from 'valibot';
 import { describe, expect, it } from 'vitest';
 
-import type { BoundaryObject, BoundaryValue } from '../src/boundary';
+import { boundaryObjectSchema, type BoundaryObject, type BoundaryValue } from '../src/boundary';
 import { canonicalJson } from '../src/canonical-json';
 import { issueCloudflareBootstrapOwnershipHandoff, verifyCloudflareBootstrapOwnershipHandoff } from
   '../src/cloudflare-bootstrap-ownership-handoff';
@@ -69,21 +70,20 @@ function required<Value>(value: Value | undefined, name: string): Value {
   return value;
 }
 
-function object(value: unknown, name: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new TypeError(`invalid ${name}`);
-  }
-  return value as Record<string, unknown>;
+const namedBindingSchema = v.looseObject({ name: v.string(), type: v.string() });
+
+function object(value: BoundaryValue, name: string): BoundaryObject {
+  const parsed = v.safeParse(boundaryObjectSchema, value);
+  if (!parsed.success || Array.isArray(value)) throw new TypeError(`invalid ${name}`);
+  return parsed.output;
 }
 
 function json(result: BoundaryValue, status = 200, resultInfo?: BoundaryObject): Response {
-  return Response.json({
-    success: status >= 200 && status < 300,
-    errors: [],
-    messages: [],
-    result,
-    ...(resultInfo === undefined ? {} : { result_info: resultInfo }),
-  }, { status });
+  const envelope = { success: status >= 200 && status < 300, errors: [], messages: [], result };
+  return Response.json(
+    resultInfo === undefined ? envelope : { ...envelope, result_info: resultInfo },
+    { status },
+  );
 }
 
 function page(url: URL, result: readonly BoundaryValue[], totalCount = result.length): Response {
@@ -109,6 +109,7 @@ class MemoryOwnershipStorage implements CustomerGatewayOwnershipStorage {
   readonly values = new Map<string, unknown>();
 
   async get<Value = unknown>(key: string): Promise<Value | undefined> {
+    // SAFETY: the storage contract lets the caller name the stored type; the map holds exactly what put() stored.
     return structuredClone(this.values.get(key)) as Value | undefined;
   }
 
@@ -222,7 +223,7 @@ function provider(plan: StaticDeployPlan) {
     if (url.pathname === appsPath && request.method === 'POST') {
       state.appCreates += 1;
       const body = object(await request.json(), 'Access application body');
-      state.application = { ...body, id: APPLICATION_ID, aud: ACCESS_AUD } as BoundaryObject;
+      state.application = { ...body, id: APPLICATION_ID, aud: ACCESS_AUD };
       return json({ id: APPLICATION_ID, aud: ACCESS_AUD }, 201);
     }
     if (url.pathname === `${appsPath}/${APPLICATION_ID}` && request.method === 'GET') {
@@ -236,7 +237,7 @@ function provider(plan: StaticDeployPlan) {
     if (url.pathname === policiesPath && request.method === 'POST') {
       state.policyCreates += 1;
       const body = object(await request.json(), 'Access policy body');
-      state.policy = { ...body, id: POLICY_ID } as BoundaryObject;
+      state.policy = { ...body, id: POLICY_ID };
       return json({ id: POLICY_ID }, 201);
     }
     if (url.pathname === `${policiesPath}/${POLICY_ID}` && request.method === 'GET') {
@@ -250,7 +251,7 @@ function provider(plan: StaticDeployPlan) {
     if (url.pathname === domainsPath && request.method === 'PUT') {
       state.domainCreates += 1;
       const body = object(await request.json(), 'custom domain body');
-      state.domain = { ...body, id: DOMAIN_ID, environment: 'production' } as BoundaryObject;
+      state.domain = { ...body, id: DOMAIN_ID, environment: 'production' };
       return json({ id: DOMAIN_ID });
     }
     if (url.pathname === `${domainsPath}/${DOMAIN_ID}` && request.method === 'GET') {
@@ -318,13 +319,10 @@ function provider(plan: StaticDeployPlan) {
       if (!Array.isArray(bindings)) throw new TypeError('invalid upload bindings');
       state.finalBindings = bindings.map((value) => {
         const binding = object(value, 'upload binding');
-        const name = binding.name;
-        const type = binding.type;
-        if (typeof name !== 'string' || typeof type !== 'string') {
-          throw new TypeError('invalid upload binding fields');
-        }
-        if (type === 'inherit') return inheritedBinding(name);
-        return binding as BoundaryObject;
+        const named = v.safeParse(namedBindingSchema, binding);
+        if (!named.success) throw new TypeError('invalid upload binding fields');
+        if (named.output.type === 'inherit') return inheritedBinding(named.output.name);
+        return binding;
       });
       state.finalActive = true;
       return json({ id: FINAL_VERSION });

@@ -1,6 +1,6 @@
 import * as v from 'valibot';
 
-import type { JsonObject, JsonValue } from './boundary';
+import { jsonValueSchema, type JsonObject, type JsonValue } from './boundary';
 import { canonicalJson } from './canonical-json';
 import {
   preflightFreshCustomerGatewayProjection,
@@ -198,7 +198,7 @@ function fail(code: CustomerStage2ConvergerErrorCode): never {
   throw new CustomerStage2ConvergerError(code);
 }
 
-function exact(left: unknown, right: unknown): boolean {
+function exact<Left, Right>(left: Left, right: Right): boolean {
   try {
     return canonicalJson(left) === canonicalJson(right);
   } catch {
@@ -206,16 +206,21 @@ function exact(left: unknown, right: unknown): boolean {
   }
 }
 
-function jsonObject(value: unknown): JsonObject {
-  if (!isPlainDataTree(value) || value === null || Array.isArray(value) || typeof value !== 'object') {
-    fail('invalid');
-  }
-  return JSON.parse(canonicalJson(value)) as JsonObject;
+const jsonObjectSchema = v.record(v.string(), jsonValueSchema);
+const callableSchema = v.function();
+
+function jsonObject<Value>(value: Value): JsonObject {
+  if (!isPlainDataTree(value) || Array.isArray(value)) fail('invalid');
+  const parsed = v.safeParse(jsonObjectSchema, JSON.parse(canonicalJson(value)));
+  if (!parsed.success) fail('invalid');
+  return parsed.output;
 }
 
-function jsonValue(value: unknown): JsonValue {
+function jsonValue<Value>(value: Value): JsonValue {
   if (!isPlainDataTree(value)) fail('invalid');
-  return JSON.parse(canonicalJson(value)) as JsonValue;
+  const parsed = v.safeParse(jsonValueSchema, JSON.parse(canonicalJson(value)));
+  if (!parsed.success) fail('invalid');
+  return parsed.output;
 }
 
 function clock(input: CustomerStage2ConvergerInput, floor = 0): number {
@@ -917,9 +922,9 @@ function identityMatches(left: CustomerStage2Identity, right: CustomerStage2Iden
 export async function convergeCustomerStage2(
   input: CustomerStage2ConvergerInput,
 ): Promise<CustomerBootstrapConvergenceResult> {
-  if (!ATTEMPT_ID.test(input.attemptId) || typeof input.now !== 'function' ||
-      typeof input.transport !== 'function' || typeof input.payload.bootstrap !== 'function' ||
-      typeof input.payload.verifyReady !== 'function') fail('invalid');
+  if (!ATTEMPT_ID.test(input.attemptId) || !v.is(callableSchema, input.now) ||
+      !v.is(callableSchema, input.transport) || !v.is(callableSchema, input.payload.bootstrap) ||
+      !v.is(callableSchema, input.payload.verifyReady)) fail('invalid');
   const adopted = await adoptOwnership(input);
   const startedAt = clock(input);
   const plan = await renewedPlan(adopted.plan, startedAt);

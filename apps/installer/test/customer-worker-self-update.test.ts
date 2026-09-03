@@ -1,6 +1,7 @@
+import * as v from 'valibot';
 import { describe, expect, it } from 'vitest';
 
-import type { BoundaryObject, BoundaryValue } from '../src/boundary';
+import { boundaryObjectSchema, type BoundaryObject, type BoundaryValue } from '../src/boundary';
 import type { GatewayWorkerPlainTextBindings } from '../src/cloudflare-worker-direct-upload';
 import { sha256Hex } from '../src/crypto';
 import {
@@ -9,6 +10,7 @@ import {
   publishCustomerWorkerFinalRuntime,
 } from '../src/customer-worker-self-update';
 
+const inheritedBindingSchema = v.looseObject({ type: v.literal('inherit') });
 const ACCOUNT_ID = 'a'.repeat(32);
 const WORKER_ID = 'b'.repeat(32);
 const WORKER_NAME = 'ankka-gateway-test';
@@ -128,9 +130,10 @@ function providerFixture(options: ProviderFixtureOptions = {}) {
       if (!(body instanceof FormData)) throw new TypeError('upload body');
       const metadata = body.get('metadata');
       const source = body.get('index.js');
-      if (typeof metadata === 'string' || metadata === null ||
-          typeof source === 'string' || source === null) throw new TypeError('upload files');
-      uploadedMetadata = JSON.parse(await metadata.text()) as BoundaryObject;
+      if (!(metadata instanceof Blob) || !(source instanceof Blob)) throw new TypeError('upload files');
+      const parsedMetadata = v.safeParse(boundaryObjectSchema, JSON.parse(await metadata.text()));
+      if (!parsedMetadata.success) throw new TypeError('upload metadata');
+      uploadedMetadata = parsedMetadata.output;
       uploadedSource = await source.text();
       activeFinal = true;
       return envelope({ id: FINAL_VERSION });
@@ -180,8 +183,7 @@ describe('customer Worker final self-update', () => {
     const bindings = metadata?.bindings;
     expect(Array.isArray(bindings)).toBe(true);
     if (!Array.isArray(bindings)) throw new TypeError('metadata bindings');
-    const inherited = bindings.filter((binding) =>
-      typeof binding === 'object' && binding !== null && !Array.isArray(binding) && binding.type === 'inherit');
+    const inherited = bindings.filter((binding) => v.is(inheritedBindingSchema, binding));
     expect(inherited).toEqual([
       { name: 'ADMIN_STATE', type: 'inherit', version_id: OLD_VERSION },
       { name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY', type: 'inherit', version_id: OLD_VERSION },

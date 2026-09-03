@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import type { BoundaryValue } from '../src/boundary';
+
 import { issueCloudflareBootstrapOwnershipHandoff } from
   '../src/cloudflare-bootstrap-ownership-handoff';
 import {
@@ -45,7 +47,7 @@ const EXPECTED_BINDINGS = Object.freeze({
   CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY: 'B'.repeat(43),
 });
 
-function json(result: unknown): Response {
+function json(result: BoundaryValue): Response {
   return new Response(JSON.stringify({ success: true, errors: [], messages: [], result }), {
     status: 200,
     headers: { 'content-type': 'application/json' },

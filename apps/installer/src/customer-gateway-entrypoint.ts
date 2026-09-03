@@ -80,11 +80,11 @@ interface FinalDurableObjectState extends DurableObjectState {
 
 type ParsedFinalEnv = v.InferOutput<typeof envSchema>;
 
+const namespaceSchema = v.object({ idFromName: v.function(), get: v.function() });
+
 function parsedEnv(env: FinalGatewayEnv): ParsedFinalEnv {
   const parsed = v.safeParse(envSchema, env);
-  if (!parsed.success || !env.ADMIN_STATE ||
-      typeof env.ADMIN_STATE.idFromName !== 'function' ||
-      typeof env.ADMIN_STATE.get !== 'function') throw new Error('gateway_config_invalid');
+  if (!parsed.success || !v.is(namespaceSchema, env.ADMIN_STATE)) throw new Error('gateway_config_invalid');
   const managementHostname = parsed.output.ANKKA_MANAGEMENT_HOSTNAME;
   const issuer = new URL(parsed.output.CF_ACCESS_ISSUER);
   if (managementHostname !== managementHostname.toLowerCase() || !managementHostname.includes('.') ||
