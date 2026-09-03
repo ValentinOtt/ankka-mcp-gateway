@@ -1284,3 +1284,32 @@ deploying the production relay. Both are operator steps.
   `target_account_ambiguous`, the approving user can see more than one
   account and the refusal is by design; whether such a customer may name the
   target account instead of being turned away is an open product decision.
+- 2026-09-03 (evening): the hosted runtime was redeployed with the
+  account-read translation (#57); the retry from the second account then
+  reported `provision_failed` / `account_read_provider_unavailable`. PR #61
+  made the account read carry the provider's HTTP status and numeric error
+  code, and the next retry read
+  `account_read_provider_unavailable_not_json_http_200`: Cloudflare answered
+  200 and our reader failed. Root cause: `withDeadline` aborts its controller
+  in `finally` whichever way the operation settles, and workerd and Node then
+  error any response body stream that is still open, so every call site that
+  took the `Response` out of `withDeadline` and read the body afterwards
+  failed on every real fetch. Reproduced in Node and in workerd via
+  `wrangler dev`; tests never saw it because their fake transports ignore the
+  signal. PR #63 added `fetchBoundedText`, which reads the bounded body inside
+  the deadline, and used it at the five sites with that shape: the Stage 1
+  account read, the customer token exchange, the zone resolution, the relay
+  start and the post-deploy health poll, with signal-aware regression tests
+  that failed before the change. Each fix was activated by regenerating the
+  reviewed canary from main and redeploying `ankka-gateway-deploy` (the
+  assistant ran these deploys under an operator-granted allow rule). The
+  third retry from the second account reached `phase: provisioned` with no
+  failure: the shell Worker exists on the customer's `workers.dev` subdomain
+  and the hosted health poll passed, so Stage 1 is proven across accounts.
+  The shell shipped in gateway-v0.1.21 is built from
+  `customer-gateway-bootstrap-entrypoint.ts` and carries the same flaw in its
+  token exchange, zone resolution and relay start, so Stage 2 needs
+  gateway-v0.1.22: the candidate was built from main `840defb` (manifest
+  `47fe8738…`, deterministic across two dry runs) and the SBOM generated;
+  signing, the R2 publication, the GitHub release and the repin are the
+  operator's next ceremony.
