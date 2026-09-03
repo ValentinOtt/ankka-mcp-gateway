@@ -708,35 +708,53 @@ export function createTwoStageDeployRuntime(
     return redirectToResult([]);
   }
 
+  /**
+   * Names the handoff step an unexpected error escaped from, so the operator
+   * reads "handoff_<step>_<kind>" instead of a bare internal_error. Stable
+   * DeployErrors pass through untouched.
+   */
+  async function handoffStep<T>(step: string, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      if (error instanceof DeployError) throw error;
+      const kind = error instanceof Error && error.name === 'ValiError' ? 'schema' : 'unexpected';
+      throw new DeployError(500, 'internal_error', `handoff_${step}_${kind}`);
+    }
+  }
+
   async function getHandoff(request: Request, context: RuntimeContext): Promise<Response> {
     const cleared = [clearBootstrapCookie()];
     const session = await requireSession(request, context);
     if (policy === 'required') await enforceSessionReadRateLimit(context.env, session.sessionId);
-    const cookie = await openCookie(request, context);
-    const current = await session.client.read();
+    const cookie = await handoffStep('cookie', () => openCookie(request, context));
+    const current = await handoffStep('session_read', () => session.client.read());
     if (current === null) throw new DeployError(404, 'session_invalid');
-    const match = await matchHostedStage1Cookie({ current, cookie, now: context.now });
+    const match = await handoffStep('cookie_match', () => matchHostedStage1Cookie({ current, cookie, now: context.now }));
     if (match.phase !== 'provisioned' || current.provision === null || current.plan === null ||
         cookie.capability === null) {
       throw new DeployError(409, 'session_conflict', 'handoff_not_provisioned');
     }
-    const issuer = await issuerKey(context);
+    const issuer = await handoffStep('issuer_key', () => issuerKey(context));
+    const provision = current.provision;
+    const plan = current.plan;
+    const capability = cookie.capability;
     try {
-      const handoff = await completeHostedStage1Handoff({
-        provision: current.provision,
-        plan: current.plan,
-        capabilitySecret: cookie.capability.capabilitySecret,
+      const handoff = await handoffStep('complete', () => completeHostedStage1Handoff({
+        provision,
+        plan,
+        capabilitySecret: capability.capabilitySecret,
         customerOauthClientId: context.config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
         issuerKeyId: issuer.keyId,
         issuerPublicKey: issuer.publicKey,
         issuerPrivateKey: issuer.privateKey,
         transport,
         now,
-      });
-      await session.client.markHandedOff({
-        bootstrapId: current.provision.bootstrapId,
-        secretCommitment: current.provision.bootstrapSecretCommitment,
-      });
+      }));
+      await handoffStep('mark', () => session.client.markHandedOff({
+        bootstrapId: provision.bootstrapId,
+        secretCommitment: provision.bootstrapSecretCommitment,
+      }));
       return json({
         schemaVersion: 1,
         status: 'ready',
@@ -751,12 +769,17 @@ export function createTwoStageDeployRuntime(
           schemaVersion: 1,
           status: 'not_ready',
           retryAfterMs: HANDOFF_RETRY_MS,
-          expiresAt: current.provision.capabilityExpiresAt,
+          expiresAt: provision.capabilityExpiresAt,
+          reason: stable.reason,
         }, 503);
       }
       if (stable.code === 'bootstrap_failed') {
         await session.client.requireCleanup('handoff_rejected');
-        return json({ code: stable.code }, stable.status, cleared);
+        return json(
+          stable.reason === null ? { code: stable.code } : { code: stable.code, reason: stable.reason },
+          stable.status,
+          cleared,
+        );
       }
       throw stable;
     }

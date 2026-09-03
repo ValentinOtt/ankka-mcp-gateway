@@ -247,9 +247,10 @@ async function harness(options: { policy?: 'disabled' | 'required' } = {}): Prom
       events.push('revoke');
       return new Response(null, { status: 200 });
     }
-    if (url.hostname.endsWith('.workers.dev') && url.pathname === '/health') {
+    if (url.hostname.endsWith('.workers.dev') && url.pathname === '/__ankka/install/status') {
       events.push('customer-health');
       expect(request.headers.get('authorization')).toBeNull();
+      expect(init?.redirect).toBe('manual');
       if (customer.healthStatus !== 200) return new Response(null, { status: customer.healthStatus });
       return Response.json({
         schemaVersion: 1,
@@ -490,7 +491,9 @@ describe('clean hosted two-stage runtime', () => {
 
     const notReady = await read(h, browser, '/api/bootstrap/handoff');
     expect(notReady.status).toBe(503);
-    expect(await parsed(notReady, handoffResponseSchema)).toMatchObject({ status: 'not_ready', retryAfterMs: 3_000 });
+    expect(await parsed(notReady, handoffResponseSchema)).toMatchObject({
+      status: 'not_ready', retryAfterMs: 3_000, reason: 'readiness_http_404',
+    });
     expect(notReady.headers.get('set-cookie')).toBeNull();
     expect(browser.bootstrapCookie).not.toBeNull();
 
@@ -585,7 +588,9 @@ describe('clean hosted two-stage runtime', () => {
     h.customer.release = 'gateway-v1.2.3';
     const rejected = await read(h, browser, '/api/bootstrap/handoff');
     expect(rejected.status).toBe(502);
-    expect(await parsed(rejected, errorSchema)).toEqual({ code: 'bootstrap_failed' });
+    expect(await parsed(rejected, v.strictObject({ code: v.string(), reason: v.string() }))).toEqual({
+      code: 'bootstrap_failed', reason: 'readiness_install_id_mismatch',
+    });
     expect(browser.bootstrapCookie).toBeNull();
     expect(await currentPhase(h, browser)).toMatchObject({
       phase: 'cleanup_required', cleanup: { reason: 'handoff_rejected', completedAt: null },

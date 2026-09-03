@@ -6,6 +6,7 @@ import {
   verifyCloudflareBootstrapOwnershipHandoff,
 } from './cloudflare-bootstrap-ownership-handoff';
 import {
+  CloudflareGatewayOwnershipProofError,
   issueCloudflareGatewayOwnershipCertificate,
 } from './cloudflare-gateway-ownership-proof';
 import {
@@ -27,6 +28,7 @@ import {
 import {
   CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH,
   CUSTOMER_INSTALL_ROOT_PATH,
+  CUSTOMER_INSTALL_STATUS_PATH,
 } from './customer-install-paths';
 import { base64UrlEncode, sha256Hex } from './crypto';
 import { DeployError } from './errors';
@@ -409,37 +411,76 @@ export async function provisionHostedStage1(input: {
   });
 }
 
+/** Names a certificate issuance failure by the proof library's own code, never its message. */
+function certificateReason<Thrown>(error: Thrown): string {
+  if (error instanceof DeployError) return error.reason ?? error.code;
+  if (error instanceof CloudflareGatewayOwnershipProofError) return `handoff_certificate_${error.code}`;
+  return 'handoff_certificate_unexpected';
+}
+
+/** Names why the readiness fetch settled without a response: expiry, body, or transport. */
+function readinessReadReason<Thrown>(error: Thrown): string {
+  if (error instanceof DeployError) {
+    if (error.status === 504) return 'readiness_deadline_expired';
+    if (error.reason === 'body_read_failed') return 'readiness_body_read_failed';
+  }
+  return 'readiness_transport_failed';
+}
+
+function readinessStatusReason(response: Response): string {
+  const { status } = response;
+  return Number.isInteger(status) && status >= 100 && status <= 599
+    ? `readiness_http_${status}`
+    : 'readiness_http_unknown';
+}
+
+/**
+ * Token-free readiness read of the freshly deployed shell.
+ *
+ * It asks the shell's install status route, not /health: the shell serves its
+ * admin assets with a single-page-application fallback and only /__ankka/*
+ * and /api/* run the Worker first, so from outside /health answers with the
+ * admin page. The request uses redirect: 'manual' because workerd rejects
+ * redirect: 'error' when the request is built; a redirect is refused by its
+ * status instead. Every outcome carries a secret-free reason so the operator
+ * can read why a handoff is still waiting.
+ */
 async function readBootstrapHealth(input: {
   readonly provision: HostedStage1Provision;
   readonly transport: FetchTransport;
 }): Promise<v.InferOutput<typeof healthSchema>> {
   let read: BoundedRead;
   try {
-    read = await fetchBoundedText(input.transport, new URL('/health', input.provision.bootstrapOrigin), {
-      method: 'GET',
-      headers: { accept: 'application/json', origin: PUBLIC_ORIGIN },
-      cache: 'no-store',
-      credentials: 'omit',
-      redirect: 'error',
-    }, 'bootstrap_not_ready', { maxBytes: MAX_HEALTH_BYTES, timeoutMs: 5_000 });
-  } catch {
-    throw new DeployError(503, 'bootstrap_not_ready');
+    read = await fetchBoundedText(
+      input.transport,
+      new URL(CUSTOMER_INSTALL_STATUS_PATH, input.provision.bootstrapOrigin),
+      {
+        method: 'GET',
+        headers: { accept: 'application/json' },
+        cache: 'no-store',
+        redirect: 'manual',
+      },
+      'bootstrap_not_ready',
+      { maxBytes: MAX_HEALTH_BYTES, timeoutMs: 5_000 },
+    );
+  } catch (error) {
+    throw new DeployError(503, 'bootstrap_not_ready', readinessReadReason(error));
   }
   const { response } = read;
-  if (response.status !== 200) throw new DeployError(503, 'bootstrap_not_ready');
+  if (response.status !== 200) throw new DeployError(503, 'bootstrap_not_ready', readinessStatusReason(response));
   let decoded: unknown;
   try {
     decoded = JSON.parse(read.text);
   } catch {
-    throw new DeployError(502, 'bootstrap_failed');
+    throw new DeployError(502, 'bootstrap_failed', 'readiness_not_json');
   }
   const parsed = v.safeParse(healthSchema, decoded);
-  const vary = response.headers.get('vary')?.toLowerCase().split(',').map((value) => value.trim()) ?? [];
-  if (!parsed.success || response.headers.get('access-control-allow-origin') !== PUBLIC_ORIGIN ||
-      !vary.includes('origin') ||
-      parsed.output.installId !== input.provision.installId ||
-      parsed.output.release !== input.provision.release.id) {
-    throw new DeployError(502, 'bootstrap_failed');
+  if (!parsed.success) throw new DeployError(502, 'bootstrap_failed', 'readiness_schema_invalid');
+  if (parsed.output.installId !== input.provision.installId) {
+    throw new DeployError(502, 'bootstrap_failed', 'readiness_install_id_mismatch');
+  }
+  if (parsed.output.release !== input.provision.release.id) {
+    throw new DeployError(502, 'bootstrap_failed', 'readiness_release_mismatch');
   }
   return parsed.output;
 }
@@ -486,9 +527,11 @@ export async function completeHostedStage1Handoff(input: {
       statement.bootstrapSecret.expiresAt !== provision.capabilityExpiresAt) invalid();
   const health = await readBootstrapHealth({ provision, transport: input.transport });
   if (health.installId !== plan.managementOwnershipMarker) {
-    throw new DeployError(502, 'bootstrap_failed');
+    throw new DeployError(502, 'bootstrap_failed', 'handoff_install_id_mismatch');
   }
-  const ownershipCertificate = await issueCloudflareGatewayOwnershipCertificate({
+  let ownershipCertificate: string;
+  try {
+    ownershipCertificate = await issueCloudflareGatewayOwnershipCertificate({
     accountId: provision.accountId,
     installId: plan.managementOwnershipMarker,
     worker: {
@@ -505,6 +548,9 @@ export async function completeHostedStage1Handoff(input: {
     issuedAt: now,
     keyId: input.issuerKeyId,
   }, input.issuerPrivateKey);
+  } catch (error) {
+    throw new DeployError(500, 'internal_error', certificateReason(error));
+  }
   const payload = canonicalJson({
     bootstrapId: provision.bootstrapId,
     ownershipCertificate,

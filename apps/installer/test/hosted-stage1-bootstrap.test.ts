@@ -307,8 +307,10 @@ describe('hosted Stage 1 coordinator', () => {
       issuerPrivateKey: fixture.keys.privateKey,
       transport: async (input, init) => {
         const request = new Request(input, init);
-        expect(request.url).toBe(`${fixture.provision.bootstrapOrigin}health`);
+        expect(request.url).toBe(`${fixture.provision.bootstrapOrigin}__ankka/install/status`);
         expect(request.headers.get('authorization')).toBeNull();
+        // workerd rejects redirect: 'error' when the request is built.
+        expect(init?.redirect).toBe('manual');
         fixture.events.push('token-free-health');
         return streamedHealth({
           schemaVersion: 1,
@@ -360,6 +362,38 @@ describe('hosted Stage 1 coordinator', () => {
       issuerPrivateKey: fixture.keys.privateKey,
       transport: async () => new Response(null, { status: 404 }),
       now: () => NOW + 2,
-    })).rejects.toMatchObject({ code: 'bootstrap_not_ready', status: 503 });
+    })).rejects.toMatchObject({ code: 'bootstrap_not_ready', status: 503, reason: 'readiness_http_404' });
+  });
+
+  it('refuses a shell that answers its status route with a page instead of JSON', async () => {
+    const fixture = await setup();
+    await expect(completeHostedStage1Handoff({
+      provision: fixture.provision,
+      plan: fixture.plan,
+      capabilitySecret: fixture.secrets.capability.secret,
+      customerOauthClientId: CUSTOMER_CLIENT_ID,
+      issuerKeyId: ISSUER_KEY_ID,
+      issuerPublicKey: fixture.publicKey,
+      issuerPrivateKey: fixture.keys.privateKey,
+      transport: async () => new Response('<!doctype html><title>Ankka MCP Gateway</title>', {
+        status: 200, headers: { 'content-type': 'text/html' },
+      }),
+      now: () => NOW + 2,
+    })).rejects.toMatchObject({ code: 'bootstrap_failed', status: 502, reason: 'readiness_not_json' });
+  });
+
+  it('names a fetch that settles without a response as a transport failure', async () => {
+    const fixture = await setup();
+    await expect(completeHostedStage1Handoff({
+      provision: fixture.provision,
+      plan: fixture.plan,
+      capabilitySecret: fixture.secrets.capability.secret,
+      customerOauthClientId: CUSTOMER_CLIENT_ID,
+      issuerKeyId: ISSUER_KEY_ID,
+      issuerPublicKey: fixture.publicKey,
+      issuerPrivateKey: fixture.keys.privateKey,
+      transport: async () => { throw new TypeError('Invalid redirect value'); },
+      now: () => NOW + 2,
+    })).rejects.toMatchObject({ code: 'bootstrap_not_ready', status: 503, reason: 'readiness_transport_failed' });
   });
 });
