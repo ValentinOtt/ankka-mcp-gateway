@@ -25,6 +25,32 @@ function json(value: BoundaryValue, status = 200): Response {
   });
 }
 
+/**
+ * A JSON body that arrives only when pulled and errors once the request signal
+ * has aborted, like a real fetch body. A consumer that reads after the deadline
+ * has released the response sees the AbortError; one that reads inside it gets
+ * the bytes.
+ */
+function streamedJson(value: BoundaryValue, signal: AbortSignal | null | undefined, status = 200): Response {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let delivered = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (signal?.aborted) {
+        controller.error(new DOMException('The operation was aborted', 'AbortError'));
+        return;
+      }
+      if (delivered) {
+        controller.close();
+        return;
+      }
+      delivered = true;
+      controller.enqueue(bytes);
+    },
+  }, { highWaterMark: 0 });
+  return new Response(body, { status, headers: { 'content-type': 'application/json' } });
+}
+
 describe('customer-owned Cloudflare grant', () => {
   it('resolves only the exact active zone selected in the signed plan', async () => {
     const requests: string[] = [];
@@ -254,8 +280,56 @@ describe('Stage 1 single-account resolution details', () => {
     expect(two).toMatchObject({ code: 'account_ambiguous', detail: 'accounts_2' });
   });
 
+  it('names a body that fails to read', async () => {
+    const error = await detailFor(async () => new Response(new ReadableStream<Uint8Array>({
+      pull(controller) { controller.error(new DOMException('The operation was aborted', 'AbortError')); },
+    }, { highWaterMark: 0 }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    expect(error).toMatchObject({ code: 'provider_unavailable', detail: 'body_read_failed' });
+  });
+
   it('drops a detail that is not a plain lowercase token', () => {
     expect(new CustomerCloudflareGrantError('provider_unavailable', `Bearer ${providerText}`).detail).toBeNull();
     expect(new CustomerCloudflareGrantError('provider_unavailable').detail).toBeNull();
+  });
+});
+
+describe('provider bodies are consumed inside the deadline', () => {
+  it('resolves the account from a body that arrives after the headers', async () => {
+    const accountId = await resolveSingleAuthorizedCloudflareAccount({
+      accessToken: ACCESS_TOKEN,
+      transport: async (_input, init) => streamedJson({
+        success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }],
+      }, init?.signal),
+    });
+    expect(accountId).toBe(ACCOUNT_ID);
+  });
+
+  it('resolves the zone from a body that arrives after the headers', async () => {
+    const zone = await resolveAuthorizedCloudflareZone({
+      accessToken: ACCESS_TOKEN,
+      accountId: ACCOUNT_ID,
+      zoneName: 'example.com',
+      transport: async (_input, init) => streamedJson({
+        success: true,
+        errors: [],
+        messages: [],
+        result: [{ id: ZONE_ID, name: 'example.com', status: 'active', account: { id: ACCOUNT_ID } }],
+      }, init?.signal),
+    });
+    expect(zone).toEqual({ id: ZONE_ID, name: 'example.com', status: 'active' });
+  });
+
+  it('exchanges the code from a token body that arrives after the headers', async () => {
+    const grant = await exchangeCustomerCloudflareAuthorizationCode({
+      clientId: CLIENT_ID,
+      code: CODE,
+      verifier: VERIFIER,
+      operation: 'install',
+      transport: async (_input, init) => streamedJson({
+        access_token: ACCESS_TOKEN, token_type: 'bearer', scope: INSTALL_SCOPES.join(' '),
+      }, init?.signal),
+    });
+    expect(grant.metadataValid).toBe(true);
+    expect(grant.scopes).toHaveLength(INSTALL_SCOPES.length);
   });
 });

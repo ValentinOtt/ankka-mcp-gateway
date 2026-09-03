@@ -40,6 +40,30 @@ function json(
   return new Response(JSON.stringify(value), { status, headers: { 'content-type': contentType } });
 }
 
+/**
+ * A relay body that arrives only when pulled and errors once the request signal
+ * has aborted, like a real fetch body.
+ */
+function streamedJson(value: RelayResponseFixture, signal: AbortSignal | null | undefined): Response {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let delivered = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (signal?.aborted) {
+        controller.error(new DOMException('The operation was aborted', 'AbortError'));
+        return;
+      }
+      if (delivered) {
+        controller.close();
+        return;
+      }
+      delivered = true;
+      controller.enqueue(bytes);
+    },
+  }, { highWaterMark: 0 });
+  return new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
+}
+
 function input(transport: (request: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
   return {
     publicClientId: CLIENT_ID,
@@ -104,6 +128,14 @@ describe('customer bootstrap code-relay client', () => {
     mutate(url);
     await expect(beginCustomerBootstrapRelay(input(async () =>
       json({ schemaVersion: 1, authorizationUrl: url.toString() })))).rejects.toThrow('relay_rejected');
+  });
+
+  it('reads the relay response before the deadline releases it', async () => {
+    const result = await beginCustomerBootstrapRelay(input(async (_request, init) => streamedJson(
+      { schemaVersion: 1, authorizationUrl: authorizationUrl().toString() },
+      init?.signal,
+    )));
+    expect(result).toEqual({ authorizationUrl: authorizationUrl().toString() });
   });
 
   it('rejects extra response fields, non-JSON media types, redirects, and oversized bodies', async () => {

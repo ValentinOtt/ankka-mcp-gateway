@@ -9,7 +9,8 @@ import {
   RECEIPT_OWNED_CLOUDFLARE_RESOURCE_KINDS,
   type CustomerCloudflareOperation,
 } from './cloudflare-operation-authority';
-import { readBoundedText, withDeadline } from './http';
+import { DeployError } from './errors';
+import { type BoundedRead, fetchBoundedText, readBoundedText, withDeadline } from './http';
 
 const CLIENT_ID = /^[A-Za-z0-9_-]{16,128}$/u;
 const VERIFIER = /^[A-Za-z0-9_-]{43}$/u;
@@ -111,21 +112,19 @@ function validOperation(
   return isCustomerCloudflareOperation(value);
 }
 
-async function responseJson(response: Response, failure: CustomerCloudflareGrantErrorCode): Promise<BoundaryValue> {
-  let serialized: string;
-  try {
-    serialized = await readBoundedText(response, failure === 'revoke_failed' ? 'oauth_revoke_failed' : 'oauth_exchange_failed',
-      MAX_PROVIDER_BYTES);
-  } catch {
-    throw new CustomerCloudflareGrantError(failure);
+function parseProviderJson(serialized: string): BoundaryValue {
+  const parsed = v.safeParse(boundaryValueSchema, JSON.parse(serialized));
+  if (!parsed.success) throw new Error('invalid');
+  return parsed.output;
+}
+
+/** Names a failure inside the deadline without provider text: expiry, body read, or transport. */
+function deadlineDetail<Thrown>(error: Thrown): string {
+  if (error instanceof DeployError) {
+    if (error.status === 504) return 'deadline_expired';
+    if (error.reason === 'body_read_failed') return 'body_read_failed';
   }
-  try {
-    const parsed = v.safeParse(boundaryValueSchema, JSON.parse(serialized));
-    if (!parsed.success) throw new Error('invalid');
-    return parsed.output;
-  } catch {
-    throw new CustomerCloudflareGrantError(failure);
-  }
+  return 'transport_failed';
 }
 
 const providerErrorCodeSchema = v.object({
@@ -149,15 +148,18 @@ function httpStatusDetail(response: Response): string {
   return Number.isInteger(status) && status >= 100 && status <= 599 ? `http_${status}` : 'http_unknown';
 }
 
+type EnvelopeParse =
+  | v.SafeParseResult<typeof accountEnvelopeSchema>
+  | v.SafeParseResult<typeof zoneEnvelopeSchema>;
+
 /**
- * Names why an accounts envelope was rejected: the HTTP status and numeric
+ * Names why a provider envelope was rejected: the HTTP status and numeric
  * provider code for a refused read, else which envelope rule failed.
  */
-function accountEnvelopeDetail(response: Response, value: BoundaryValue): string {
+function envelopeDetail(response: Response, value: BoundaryValue, parsed: EnvelopeParse): string {
   const code = firstProviderErrorCode(value);
   const suffix = code === null ? '' : `_code_${code}`;
   if (!response.ok) return `${httpStatusDetail(response)}${suffix}`;
-  const parsed = v.safeParse(accountEnvelopeSchema, value);
   if (!parsed.success) return `envelope_invalid${suffix}`;
   if (parsed.output.errors.length !== 0) return `errors_present${suffix}`;
   if (parsed.output.messages.length !== 0) return 'messages_present';
@@ -265,9 +267,9 @@ export async function exchangeCustomerCloudflareAuthorizationCode(input: {
   if (input.operation !== 'uninstall' && receiptResourceKinds !== undefined) invalid();
   const expectedScopes = exactOperationScopes(input.operation, receiptResourceKinds);
   if (expectedScopes.length === 0) invalid();
-  let response: Response;
+  let read: BoundedRead;
   try {
-    response = await withDeadline((signal) => input.transport(OAUTH_EXCHANGE_URL, {
+    read = await fetchBoundedText(input.transport, OAUTH_EXCHANGE_URL, {
       method: 'POST',
       headers: {
         accept: 'application/json',
@@ -280,15 +282,23 @@ export async function exchangeCustomerCloudflareAuthorizationCode(input: {
         redirect_uri: CLOUDFLARE_CODE_RELAY_CALLBACK,
         code_verifier: input.verifier,
       }),
-      signal,
-    }), 'oauth_exchange_failed');
-  } catch {
-    throw new CustomerCloudflareGrantError('token_exchange_failed');
+    }, 'oauth_exchange_failed', { maxBytes: MAX_PROVIDER_BYTES });
+  } catch (error) {
+    throw new CustomerCloudflareGrantError('token_exchange_failed', deadlineDetail(error));
   }
-  const payload = await responseJson(response, 'token_exchange_failed');
+  const { response } = read;
+  let payload: BoundaryValue;
+  try {
+    payload = parseProviderJson(read.text);
+  } catch {
+    throw new CustomerCloudflareGrantError('token_exchange_failed', `not_json_${httpStatusDetail(response)}`);
+  }
   const object = v.safeParse(boundaryObjectSchema, payload);
   if (!response.ok || !object.success) {
-    throw new CustomerCloudflareGrantError('token_exchange_failed');
+    throw new CustomerCloudflareGrantError(
+      'token_exchange_failed',
+      response.ok ? 'envelope_invalid' : httpStatusDetail(response),
+    );
   }
   const accessToken = capturedCredential(object.output.access_token);
   const refreshToken = capturedCredential(object.output.refresh_token);
@@ -316,26 +326,26 @@ export async function resolveSingleAuthorizedCloudflareAccount(input: {
   const url = new URL('/client/v4/accounts', CLOUDFLARE_API_ORIGIN);
   url.searchParams.set('page', '1');
   url.searchParams.set('per_page', '2');
-  let response: Response;
+  let read: BoundedRead;
   try {
-    response = await withDeadline((signal) => input.transport(url, {
+    read = await fetchBoundedText(input.transport, url, {
       method: 'GET',
       headers: { accept: 'application/json', authorization: `Bearer ${input.accessToken}` },
-      signal,
-    }), 'oauth_exchange_failed');
-  } catch {
-    throw new CustomerCloudflareGrantError('provider_unavailable', 'transport_failed');
+    }, 'oauth_exchange_failed', { maxBytes: MAX_PROVIDER_BYTES });
+  } catch (error) {
+    throw new CustomerCloudflareGrantError('provider_unavailable', deadlineDetail(error));
   }
+  const { response } = read;
   let value: BoundaryValue;
   try {
-    value = await responseJson(response, 'provider_unavailable');
+    value = parseProviderJson(read.text);
   } catch {
     throw new CustomerCloudflareGrantError('provider_unavailable', `not_json_${httpStatusDetail(response)}`);
   }
   const parsed = v.safeParse(accountEnvelopeSchema, value);
   if (!response.ok || !parsed.success || parsed.output.errors.length !== 0 ||
       parsed.output.messages.length !== 0) {
-    throw new CustomerCloudflareGrantError('provider_unavailable', accountEnvelopeDetail(response, value));
+    throw new CustomerCloudflareGrantError('provider_unavailable', envelopeDetail(response, value, parsed));
   }
   if (parsed.output.result.length !== 1) {
     throw new CustomerCloudflareGrantError('account_ambiguous', `accounts_${parsed.output.result.length}`);
@@ -385,23 +395,30 @@ export async function resolveAuthorizedCloudflareZone(input: {
   url.searchParams.set('status', 'active');
   url.searchParams.set('page', '1');
   url.searchParams.set('per_page', '2');
-  let response: Response;
+  let read: BoundedRead;
   try {
-    response = await withDeadline((signal) => input.transport(url, {
+    read = await fetchBoundedText(input.transport, url, {
       method: 'GET',
       headers: { accept: 'application/json', authorization: `Bearer ${input.accessToken}` },
-      signal,
-    }), 'oauth_exchange_failed');
-  } catch {
-    throw new CustomerCloudflareGrantError('provider_unavailable');
+    }, 'oauth_exchange_failed', { maxBytes: MAX_PROVIDER_BYTES });
+  } catch (error) {
+    throw new CustomerCloudflareGrantError('provider_unavailable', deadlineDetail(error));
   }
-  const value = await responseJson(response, 'provider_unavailable');
+  const { response } = read;
+  let value: BoundaryValue;
+  try {
+    value = parseProviderJson(read.text);
+  } catch {
+    throw new CustomerCloudflareGrantError('provider_unavailable', `not_json_${httpStatusDetail(response)}`);
+  }
   const parsed = v.safeParse(zoneEnvelopeSchema, value);
   if (!response.ok || !parsed.success || parsed.output.errors.length !== 0 ||
       parsed.output.messages.length !== 0) {
-    throw new CustomerCloudflareGrantError('provider_unavailable');
+    throw new CustomerCloudflareGrantError('provider_unavailable', envelopeDetail(response, value, parsed));
   }
-  if (parsed.output.result.length > 1) throw new CustomerCloudflareGrantError('zone_ambiguous');
+  if (parsed.output.result.length > 1) {
+    throw new CustomerCloudflareGrantError('zone_ambiguous', `zones_${parsed.output.result.length}`);
+  }
   const zone = parsed.output.result[0];
   if (zone === undefined || zone.account.id !== input.accountId || zone.name !== expectedName) {
     throw new CustomerCloudflareGrantError('zone_mismatch');
