@@ -1261,3 +1261,26 @@ deploying the production relay. Both are operator steps.
   published for testing on isolated hostnames. No runtime change follows
   from this; the alternatives (two pins, or a separate canary site) were
   declined.
+- 2026-09-03: the first install from a second Cloudflare account failed
+  right after the consent approval. The result page said the shell could not
+  be installed with the temporary permission, `/api/session` recorded
+  `provision_failed` / `internal_error`, and no `ankka-gateway-*` Worker
+  existed in the customer account, so nothing after deployment was involved.
+  Cause: `resolveSingleAuthorizedCloudflareAccount` runs between the approval
+  and the deployment, inside `grant.withAccessToken` but outside the try that
+  wraps `deploy()`, and throws `CustomerCloudflareGrantError` rather than
+  `DeployError`; `stableError` filed it under the catch-all. PR #57 translates
+  it at that boundary: `account_ambiguous` becomes `target_account_ambiguous`
+  (403, shown to the operator as `grant_invalid`), any other grant error
+  becomes `oauth_exchange_failed` with reason `account_read_<code>`, and
+  nothing is deployed in either case. The reviewed canary was regenerated from
+  main `fe3fff8` into `live-activation-3/` and validated; its delta against
+  the live version `0fff05d6` is 60 bundle lines: this fix, the reason
+  plumbing of PR #54 and PR #55 (the live artifact was built 30 s after #54
+  merged and carries neither), and one dead constant dropped by the
+  retirement. The deploy was refused to the assistant by the classifier and
+  is pending for the operator, followed by the install retry, after which
+  `failure.reason` on `/api/session` names the failing step. If it reads
+  `target_account_ambiguous`, the approving user can see more than one
+  account and the refusal is by design; whether such a customer may name the
+  target account instead of being turned away is an open product decision.
