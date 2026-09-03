@@ -10,7 +10,10 @@ import {
   type FetchTransport,
 } from './oauth';
 import { OAUTH_EXCHANGE_URL } from './constants';
-import { resolveSingleAuthorizedCloudflareAccount } from './customer-cloudflare-grant';
+import {
+  CustomerCloudflareGrantError,
+  resolveSingleAuthorizedCloudflareAccount,
+} from './customer-cloudflare-grant';
 import { DeployError } from './errors';
 import { readBoundedText } from './http';
 
@@ -53,6 +56,20 @@ function deployFailureReason<Thrown>(error: Thrown): string {
   return 'bootstrap_deploy_failed';
 }
 
+/**
+ * The account read runs before any deployment and throws a grant error, not a
+ * DeployError. Left untranslated it reached the operator as the unclassified
+ * "internal_error"; the ambiguous case is a real, actionable outcome (the
+ * grant can see zero or several accounts) and deserves its own code.
+ */
+function accountReadError<Thrown>(error: Thrown): DeployError {
+  if (!(error instanceof CustomerCloudflareGrantError)) {
+    return new DeployError(502, 'oauth_exchange_failed', 'account_read_failed');
+  }
+  if (error.code === 'account_ambiguous') return new DeployError(403, 'target_account_ambiguous');
+  return new DeployError(502, 'oauth_exchange_failed', `account_read_${error.code}`);
+}
+
 export async function executeHostedBootstrapGrant<Deployment>(input: {
   readonly code: string;
   readonly verifier: string;
@@ -90,10 +107,15 @@ export async function executeHostedBootstrapGrant<Deployment>(input: {
     grant.assertUsable(BOOTSTRAP_SCOPES);
     if (refreshTokenReturned) throw new DeployError(403, 'oauth_grant_invalid');
     const result = await grant.withAccessToken(async (accessToken) => {
-      const accountId = await resolveSingleAuthorizedCloudflareAccount({
-        accessToken,
-        transport: input.transport,
-      });
+      let accountId: string;
+      try {
+        accountId = await resolveSingleAuthorizedCloudflareAccount({
+          accessToken,
+          transport: input.transport,
+        });
+      } catch (error) {
+        throw accountReadError(error);
+      }
       try {
         const deployment = await input.deploy({ accessToken, accountId });
         return Object.freeze({ accountId, deployment });
