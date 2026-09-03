@@ -9,7 +9,7 @@ import {
   OAUTH_AUTHORIZE_URL,
   OAUTH_CALLBACK_URL,
   OAUTH_REVOKE_URL,
-  OAUTH_TOKEN_URL,
+  OAUTH_EXCHANGE_URL,
   REQUIRED_OAUTH_SCOPES,
 } from './constants';
 import { DeployError } from './errors';
@@ -236,7 +236,7 @@ export async function exchangeAuthorizationCode(input: {
     payload = await withDeadline(async (signal) => {
       let response: Response;
       try {
-        response = await input.transport(OAUTH_TOKEN_URL, {
+        response = await input.transport(OAUTH_EXCHANGE_URL, {
           method: 'POST',
           headers: {
             authorization,

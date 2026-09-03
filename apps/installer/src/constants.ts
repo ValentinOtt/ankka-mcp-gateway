@@ -1,7 +1,7 @@
 export const PUBLIC_ORIGIN = 'https://deploy.ankka.ai';
 export const OAUTH_CALLBACK_URL = `${PUBLIC_ORIGIN}/oauth/callback`;
 export const OAUTH_AUTHORIZE_URL = 'https://dash.cloudflare.com/oauth2/auth';
-export const OAUTH_TOKEN_URL = 'https://dash.cloudflare.com/oauth2/token';
+export const OAUTH_EXCHANGE_URL = 'https://dash.cloudflare.com/oauth2/token';
 export const OAUTH_REVOKE_URL = 'https://dash.cloudflare.com/oauth2/revoke';
 export const CLOUDFLARE_API_ORIGIN = 'https://api.cloudflare.com';
 

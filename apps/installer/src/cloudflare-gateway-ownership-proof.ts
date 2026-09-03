@@ -38,7 +38,7 @@ export const CLOUDFLARE_GATEWAY_OWNERSHIP_PROOF_CONTEXT =
   'ankka-cloudflare-gateway-relay-proof-v1' as const;
 export const CLOUDFLARE_GATEWAY_OWNERSHIP_CHALLENGE_REQUEST_CONTEXT =
   'ankka-cloudflare-gateway-relay-challenge-request-v1' as const;
-export const CLOUDFLARE_GATEWAY_OWNERSHIP_PRIVATE_KEY_CONTEXT =
+export const CLOUDFLARE_GATEWAY_OWNERSHIP_SIGNING_KEY_CONTEXT =
   'ankka-cloudflare-gateway-ownership-private-key-v1' as const;
 export const CLOUDFLARE_GATEWAY_OWNERSHIP_WRAP_KEY_BINDING =
   'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY' as const;
@@ -459,13 +459,13 @@ function ownershipPrivateKeyAdditionalData(publicKey: string): Uint8Array<ArrayB
   return new TextEncoder().encode(canonicalJson({
     schemaVersion: 1,
     purpose: 'cloudflare_gateway_ownership_private_key_aad',
-    context: CLOUDFLARE_GATEWAY_OWNERSHIP_PRIVATE_KEY_CONTEXT,
+    context: CLOUDFLARE_GATEWAY_OWNERSHIP_SIGNING_KEY_CONTEXT,
     publicKey,
   }));
 }
 
 async function verifyOwnershipKeyPair(privateKey: CryptoKey, publicKey: string): Promise<void> {
-  const payload = `${CLOUDFLARE_GATEWAY_OWNERSHIP_PRIVATE_KEY_CONTEXT}.pair-check`;
+  const payload = `${CLOUDFLARE_GATEWAY_OWNERSHIP_SIGNING_KEY_CONTEXT}.pair-check`;
   let signature: Uint8Array<ArrayBuffer>;
   try {
     signature = new Uint8Array(await crypto.subtle.sign(
