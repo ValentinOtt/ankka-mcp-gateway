@@ -47,15 +47,24 @@ export type CustomerCloudflareGrantErrorCode =
   | 'provider_unavailable'
   | 'revoke_failed';
 
+const GRANT_ERROR_DETAIL = /^[a-z][a-z0-9_]{0,80}$/u;
+
 export class CustomerCloudflareGrantError extends Error {
   readonly userMessage: string | null;
+  /**
+   * Secret-free diagnostic naming which check failed, built only from HTTP
+   * statuses, the provider's numeric error codes, and result counts. Never
+   * provider text, ids, or tokens.
+   */
+  readonly detail: string | null;
 
-  constructor(readonly code: CustomerCloudflareGrantErrorCode) {
+  constructor(readonly code: CustomerCloudflareGrantErrorCode, detail: string | null = null) {
     super(code);
     this.name = 'CustomerCloudflareGrantError';
     this.userMessage = code === 'account_ambiguous'
       ? 'Please authorize exactly one Cloudflare account.'
       : null;
+    this.detail = detail !== null && GRANT_ERROR_DETAIL.test(detail) ? detail : null;
   }
 }
 
@@ -117,6 +126,42 @@ async function responseJson(response: Response, failure: CustomerCloudflareGrant
   } catch {
     throw new CustomerCloudflareGrantError(failure);
   }
+}
+
+const providerErrorCodeSchema = v.object({
+  errors: v.pipe(
+    v.array(v.looseObject({
+      code: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(999_999))),
+    })),
+    v.minLength(1),
+  ),
+});
+
+/** The provider's first numeric error code, or null. Numeric codes carry no secrets. */
+function firstProviderErrorCode(value: BoundaryValue): number | null {
+  const parsed = v.safeParse(providerErrorCodeSchema, value);
+  if (!parsed.success) return null;
+  return parsed.output.errors[0]?.code ?? null;
+}
+
+function httpStatusDetail(response: Response): string {
+  const { status } = response;
+  return Number.isInteger(status) && status >= 100 && status <= 599 ? `http_${status}` : 'http_unknown';
+}
+
+/**
+ * Names why an accounts envelope was rejected: the HTTP status and numeric
+ * provider code for a refused read, else which envelope rule failed.
+ */
+function accountEnvelopeDetail(response: Response, value: BoundaryValue): string {
+  const code = firstProviderErrorCode(value);
+  const suffix = code === null ? '' : `_code_${code}`;
+  if (!response.ok) return `${httpStatusDetail(response)}${suffix}`;
+  const parsed = v.safeParse(accountEnvelopeSchema, value);
+  if (!parsed.success) return `envelope_invalid${suffix}`;
+  if (parsed.output.errors.length !== 0) return `errors_present${suffix}`;
+  if (parsed.output.messages.length !== 0) return 'messages_present';
+  return 'envelope_rejected';
 }
 
 export class EphemeralCustomerCloudflareGrant {
@@ -279,19 +324,26 @@ export async function resolveSingleAuthorizedCloudflareAccount(input: {
       signal,
     }), 'oauth_exchange_failed');
   } catch {
-    throw new CustomerCloudflareGrantError('provider_unavailable');
+    throw new CustomerCloudflareGrantError('provider_unavailable', 'transport_failed');
   }
-  const value = await responseJson(response, 'provider_unavailable');
+  let value: BoundaryValue;
+  try {
+    value = await responseJson(response, 'provider_unavailable');
+  } catch {
+    throw new CustomerCloudflareGrantError('provider_unavailable', `not_json_${httpStatusDetail(response)}`);
+  }
   const parsed = v.safeParse(accountEnvelopeSchema, value);
   if (!response.ok || !parsed.success || parsed.output.errors.length !== 0 ||
       parsed.output.messages.length !== 0) {
-    throw new CustomerCloudflareGrantError('provider_unavailable');
+    throw new CustomerCloudflareGrantError('provider_unavailable', accountEnvelopeDetail(response, value));
   }
   if (parsed.output.result.length !== 1) {
-    throw new CustomerCloudflareGrantError('account_ambiguous');
+    throw new CustomerCloudflareGrantError('account_ambiguous', `accounts_${parsed.output.result.length}`);
   }
   const accountId = parsed.output.result[0]?.id;
-  if (accountId === undefined) throw new CustomerCloudflareGrantError('provider_unavailable');
+  if (accountId === undefined) {
+    throw new CustomerCloudflareGrantError('provider_unavailable', 'account_id_missing');
+  }
   return accountId;
 }
 

@@ -2,6 +2,7 @@ import {
   CustomerCloudflareGrantError,
   exchangeCustomerCloudflareAuthorizationCode,
   resolveAuthorizedCloudflareZone,
+  resolveSingleAuthorizedCloudflareAccount,
   verifyCustomerCloudflareGrantAccount,
 } from '../src/customer-cloudflare-grant';
 import type { BoundaryValue } from '../src/boundary';
@@ -198,5 +199,63 @@ describe('customer-owned Cloudflare grant', () => {
       },
     })).rejects.toMatchObject({ code: 'invalid' });
     expect(called).toBe(false);
+  });
+});
+
+describe('Stage 1 single-account resolution details', () => {
+  const providerText = `refused token_${'q'.repeat(32)}`;
+
+  async function detailFor(transport: (url: string) => Promise<Response>): Promise<CustomerCloudflareGrantError> {
+    try {
+      await resolveSingleAuthorizedCloudflareAccount({
+        accessToken: ACCESS_TOKEN,
+        transport: async (input) => transport(String(input)),
+      });
+    } catch (error) {
+      if (error instanceof CustomerCloudflareGrantError) return error;
+      throw error;
+    }
+    throw new Error('resolution unexpectedly succeeded');
+  }
+
+  it('names a refused read by HTTP status and numeric provider code only', async () => {
+    const error = await detailFor(async () => json({
+      success: false, errors: [{ code: 10000, message: providerText }], messages: [], result: null,
+    }, 403));
+    expect(error).toMatchObject({ code: 'provider_unavailable', detail: 'http_403_code_10000' });
+    expect(JSON.stringify({ code: error.code, detail: error.detail })).not.toContain('token_');
+  });
+
+  it('names a transport failure without a status', async () => {
+    const error = await detailFor(async () => { throw new Error(providerText); });
+    expect(error).toMatchObject({ code: 'provider_unavailable', detail: 'transport_failed' });
+  });
+
+  it('names a non-JSON body by status', async () => {
+    const error = await detailFor(async () => new Response('<html>maintenance</html>', {
+      status: 502, headers: { 'content-type': 'text/html' },
+    }));
+    expect(error).toMatchObject({ code: 'provider_unavailable', detail: 'not_json_http_502' });
+  });
+
+  it('names a successful envelope the provider decorated with messages', async () => {
+    const error = await detailFor(async () => json({
+      success: true, errors: [], messages: [{ code: 10001, message: 'notice' }], result: [{ id: ACCOUNT_ID }],
+    }));
+    expect(error).toMatchObject({ code: 'provider_unavailable', detail: 'messages_present' });
+  });
+
+  it('counts the accounts when the grant sees zero or several', async () => {
+    const none = await detailFor(async () => json({ success: true, errors: [], messages: [], result: [] }));
+    expect(none).toMatchObject({ code: 'account_ambiguous', detail: 'accounts_0' });
+    const two = await detailFor(async () => json({
+      success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }, { id: ZONE_ID }],
+    }));
+    expect(two).toMatchObject({ code: 'account_ambiguous', detail: 'accounts_2' });
+  });
+
+  it('drops a detail that is not a plain lowercase token', () => {
+    expect(new CustomerCloudflareGrantError('provider_unavailable', `Bearer ${providerText}`).detail).toBeNull();
+    expect(new CustomerCloudflareGrantError('provider_unavailable').detail).toBeNull();
   });
 });
