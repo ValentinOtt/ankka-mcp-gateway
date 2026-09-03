@@ -312,4 +312,21 @@ describe('TwoStageDeploySession Durable Object', () => {
     await empty.object.alarm();
     expect(empty.state.storage.alarmAt).toBeNull();
   });
+
+  it('names the route and kind when an unexpected error escapes a mutation', async () => {
+    const h = harness();
+    await h.client.initialize();
+    // A storage fault carries no typed error and no message we control; without
+    // a route tag the operator sees only "internal_error".
+    h.state.storage.sqlFake.failNextExec = true;
+    const failed = await h.object.fetch(internal('/selection', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ selection: selectionInput }),
+    }));
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toEqual({ error: { code: 'internal_error', reason: 'selection_unexpected' } });
+    await expect(h.client.saveSelection(parseDeploySelection(selectionInput)))
+      .resolves.toMatchObject({ phase: 'draft' });
+  });
 });
