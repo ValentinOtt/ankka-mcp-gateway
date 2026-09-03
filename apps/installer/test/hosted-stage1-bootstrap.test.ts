@@ -247,10 +247,32 @@ async function setup() {
   return { bundle, plan, secrets, keys, publicKey, events, provision };
 }
 
-function health(value: BoundaryValue, status = 200): Response {
-  return Response.json(value, {
-    status,
+/**
+ * A health body that arrives only when pulled and errors once the request
+ * signal has aborted, like a real fetch body: the poll must consume it inside
+ * its deadline.
+ */
+function streamedHealth(value: BoundaryValue, signal: AbortSignal | null | undefined): Response {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let delivered = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (signal?.aborted) {
+        controller.error(new DOMException('The operation was aborted', 'AbortError'));
+        return;
+      }
+      if (delivered) {
+        controller.close();
+        return;
+      }
+      delivered = true;
+      controller.enqueue(bytes);
+    },
+  }, { highWaterMark: 0 });
+  return new Response(body, {
+    status: 200,
     headers: {
+      'content-type': 'application/json',
       'access-control-allow-origin': 'https://deploy.ankka.ai',
       vary: 'Origin',
     },
@@ -288,14 +310,14 @@ describe('hosted Stage 1 coordinator', () => {
         expect(request.url).toBe(`${fixture.provision.bootstrapOrigin}health`);
         expect(request.headers.get('authorization')).toBeNull();
         fixture.events.push('token-free-health');
-        return health({
+        return streamedHealth({
           schemaVersion: 1,
           role: 'customer-gateway-bootstrap',
           status: 'INCOMPLETE',
           installId: fixture.plan.managementOwnershipMarker,
           release: fixture.plan.releaseId,
           ownershipPublicKey: CUSTOMER_OWNERSHIP_PUBLIC_KEY,
-        });
+        }, init?.signal);
       },
       now: () => NOW + 2,
     });

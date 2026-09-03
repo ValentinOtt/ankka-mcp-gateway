@@ -33,7 +33,7 @@ import { DeployError } from './errors';
 import {
   executeHostedBootstrapGrant,
 } from './hosted-bootstrap-grant';
-import { readBoundedText, withDeadline } from './http';
+import { type BoundedRead, fetchBoundedText } from './http';
 import type { CloudflareOauthConfig, FetchTransport } from './oauth';
 import {
   adaptVerifiedReleaseBundleForGatewayDeployments,
@@ -413,29 +413,23 @@ async function readBootstrapHealth(input: {
   readonly provision: HostedStage1Provision;
   readonly transport: FetchTransport;
 }): Promise<v.InferOutput<typeof healthSchema>> {
-  let response: Response;
+  let read: BoundedRead;
   try {
-    response = await withDeadline((signal) => input.transport(
-      new URL('/health', input.provision.bootstrapOrigin),
-      {
-        method: 'GET',
-        headers: { accept: 'application/json', origin: PUBLIC_ORIGIN },
-        cache: 'no-store',
-        credentials: 'omit',
-        redirect: 'error',
-        signal,
-      },
-    ), 'bootstrap_not_ready', 5_000);
+    read = await fetchBoundedText(input.transport, new URL('/health', input.provision.bootstrapOrigin), {
+      method: 'GET',
+      headers: { accept: 'application/json', origin: PUBLIC_ORIGIN },
+      cache: 'no-store',
+      credentials: 'omit',
+      redirect: 'error',
+    }, 'bootstrap_not_ready', { maxBytes: MAX_HEALTH_BYTES, timeoutMs: 5_000 });
   } catch {
     throw new DeployError(503, 'bootstrap_not_ready');
   }
-  if (response.status !== 200) {
-    await response.body?.cancel().catch(() => undefined);
-    throw new DeployError(503, 'bootstrap_not_ready');
-  }
+  const { response } = read;
+  if (response.status !== 200) throw new DeployError(503, 'bootstrap_not_ready');
   let decoded: unknown;
   try {
-    decoded = JSON.parse(await readBoundedText(response, 'bootstrap_failed', MAX_HEALTH_BYTES));
+    decoded = JSON.parse(read.text);
   } catch {
     throw new DeployError(502, 'bootstrap_failed');
   }

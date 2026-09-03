@@ -28,6 +28,32 @@ function json(value: BoundaryValue, status = 200): Response {
   });
 }
 
+/**
+ * A JSON body that arrives only when pulled and errors once the request signal
+ * has aborted, like a real fetch body. A consumer that reads after the deadline
+ * has released the response sees the AbortError; one that reads inside it gets
+ * the bytes.
+ */
+function streamedJson(value: BoundaryValue, signal: AbortSignal | null | undefined, status = 200): Response {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let delivered = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (signal?.aborted) {
+        controller.error(new DOMException('The operation was aborted', 'AbortError'));
+        return;
+      }
+      if (delivered) {
+        controller.close();
+        return;
+      }
+      delivered = true;
+      controller.enqueue(bytes);
+    },
+  }, { highWaterMark: 0 });
+  return new Response(body, { status, headers: { 'content-type': 'application/json' } });
+}
+
 describe('hosted Stage 1 bootstrap grant', () => {
   it('builds confidential Authorization Code + PKCE with one scope and no refresh request', () => {
     const url = new URL(buildHostedBootstrapAuthorizationUrl({
@@ -267,5 +293,28 @@ describe('hosted Stage 1 bootstrap grant', () => {
       reason: 'account_read_provider_unavailable_messages_present',
     });
     expect(deployed).toBe(false);
+  });
+
+  it('reads the account list before the deadline releases the response', async () => {
+    let deployedAccount: string | null = null;
+    const result = await executeHostedBootstrapGrant({
+      code: CODE,
+      verifier: VERIFIER,
+      config: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET },
+      transport: async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/oauth2/token')) return streamedJson({
+          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write',
+        }, init?.signal);
+        if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) return streamedJson({
+          success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }],
+        }, init?.signal);
+        if (url.endsWith('/oauth2/revoke')) return json({ revoked: true });
+        throw new Error('unexpected request');
+      },
+      deploy: async ({ accountId }) => { deployedAccount = accountId; return null; },
+    });
+    expect(deployedAccount).toBe(ACCOUNT_ID);
+    expect(result).toMatchObject({ accountId: ACCOUNT_ID, grantRevocation: 'confirmed' });
   });
 });

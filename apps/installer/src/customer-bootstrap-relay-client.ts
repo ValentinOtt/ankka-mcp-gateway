@@ -6,7 +6,8 @@ import {
   CLOUDFLARE_CODE_RELAY_ORIGIN,
 } from './cloudflare-code-relay';
 import { exactOperationScopes } from './cloudflare-operation-authority';
-import { readBoundedText, withDeadline } from './http';
+import { DeployError } from './errors';
+import { type BoundedRead, fetchBoundedText } from './http';
 import type { CustomerBootstrapRelayStart } from './customer-bootstrap-router';
 import type { CustomerCloudflareTransport } from './customer-cloudflare-grant';
 import { CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH } from './customer-install-paths';
@@ -83,33 +84,38 @@ export async function beginCustomerBootstrapRelay(input: {
   }
   if (!validGatewayCallback(callback)) throw new Error('relay_rejected');
 
-  const response = await withDeadline((signal) => input.transport(
-    `${CLOUDFLARE_CODE_RELAY_ORIGIN}/oauth/start/install`,
-    {
-      method: 'POST',
-      headers: { accept: 'application/json', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        relayTicket: input.relayTicket,
-        gatewayState: input.gatewayState,
-        pkceChallenge: input.pkceChallenge,
-        gatewayCallback: callback.toString(),
-      }),
-      redirect: 'manual',
-      signal,
-    },
-  ), 'oauth_exchange_failed');
+  let read: BoundedRead;
+  try {
+    read = await fetchBoundedText(
+      input.transport,
+      `${CLOUDFLARE_CODE_RELAY_ORIGIN}/oauth/start/install`,
+      {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          relayTicket: input.relayTicket,
+          gatewayState: input.gatewayState,
+          pkceChallenge: input.pkceChallenge,
+          gatewayCallback: callback.toString(),
+        }),
+        redirect: 'manual',
+      },
+      'oauth_exchange_failed',
+      { maxBytes: MAX_RESPONSE_BYTES },
+    );
+  } catch (error) {
+    // An unreadable or oversized relay body is a rejected relay answer, as before.
+    if (error instanceof DeployError && error.reason === 'body_read_failed') throw new Error('relay_rejected');
+    throw error;
+  }
+  const { response } = read;
   if (response.redirected || response.status !== 200 ||
       !applicationJson(response.headers.get('content-type'))) {
-    await response.body?.cancel();
     throw new Error('relay_rejected');
   }
   let parsed: v.InferOutput<typeof responseSchema>;
   try {
-    parsed = v.parse(responseSchema, JSON.parse(await readBoundedText(
-      response,
-      'oauth_exchange_failed',
-      MAX_RESPONSE_BYTES,
-    )));
+    parsed = v.parse(responseSchema, JSON.parse(read.text));
   } catch {
     throw new Error('relay_rejected');
   }
