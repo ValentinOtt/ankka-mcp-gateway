@@ -5,7 +5,7 @@ teams that want one endpoint for approved, read-only tools. The gateway,
 access policies, logs, and upstream credentials stay in your team's
 Cloudflare account, not at Ankka.
 
-> **Status:** canary preview. Signed [canary releases](https://github.com/ValentinOtt/ankka-mcp-gateway/releases)
+> **Status:** canary preview. Signed [canary releases](https://github.com/ankka-ai/ankka-mcp-gateway/releases)
 > are available. This repository contains the gateway runtime and hosted-installer
 > source; live deployment authority and credentials remain outside the public
 > repository.
@@ -55,7 +55,7 @@ Use Node.js `22.23.2` and npm `10.9.8`. The example below uses nvm; fnm and mise
 can also read the pinned version from `.nvmrc`.
 
 ```sh
-git clone https://github.com/ValentinOtt/ankka-mcp-gateway.git
+git clone https://github.com/ankka-ai/ankka-mcp-gateway.git
 cd ankka-mcp-gateway
 nvm install   # or: fnm install / mise install
 nvm use
@@ -133,10 +133,9 @@ The management dashboard and MCP Portal must use different hostnames.
 
 - MCP source-provider credentials never transit or persist at Ankka.
 - Self-hosted gateways send no telemetry to Ankka.
-- The Ankka-hosted installer may record only the fixed, session-scoped funnel
-  documented in [Hosted installer analytics](docs/HOSTED_INSTALLER_ANALYTICS.md):
-  no cookies, no IP or raw user-agent storage, and no identifier that outlives
-  the session. Deploying from this repository sends no analytics.
+- The Ankka-hosted installer records no analytics: it keeps a short-lived
+  setup session and no identifier that outlives it. Deploying from this
+  repository sends nothing to Ankka either.
 - Every Cloudflare resource mutation requires fresh provider state, an exact
   operator-approved target and plan, and a durable intent record. Adoption and
   deletion additionally require receipt-bound ownership.
@@ -219,7 +218,6 @@ committed. Contributor-facing toolchain and history policies are documented in
 - [Architecture](docs/ARCHITECTURE.md)
 - [Security model](docs/SECURITY_MODEL.md)
 - [Gateway updates and rollback](docs/UPDATES.md)
-- [Hosted installer analytics](docs/HOSTED_INSTALLER_ANALYTICS.md)
 - [Release integrity](docs/RELEASING.md)
 - [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)
@@ -228,10 +226,10 @@ committed. Contributor-facing toolchain and history policies are documented in
 ## Getting help
 
 For a reproducible, non-security problem, open a
-[GitHub issue](https://github.com/ValentinOtt/ankka-mcp-gateway/issues) using
+[GitHub issue](https://github.com/ankka-ai/ankka-mcp-gateway/issues) using
 synthetic values and fixed public error codes only. Support is best-effort as
 described in the [support policy](SUPPORT.md). Check the
-[release status](https://github.com/ValentinOtt/ankka-mcp-gateway/releases)
+[release status](https://github.com/ankka-ai/ankka-mcp-gateway/releases)
 before deploying a preview release.
 
 Never include credentials, private data, private hostnames, Cloudflare account

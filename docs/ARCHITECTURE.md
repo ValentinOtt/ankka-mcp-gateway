@@ -146,8 +146,8 @@ Gateway releases are built from one clean public source commit and signed with
 Ed25519 outside the repository. The signed manifest covers the release channel,
 one canonical HTTPS control-plane origin, source commit, deployment contract,
 and every payload file. Candidate generation compiles that origin into the
-gateway Worker before hashing; update discovery and management handoffs use
-the same non-runtime-selectable origin.
+gateway Worker before hashing; update discovery uses the same
+non-runtime-selectable origin.
 
 The gateway Worker payloads remain hand-authored JavaScript by design. Each is
 a dependency-free, single-module deployment unit, and the reviewed file bytes
@@ -163,8 +163,8 @@ Worker version but does not roll back Durable Object data. See
 
 ## Telemetry boundary
 
-Self-hosted gateway code sends no telemetry to Ankka. The hosted installer
-has a separate, fixed analytics policy documented in
-[Hosted installer analytics](HOSTED_INSTALLER_ANALYTICS.md). Cloudflare and
-upstream services still process traffic according to the team's account
-configuration and their own policies.
+Neither self-hosted gateway code nor the hosted installer sends telemetry to
+Ankka. The hosted installer keeps only its short-lived setup session and
+records no analytics events. Cloudflare and upstream services still process
+traffic according to the team's account configuration and their own
+policies.

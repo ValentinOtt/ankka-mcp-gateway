@@ -6,7 +6,7 @@ Ankka MCP Gateway is designed to install into and operate from your Cloudflare
 account. Your MCP Portal, management Worker, Access policies, logs, source
 configuration, and upstream credentials remain under your control.
 
-> **Availability:** canary preview. Signed [canary releases](https://github.com/ValentinOtt/ankka-mcp-gateway/releases)
+> **Availability:** canary preview. Signed [canary releases](https://github.com/ankka-ai/ankka-mcp-gateway/releases)
 > are available, with a hosted evaluation flow at [deploy.ankka.ai](https://deploy.ankka.ai).
 > Review the exact release before authorizing changes to your account; this is
 > not a stable, production-supported release. If the installer reports that

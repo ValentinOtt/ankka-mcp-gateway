@@ -163,16 +163,11 @@ Self-hosted gateways send no telemetry to Ankka. Their routine Ankka
 request is anonymous signed-release discovery and carries no account,
 hostname, user, cookie, authorization, or referrer.
 
-The optional Ankka-hosted installer has a separate session-scoped product
-funnel: an opaque per-session key with coarse request context (country,
-browser family, and the page-view referrer host), set without cookies and
-without account or user identifiers, IP or raw user-agent storage, or any identifier
-that outlives the installer session. Cloudflare separately adds Network Error
-Logging headers to hosted-zone browser responses, and browsers may send the
-resulting reliability reports to Cloudflare. The exact product fields,
-destination, retention, exclusions, and user notice are public in
-[Hosted installer analytics](HOSTED_INSTALLER_ANALYTICS.md). Neither mechanism
-is installed in the gateway.
+The optional Ankka-hosted installer records no analytics: it keeps a
+short-lived setup session and nothing that outlives it. Cloudflare separately
+adds Network Error Logging headers to hosted-zone browser responses, and
+browsers may send the resulting reliability reports to Cloudflare. Neither
+mechanism is installed in the gateway.
 
 Cloudflare and upstream providers may retain their own operational data under
 the team's configuration and their policies. The no-Ankka-telemetry
@@ -182,7 +177,7 @@ guarantee does not claim that those providers process no metadata.
 
 - Signed canary releases are available; there is no stable,
   production-supported release yet. Review the exact
-  [release](https://github.com/ValentinOtt/ankka-mcp-gateway/releases), not only
+  [release](https://github.com/ankka-ai/ankka-mcp-gateway/releases), not only
   the current main-branch source.
 - The default installer activation in the public source is disabled. A
   reviewed canary entrypoint uses an exact signed release pin and separately

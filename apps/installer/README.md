@@ -42,7 +42,6 @@ See:
 - [Self-service deployment](../../docs/CUSTOMER_SELF_SERVICE.md)
 - [Architecture](../../docs/ARCHITECTURE.md)
 - [Security model](../../docs/SECURITY_MODEL.md)
-- [Hosted installer analytics](../../docs/HOSTED_INSTALLER_ANALYTICS.md)
 
 ## Local development
 
