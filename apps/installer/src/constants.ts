@@ -12,18 +12,6 @@ export const BOOTSTRAP_COOKIE = '__Host-ankka_gateway_bootstrap';
 export const SESSION_TTL_MS = 30 * 60 * 1000;
 export const OAUTH_ATTEMPT_TTL_MS = 10 * 60 * 1000;
 
-// The first authorization is deliberately read-only and is revoked as soon as
-// account and active-zone discovery completes. A separate grant is required
-// for the exact reviewed deployment plan.
-export const DISCOVERY_OAUTH_SCOPES = Object.freeze([
-  'account-settings.read',
-  'memberships.read',
-  'user-details.read',
-  'zone.read',
-] as const);
-
-export type DiscoveryOauthScope = (typeof DISCOVERY_OAUTH_SCOPES)[number];
-
 // This list is an application security boundary, not release-manifest input.
 // A release is accepted only when it requests this exact set.
 export const REQUIRED_OAUTH_SCOPES = Object.freeze([

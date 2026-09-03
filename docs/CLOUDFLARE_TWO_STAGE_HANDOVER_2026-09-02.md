@@ -1244,3 +1244,13 @@ deploying the production relay. Both are operator steps.
   `~/Documents/ankka-releases/gateway-v0.1.21/` (`live-activation/`).
   Remaining before the install is declared production-ready: one complete
   install from a second Cloudflare account owning a real zone.
+- 2026-09-03: legacy hosted runtime retired from the tree: `src/index.ts`,
+  `src/durable/gateway-deploy-session.ts`, `src/reviewed-runtime.ts`, the
+  hosted analytics sink, the hosted install/uninstall journals and executors,
+  the returning-uninstall surface, discovery, the legacy relays, `env.ts`,
+  `session.ts`, and their 26 test files (about 32,000 lines). Nothing
+  reachable from a checked-in Wrangler main or a release script changed;
+  `abuse-controls.ts` and `exact-release-bundle.ts` now declare their own
+  environment types, and the shared test fixtures lost the legacy Durable
+  Object fakes. `cloudflare-uninstall-finalizer.ts` stays: it is the
+  two-stage hosted finalizer, not yet wired to a route.

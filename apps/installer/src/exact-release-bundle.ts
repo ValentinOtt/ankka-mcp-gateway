@@ -1,6 +1,6 @@
 import * as v from 'valibot';
 
-import type { GatewayDeployEnv } from './env';
+import type { ReleaseEnvironment } from './release';
 import { DeployError } from './errors';
 import {
   RELEASE_ENVELOPE_SCHEMA_VERSION,
@@ -43,7 +43,7 @@ export interface ExactReleaseBundleIdentity {
 
 export interface ExactReleaseBundleProvider {
   loadVerifiedReleaseBundleForIdentity(
-    env: GatewayDeployEnv,
+    env: ReleaseEnvironment,
     identity: ExactReleaseBundleIdentity,
   ): Promise<VerifiedReleaseBundle>;
 }
@@ -93,7 +93,7 @@ export function assertExactReleaseBundleIdentity(
 /** Default entrypoint behavior: historical release access is explicitly absent. */
 export class DisabledExactReleaseBundleProvider implements ExactReleaseBundleProvider {
   async loadVerifiedReleaseBundleForIdentity(
-    _env: GatewayDeployEnv,
+    _env: ReleaseEnvironment,
     _identity: ExactReleaseBundleIdentity,
   ): Promise<VerifiedReleaseBundle> {
     throw new DeployError(503, 'release_unavailable');

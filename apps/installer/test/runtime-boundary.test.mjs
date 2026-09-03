@@ -9,9 +9,8 @@ async function source(path) {
 
 describe('compile-time reviewed runtime files', () => {
   it('keeps the deployed Wrangler main on the disabled two-stage entrypoint with no production route', async () => {
-    const [config, index, release, entrypoint] = await Promise.all([
+    const [config, release, entrypoint] = await Promise.all([
       source('wrangler.toml'),
-      source('src/index.ts'),
       source('src/release.ts'),
       source('src/reviewed-entrypoint.ts'),
     ]);
@@ -27,7 +26,6 @@ describe('compile-time reviewed runtime files', () => {
     expect(config).not.toMatch(/^\[\[routes\]\]$/mu);
     expect(config).not.toMatch(/^route(?:s)?\s*=/mu);
     expect(config).not.toContain('pattern = "deploy.ankka.ai"');
-    expect(index).not.toMatch(/reviewed-(?:activation|entrypoint|runtime)/u);
     expect(release).toMatch(
       /const PINNED_RELEASE_PUBLIC_KEYS:[^=]+= Object\.freeze\(\{\}\);/u,
     );
