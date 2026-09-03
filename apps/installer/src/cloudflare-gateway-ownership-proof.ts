@@ -208,6 +208,9 @@ export interface VerifiedCloudflareGatewayOwnershipProof {
   readonly workerName: string;
   readonly workerProviderId: string;
   readonly adminStateNamespaceId: string;
+  /** The certified callback on the Gateway's bootstrap (workers.dev) origin. */
+  readonly bootstrapCallback: string;
+  /** The certified callback on the Gateway's management hostname. */
   readonly gatewayCallback: string;
   readonly publicClientId: string;
   readonly operation: CustomerCloudflareOperation;
@@ -917,6 +920,7 @@ export async function verifyAndConsumeCloudflareGatewayOwnershipProof(input: {
     workerName: certificate.statement.worker.name,
     workerProviderId: certificate.statement.worker.providerId,
     adminStateNamespaceId: certificate.statement.adminStateNamespaceId,
+    bootstrapCallback: certificate.statement.bootstrapCallback,
     gatewayCallback: certificate.statement.gatewayCallback,
     publicClientId: certificate.statement.publicClientId,
     operation: statement.operation,
@@ -926,6 +930,20 @@ export async function verifyAndConsumeCloudflareGatewayOwnershipProof(input: {
     certificateSha256: certificate.certificateSha256,
     verification: 'ed25519-possession-and-single-use-challenge' as const,
   });
+}
+
+/**
+ * The callback the relay may send a code to for this operation. During
+ * `install` the Gateway is reachable only at its certified bootstrap origin:
+ * the management hostname gets its DNS and route from the install itself, so
+ * a code sent there would land nowhere, and the shell can only start the
+ * relay from the origin it is served on. Every later operation runs on the
+ * converged Gateway at the management hostname. Both callbacks come from the
+ * certificate deploy.ankka.ai signed, and the bootstrap one is checked
+ * against the certified Worker name, so neither choice widens the trust.
+ */
+function relayCallbackFor(proof: VerifiedCloudflareGatewayOwnershipProof): string {
+  return proof.operation === 'install' ? proof.bootstrapCallback : proof.gatewayCallback;
 }
 
 /**
@@ -950,7 +968,7 @@ export async function issueCloudflareGatewayRelayTicketFromOwnershipProof(input:
     accountId: proof.accountId,
     installId: proof.installId,
     workerName: proof.workerName,
-    gatewayCallback: proof.gatewayCallback,
+    gatewayCallback: relayCallbackFor(proof),
     publicClientId: proof.publicClientId,
     operation: proof.operation,
     nonce: randomBase64Url(32),

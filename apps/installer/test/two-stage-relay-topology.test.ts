@@ -266,12 +266,15 @@ describe('production-shaped relay topology: customer account to auth.ankka.ai ov
     });
     expect(f.shardNames).toEqual(['v1:install', 'v1:install']);
 
+    // The shell starts the relay from the only origin it is served on during
+    // the install, its bootstrap origin; the management hostname does not
+    // exist until the install has converged.
     const relayStart = await beginCustomerBootstrapRelay({
       publicClientId: CLIENT_ID,
       relayTicket: ticket.relayTicket,
       gatewayState: start.state,
       pkceChallenge: start.challenge,
-      gatewayCallback: GATEWAY_CALLBACK,
+      gatewayCallback: BOOTSTRAP_CALLBACK,
       transport: f.publicHttps,
     });
     const authorization = new URL(relayStart.authorizationUrl);
@@ -305,7 +308,7 @@ describe('production-shaped relay topology: customer account to auth.ankka.ai ov
     expect(callback.status).toBe(302);
     expectRelayHeaders(callback);
     const forwarded = new URL(callback.headers.get('location') ?? '');
-    expect(`${forwarded.origin}${forwarded.pathname}`).toBe(GATEWAY_CALLBACK);
+    expect(`${forwarded.origin}${forwarded.pathname}`).toBe(BOOTSTRAP_CALLBACK);
     expect([...forwarded.searchParams.keys()].sort()).toEqual(['code', 'state']);
     expect(forwarded.searchParams.get('code')).toBe(AUTHORIZATION_CODE);
     expect(forwarded.searchParams.get('state')).toBe(start.state);
@@ -345,7 +348,7 @@ describe('production-shaped relay topology: customer account to auth.ankka.ai ov
       relayTicket: ticket.relayTicket,
       gatewayState,
       pkceChallenge: randomBase64Url(32),
-      gatewayCallback: GATEWAY_CALLBACK,
+      gatewayCallback: BOOTSTRAP_CALLBACK,
       transport: f.publicHttps,
     });
     const relayState = new URL(relayStart.authorizationUrl).searchParams.get('state') ?? '';
@@ -356,7 +359,7 @@ describe('production-shaped relay topology: customer account to auth.ankka.ai ov
     ), f.env);
     expect(denied.status).toBe(302);
     const deniedTarget = new URL(denied.headers.get('location') ?? '');
-    expect(`${deniedTarget.origin}${deniedTarget.pathname}`).toBe(GATEWAY_CALLBACK);
+    expect(`${deniedTarget.origin}${deniedTarget.pathname}`).toBe(BOOTSTRAP_CALLBACK);
     expect([...deniedTarget.searchParams.keys()].sort()).toEqual(['error', 'state']);
     expect(deniedTarget.searchParams.get('state')).toBe(gatewayState);
     expect(denied.headers.get('location')).not.toContain('user said no');
@@ -429,6 +432,17 @@ describe('production-shaped relay topology: customer account to auth.ankka.ai ov
       gatewayState: randomBase64Url(32),
       pkceChallenge: randomBase64Url(32),
       gatewayCallback: foreignCallback,
+      transport: f.publicHttps,
+    })).rejects.toThrow('relay_rejected');
+    // The install ticket is bound to the bootstrap origin, so even the certified
+    // management-hostname callback cannot start it: the code must return to
+    // the origin the shell is served on.
+    await expect(beginCustomerBootstrapRelay({
+      publicClientId: CLIENT_ID,
+      relayTicket: ticket.relayTicket,
+      gatewayState: randomBase64Url(32),
+      pkceChallenge: randomBase64Url(32),
+      gatewayCallback: GATEWAY_CALLBACK,
       transport: f.publicHttps,
     })).rejects.toThrow('relay_rejected');
   });

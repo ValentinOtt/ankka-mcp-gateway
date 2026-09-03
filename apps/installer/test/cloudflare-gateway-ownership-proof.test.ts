@@ -180,6 +180,24 @@ describe('customer Gateway relay ownership proof', () => {
       relayTicketSigningKey: relayTicketKey,
       store,
     });
+    // An install ticket is bound to the certified bootstrap origin: during the
+    // install the Gateway is reachable only there, and the management hostname
+    // only exists once the install has converged.
+    await expect(verifyCloudflareGatewayRelayTicket({
+      ticket,
+      signingKey: relayTicketKey,
+      expectedClientId: CLIENT_ID,
+      expectedOperation: 'install',
+      expectedGatewayCallback: BOOTSTRAP_CALLBACK,
+      now: NOW + 4_000,
+    })).resolves.toMatchObject({
+      accountId: ACCOUNT_ID,
+      installId: INSTALL_ID,
+      workerName: WORKER_NAME,
+      gatewayCallback: BOOTSTRAP_CALLBACK,
+      operation: 'install',
+      receiptResourceKinds: null,
+    });
     await expect(verifyCloudflareGatewayRelayTicket({
       ticket,
       signingKey: relayTicketKey,
@@ -187,13 +205,7 @@ describe('customer Gateway relay ownership proof', () => {
       expectedOperation: 'install',
       expectedGatewayCallback: GATEWAY_CALLBACK,
       now: NOW + 4_000,
-    })).resolves.toMatchObject({
-      accountId: ACCOUNT_ID,
-      installId: INSTALL_ID,
-      workerName: WORKER_NAME,
-      operation: 'install',
-      receiptResourceKinds: null,
-    });
+    })).rejects.toMatchObject({ code: 'operation_mismatch' });
     expect(store.records.size).toBe(0);
     await expect(issueCloudflareGatewayRelayTicketFromOwnershipProof({
       proof,
