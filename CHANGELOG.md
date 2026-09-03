@@ -10,6 +10,10 @@ Notable public product and repository changes are recorded here.
 - The hosted installer records no analytics; the former funnel documentation
   is removed and the architecture and security-model notes now say so.
 - Repository references point at `ankka-ai/ankka-mcp-gateway`.
+- The admin third-party license bundle excludes platform-specific optional
+  packages (native binaries selected by `os`/`cpu`); their license is the
+  parent package's own section. The bundle no longer depends on how npm
+  flags those entries in the lockfile.
 
 ## gateway-v0.1.16 (canary)
 

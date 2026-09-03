@@ -41,37 +41,21 @@ if (lock.lockfileVersion !== 3 || !v.is(OBJECT_SCHEMA, lock.packages)) {
   throw new Error('license_bundle_lock_invalid');
 }
 
+// Platform-specific optional packages (native binaries selected by `os`/`cpu`)
+// are excluded: npm installs at most one per family, so including them would
+// make the bundle depend on the build host, and their license is the parent
+// package's, which has its own section.
+function platformSpecificOptional(value) {
+  return value.optional === true && (Array.isArray(value.os) || Array.isArray(value.cpu));
+}
+
 const external = Object.entries(lock.packages)
-  .filter(([relative, value]) => relative.startsWith('node_modules/') && value.dev !== true && value.link !== true)
+  .filter(([relative, value]) => relative.startsWith('node_modules/') && value.dev !== true &&
+    value.link !== true && !platformSpecificOptional(value))
   .sort(([left], [right]) => lexicalCompare(left, right));
 if (external.length === 0) throw new Error('license_bundle_empty');
 
 const licenseName = /^(?:license|licence|copying|notice)(?:[-._].*)?$/iu;
-
-async function familyLicenseInputs(packageName, expectedVersion) {
-  const directory = path.join(projectRoot, 'node_modules', packageName);
-  let manifest;
-  try {
-    manifest = JSON.parse(await readUtf8(
-      path.join(directory, 'package.json'),
-      'license_bundle_fallback_invalid',
-    ));
-  } catch {
-    throw new Error('license_bundle_fallback_invalid');
-  }
-  if (manifest.name !== packageName || manifest.version !== expectedVersion) {
-    throw new Error('license_bundle_fallback_invalid');
-  }
-  const filenames = (await readdir(directory, { withFileTypes: true }))
-    .filter((entry) => entry.isFile() && licenseName.test(entry.name))
-    .map((entry) => entry.name)
-    .sort(lexicalCompare);
-  if (filenames.length === 0) throw new Error('license_bundle_fallback_invalid');
-  return filenames.map((filename) => ({
-    label: `${packageName}/${filename}`,
-    filename: path.join(directory, filename),
-  }));
-}
 
 async function reviewedLicenseFallback(manifest) {
   if (manifest.name === '@cfworker/json-schema' && manifest.version === '4.1.1') {
@@ -85,20 +69,7 @@ async function reviewedLicenseFallback(manifest) {
       ),
     }];
   }
-  if (manifest.name.startsWith('@esbuild/')) {
-    return familyLicenseInputs('esbuild', manifest.version);
-  }
-  if (manifest.name.startsWith('@rolldown/binding-')) {
-    return familyLicenseInputs('rolldown', manifest.version);
-  }
   throw new Error('license_bundle_text_missing');
-}
-
-function optionalFamilyManifest(relative, locked) {
-  if (locked.optional !== true) return null;
-  const name = relative.slice('node_modules/'.length);
-  if (!name.startsWith('@esbuild/') && !name.startsWith('@rolldown/binding-')) return null;
-  return { name, version: locked.version };
 }
 
 const sections = [];
@@ -111,8 +82,7 @@ for (const [relative, locked] of external) {
       'license_bundle_package_invalid',
     ));
   } catch {
-    manifest = optionalFamilyManifest(relative, locked);
-    if (manifest === null) throw new Error('license_bundle_package_invalid');
+    throw new Error('license_bundle_package_invalid');
   }
   if (!v.is(STRING_SCHEMA, manifest.name) || !v.is(STRING_SCHEMA, manifest.version) ||
       manifest.version !== locked.version || !v.is(STRING_SCHEMA, locked.resolved) ||

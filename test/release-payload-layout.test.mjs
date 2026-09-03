@@ -150,15 +150,10 @@ test('generated admin distribution carries the project and complete production d
   const expectedPackages = [];
   for (const [relative, value] of Object.entries(lock.packages)) {
     if (!relative.startsWith('node_modules/') || value.dev === true || value.link === true) continue;
-    let manifest;
-    try {
-      manifest = JSON.parse(await readFile(new URL(`../${relative}/package.json`, import.meta.url), 'utf8'));
-    } catch {
-      assert.equal(value.optional, true);
-      const name = relative.slice('node_modules/'.length);
-      assert.match(name, /^@(?:esbuild\/|rolldown\/binding-)/u);
-      manifest = { name, version: value.version };
-    }
+    // Platform-specific optional binaries are excluded by the generator; the
+    // parent package carries the license section.
+    if (value.optional === true && (Array.isArray(value.os) || Array.isArray(value.cpu))) continue;
+    const manifest = JSON.parse(await readFile(new URL(`../${relative}/package.json`, import.meta.url), 'utf8'));
     assert.ok(thirdPartyLicenses.includes(`Package: ${manifest.name}@${manifest.version}`));
     expectedPackages.push({ relative, heading: `${manifest.name}@${manifest.version}` });
   }
