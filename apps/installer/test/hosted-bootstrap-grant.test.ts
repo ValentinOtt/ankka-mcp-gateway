@@ -174,7 +174,12 @@ describe('hosted Stage 1 bootstrap grant', () => {
       deploy: async () => { deployed = true; },
     // Translated at this boundary: the runtime maps this code to the operator's
     // "grant_invalid", where an untranslated grant error read as internal_error.
-    })).rejects.toMatchObject({ code: 'target_account_ambiguous', status: 403 });
+    // The reason carries the account count so zero and several stay apart.
+    })).rejects.toMatchObject({
+      code: 'target_account_ambiguous',
+      status: 403,
+      reason: 'account_read_account_ambiguous_accounts_2',
+    });
     expect(deployed).toBe(false);
     expect(revoked).toBe(true);
   });
@@ -209,7 +214,35 @@ describe('hosted Stage 1 bootstrap grant', () => {
     expect(revoked).toEqual([ACCESS_TOKEN, refreshToken]);
   });
 
-  it('names the account read when the provider refuses it, deploying nothing', async () => {
+  it('names the status and provider code when the account read is refused, deploying nothing', async () => {
+    let deployed = false;
+    const providerText = `Authentication error for token_${'z'.repeat(32)}`;
+    await expect(executeHostedBootstrapGrant({
+      code: CODE,
+      verifier: VERIFIER,
+      config: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET },
+      transport: async (input) => {
+        const url = String(input);
+        if (url.endsWith('/oauth2/token')) return json({
+          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write',
+        });
+        if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
+          return json({
+            success: false, errors: [{ code: 10000, message: providerText }], messages: [], result: null,
+          }, 403);
+        }
+        if (url.endsWith('/oauth2/revoke')) return json({ revoked: true });
+        throw new Error('unexpected request');
+      },
+      deploy: async () => { deployed = true; return null; },
+    })).rejects.toMatchObject({
+      code: 'oauth_exchange_failed',
+      reason: 'account_read_provider_unavailable_http_403_code_10000',
+    });
+    expect(deployed).toBe(false);
+  });
+
+  it('names an envelope the provider decorated with messages, deploying nothing', async () => {
     let deployed = false;
     await expect(executeHostedBootstrapGrant({
       code: CODE,
@@ -221,13 +254,18 @@ describe('hosted Stage 1 bootstrap grant', () => {
           access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write',
         });
         if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
-          return json({ success: false, errors: [{ code: 10000 }], messages: [], result: null }, 403);
+          return json({
+            success: true, errors: [], messages: [{ code: 10001, message: 'notice' }], result: [{ id: ACCOUNT_ID }],
+          });
         }
         if (url.endsWith('/oauth2/revoke')) return json({ revoked: true });
         throw new Error('unexpected request');
       },
       deploy: async () => { deployed = true; return null; },
-    })).rejects.toMatchObject({ code: 'oauth_exchange_failed', reason: 'account_read_provider_unavailable' });
+    })).rejects.toMatchObject({
+      code: 'oauth_exchange_failed',
+      reason: 'account_read_provider_unavailable_messages_present',
+    });
     expect(deployed).toBe(false);
   });
 });

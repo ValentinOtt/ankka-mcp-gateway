@@ -60,14 +60,19 @@ function deployFailureReason<Thrown>(error: Thrown): string {
  * The account read runs before any deployment and throws a grant error, not a
  * DeployError. Left untranslated it reached the operator as the unclassified
  * "internal_error"; the ambiguous case is a real, actionable outcome (the
- * grant can see zero or several accounts) and deserves its own code.
+ * grant can see zero or several accounts) and deserves its own code. The
+ * grant error's secret-free detail (HTTP status, numeric provider code,
+ * account count) rides along in the reason so a refused read names itself.
  */
 function accountReadError<Thrown>(error: Thrown): DeployError {
   if (!(error instanceof CustomerCloudflareGrantError)) {
     return new DeployError(502, 'oauth_exchange_failed', 'account_read_failed');
   }
-  if (error.code === 'account_ambiguous') return new DeployError(403, 'target_account_ambiguous');
-  return new DeployError(502, 'oauth_exchange_failed', `account_read_${error.code}`);
+  const reason = error.detail === null
+    ? `account_read_${error.code}`
+    : `account_read_${error.code}_${error.detail}`;
+  if (error.code === 'account_ambiguous') return new DeployError(403, 'target_account_ambiguous', reason);
+  return new DeployError(502, 'oauth_exchange_failed', reason);
 }
 
 export async function executeHostedBootstrapGrant<Deployment>(input: {
