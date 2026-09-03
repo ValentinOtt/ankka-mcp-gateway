@@ -1193,3 +1193,20 @@ deploying the production relay. Both are operator steps.
    `/health`, `/api/releases/canary`, and the installer page.
 6. Full install from a second Cloudflare account that owns a real zone
    (cross-account isolation), then tear down and record the evidence here.
+
+### Activation log
+
+- 2026-09-03: PR #47 merged (squash `236462b`). Stage 1 client confirmed
+  public and verified. Security → Events shows no edge block for the
+  qualification host, so the operator-browser 403 was client-side.
+- 2026-09-03: Stage 2 public PKCE client created by the operator (redirect
+  `https://auth.ankka.ai/oauth/callback`, seven required install scopes,
+  client URL `https://ankka.ai`, no post-logout or CORS entries).
+- 2026-09-03: relay deployed from `wrangler.auth.toml` with its Custom
+  Domain; all five bindings provisioned as secrets (issuer key id
+  `ankka-ownership-issuer-2026-09-v1`; the issuer seed lives in the
+  operator's Bitwarden). Verified live: `/health` 200
+  `{ok:true, role:'cloudflare-code-relay', tokenExchange:false}` with
+  `no-store` and `no-referrer`; unknown paths 404 `no-store` with no cookie
+  or CORS header; the workers.dev alias answers 404. Pending: deploy Worker
+  cut decision, its six bindings, release ceremony, second-account install.
