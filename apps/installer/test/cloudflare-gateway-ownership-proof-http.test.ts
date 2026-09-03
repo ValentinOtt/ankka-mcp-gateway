@@ -149,17 +149,21 @@ describe('ownership-proof HTTP boundary', () => {
       transport,
       now: () => NOW,
     });
+    // The install ticket is bound to the certified bootstrap origin, where the
+    // shell is served during the install; the proof itself still names the
+    // certified management callback.
     await expect(verifyCloudflareGatewayRelayTicket({
       ticket: ticket.relayTicket,
       signingKey: value.relayTicketKey,
       expectedClientId: CLIENT_ID,
       expectedOperation: 'install',
-      expectedGatewayCallback: GATEWAY_CALLBACK,
+      expectedGatewayCallback: BOOTSTRAP_CALLBACK,
       now: NOW + 1,
     })).resolves.toMatchObject({
       accountId: ACCOUNT_ID,
       installId: INSTALL_ID,
       workerName: WORKER_NAME,
+      gatewayCallback: BOOTSTRAP_CALLBACK,
       operation: 'install',
       receiptResourceKinds: null,
     });
