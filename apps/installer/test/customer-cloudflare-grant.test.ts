@@ -458,7 +458,7 @@ describe('verifyCustomerCloudflareGrantAccountAccess', () => {
   }
 
   it('reads the expected account under the operation scope instead of listing accounts', async () => {
-    const source = probe(() => json({ success: true, errors: [], messages: [], result: [] }));
+    const source = probe(() => json({ success: true, result: [], result_info: { count: 0 } }));
     await verifyCustomerCloudflareGrantAccountAccess({
       accessToken: ACCESS_TOKEN, expectedAccountId: ACCOUNT_ID, operation: 'source-add',
       workerName: WORKER, transport: source.transport,
