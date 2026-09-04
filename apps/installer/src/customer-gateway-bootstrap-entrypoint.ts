@@ -30,6 +30,7 @@ import {
   CUSTOMER_INSTALL_STATUS_PATH,
 } from './customer-install-paths';
 import type { CustomerInstallStatus } from './customer-install-status';
+import { customerPayloadEnvironment } from './customer-payload-environment';
 
 declare const __ANKKA_FINAL_RUNTIME_SOURCE__: string;
 
@@ -295,9 +296,12 @@ export class AdminState extends RuntimeAdminState {
         },
         finalRuntimeSource: __ANKKA_FINAL_RUNTIME_SOURCE__,
         payload: {
-          bootstrap: (request) => processBootstrap(
+          // The shell's bindings stop at Stage 1; the payload parses a
+          // strict runtime environment that also names the zone and the
+          // Zero Trust readiness the converger has established by now.
+          bootstrap: (request, { target }) => processBootstrap(
             request,
-            this.bootstrapEnv,
+            customerPayloadEnvironment(this.bootstrapEnv, target),
             this.bootstrapState.storage,
           ),
           verifyReady: async ({ accessToken: token, plan, target }) => {
@@ -309,7 +313,7 @@ export class AdminState extends RuntimeAdminState {
             return verifyBootstrapReceiptProviderState({
               ...claim,
               cloudflareAccessToken: token,
-            }, this.bootstrapEnv, this.bootstrapState.storage, Date.now());
+            }, customerPayloadEnvironment(this.bootstrapEnv, target), this.bootstrapState.storage, Date.now());
           },
         },
         transport: (target, init) => fetch(target, init),

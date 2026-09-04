@@ -142,8 +142,15 @@ export interface CustomerStage2RuntimeIdentity {
 }
 
 export interface CustomerStage2PayloadAdapter {
-  /** Delivers the one signed bootstrap request directly to the co-resident payload. */
-  readonly bootstrap: (request: Request) => Promise<Response>;
+  /**
+   * Delivers the one signed bootstrap request directly to the co-resident
+   * payload, with the plan and target it was derived from so the host can
+   * complete the payload's runtime environment.
+   */
+  readonly bootstrap: (request: Request, context: {
+    readonly plan: StaticDeployPlan;
+    readonly target: CustomerBootstrapTarget;
+  }) => Promise<Response>;
   /** Re-reads every receipt-owned Gateway resource with the request-local grant. */
   readonly verifyReady: (input: {
     readonly accessToken: string;
@@ -630,7 +637,7 @@ async function convergeGatewayResources(context: Context): Promise<v.InferOutput
       },
       bootstrapNonce: bootstrap.nonce,
       cloudflareAccessToken: context.input.accessToken,
-      transport: context.input.payload.bootstrap,
+      transport: (request) => context.input.payload.bootstrap(request, { plan, target: context.target }),
       timeoutMs: 120_000,
       nowMs: clock(context.input, context.journal.updatedAt),
     });
