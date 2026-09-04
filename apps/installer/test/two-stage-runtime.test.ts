@@ -259,6 +259,7 @@ async function harness(options: { policy?: 'disabled' | 'required' } = {}): Prom
         installId: customer.installId,
         release: customer.release,
         ownershipPublicKey: CUSTOMER_OWNERSHIP_PUBLIC_KEY,
+        failure: null,
       }, { headers: { 'access-control-allow-origin': PUBLIC_ORIGIN, vary: 'Origin' } });
     }
     throw new Error(`unexpected transport ${request.method} ${request.url}`);

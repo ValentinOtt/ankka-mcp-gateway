@@ -30,6 +30,7 @@ import {
   CUSTOMER_INSTALL_ROOT_PATH,
   CUSTOMER_INSTALL_STATUS_PATH,
 } from './customer-install-paths';
+import { customerInstallStatusSchema } from './customer-install-status';
 import { base64UrlEncode, sha256Hex } from './crypto';
 import { DeployError } from './errors';
 import {
@@ -99,14 +100,6 @@ const provisionSchema = v.strictObject({
     artifactSha256: v.pipe(v.string(), v.regex(SHA256)),
   }),
   workersSubdomain: v.pipe(v.string(), v.regex(DNS_LABEL)),
-});
-const healthSchema = v.strictObject({
-  schemaVersion: v.literal(1),
-  role: v.literal('customer-gateway-bootstrap'),
-  status: v.literal('INCOMPLETE'),
-  installId: v.pipe(v.string(), v.regex(INSTALL_ID)),
-  release: v.pipe(v.string(), v.regex(RELEASE_ID)),
-  ownershipPublicKey: v.pipe(v.string(), v.regex(TOKEN)),
 });
 
 /** Optional propagation wait forwarded only when a caller supplied one. */
@@ -448,7 +441,7 @@ function readinessStatusReason(response: Response): string {
 async function readBootstrapHealth(input: {
   readonly provision: HostedStage1Provision;
   readonly transport: FetchTransport;
-}): Promise<v.InferOutput<typeof healthSchema>> {
+}): Promise<v.InferOutput<typeof customerInstallStatusSchema>> {
   let read: BoundedRead;
   try {
     read = await fetchBoundedText(
@@ -474,8 +467,13 @@ async function readBootstrapHealth(input: {
   } catch {
     throw new DeployError(502, 'bootstrap_failed', 'readiness_not_json');
   }
-  const parsed = v.safeParse(healthSchema, decoded);
+  const parsed = v.safeParse(customerInstallStatusSchema, decoded);
   if (!parsed.success) throw new DeployError(502, 'bootstrap_failed', 'readiness_schema_invalid');
+  // A shell that was just deployed has nothing to converge yet; any other
+  // status means the readiness read reached a different install.
+  if (parsed.output.status !== 'INCOMPLETE') {
+    throw new DeployError(502, 'bootstrap_failed', 'readiness_status_unexpected');
+  }
   if (parsed.output.installId !== input.provision.installId) {
     throw new DeployError(502, 'bootstrap_failed', 'readiness_install_id_mismatch');
   }

@@ -1,6 +1,7 @@
 import * as v from 'valibot';
 
 import type { BoundaryValue } from '../src/boundary';
+import type { CustomerInstallStatus } from '../src/customer-install-status';
 import {
   verifyCloudflareGatewayOwnershipCertificate,
 } from '../src/cloudflare-gateway-ownership-proof';
@@ -319,6 +320,7 @@ describe('hosted Stage 1 coordinator', () => {
           installId: fixture.plan.managementOwnershipMarker,
           release: fixture.plan.releaseId,
           ownershipPublicKey: CUSTOMER_OWNERSHIP_PUBLIC_KEY,
+          failure: null,
         }, init?.signal);
       },
       now: () => NOW + 2,
@@ -348,6 +350,60 @@ describe('hosted Stage 1 coordinator', () => {
     });
     expect(certificate.statement.accountId).toBe(ACCOUNT_ID);
     expect(certificate.statement.ownershipKey.publicKey).toBe(CUSTOMER_OWNERSHIP_PUBLIC_KEY);
+  });
+
+  it('accepts a shell that names an earlier failure and stays strict about unknown keys and status', async () => {
+    type Answer = Partial<CustomerInstallStatus> & { readonly extra?: true };
+    const answer = (extra: Answer) => async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const value = {
+        schemaVersion: 1,
+        role: 'customer-gateway-bootstrap',
+        status: 'INCOMPLETE',
+        installId: '',
+        release: '',
+        ownershipPublicKey: CUSTOMER_OWNERSHIP_PUBLIC_KEY,
+        failure: null,
+        ...extra,
+      };
+      // SAFETY: `value` is a literal of strings, numbers, null and one nested
+      // literal; an `undefined` field stands for a shell that omits it and is
+      // dropped by JSON.stringify inside streamedHealth, so what is sent is
+      // always a JSON object.
+      return streamedHealth(value as BoundaryValue, init?.signal);
+    };
+    const attempt = async (extra: Answer) => {
+      const fixture = await setup();
+      return completeHostedStage1Handoff({
+        provision: fixture.provision,
+        plan: fixture.plan,
+        capabilitySecret: fixture.secrets.capability.secret,
+        customerOauthClientId: CUSTOMER_CLIENT_ID,
+        issuerKeyId: ISSUER_KEY_ID,
+        issuerPublicKey: fixture.publicKey,
+        issuerPrivateKey: fixture.keys.privateKey,
+        transport: answer({
+          installId: fixture.plan.managementOwnershipMarker,
+          release: fixture.plan.releaseId,
+          ...extra,
+        }),
+        now: () => NOW + 2,
+      });
+    };
+    // The shell's status answer carries the last Stage 2 outcome; readiness
+    // only checks identity, so a named failure does not block the handoff.
+    const named = await attempt({
+      failure: { code: 'provider_recovery_required', reason: 'payload_portal_create_auth_http_403_code_10000' },
+    });
+    expect(new URL(named.handoffUrl).pathname).toBe('/__ankka/install');
+    // Shells from a release before the field existed answer without it.
+    const legacy = await attempt({ failure: undefined });
+    expect(new URL(legacy.handoffUrl).pathname).toBe('/__ankka/install');
+    await expect(attempt({ extra: true }))
+      .rejects.toMatchObject({ code: 'bootstrap_failed', status: 502, reason: 'readiness_schema_invalid' });
+    await expect(attempt({ failure: { code: 'provider_recovery_required', reason: 'not a reason' } }))
+      .rejects.toMatchObject({ code: 'bootstrap_failed', status: 502, reason: 'readiness_schema_invalid' });
+    await expect(attempt({ status: 'READY' }))
+      .rejects.toMatchObject({ code: 'bootstrap_failed', status: 502, reason: 'readiness_status_unexpected' });
   });
 
   it('keeps the capability private while the customer Worker is not ready', async () => {
