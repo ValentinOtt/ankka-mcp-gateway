@@ -46,11 +46,14 @@ which also disconnects other team members. See
 Deployment receipts and private test details remain outside this repository.
 
 The live `tools/list` response confirmed the reviewed tool names and argument
-names. Unlike the current documentation, its SQL input does not yet include
+names. A fresh public discovery probe on 2026-09-04 again found only
+`projectId`, `query`, `dryRun`, and `labels` among the reviewed SQL fields.
+Unlike the current documentation, its SQL input does not yet include
 `timeoutMs` or `jobTimeoutMs`; sending those fields produced an invalid-argument
 tool error. The prototype now sends only the required project and constant
-query. General SQL remains deliberately disabled; query cost controls remain
-necessary before production qualification.
+query. It also lacks `maximumBytesBilled`, `maxResults`, and `location`.
+General SQL remains deliberately disabled; query cost controls remain necessary
+before production qualification.
 
 The Worker belongs in your Cloudflare account. Cloudflare Access with Managed
 OAuth protects its exact hostname; the Worker verifies the signed Access JWT.
@@ -190,6 +193,90 @@ enforce acceptable query costs and dataset-scoped read-only IAM.
 [Custom daily quotas](https://docs.cloud.google.com/bigquery/docs/custom-quotas)
 are useful additional safeguards, but Google documents that they are
 approximate and can be exceeded. They are not a per-query byte ceiling.
+
+A separate dry run cannot close this gap: the actual query is a later request,
+and the hosted tool has no execution-time byte ceiling to enforce its estimate.
+A row limit and a shorter HTTP timeout do not bound bytes scanned either.
+Do not expand the hosted bridge's literal query allowlist on that basis.
+
+The existing `CONNECTOR_PROVIDER=bigquery` REST reader is the available
+implementation for useful queries with a per-query ceiling: it requires a
+Google-classified `SELECT` dry run within the configured budget, then sends
+`maximumBytesBilled` on execution. It needs its own real-data, IAM, and client
+qualification. Choosing it is an explicit deployment choice; the
+`bigquery-mcp` provider never falls back to REST or silently changes SQL behavior.
+
+## Repeat public capability discovery
+
+From `apps/read-only-connectors`, run:
+
+```sh
+ANKKA_BIGQUERY_MCP_DISCOVERY_LIVE=1 npx vitest run \
+  --config vitest.live.config.ts test-live/bigquery-mcp-capabilities.live.ts \
+  --silent=false --reporter=verbose
+```
+
+This opt-in probe sends one unauthenticated `tools/list` request to Google's
+fixed endpoint. It executes no tools, reads no credential, follows no redirects,
+and makes no retry or credential fallback. It uses the connector's existing
+response-size and timeout bounds. Incomplete catalogues, duplicate tool names,
+missing reviewed tools, or failed discovery produce fixed errors. Output
+contains only reviewed field names and booleans; upstream descriptions and
+errors are not printed. A field appearing in discovery requires a fresh
+enforcement test before any runtime change. Discovery itself does not prove
+that a query budget is enforced.
+
+## Claude Desktop qualification
+
+The current Claude Desktop custom-connector flow reached the Portal, signed
+in the admitted member by email code, and returned the constant query result
+through the Portal's Code Mode tools. The recorded tool response contained
+`bridge_ok = 1`, `jobComplete: true`, and zero bytes processed and billed.
+This is real-client connectivity evidence; useful analytics, refresh, and
+reconnection must still pass their separate checks.
+
+For this tested setup:
+
+1. Add your Portal's `/mcp` URL to Claude. Select **Always required** for
+   authentication and **No client ID — register one automatically** for the
+   OAuth client. The tested path uses dynamic client registration, not Claude's
+   client-metadata default. No additional credential header is needed.
+2. On the Portal Access application, allow the exact public callback
+   `https://claude.ai/api/mcp/auth_callback`. Preserve existing callback entries,
+   admission policies, and token lifetimes. An older test installation lacked
+   this entry: Claude failed with `invalid_request` / `provider_redirect` before
+   Portal sign-in. Adding only that callback resolved the failure.
+3. Choose **Connect** in Claude, complete Portal sign-in, select the intended
+   source, and finish the browser handoff to Claude Desktop. The member signs
+   into Cloudflare Access; the shared Google identity stays in the bridge.
+4. Use the Portal tools in a new conversation. With Code Mode enabled, seeing
+   Portal wrapper tools in Claude's settings is expected. Inspect the tools
+   returned by Code Mode separately and verify the exact three-tool allowlist.
+   Approve the reviewed discovery and constant query calls individually.
+
+New-Portal callback defaults are already implemented in the gateway source.
+The latest checked canary, `gateway-v0.1.48`, predates PR #114's additional
+ChatGPT and Cursor defaults. Neither a source-code default nor Claude's passing
+query proves those clients or changes an older Portal automatically.
+
+## Remaining support gates
+
+1. Decide whether useful analytics uses the explicitly configured REST reader
+   or waits for a hosted execution-time byte ceiling. Prove a bounded aggregate
+   against an allowed dataset and denial for an excluded dataset using the
+   actual dedicated identity. Preserve dataset-scoped read-only IAM and the
+   exact Portal tool allowlist.
+2. Include the qualified Portal-wide revocation procedure in setup and operator
+   documentation, including its impact on everyone connected to that Portal.
+   Cloudflare evaluates the Portal grant and source selection; the bridge
+   receives the shared operator identity, so it cannot selectively reject a
+   removed Portal member. Do not promise selective or immediate disconnection.
+3. Complete a real client's OAuth sign-in, tool discovery, table read, bounded
+   aggregate, token refresh beyond the initial 15-minute access-token lifetime,
+   and reconnection. A controlled client or Code Mode probe is separate evidence.
+4. Then integrate the chosen deployment path into setup and the supported
+   catalogue. The manual bridge Worker is still separately deployed, updated,
+   and supplied with its secret directly in your Cloudflare account.
 
 ## Evidence
 

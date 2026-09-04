@@ -10,6 +10,11 @@ Notable public product and repository changes are recorded here.
   grant; keep the reviewed channel, origin, and signing key fixed and preserve
   runtime compatibility checks. Missing or invalid bytes stop before upload.
 
+- Add an opt-in, credential-free BigQuery MCP capability probe with bounded
+  discovery and fixed diagnostics. Record the hosted query-cost limitation and
+  distinguish fresh authorization, refreshed grants, and Portal-wide revocation
+  in the connector qualification evidence. General hosted SQL stays disabled.
+
 - Add ChatGPT and Cursor web OAuth callback defaults to newly created Portals
   alongside Claude. ChatGPT's variable callback is limited to its documented
   connector OAuth path. Keep local callbacks, existing Portal settings, and
