@@ -1,6 +1,7 @@
 # Google hosted BigQuery MCP bridge experiment
 
-This is a tested prototype, not a supported catalog source or a release change.
+This experimental bridge is included in the `gateway-v0.1.46` canary. It is
+not yet a supported catalog source or a workflow qualified for stable release.
 Run the existing connector Worker with `CONNECTOR_PROVIDER=bigquery-mcp` to
 send approved tool calls to Google's fixed `https://bigquery.googleapis.com/mcp`
 endpoint. Google implements the BigQuery tools; this adapter only authenticates,
@@ -8,8 +9,8 @@ restricts requests, and unwraps bounded text tool results.
 
 ## Qualification status
 
-The prototype passed `npm run check:fast`, including 31 bridge checks across
-both supported client protocol versions. Integration must also pass the
+The bridge passed `npm run check:fast`, including 31 bridge checks across
+both supported client protocol versions. Its integration passed the
 repository's full CI release gate.
 
 Live qualification passed on a separate Worker in the test Cloudflare account:
@@ -22,20 +23,27 @@ Live qualification passed on a separate Worker in the test Cloudflare account:
 - unauthenticated requests rejected with HTTP 401; and
 - public OAuth discovery served by the expected Cloudflare Access issuer.
 
-No Google sign-in was required for the person using the direct bridge; the
-Worker authenticated to Google. This does not prove the Portal's shared
-operator flow. Deployment receipts and private test details remain outside
-the public repository.
+Canary qualification also passed source installation through Ankka: the
+action paused for operator authentication, then fresh consent resumed the
+retained resources and attached the exact tool allowlist to the Portal. A
+second identity signed in to the Portal using an email code and used the
+shared operator connection without a Google login. Direct calls listed tables,
+read metadata, and returned `1` from the constant query. Code Mode exposed
+exactly the same three tools and also returned `1` from that query.
+
+Revocation remains a release blocker. After the second identity was removed
+from the source policy and the updated policy was verified, its existing
+Portal grant still executed direct and Code Mode calls more than five minutes
+later. Fresh-grant denial and effective invalidation of existing access remain
+unproven. See [Team access](../../docs/TEAM_ACCESS.md#revocation-qualification).
+Deployment receipts and private test details remain outside this repository.
 
 The live `tools/list` response confirmed the reviewed tool names and argument
 names. Unlike the current documentation, its SQL input does not yet include
 `timeoutMs` or `jobTimeoutMs`; sending those fields produced an invalid-argument
 tool error. The prototype now sends only the required project and constant
-query. The deployed client-to-Worker-to-Google path is proven. Adding this
-source through Ankka's dashboard, shared-operator authentication in the
-Cloudflare MCP portal, and use by a second team member remain unproven.
-General SQL is still deliberately disabled; credential rotation and a query
-cost-control decision remain necessary before production qualification.
+query. General SQL remains deliberately disabled; query cost controls and
+the access-revocation checks remain necessary before production qualification.
 
 The Worker belongs in your Cloudflare account. Cloudflare Access with Managed
 OAuth protects its exact hostname; the Worker verifies the signed Access JWT.
