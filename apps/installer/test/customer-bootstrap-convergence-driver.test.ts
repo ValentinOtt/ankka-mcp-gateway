@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { exactOperationScopes } from '../src/cloudflare-operation-authority';
 import {
@@ -113,6 +113,9 @@ function transportCounting(revocations: { count: number }): CustomerCloudflareTr
 }
 
 describe('customer bootstrap convergence driver', () => {
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }); });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
   it('runs one converger pass per scheduled invocation and settles READY after the last', async () => {
     const converging = await convergingState();
     const state = new MemoryState(converging.state);
@@ -134,8 +137,13 @@ describe('customer bootstrap convergence driver', () => {
       schedule: async () => { scheduled += 1; },
     });
     await driver.start({ attemptId: converging.attemptId, grant: grant() });
+    expect(vi.getTimerCount()).toBe(1);
     expect(scheduled).toBe(1);
     expect(await driver.continue()).toBe('scheduled');
+    // A delayed alarm must not leave the object eligible for idle hibernation
+    // after ten seconds when no browser is polling the progress page.
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(vi.getTimerCount()).toBe(1);
     expect(await driver.continue()).toBe('scheduled');
     expect(state.stored?.status).toBe('CONVERGING');
     expect(revocations.count).toBe(0);
@@ -144,6 +152,7 @@ describe('customer bootstrap convergence driver', () => {
     expect(passes).toEqual(Array(3).fill(`token:${converging.attemptId}`));
     expect(state.stored).toMatchObject({ status: 'READY', oauth: null, session: null });
     expect(revocations.count).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
     // Nothing is left to run once the attempt has settled.
     expect(await driver.continue()).toBe('idle');
     expect(scheduled).toBe(3);
@@ -187,6 +196,8 @@ describe('customer bootstrap convergence driver', () => {
     });
     await driver.start({ attemptId: converging.attemptId, grant: grant() });
     clock += CUSTOMER_BOOTSTRAP_CONVERGENCE_DEADLINE_MS + 1;
+    await vi.advanceTimersByTimeAsync(CUSTOMER_BOOTSTRAP_CONVERGENCE_DEADLINE_MS + 1);
+    expect(vi.getTimerCount()).toBe(0);
     expect(await driver.continue()).toBe('settled');
     expect(converged).toBe(false);
     expect(revocations.count).toBe(1);
@@ -214,6 +225,7 @@ describe('customer bootstrap convergence driver', () => {
     await driver.start({ attemptId: converging.attemptId, grant: grant() });
     expect(await driver.continue()).toBe('settled');
     expect(revocations.count).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
     expect(state.stored).toMatchObject({
       status: 'INCOMPLETE',
       failureCode: 'provider_recovery_required',
@@ -246,6 +258,7 @@ describe('customer bootstrap convergence driver', () => {
     expect(phasesSeen).toEqual(['exchanging', 'finalizing']);
     expect(scheduled).toEqual([0, CUSTOMER_BOOTSTRAP_HANDOVER_ALARM_DELAY_MS]);
     expect(revocations.count).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
     expect(state.stored).toMatchObject({ status: 'CONVERGING', oauth: { phase: 'finalizing' } });
     // Until the object restarts on the final runtime, this code only looks again later.
     expect(await driver.continue()).toBe('scheduled');
