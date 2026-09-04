@@ -1606,3 +1606,22 @@ deploying the production relay. Both are operator steps.
   accepts. Redirects back to the dashboard carry a bounded reason word, so
   the next refused apply names itself. A token-mode "eight" install proved
   useless for these flows (its object never became READY) and was removed.
+- 2026-09-04 (18:00–19:00), gateway-v0.1.35 carried the reason word and the
+  files route (deploy.ankka.ai version eb1dc5c0), and a token-mode run of
+  the gateway's own updater, driven from a workstation with the test-account
+  token standing in for the `upgrade` grant, stopped at its first read: the
+  updater had reused the bootstrap-shaped bindings parser, and an installed
+  final runtime carries the ownership wrap-key secret as a nineteenth
+  binding. With the final runtime's own parser (PR #90) the same run moved
+  the ninth install from v0.1.34 to v0.1.35 in twelve seconds, secret
+  inherited, dashboard reporting the new release. The source apply's second
+  try then named its refusal: `grant_account_ambiguous_accounts_0`. The
+  gateway had checked the grant's account the way the install callback does,
+  by listing accounts and expecting exactly one, and a `source-add` grant
+  carries no account-level read scope, so the listing was empty. The router
+  now reads one resource of the installed account under the operation's own
+  scope instead: the MCP portals for a source grant, the gateway Worker for
+  an update (PR #91). gateway-v0.1.37 with both fixes went out
+  (deploy.ankka.ai version dc5e7c11) and the token-mode updater moved the
+  ninth install onto it. The source retry on that release and the first
+  dashboard-driven update are the next two live proofs.
