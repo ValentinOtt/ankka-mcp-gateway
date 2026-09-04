@@ -119,6 +119,25 @@ describe('source installation recovery', () => {
     expect(api.cancelSourceAction).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['source_connection_required', 'Connect your source'],
+    ['source_sync_required', 'Sync source tools'],
+    ['source_tools_mismatch', 'Review source tools'],
+  ])('explains %s and links the recorded source without offering a new installation', async (failureCode, label) => {
+    const connectionUrl = `https://dash.cloudflare.com/${'1'.repeat(32)}/one/access-controls/ai-controls/mcp-server/edit/synthetic-source`
+    const action = pendingAction({ state: 'recovery_required', status: 'recovery_required',
+      canCancel: false, canRenew: true, failureCode, connectionUrl })
+    const api = actionApi(actionSnapshot(action))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const card = await screen.findByRole('article', { name: `Installation of ${draft.label}` })
+    expect(within(card).getByText(label)).toBeVisible()
+    expect(within(card).getByRole('link', { name: 'Open source in Cloudflare' })).toHaveAttribute('href', connectionUrl)
+    expect(within(card).getByRole('button', { name: 'Renew consent and resume' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeDisabled()
+    expect(screen.queryByText('Recovery required')).not.toBeInTheDocument()
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+
   it('does not offer cancellation to a different administrator', async () => {
     const api = actionApi(actionSnapshot(pendingAction({ canCancel: false })))
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)

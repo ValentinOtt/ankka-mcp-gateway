@@ -836,6 +836,64 @@ async function renewPreparedSource(gateway, prepared) {
   return { ...prepared, claim };
 }
 
+for (const [authentication, status, tools, failureCode] of [
+  ['required', 'waiting', [], 'source_connection_required'],
+  ['stale', 'stale', [], 'source_connection_required'],
+  ['connected', 'waiting', [], 'source_sync_required'],
+  ['connected', 'error', [], 'source_sync_required'],
+  ['connected', 'ready', [{ name: 'other_tool' }], 'source_tools_mismatch'],
+]) {
+  test(`source waits for ${authentication}/${status} before attaching exact tools`, async () => fixture(async (gateway) => {
+    const prepared = await prepareNewSource(gateway);
+    const beforePortal = structuredClone(gateway.provider.state.portal);
+    gateway.provider.hook(({ record, state }) => {
+      if (record.method !== 'POST' || !record.pathname.endsWith('/mcp/servers')) return undefined;
+      const server = { ...record.body, authentication_status: authentication, status, tools,
+        error: 'synthetic-private-provider-detail',
+      };
+      state.servers.set(server.id, server);
+      return envelope(server);
+    });
+    const response = await gateway.apply(prepared, {}, null);
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error, failureCode);
+    const retained = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.at(-1);
+    assert.equal(retained.resources.length, 3);
+    assert.equal(retained.pending, null);
+    assert.equal(retained.portalUpdate, null);
+    assert.equal(JSON.stringify(retained).includes('synthetic-private'), false);
+    assert.deepEqual(gateway.provider.state.portal, beforePortal);
+    const policyResource = retained.resources[2];
+    const policies = gateway.provider.state.policies.get(policyResource.provider.parentId);
+    assert.equal(policies.length, 1);
+    assert.equal(policies[0].decision, 'deny');
+    assert.deepEqual(policies[0].include, [{ everyone: {} }]);
+    const snapshot = (await (await gateway.api('/api/source-actions')).json()).actions.at(-1);
+    assert.equal(snapshot.canRenew, true, 'a completed connection pause can renew before expiry');
+    assert.equal(snapshot.canCancel, false);
+    assert.equal(snapshot.connectionUrl,
+      `https://dash.cloudflare.com/${ACCOUNT_ID}/one/access-controls/ai-controls/mcp-server/edit/${retained.resources[0].provider.id}`);
+    const otherAdmin = (await (await gateway.api('/api/source-actions', { email: OWNER })).json()).actions.at(-1);
+    assert.equal(otherAdmin.canRenew, false);
+    const renewed = await renewPreparedSource(gateway, prepared);
+    assert.equal((await gateway.apply(prepared, { expiresAt: renewed.claim.expiresAt }, null)).status, 400);
+    const server = gateway.provider.state.servers.get(retained.resources[0].provider.id);
+    Object.assign(server, { authentication_status: 'connected', status: 'ready',
+      tools: prepared.source.enabledTools.map((name) => ({ name })),
+    });
+    gateway.provider.hook(undefined);
+    const baseline = gateway.provider.requests.length;
+    const result = await gateway.apply(renewed, {}, null);
+    assert.equal(result.status, 200, await result.clone().text());
+    const mutations = gateway.provider.requests.slice(baseline).filter(({ method }) => method !== 'GET');
+    assert.equal(mutations.length, 1);
+    assert.equal(mutations[0].method, 'PUT');
+    assert.equal(mutations[0].body.servers.at(-1).default_disabled, true);
+    assert.deepEqual(gateway.provider.state.policies.get(policyResource.provider.parentId), policies);
+    assert.equal((await gateway.view()).members.some((member) => member.sourceIds.includes(prepared.source.id)), false);
+  }));
+}
+
 for (const portalCommitted of [false, true]) {
   test(`renewed source consent reconciles retained portal work without recreating resources (committed: ${portalCommitted})`, async () => fixture(async (gateway) => {
     const prepared = await prepareNewSource(gateway);
@@ -937,7 +995,9 @@ for (const createdBeforeFailure of [false, true]) {
       const team = gateway.managementStorage.snapshot(TEAM_KEY);
       assert.equal(team.teardownDisabled, true, 'floor must be durable before potential creation');
       assert.equal(team.minimumRuntimeRelease, gateway.env.ANKKA_GATEWAY_RELEASE);
-      if (createdBeforeFailure) state.servers.set(record.body.id, { ...record.body, status: 'ready' });
+      if (createdBeforeFailure) state.servers.set(record.body.id, { ...record.body, status: 'ready',
+        tools: record.body.updated_tools.map(({ name }) => ({ name })),
+      });
       return envelope(null, 503);
     });
     const response = await gateway.apply(prepared, {}, null);

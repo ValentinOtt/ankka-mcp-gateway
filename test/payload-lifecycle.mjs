@@ -508,7 +508,9 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
 
     // MCP server
     if (pathname === SERVERS && method === 'POST') {
-      const created = { ...record.body, status: 'ready' };
+      const created = { ...record.body, status: 'ready', authentication_status: 'not_required',
+        tools: (record.body.updated_tools ?? []).map(({ name }) => ({ name, inputSchema: { type: 'object' } })),
+      };
       state.servers.set(created.id, created);
       state.server ??= created;
       return envelope(created);
@@ -531,6 +533,13 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
     if (portalWrite && record.body.servers?.some((mapping) =>
       !v.is(v.pipe(v.string(), v.minLength(1)), mapping.id) || mapping.server_id !== mapping.id)) {
       return Response.json({ success: false, result: null, errors: [{ code: 7001 }] }, { status: 400 });
+    }
+    if (portalWrite && record.body.servers?.some((mapping) =>
+      mapping.updated_tools?.some((tool) =>
+        !state.servers.get(mapping.id)?.tools?.some((available) => available.name === tool.name)))) {
+      return Response.json({ success: false, result: null, errors: [{ code: 7001,
+        message: 'Tool does not exist on server',
+      }] }, { status: 400 });
     }
     const portalBody = portalWrite ? { ...record.body } : null;
     if (portalWrite && record.body.servers) {

@@ -86,6 +86,7 @@ const sourceActionFailureCodes = new Set([
   'source_action_denied', 'source_action_recovery_required', 'source_action_state_unavailable',
   'source_action_conflict', 'source_action_drift', 'source_discovery_failed', 'source_action_invalid',
   'source_action_authorization_failed', 'source_resource_collision', 'source_action_legacy_policy',
+  'source_connection_required', 'source_sync_required', 'source_tools_mismatch',
 ])
 const sourceActionSchema = v.strictObject({
   schemaVersion: v.literal(1),
@@ -111,6 +112,7 @@ const sourceActionSummarySchema = v.strictObject({
   state: sourceActionStateSchema,
   canCancel: v.boolean(),
   canRenew: v.optional(v.boolean()),
+  connectionUrl: v.optional(v.pipe(v.string(), v.regex(/^https:\/\/dash\.cloudflare\.com\/[a-f0-9]{32}\/one\/access-controls\/ai-controls\/mcp-server\/edit\/[a-z0-9_-]+$/u))),
 })
 const sourceActionsSchema = v.strictObject({
   schemaVersion: v.literal(1),

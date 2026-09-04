@@ -33,7 +33,16 @@ const actionLabels = {
 } satisfies Record<SourceActionSummary['state'], string>
 
 function sourceDraftLabel(action: SourceActionSummary | undefined): string {
-  return action && action.state !== 'failed' ? actionLabels[action.state] : 'Saved draft'
+  return action && action.state !== 'failed' ? actionLabel(action) : 'Saved draft'
+}
+
+function actionLabel(action: SourceActionSummary): string {
+  if (action.state === 'recovery_required') {
+    if (action.failureCode === 'source_connection_required') return 'Connect your source'
+    if (action.failureCode === 'source_sync_required') return 'Sync source tools'
+    if (action.failureCode === 'source_tools_mismatch') return 'Review source tools'
+  }
+  return actionLabels[action.state]
 }
 
 function actionGuidance(action: SourceActionSummary, pollingPaused: boolean): string {
@@ -53,6 +62,15 @@ function actionGuidance(action: SourceActionSummary, pollingPaused: boolean): st
         ? 'This authorization was cancelled. You can authorize the saved draft again.'
         : 'This attempt is closed. Review the saved draft before starting another authorization.'
     case 'recovery_required':
+      if (action.failureCode === 'source_connection_required') {
+        return 'Authenticate the server in Cloudflare, keeping Require user auth off. Once its status is Ready, return here to renew consent and finish installation. Nobody has been assigned access.'
+      }
+      if (action.failureCode === 'source_sync_required') {
+        return 'Open the server in Cloudflare and sync its capabilities. Resolve any connection error, then return when its status is Ready to renew consent and finish installation.'
+      }
+      if (action.failureCode === 'source_tools_mismatch') {
+        return 'The synced source is missing one or more tools from your saved selection. Review its catalogue in Cloudflare and restore the selected tools before resuming. The gateway will keep your exact selection.'
+      }
       return action.canRenew === true
         ? 'Renew Cloudflare consent to resume this recorded installation. The gateway checks the retained resources before continuing.'
         : 'Provisioning may be incomplete or still finishing. Check status after the previous approval expires. The journal is retained; uncertain resource ownership requires review in Cloudflare.'
@@ -269,13 +287,16 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
               <article key={action.actionId} className="mt-4 border-t border-kumo-line pt-4" aria-label={`Installation of ${sources.sources.find((source) => source.id === action.sourceId)?.label ?? action.sourceId}`}>
                 <div className="flex flex-wrap items-center gap-2.5">
                   <h3 className="text-sm font-semibold text-kumo-strong">{sources.sources.find((source) => source.id === action.sourceId)?.label ?? action.sourceId}</h3>
-                  <StatusPill tone={action.state === 'succeeded' ? 'ready' : action.state === 'recovery_required' || action.state === 'authorization_expired' ? 'attention' : 'waiting'}>{actionLabels[action.state]}</StatusPill>
+                  <StatusPill tone={action.state === 'succeeded' ? 'ready' : action.state === 'recovery_required' || action.state === 'authorization_expired' ? 'attention' : 'waiting'}>{actionLabel(action)}</StatusPill>
                 </div>
                 <p className="mt-2 max-w-[80ch] text-sm leading-6 text-kumo-subtle">{actionGuidance(action, sourceActionsPollingPaused)}</p>
                 <p className="mt-2 text-xs leading-5 text-kumo-subtle">
                   Started <time dateTime={action.issuedAt}>{actionTime(action.issuedAt)}</time> · Authorization expires <time dateTime={action.expiresAt}>{actionTime(action.expiresAt)}</time>
                 </p>
                 <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Action: {action.actionId}</p>
+                {action.connectionUrl && action.state === 'recovery_required' ? (
+                  <a className="mt-3 inline-flex text-sm underline underline-offset-4" href={action.connectionUrl} target="_blank" rel="noopener noreferrer">Open source in Cloudflare</a>
+                ) : null}
                 {action.canRenew === true && action.state === 'recovery_required' ? (
                   <div className="mt-3">
                     <Button variant="secondary" className="pressable" disabled={!installationEnabled || isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void authorize(action.sourceId, action.actionId)}>Renew consent and resume</Button>

@@ -266,7 +266,9 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       // The authenticated endpoint checks again that provisioning has not started.
       void cancelSourceApply(actionId).catch(() => {})
     }
-    if (result === 'failed') {
+    if (result === 'failed' && ['apply_source_connection_required', 'apply_source_sync_required', 'apply_source_tools_mismatch'].includes(reason ?? '')) {
+      setSourceNotice({ tone: 'neutral', message: 'Your source resources are saved. Complete the connection step below, then renew consent to finish installation.' })
+    } else if (result === 'failed') {
       setSourceNotice({ tone: 'neutral', message: `Cloudflare approved the request, but your gateway could not complete the installation${reason === null ? '' : ` (${reason})`}. Check the action status below before authorizing again.` })
     } else if (result === 'revocation_unconfirmed') {
       setSourceNotice({ tone: 'neutral', message: 'The source was installed, but the temporary Cloudflare permission could not be confirmed revoked. Review active OAuth grants in your Cloudflare profile.' })

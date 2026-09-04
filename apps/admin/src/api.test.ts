@@ -108,6 +108,24 @@ describe('HttpGatewayAdminApi', () => {
     expect(fetch).toHaveBeenCalledExactlyOnceWith('/api/source-actions', expect.objectContaining({ credentials: 'same-origin', redirect: 'error' }))
   })
 
+  it('accepts only a credential-free Cloudflare server configuration link for connection pauses', async () => {
+    const connectionUrl = `https://dash.cloudflare.com/${'1'.repeat(32)}/one/access-controls/ai-controls/mcp-server/edit/synthetic-source`
+    const action = {
+      schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, sourceId: 'source-1111111111111111',
+      status: 'recovery_required', state: 'recovery_required', failureCode: 'source_connection_required',
+      issuedAt: '2030-01-01T00:00:00.000Z', expiresAt: '2030-01-01T00:10:00.000Z',
+      canCancel: false, canRenew: true, connectionUrl,
+    }
+    const snapshot = { schemaVersion: 1, actions: [action], blockingAction: null }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(snapshot)))
+    expect(await new HttpGatewayAdminApi().getSourceActions()).toEqual(snapshot)
+    for (const invalid of ['javascript:alert(1)', connectionUrl.replace('dash.cloudflare.com', 'other.example.com'),
+      `${connectionUrl}?code=synthetic-private-code`, `${connectionUrl}#synthetic-private-fragment`]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...snapshot, actions: [{ ...action, connectionUrl: invalid }] })))
+      await expect(new HttpGatewayAdminApi().getSourceActions()).rejects.toThrow()
+    }
+  })
+
   it.each([
     ['draft_changed', 'saved source draft changed'],
     ['source_pending', 'source installation is already pending'],

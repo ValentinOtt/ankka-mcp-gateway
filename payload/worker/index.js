@@ -2867,13 +2867,21 @@ function sourceActionCanCancel(action, actorEmail, now) {
 }
 
 function sourceActionCanRenew(action, actorEmail, now) {
-  // Wait out the previous execution window and rotate only the consent key.
+  // A completed connection check has no outstanding write. Other recovery
+  // work must wait out the previous execution window before rotating its key.
   // An unacknowledged hostname-less app creation has no authoritative locator:
   // the zone listing cannot prove it absent, so it still needs manual review.
-  return action.actorEmail === normalizedEmail(actorEmail) && action.expiresAt <= now &&
+  return action.actorEmail === normalizedEmail(actorEmail) && now >= action.issuedAt &&
+    (action.expiresAt <= now || sourceActionConnectionPaused(action)) &&
     action.initialPolicyVersion === SOURCE_INITIAL_POLICY_VERSION &&
     sourceActionState(action, now) === 'recovery_required' &&
     !(action.pending?.kind === 'source_access_application' && action.pending.provider === null);
+}
+
+function sourceActionConnectionPaused(action) {
+  return action.status === 'recovery_required' && action.pending === null && action.portalUpdate === null &&
+    action.resources.length === SOURCE_ACTION_RESOURCE_ORDER.length &&
+    ['source_connection_required', 'source_sync_required', 'source_tools_mismatch'].includes(action.failureCode);
 }
 
 function sourceActionBlocks(action) {
@@ -2924,11 +2932,20 @@ async function sourceActionSnapshot(storage, actorEmail, now) {
       }
     }
   }
-  return { schemaVersion: 1, actions: current.actions.map((action) => ({
-    ...publicSourceAction(action), issuedAt: new Date(action.issuedAt).toISOString(),
-    state: sourceActionState(action, now), canCancel: sourceActionCanCancel(action, actorEmail, now),
-    canRenew: sourceActionCanRenew(action, actorEmail, now),
-  })), blockingAction };
+  const control = current.actions.some(sourceActionConnectionPaused)
+    ? safeManagementControl(await storage.get(CONTROL_KEY)) : null;
+  return { schemaVersion: 1, actions: current.actions.map((action) => {
+    const summary = {
+      ...publicSourceAction(action), issuedAt: new Date(action.issuedAt).toISOString(),
+      state: sourceActionState(action, now), canCancel: sourceActionCanCancel(action, actorEmail, now),
+      canRenew: sourceActionCanRenew(action, actorEmail, now),
+    };
+    if (control && sourceActionConnectionPaused(action)) {
+      summary.connectionUrl = `https://dash.cloudflare.com/${encodeURIComponent(control.accountId)}` +
+        '/one/access-controls/ai-controls/mcp-server/edit/' + encodeURIComponent(action.resources[0].provider.id);
+    }
+    return summary;
+  }), blockingAction };
 }
 
 function sourceSnapshotConflict(snapshot) {
@@ -3223,6 +3240,15 @@ function portalStaticMatches(value, control) {
     value.code_mode === 'default_on' && value.secure_web_gateway === false;
 }
 
+function sourceConnectionFailure(server, source) {
+  if (!isRecord(server)) return 'source_sync_required';
+  if (['required', 'stale'].includes(server.authentication_status)) return 'source_connection_required';
+  if (server.status !== 'ready' || !Array.isArray(server.tools) ||
+      server.tools.some((tool) => !isRecord(tool) || !toolName(tool.name))) return 'source_sync_required';
+  const names = new Set(server.tools.map((tool) => tool.name));
+  return source.enabledTools.every((name) => names.has(name)) ? null : 'source_tools_mismatch';
+}
+
 function portalExact(value, control, mappings) {
   const observed = normalizedPortalMappings(value);
   const expected = [...mappings].map((mapping) => ({
@@ -3416,6 +3442,18 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
       action = await persistSourceAction(storage, { ...action, portalUpdate: null });
       if (!action) return actionRecovery('source_action_state_unavailable');
     }
+    // Cloudflare validates overrides against its synced catalogue. OAuth
+    // sources need an operator connection before this Portal write can work.
+    const serverPath = `/accounts/${encodeURIComponent(refreshed.control.accountId)}` +
+      `/access/ai-controls/mcp/servers/${encodeURIComponent(action.resources[0].provider.id)}`;
+    const server = await providerCall(serverPath, parsed.claim.cloudflareAccessToken);
+    if (server.status !== 'ok' || server.result?.id !== action.resources[0].provider.id) {
+      return failSourceAction(storage, action, 'source_action_recovery_required', false,
+        providerDetail('mcp_server', 'connection', server));
+    }
+    const connectionFailure = sourceConnectionFailure(server.result, desiredState.source);
+    if (connectionFailure) return failSourceAction(storage, action, connectionFailure);
+    if (Date.now() >= action.expiresAt) return failSourceAction(storage, action, 'source_action_recovery_required');
     action = await persistSourceAction(storage, {
       ...action,
       portalUpdate: { phase: 'send_armed', desiredHash },
