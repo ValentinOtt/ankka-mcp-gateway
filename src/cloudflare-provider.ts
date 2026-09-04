@@ -1008,7 +1008,7 @@ async function mutatePortal(
   }
   const expected = normalizePortalDesired(change.desired, marker);
   const body = { ...expected,
-    servers: expected.servers.map(({ server_id, ...mapping }) => ({ id: server_id, ...mapping })),
+    servers: expected.servers.map((mapping) => ({ ...mapping, id: mapping.server_id })),
   };
   if (change.action === 'create') {
     if (await cloudflare.getPortal(change.key) !== null) fail('resource_collision');

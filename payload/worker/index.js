@@ -1649,21 +1649,38 @@ function providerUrl(path) {
   return new URL(`/client/v4${path}`, API_ORIGIN);
 }
 
-/**
- * The provider's first numeric error code from a bounded JSON body, or null.
- * Numeric codes carry no secrets; the message text is never kept.
- */
-async function providerErrorCode(response, signal) {
-  let envelope;
-  try { envelope = await readBoundedProviderJson(response, signal); } catch { return null; }
-  if (!isRecord(envelope) || !Array.isArray(envelope.errors)) return null;
-  const first = envelope.errors[0];
-  const code = isRecord(first) ? first.code : undefined;
-  return Number.isSafeInteger(code) && code >= 0 && code <= 999999 ? code : null;
+// Return only a fixed vocabulary. Never copy provider messages, values, or
+// arbitrary validation paths into a response or retained journal.
+function providerValidationLabel(message) {
+  if (!isText(message)) return null;
+  for (const [pattern, label] of [
+    [/\bserver_id\b/iu, 'field_server_id'],
+    [/\bhostname\b/iu, 'field_hostname'],
+    [/\bon_behalf\b/iu, 'field_on_behalf'],
+    [/\bupdated_tools\b/iu, 'field_updated_tools'],
+    [/\bupdated_prompts\b/iu, 'field_updated_prompts'],
+    [/\bdefault_disabled\b/iu, 'field_default_disabled'],
+    [/\bcode_mode\b/iu, 'field_code_mode'],
+    [/not valid id format/iu, 'id_format'],
+    [/\bid\b/iu, 'field_id'],
+  ]) {
+    if (pattern.test(message)) return label;
+  }
+  return null;
 }
 
-function providerResult(status, result, httpStatus = null, providerCode = null) {
-  return Object.freeze({ status, result, httpStatus, providerCode });
+async function providerHttpFailure(status, response, signal) {
+  let envelope;
+  try { envelope = await readBoundedProviderJson(response, signal); } catch { envelope = null; }
+  const first = isRecord(envelope) && Array.isArray(envelope.errors) ? envelope.errors[0] : null;
+  const code = isRecord(first) ? first.code : undefined;
+  return providerResult(status, null, response.status,
+    Number.isSafeInteger(code) && code >= 0 && code <= 999999 ? code : null,
+    isRecord(first) ? providerValidationLabel(first.message) : null);
+}
+
+function providerResult(status, result, httpStatus = null, providerCode = null, providerValidation = null) {
+  return Object.freeze({ status, result, httpStatus, providerCode, providerValidation });
 }
 
 async function providerCall(path, token, init = {}) {
@@ -1692,17 +1709,17 @@ async function providerCall(path, token, init = {}) {
     return providerResult('absent', null, 404);
   }
   if (response.status === 401 || response.status === 403) {
-    return providerResult('auth', null, response.status, await providerErrorCode(response, init.signal));
+    return providerHttpFailure('auth', response, init.signal);
   }
   if (response.status === 429 || response.status >= 500) {
-    return providerResult('unknown', null, response.status, await providerErrorCode(response, init.signal));
+    return providerHttpFailure('unknown', response, init.signal);
   }
   if (response.status === 204) {
     await discardBody(response, init.signal);
     return providerResult('ok', null, 204);
   }
   if (response.status !== 200 && response.status !== 201) {
-    return providerResult('blocked', null, response.status, await providerErrorCode(response, init.signal));
+    return providerHttpFailure('blocked', response, init.signal);
   }
   let envelope;
   try { envelope = await readBoundedProviderJson(response, init.signal); } catch { envelope = null; }
@@ -1719,6 +1736,7 @@ function providerOutcome(status, response) {
     provider: null,
     httpStatus: response?.httpStatus ?? null,
     providerCode: response?.providerCode ?? null,
+    providerValidation: response?.providerValidation ?? null,
   });
 }
 
@@ -2049,6 +2067,7 @@ async function createResource(state, kind, token) {
     if (server) {
       body.servers = [{
         id: server.id,
+        server_id: server.id,
         default_disabled: true,
         on_behalf: state.settings.sources[0].authentication.onBehalfOfUser,
         updated_tools: toolProjection(state.settings.sources[0].enabledTools),
@@ -3086,13 +3105,14 @@ function actionRecovery(code = 'source_action_recovery_required', detail = null)
     : { schemaVersion: 1, error: code, retryable: true, detail });
 }
 
-// Names the provider step that stopped an action with only the HTTP status
-// and Cloudflare's numeric code: never provider text or identifiers.
+// Names the stopped step, HTTP status, numeric code, and a fixed validation
+// label: never provider text or identifiers.
 function providerDetail(kind, step, outcome) {
   const status = outcome?.httpStatus;
   const code = outcome?.providerCode;
   return `${kind}_${step}_${outcome?.status ?? 'unknown'}` +
-    `${Number.isInteger(status) ? `_http_${status}` : ''}${Number.isInteger(code) ? `_code_${code}` : ''}`;
+    `${Number.isInteger(status) ? `_http_${status}` : ''}${Number.isInteger(code) ? `_code_${code}` : ''}` +
+    `${outcome?.providerValidation ? `_${outcome.providerValidation}` : ''}`;
 }
 
 function sourceAdditionPaused() {
@@ -3403,10 +3423,10 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     if (!action) return actionRecovery('source_action_state_unavailable');
     if (!await armSourceCompatibility(storage, env)) return actionRecovery('source_action_state_unavailable');
     const updated = await providerCall(portalPath, parsed.claim.cloudflareAccessToken, {
-      // Cloudflare writes use `id`; `server_id` is the read/receipt shape.
-      // Keep the recorded desired hash stable when renewing an older action.
+      // The guide uses `id` while the API schema requires `server_id`.
+      // Send both with one identity; keep retained desired hashes unchanged.
       method: 'PUT', body: canonicalJson({ ...portalBody,
-        servers: mappings.map(({ server_id, ...mapping }) => ({ id: server_id, ...mapping })),
+        servers: mappings.map((mapping) => ({ ...mapping, id: mapping.server_id })),
       }),
     });
     if (updated.status !== 'ok') {
