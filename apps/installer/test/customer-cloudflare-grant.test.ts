@@ -149,6 +149,40 @@ describe('customer-owned Cloudflare grant', () => {
       .rejects.toMatchObject({ code: 'zone_mismatch', detail: 'status' });
   });
 
+  it('retries a refused revocation briefly and reports it unconfirmed only after three attempts', async () => {
+    const exchange = async (revokeStatuses: readonly number[]) => {
+      const statuses = [...revokeStatuses];
+      let revokeCalls = 0;
+      const waits: number[] = [];
+      const transport = async (input: RequestInfo | URL): Promise<Response> => {
+        const url = String(input);
+        if (url.endsWith('/oauth2/token')) {
+          return json({ access_token: ACCESS_TOKEN, token_type: 'Bearer', scope: INSTALL_SCOPES.join(' ') });
+        }
+        if (url.endsWith('/oauth2/revoke')) {
+          revokeCalls += 1;
+          return new Response(null, { status: statuses.shift() ?? 200 });
+        }
+        throw new Error('unexpected request');
+      };
+      const grant = await exchangeCustomerCloudflareAuthorizationCode({
+        clientId: CLIENT_ID, code: CODE, verifier: VERIFIER, operation: 'install', transport,
+      });
+      grant.assertUsable();
+      const revoke = grant.revoke({ clientId: CLIENT_ID, transport, wait: async (ms) => { waits.push(ms); } });
+      return { revoke, revokeCalls: () => revokeCalls, waits };
+    };
+    const recovered = await exchange([503, 429, 200]);
+    await expect(recovered.revoke).resolves.toBeUndefined();
+    expect(recovered.revokeCalls()).toBe(3);
+    expect(recovered.waits).toEqual([300, 600]);
+
+    const refused = await exchange([503, 503, 503]);
+    await expect(refused.revoke).rejects.toMatchObject({ code: 'revoke_failed' });
+    expect(refused.revokeCalls()).toBe(3);
+    expect(refused.waits).toEqual([300, 600]);
+  });
+
   it('uses public-client PKCE, verifies one exact account, revokes, and discards', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const transport = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {

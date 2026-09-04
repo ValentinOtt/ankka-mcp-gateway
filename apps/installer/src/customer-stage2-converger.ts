@@ -151,13 +151,24 @@ export interface CustomerStage2PayloadAdapter {
     readonly plan: StaticDeployPlan;
     readonly target: CustomerBootstrapTarget;
   }) => Promise<Response>;
-  /** Re-reads every receipt-owned Gateway resource with the request-local grant. */
+  /**
+   * Re-reads every receipt-owned Gateway resource with the request-local
+   * grant and names the first disagreement with fixed words when it fails.
+   */
   readonly verifyReady: (input: {
     readonly accessToken: string;
     readonly plan: StaticDeployPlan;
     readonly target: CustomerBootstrapTarget;
-  }) => Promise<boolean>;
+  }) => Promise<CustomerStage2ReadinessVerdict>;
 }
+
+export interface CustomerStage2ReadinessVerdict {
+  readonly verified: boolean;
+  /** Fixed words only, for example `dns_record_absent`; null when verified. */
+  readonly reason: string | null;
+}
+
+const VERIFY_REASON = /^[a-z][a-z0-9_]{0,120}$/u;
 
 export interface CustomerStage2ConvergerInput {
   readonly accessToken: string;
@@ -600,12 +611,17 @@ function gatewayActionRecord(context: Context, projectionHash: string): JsonObje
 
 async function verifyGatewayResources(context: Context): Promise<void> {
   const plan = await renewedPlan(context.plan, clock(context.input, context.journal.updatedAt));
-  const verified = await context.input.payload.verifyReady({
+  const verdict = await context.input.payload.verifyReady({
     accessToken: context.input.accessToken,
     plan,
     target: context.target,
   });
-  if (verified !== true) fail('payload_recovery_required');
+  if (verdict.verified !== true) {
+    const reason = v.is(v.string(), verdict.reason) && VERIFY_REASON.test(verdict.reason)
+      ? `verify_${verdict.reason}`
+      : 'verify_unknown';
+    fail('payload_recovery_required', reason);
+  }
 }
 
 async function convergeGatewayResources(context: Context): Promise<v.InferOutput<typeof gatewayLocatorSchema>> {

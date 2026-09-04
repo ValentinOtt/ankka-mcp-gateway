@@ -1,7 +1,7 @@
 import * as v from 'valibot';
 
 // @ts-expect-error The payload is validated as a release input, not a TS package.
-import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceiptProviderState } from '../../../payload/worker/index.js';
+import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceiptProviderStateWithReason } from '../../../payload/worker/index.js';
 import { beginCustomerBootstrapRelay } from './customer-bootstrap-relay-client';
 import {
   CustomerBootstrapDurableStatePort,
@@ -273,7 +273,7 @@ export class AdminState extends RuntimeAdminState {
                 target,
                 nowMs: Date.now(),
               });
-              return verifyBootstrapReceiptProviderState({
+              return verifyBootstrapReceiptProviderStateWithReason({
                 ...claim,
                 cloudflareAccessToken: token,
               }, this.finalEnv, this.finalState.storage, Date.now());

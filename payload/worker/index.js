@@ -2375,15 +2375,27 @@ export async function processBootstrap(request, env, storage) {
  * anything and does not need the bootstrap HMAC secret after final cutover.
  */
 export async function verifyBootstrapReceiptProviderState(value, env, storage, nowMs = Date.now()) {
+  return (await verifyBootstrapReceiptProviderStateWithReason(value, env, storage, nowMs)).verified;
+}
+
+/**
+ * The same check, naming the first disagreement with fixed words only: the
+ * resource kind and the discovery status, never provider text or ids.
+ */
+export async function verifyBootstrapReceiptProviderStateWithReason(value, env, storage, nowMs = Date.now()) {
+  const failure = (reason) => Object.freeze({ verified: false, reason });
   try {
     const environment = parseEnvironment(env, false);
-    if (!environment || !isPlainData(value) || !isRecord(value) ||
-        !Number.isSafeInteger(nowMs) || nowMs < 0) return false;
+    if (!environment) return failure('environment_invalid');
+    if (!isPlainData(value) || !isRecord(value) || !Number.isSafeInteger(nowMs) || nowMs < 0) {
+      return failure('claim_invalid');
+    }
     const claim = await parseClaim(value, environment, nowMs);
-    if (!claim) return false;
+    if (!claim) return failure('claim_invalid');
     const stored = await storage.get(STORAGE_KEY);
+    if (stored === undefined) return failure('receipt_missing');
     const receipt = await parseReadyReceipt(stored, claim);
-    if (!receipt) return false;
+    if (!receipt) return failure('receipt_invalid');
     const state = {
       ...await initialState(claim),
       status: 'ready',
@@ -2392,13 +2404,18 @@ export async function verifyBootstrapReceiptProviderState(value, env, storage, n
     };
     for (const kind of claim.resources.map((resourceValue) => resourceValue.kind)) {
       const expected = receipt.resources.find((resourceValue) => resourceValue.kind === kind);
+      if (!expected) return failure(`${kind}_missing`);
       const observed = await discoverResource(state, kind, claim.cloudflareAccessToken);
-      if (!expected || observed.status !== 'present' ||
-          canonicalJson(observed.provider) !== canonicalJson(expected.provider)) return false;
+      if (observed.status !== 'present') {
+        return failure(`${kind}_${isText(observed.status) ? observed.status : 'unknown'}`);
+      }
+      if (canonicalJson(observed.provider) !== canonicalJson(expected.provider)) {
+        return failure(`${kind}_locator_mismatch`);
+      }
     }
-    return true;
+    return Object.freeze({ verified: true, reason: null });
   } catch {
-    return false;
+    return failure('threw');
   }
 }
 
