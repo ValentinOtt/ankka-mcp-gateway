@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Accept Cloudflare One-time PIN providers with the empty name returned by the
+  dashboard, so adding email-code login does not block installation. Document
+  the Portal login-method prerequisite for team members outside the Cloudflare
+  account; Portal and source allow rules remain separate requirements.
+
 - Allow Claude's exact hosted OAuth callback when creating a Gateway Portal,
   including through the installer. Local MCP clients retain localhost and
   loopback support. Existing Portal settings and installation receipt hashes

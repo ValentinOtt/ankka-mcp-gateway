@@ -269,18 +269,19 @@ describe('Cloudflare management-surface prerequisite', () => {
     expect(new URL(requiredFixture(provider.requests.at(1), 'second provider request').url).searchParams.get('page')).toBe('2');
   });
 
-  it('accepts the account-default Cloudflare identity provider, which is listed with an empty name', async () => {
-    // Live shape 2026-08-23: new Zero Trust organisations get type "cloudflare"
-    // with name "" and extra uid/version/config fields.
+  it.each(['cloudflare', 'onetimepin'])('accepts the unnamed built-in %s identity provider', async (type) => {
+    // Both built-in providers may have an empty name and extra provider fields.
     const provider = recorded(page([
-      { id: IDP_ONE, type: 'cloudflare', uid: IDP_ONE, name: '', version: '1', config: {}, scim_config: {} },
+      { id: IDP_ONE, type, uid: IDP_ONE, name: '', version: '1', config: {}, scim_config: {} },
     ], 1, 1, 1_000));
     await expect(listAccessIdentityProviders({
       ...call(provider.transport),
       accountId: ACCOUNT_ID,
-    })).resolves.toEqual([{ id: IDP_ONE, name: '', readOnly: false, type: 'cloudflare' }]);
+    })).resolves.toEqual([{ id: IDP_ONE, name: '', readOnly: false, type }]);
+  });
 
-    const unnamedOther = recorded(page([{ id: IDP_ONE, type: 'onetimepin', name: '' }], 1, 1, 1_000));
+  it.each(['google', 'saml', 'oidc', 'unrecognized'])('rejects an unnamed %s identity provider', async (type) => {
+    const unnamedOther = recorded(page([{ id: IDP_ONE, type, name: '' }], 1, 1, 1_000));
     await expect(listAccessIdentityProviders({
       ...call(unnamedOther.transport),
       accountId: ACCOUNT_ID,
