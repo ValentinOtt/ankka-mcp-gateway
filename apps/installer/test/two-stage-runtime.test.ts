@@ -454,6 +454,44 @@ describe('clean hosted two-stage runtime', () => {
     expect(unknown.status).toBe(404);
   });
 
+  it('serves the pinned bundle files token-free for a Gateway that updates itself', async () => {
+    const h = await harness();
+    // SAFETY: the files route must succeed with every non-bucket binding missing; the cast expresses that gap.
+    const bucketOnly = Object.freeze({ GATEWAY_RELEASE_BUCKET: h.env.GATEWAY_RELEASE_BUCKET }) as TwoStageDeployEnv;
+    // The fixture bundle's worker module, byte for byte.
+    const expected = '// ankka-control-plane-origin:https://deploy.ankka.ai\nexport default{fetch(){return new Response("ready")}};';
+    const file = await h.worker.fetch(
+      new Request(`${PUBLIC_ORIGIN}/api/releases/canary/files/payload/worker/index.js`),
+      bucketOnly,
+    );
+    expect(file.status).toBe(200);
+    expect(file.headers.get('set-cookie')).toBeNull();
+    expect(file.headers.get('cache-control')).toBe('no-store');
+    expect(file.headers.get('content-type')).toBe('application/javascript+module');
+    expect(file.headers.get('content-length')).toBe(String(encoder.encode(expected).byteLength));
+    expect(await file.text()).toBe(expected);
+
+    for (const path of [
+      '/api/releases/stable/files/payload/worker/index.js',
+      '/api/releases/canary/files/payload/worker/missing.js',
+      '/api/releases/canary/files/payload/../worker/index.js',
+      '/api/releases/canary/files/manifest.json',
+    ]) {
+      const missing = await h.worker.fetch(new Request(`${PUBLIC_ORIGIN}${path}`), h.env);
+      expect(missing.status).toBe(404);
+    }
+    const posted = await h.worker.fetch(
+      new Request(`${PUBLIC_ORIGIN}/api/releases/canary/files/payload/worker/index.js`, { method: 'POST' }),
+      h.env,
+    );
+    expect(posted.status).toBe(405);
+    const queried = await h.worker.fetch(
+      new Request(`${PUBLIC_ORIGIN}/api/releases/canary/files/payload/worker/index.js?x=1`),
+      h.env,
+    );
+    expect(queried.status).toBe(404);
+  });
+
   it('walks selection, plan, one temporary approval, callback provisioning, and token-free handoff', async () => {
     const h = await harness();
     const health = await h.worker.fetch(new Request(`${PUBLIC_ORIGIN}/health`), h.env);

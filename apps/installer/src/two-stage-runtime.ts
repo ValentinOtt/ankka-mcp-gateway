@@ -90,6 +90,8 @@ const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 
 /** Token-free public update descriptors read by installed Gateways' updaters. */
 const RELEASE_DESCRIPTOR_ROUTES = Object.freeze(['/api/releases/canary', '/api/releases/stable'] as const);
+/** One exact manifest path of the pinned bundle; matched by equality, never resolved. */
+const RELEASE_FILE_ROUTE = /^\/api\/releases\/(canary|stable)\/files\/(payload\/[A-Za-z0-9][A-Za-z0-9._/-]{0,200})$/u;
 
 /** The complete hosted route allowlist besides signed installer assets. */
 export const TWO_STAGE_API_ROUTES = Object.freeze([
@@ -808,6 +810,26 @@ export function createTwoStageDeployRuntime(
       const channel = buildPublicUpdateChannel((await loadSnapshot(env)).bundle);
       if (path !== `/api/releases/${channel.channel}`) throw new DeployError(404, 'release_unavailable');
       return json(channel);
+    }
+    const releaseFile = RELEASE_FILE_ROUTE.exec(path);
+    if (releaseFile !== null) {
+      if (request.method !== 'GET') throw new DeployError(405, 'bad_request');
+      // The pinned bundle's own bytes, for an installed Gateway that updates
+      // itself: it fetched the signed manifest first and verifies every file
+      // against it, so this route needs no session, grant, or other binding.
+      const [, channelName = '', filePath = ''] = releaseFile;
+      const snapshot = await loadSnapshot(env);
+      const channel = buildPublicUpdateChannel(snapshot.bundle);
+      const file = snapshot.bundle.payload.find((entry) => entry.path === filePath);
+      if (channelName !== channel.channel || file === undefined) throw new DeployError(404, 'release_unavailable');
+      return new Response(file.bytes, {
+        headers: {
+          'cache-control': 'no-store',
+          'content-length': String(file.byteSize),
+          'content-type': file.contentType,
+          'x-content-type-options': 'nosniff',
+        },
+      });
     }
     const runtime = context(env);
     switch (`${request.method} ${path}`) {

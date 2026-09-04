@@ -14,6 +14,7 @@ import {
   validCustomerBootstrapRelayAuthorization,
 } from './customer-bootstrap-router';
 import {
+  CustomerCloudflareGrantError,
   exchangeCustomerCloudflareAuthorizationCode,
   verifyCustomerCloudflareGrantAccount,
   type CustomerCloudflareTransport,
@@ -24,16 +25,18 @@ import {
   CUSTOMER_OPERATION_OAUTH_START_PATH,
   CUSTOMER_OPERATION_ROOT_PATH,
 } from './customer-install-paths';
+import { operationSignature } from './customer-operation-secrets';
+import type { CustomerRuntimeUpdateTarget } from './customer-runtime-update';
 
 /**
  * Gateway-local authorization for a later operation.
  *
- * The dashboard prepares a source installation inside the gateway and hands
- * the browser a same-origin fragment carrying the one-time action key. This
- * router turns that handoff into a fresh Cloudflare consent for the exact
- * `source-add` scopes, using the public client and callback the ownership
- * trust certified for the install, then applies the action with the
- * request-local grant and revokes it. Nothing about the grant, the PKCE
+ * The dashboard prepares a source installation or a runtime update inside the
+ * gateway and hands the browser a same-origin fragment carrying the one-time
+ * action key. This router turns that handoff into a fresh Cloudflare consent
+ * for exactly the operation's scopes, using the public client and callback
+ * the ownership trust certified for the install, then runs the operation with
+ * the request-local grant and revokes it. Nothing about the grant, the PKCE
  * verifier, or the action key is written to durable storage: the verifier and
  * the key ride in one HttpOnly cookie, the attempt record keeps only hashes,
  * identifiers, and expiries.
@@ -57,6 +60,8 @@ const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const RELEASE = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const KEY_ID = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u;
 const ARTIFACT_SHA256 = /^[a-f0-9]{64}$/u;
+const PREFIXED_SHA256 = /^sha256:[a-f0-9]{64}$/u;
+const VERSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const MAX_COOKIE_BYTES = 8 * 1024;
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_APPLY_RESPONSE_BYTES = 64 * 1024;
@@ -72,7 +77,7 @@ const configSchema = v.strictObject({
   artifactSha256: v.pipe(v.string(), v.regex(ARTIFACT_SHA256)),
 });
 
-/** The exact release identity the gateway wrote into the handoff. */
+/** The exact release identity the gateway wrote into a source handoff. */
 const releaseIdentitySchema = v.strictObject({
   schemaVersion: v.literal(1),
   channel: v.picklist(['canary', 'stable']),
@@ -83,9 +88,7 @@ const releaseIdentitySchema = v.strictObject({
   artifactSha256: v.pipe(v.string(), v.regex(ARTIFACT_SHA256)),
 });
 
-/** A source installation handoff, exactly as the gateway's prepare route builds it. */
-const sourceActionClaimSchema = v.strictObject({
-  schemaVersion: v.literal(1),
+const commonClaimEntries = {
   actionId: v.pipe(v.string(), v.regex(ACTION_ID)),
   actionKey: v.pipe(v.string(), v.regex(TOKEN)),
   actorEmail: v.pipe(v.string(), v.maxLength(256), v.regex(EMAIL)),
@@ -94,8 +97,30 @@ const sourceActionClaimSchema = v.strictObject({
   workerName: v.pipe(v.string(), v.regex(WORKER_NAME)),
   workersSubdomain: v.pipe(v.string(), v.regex(DNS_LABEL)),
   managementOrigin: v.pipe(v.string(), v.url()),
-  releaseIdentity: releaseIdentitySchema,
   expiresAt: v.pipe(v.number(), v.safeInteger()),
+};
+
+/** A source installation handoff, exactly as the gateway's prepare route builds it. */
+const sourceActionClaimSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  ...commonClaimEntries,
+  releaseIdentity: releaseIdentitySchema,
+});
+
+const runtimeVersionSchema = v.strictObject({
+  release: v.pipe(v.string(), v.regex(RELEASE)),
+  artifactSha256: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
+  versionId: v.union([v.pipe(v.string(), v.regex(VERSION_ID)), v.null()]),
+});
+
+/** A runtime update handoff, exactly as the gateway's update prepare route builds it. */
+const runtimeActionClaimSchema = v.strictObject({
+  schemaVersion: v.literal(2),
+  actionType: v.literal('runtime_update'),
+  ...commonClaimEntries,
+  operation: v.picklist(['update', 'rollback']),
+  from: runtimeVersionSchema,
+  to: runtimeVersionSchema,
 });
 
 const startBodySchema = v.strictObject({
@@ -109,13 +134,23 @@ const appliedSchema = v.strictObject({
   status: v.literal('succeeded'),
 });
 
+const targetSchema = v.strictObject({
+  release: v.pipe(v.string(), v.regex(RELEASE)),
+  artifactSha256: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
+});
+
 export const customerOperationAttemptSchema = v.strictObject({
   schemaVersion: v.literal(1),
   attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
-  operation: v.literal('source-add'),
+  kind: v.picklist(['source', 'runtime']),
+  operation: v.picklist(['source-add', 'upgrade', 'rollback']),
   actionId: v.pipe(v.string(), v.regex(ACTION_ID)),
   actorEmail: v.pipe(v.string(), v.maxLength(256), v.regex(EMAIL)),
   actionExpiresAt: v.pipe(v.number(), v.safeInteger()),
+  /** Where a runtime update fetches the signed bundle; as the gateway named it in the handoff. */
+  controlPlaneOrigin: v.pipe(v.string(), v.url()),
+  /** The runtime release to reach; null for a source installation. */
+  target: v.union([targetSchema, v.null()]),
   stateHash: v.pipe(v.string(), v.regex(TOKEN)),
   phase: v.picklist(['authorizing', 'exchanging']),
   expiresAt: v.pipe(v.number(), v.safeInteger()),
@@ -123,6 +158,10 @@ export const customerOperationAttemptSchema = v.strictObject({
 
 export type CustomerOperationAttempt = v.InferOutput<typeof customerOperationAttemptSchema>;
 type SourceActionClaim = v.InferOutput<typeof sourceActionClaimSchema>;
+type RuntimeActionClaim = v.InferOutput<typeof runtimeActionClaimSchema>;
+type DecodedClaim =
+  | { readonly kind: 'source'; readonly claim: SourceActionClaim }
+  | { readonly kind: 'runtime'; readonly claim: RuntimeActionClaim };
 
 /** One attempt per gateway, durable so the callback can refuse replays. */
 export interface CustomerOperationAttemptPort {
@@ -131,13 +170,24 @@ export interface CustomerOperationAttemptPort {
   clear(): Promise<void>;
 }
 
-/** What the gateway's own action route reports about a prepared action. */
-export interface CustomerOperationSourceActionView {
+/** What the gateway's own action routes report about a prepared action. */
+export interface CustomerOperationActionView {
   readonly status: string;
   readonly expiresAt: number;
 }
 
 export type CustomerOperationResult = 'applied' | 'failed' | 'denied' | 'revocation_unconfirmed';
+
+export interface CustomerOperationRuntimeUpdateInput {
+  readonly accessToken: string;
+  readonly actionId: string;
+  readonly actionKey: string;
+  readonly actorEmail: string;
+  readonly actionExpiresAt: number;
+  readonly controlPlaneOrigin: string;
+  readonly operation: 'update' | 'rollback';
+  readonly target: CustomerRuntimeUpdateTarget;
+}
 
 export interface CustomerOperationRouterConfig {
   readonly accountId: string;
@@ -155,7 +205,8 @@ export interface CustomerOperationRouterDependencies {
   readonly transport: CustomerCloudflareTransport;
   /** Throws unless the install is complete and the ownership trust names the callback. */
   readonly assertOperational: () => Promise<void>;
-  readonly readSourceAction: (actionId: string) => Promise<CustomerOperationSourceActionView | null>;
+  readonly readSourceAction: (actionId: string) => Promise<CustomerOperationActionView | null>;
+  readonly readRuntimeAction: (actionId: string) => Promise<CustomerOperationActionView | null>;
   readonly issueRelayTicket: (operation: CustomerCloudflareOperation) => Promise<{
     readonly relayTicket: string;
     readonly expiresAt: number;
@@ -172,6 +223,8 @@ export interface CustomerOperationRouterDependencies {
     readonly body: string;
     readonly signature: string;
   }) => Promise<Response>;
+  /** Runs the gateway's own update with the grant; it hands over before the upload. */
+  readonly runRuntimeUpdate: (input: CustomerOperationRuntimeUpdateInput) => Promise<CustomerOperationResult>;
   readonly now?: () => number;
 }
 
@@ -262,87 +315,117 @@ async function startBody(request: Request): Promise<v.InferOutput<typeof startBo
   }
 }
 
-function decodeClaim(handoff: string): SourceActionClaim | null {
+function decodeClaim(handoff: string): DecodedClaim | null {
+  let decoded: v.InferInput<typeof startBodySchema> | null;
   try {
-    const parsed = v.safeParse(sourceActionClaimSchema, JSON.parse(new TextDecoder().decode(base64UrlDecode(handoff))));
-    return parsed.success ? parsed.output : null;
+    decoded = JSON.parse(new TextDecoder().decode(base64UrlDecode(handoff)));
   } catch {
     return null;
   }
+  const source = v.safeParse(sourceActionClaimSchema, decoded);
+  if (source.success) return { kind: 'source', claim: source.output };
+  const runtime = v.safeParse(runtimeActionClaimSchema, decoded);
+  if (runtime.success) return { kind: 'runtime', claim: runtime.output };
+  return null;
 }
 
 function claimMatches(
-  claim: SourceActionClaim,
+  decoded: DecodedClaim,
   config: v.InferOutput<typeof configSchema>,
   now: number,
 ): boolean {
-  return claim.accountId === config.accountId && claim.managementOrigin === config.managementOrigin &&
+  const { claim } = decoded;
+  const identity = decoded.kind === 'source'
+    ? decoded.claim.releaseIdentity.release === config.release &&
+      decoded.claim.releaseIdentity.artifactSha256 === config.artifactSha256
+    : decoded.claim.from.release === config.release &&
+      decoded.claim.from.artifactSha256 === `sha256:${config.artifactSha256}` &&
+      decoded.claim.to.release !== decoded.claim.from.release;
+  return identity && claim.accountId === config.accountId && claim.managementOrigin === config.managementOrigin &&
     claim.workerName === config.workerName && claim.workersSubdomain === config.workersSubdomain &&
-    claim.releaseIdentity.release === config.release &&
-    claim.releaseIdentity.artifactSha256 === config.artifactSha256 &&
     claim.expiresAt > now && claim.expiresAt <= now + MAX_ACTION_LIFETIME_MS + CLOCK_SKEW_MS;
 }
 
-async function signature(actionKey: string, body: string): Promise<string> {
-  const keyBytes = base64UrlDecode(actionKey);
-  const ownedKey = new Uint8Array(keyBytes.byteLength);
-  ownedKey.set(keyBytes);
-  try {
-    const key = await crypto.subtle.importKey(
-      'raw', ownedKey.buffer, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
-    );
-    const digest = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body)));
-    try {
-      return `sha256=${[...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
-    } finally {
-      digest.fill(0);
-    }
-  } finally {
-    keyBytes.fill(0);
-    ownedKey.fill(0);
-  }
+function relayOperation(decoded: DecodedClaim): 'source-add' | 'upgrade' | 'rollback' {
+  if (decoded.kind === 'source') return 'source-add';
+  return decoded.claim.operation === 'rollback' ? 'rollback' : 'upgrade';
 }
 
-async function appliedOutcome(response: Response, actionId: string): Promise<CustomerOperationResult> {
+/** A fixed, bounded word naming why an operation stopped; never provider text. */
+export type CustomerOperationReason = string;
+const REASON = /^[a-z][a-z0-9_]{0,120}$/u;
+
+interface OperationOutcome {
+  readonly result: CustomerOperationResult;
+  readonly reason: CustomerOperationReason | null;
+}
+
+const rejectionSchema = v.looseObject({ error: v.pipe(v.string(), v.regex(REASON)) });
+
+async function appliedOutcome(response: Response, actionId: string): Promise<OperationOutcome> {
   const declared = response.headers.get('content-length');
   if (declared !== null && (!/^\d{1,7}$/u.test(declared) || Number(declared) > MAX_APPLY_RESPONSE_BYTES)) {
     await response.body?.cancel();
-    return 'failed';
+    return { result: 'failed', reason: `apply_http_${response.status}` };
   }
   let text: string;
   try {
     text = await response.text();
   } catch {
-    return 'failed';
+    return { result: 'failed', reason: `apply_http_${response.status}_unreadable` };
   }
-  if (response.status !== 200 || text.length > MAX_APPLY_RESPONSE_BYTES) return 'failed';
+  if (text.length > MAX_APPLY_RESPONSE_BYTES) return { result: 'failed', reason: `apply_http_${response.status}` };
+  let body: v.InferInput<typeof appliedSchema> | null;
   try {
-    const parsed = v.safeParse(appliedSchema, JSON.parse(text));
-    return parsed.success && parsed.output.actionId === actionId ? 'applied' : 'failed';
+    body = JSON.parse(text);
   } catch {
-    return 'failed';
+    body = null;
   }
+  if (response.status !== 200) {
+    const rejection = v.safeParse(rejectionSchema, body);
+    return {
+      result: 'failed',
+      reason: rejection.success ? `apply_${rejection.output.error}` : `apply_http_${response.status}`,
+    };
+  }
+  const parsed = v.safeParse(appliedSchema, body);
+  return parsed.success && parsed.output.actionId === actionId
+    ? { result: 'applied', reason: null }
+    : { result: 'failed', reason: 'apply_response_invalid' };
+}
+
+function failureReason<Thrown>(error: Thrown): CustomerOperationReason {
+  if (error instanceof CustomerCloudflareGrantError) {
+    return error.detail === null ? `grant_${error.code}` : `grant_${error.code}_${error.detail}`;
+  }
+  return 'unexpected';
 }
 
 function operationPage(): Response {
   const nonce = crypto.randomUUID().replaceAll('-', '');
   const pageHeaders = headers('text/html; charset=utf-8');
   pageHeaders.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Authorize in Cloudflare</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}button{font:inherit;padding:.75rem 1rem}a{color:inherit}</style><h1>Authorize this change in Cloudflare</h1><p id="message">Preparing a fresh, temporary Cloudflare approval for your gateway…</p><button id="retry" hidden>Try again</button><p><a href="/sources">Back to Sources</a></p><script nonce="${nonce}">(()=>{const message=document.querySelector('#message');const retry=document.querySelector('#retry');const handoff=location.hash.slice(1);history.replaceState(null,'',location.pathname);const run=async()=>{retry.hidden=true;try{if(!/^[A-Za-z0-9_-]{40,8192}$/.test(handoff))throw new Error();const response=await fetch('${CUSTOMER_OPERATION_OAUTH_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({schemaVersion:1,handoff}),credentials:'same-origin',cache:'no-store'});const value=await response.json();if(!response.ok||typeof value.authorizationUrl!=='string')throw new Error();location.replace(value.authorizationUrl)}catch{message.textContent='This authorization link could not be started. Go back to Sources, check the action status, and authorize again from the saved draft.';retry.hidden=false}};retry.addEventListener('click',run);run()})();</script></html>`, {
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Authorize in Cloudflare</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}button{font:inherit;padding:.75rem 1rem}a{color:inherit}</style><h1>Authorize this change in Cloudflare</h1><p id="message">Preparing a fresh, temporary Cloudflare approval for your gateway…</p><button id="retry" hidden>Try again</button><p><a href="/sources">Back to the dashboard</a></p><script nonce="${nonce}">(()=>{const message=document.querySelector('#message');const retry=document.querySelector('#retry');const handoff=location.hash.slice(1);history.replaceState(null,'',location.pathname);const run=async()=>{retry.hidden=true;try{if(!/^[A-Za-z0-9_-]{40,8192}$/.test(handoff))throw new Error();const response=await fetch('${CUSTOMER_OPERATION_OAUTH_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({schemaVersion:1,handoff}),credentials:'same-origin',cache:'no-store'});const value=await response.json();if(!response.ok||typeof value.authorizationUrl!=='string')throw new Error();location.replace(value.authorizationUrl)}catch{message.textContent='This authorization link could not be started. Go back to the dashboard, check the action status, and authorize again.';retry.hidden=false}};retry.addEventListener('click',run);run()})();</script></html>`, {
     status: 200,
     headers: pageHeaders,
   });
 }
 
-function redirectToSources(
+function redirectToDashboard(
   managementOrigin: string,
-  actionId: string,
-  result: CustomerOperationResult,
+  attempt: CustomerOperationAttempt,
+  outcome: OperationOutcome,
   cookies: readonly string[],
 ): Response {
-  const location = new URL('/sources', managementOrigin);
-  location.searchParams.set('sourceAction', actionId);
-  location.searchParams.set('sourceActionResult', result);
+  const location = attempt.kind === 'source'
+    ? new URL('/sources', managementOrigin)
+    : new URL('/settings', managementOrigin);
+  const parameter = attempt.kind === 'source' ? 'sourceAction' : 'runtimeAction';
+  location.searchParams.set(parameter, attempt.actionId);
+  location.searchParams.set(`${parameter}Result`, outcome.result);
+  if (outcome.reason !== null && REASON.test(outcome.reason)) {
+    location.searchParams.set(`${parameter}Reason`, outcome.reason);
+  }
   const responseHeaders = headers();
   responseHeaders.set('location', location.toString());
   for (const cookie of cookies) responseHeaders.append('set-cookie', cookie);
@@ -369,12 +452,15 @@ export function createCustomerOperationRouter(
       return json({ schemaVersion: 1, error: 'forbidden' }, 403);
     }
     const body = await startBody(request);
-    const claim = body === null ? null : decodeClaim(body.handoff);
+    const decoded = body === null ? null : decodeClaim(body.handoff);
     const startedAt = now();
-    if (claim === null || !claimMatches(claim, config, startedAt)) {
+    if (decoded === null || !claimMatches(decoded, config, startedAt)) {
       return json({ schemaVersion: 1, error: 'operation_invalid' }, 400);
     }
-    const action = await dependencies.readSourceAction(claim.actionId);
+    const { claim } = decoded;
+    const action = decoded.kind === 'source'
+      ? await dependencies.readSourceAction(claim.actionId)
+      : await dependencies.readRuntimeAction(claim.actionId);
     if (action === null || action.status !== 'authorization_required' || action.expiresAt !== claim.expiresAt) {
       return json({ schemaVersion: 1, error: 'operation_conflict' }, 409);
     }
@@ -382,6 +468,7 @@ export function createCustomerOperationRouter(
     if (existing !== null && existing.expiresAt > startedAt && existing.actionId !== claim.actionId) {
       return json({ schemaVersion: 1, error: 'operation_pending' }, 409);
     }
+    const operation = relayOperation(decoded);
     const verifier = randomBase64Url(32);
     const state = randomBase64Url(32);
     const attemptId = `attempt_${randomBase64Url(18)}`;
@@ -389,29 +476,34 @@ export function createCustomerOperationRouter(
     await dependencies.attempts.write({
       schemaVersion: 1,
       attemptId,
-      operation: 'source-add',
+      kind: decoded.kind,
+      operation,
       actionId: claim.actionId,
       actorEmail: claim.actorEmail,
       actionExpiresAt: claim.expiresAt,
+      controlPlaneOrigin: new URL(claim.controlPlaneOrigin).origin,
+      target: decoded.kind === 'runtime'
+        ? { release: decoded.claim.to.release, artifactSha256: decoded.claim.to.artifactSha256 }
+        : null,
       stateHash: await sha256(state),
       phase: 'authorizing',
       expiresAt,
     });
     try {
-      const ticket = await dependencies.issueRelayTicket('source-add');
+      const ticket = await dependencies.issueRelayTicket(operation);
       if (!Number.isSafeInteger(ticket.expiresAt) || ticket.expiresAt <= startedAt ||
           ticket.relayTicket.length > 4_096 || !RELAY_TICKET.test(ticket.relayTicket)) {
         throw new Error('invalid');
       }
       const challenge = await pkceChallenge(verifier);
       const relay = await dependencies.beginRelay({
-        operation: 'source-add',
+        operation,
         relayTicket: ticket.relayTicket,
         gatewayState: state,
         pkceChallenge: challenge,
         gatewayCallback,
       });
-      if (!validCustomerBootstrapRelayAuthorization(relay, config.publicClientId, challenge, 'source-add')) {
+      if (!validCustomerBootstrapRelayAuthorization(relay, config.publicClientId, challenge, operation)) {
         throw new Error('invalid');
       }
       return json({ schemaVersion: 1, authorizationUrl: relay.authorizationUrl }, 200, [
@@ -421,6 +513,29 @@ export function createCustomerOperationRouter(
       await dependencies.attempts.clear();
       return json({ schemaVersion: 1, error: 'authorization_unavailable' }, 503, [clearCookie()]);
     }
+  };
+
+  const applySource = async (
+    attempt: CustomerOperationAttempt,
+    actionKey: string,
+    accessToken: string,
+    at: number,
+  ): Promise<OperationOutcome> => {
+    const body = canonicalJson({
+      schemaVersion: 1,
+      actionId: attempt.actionId,
+      actionKey,
+      actorEmail: attempt.actorEmail,
+      accountId: config.accountId,
+      issuedAt: at,
+      expiresAt: attempt.actionExpiresAt,
+      cloudflareAccessToken: accessToken,
+    });
+    const response = await dependencies.applySourceAction({
+      body,
+      signature: await operationSignature(actionKey, body),
+    });
+    return appliedOutcome(response, attempt.actionId);
   };
 
   const callback = async (request: Request, url: URL): Promise<Response> => {
@@ -439,7 +554,7 @@ export function createCustomerOperationRouter(
     const oauthError = url.searchParams.get('error');
     if (oauthError === 'authorization_rejected' && code === '' && url.searchParams.size === 2) {
       await dependencies.attempts.clear();
-      return redirectToSources(config.managementOrigin, attempt.actionId, 'denied', cookies);
+      return redirectToDashboard(config.managementOrigin, attempt, { result: 'denied', reason: null }, cookies);
     }
     if (oauthError !== null || !AUTHORIZATION_CODE.test(code) || url.searchParams.size !== 2) {
       return json({ schemaVersion: 1, error: 'oauth_callback_rejected' }, 400, cookies);
@@ -447,51 +562,56 @@ export function createCustomerOperationRouter(
     // The attempt is spent before the exchange: a replayed callback cannot exchange twice.
     await dependencies.attempts.write({ ...attempt, phase: 'exchanging' });
     let grant: EphemeralCustomerCloudflareGrant | null = null;
-    let result: CustomerOperationResult;
+    let outcome: OperationOutcome;
     try {
       grant = await exchangeCustomerCloudflareAuthorizationCode({
         clientId: config.publicClientId,
         code,
         verifier: cookie.verifier,
-        operation: 'source-add',
+        operation: attempt.operation,
         transport: dependencies.transport,
       });
       grant.assertUsable();
-      result = await grant.withAccessToken(async (accessToken) => {
+      outcome = await grant.withAccessToken(async (accessToken): Promise<OperationOutcome> => {
         await verifyCustomerCloudflareGrantAccount({
           accessToken,
           expectedAccountId: config.accountId,
           transport: dependencies.transport,
         });
-        const body = canonicalJson({
-          schemaVersion: 1,
+        if (attempt.kind === 'source') return applySource(attempt, cookie.actionKey, accessToken, callbackAt);
+        if (attempt.target === null || attempt.operation === 'source-add') {
+          return { result: 'failed', reason: 'attempt_invalid' };
+        }
+        const result = await dependencies.runRuntimeUpdate({
+          accessToken,
           actionId: attempt.actionId,
           actionKey: cookie.actionKey,
           actorEmail: attempt.actorEmail,
-          accountId: config.accountId,
-          issuedAt: callbackAt,
-          expiresAt: attempt.actionExpiresAt,
-          cloudflareAccessToken: accessToken,
+          actionExpiresAt: attempt.actionExpiresAt,
+          controlPlaneOrigin: attempt.controlPlaneOrigin,
+          operation: attempt.operation === 'rollback' ? 'rollback' : 'update',
+          target: attempt.target,
         });
-        const response = await dependencies.applySourceAction({
-          body,
-          signature: await signature(cookie.actionKey, body),
-        });
-        return appliedOutcome(response, attempt.actionId);
+        return { result, reason: result === 'applied' ? null : 'update_failed' };
       });
-    } catch {
-      result = 'failed';
+    } catch (error) {
+      outcome = { result: 'failed', reason: failureReason(error) };
     }
     if (grant !== null) {
       try {
         await grant.revoke({ clientId: config.publicClientId, transport: dependencies.transport });
       } catch {
-        if (result === 'applied') result = 'revocation_unconfirmed';
+        if (outcome.result === 'applied') outcome = { result: 'revocation_unconfirmed', reason: null };
       }
       grant.discard();
     }
-    await dependencies.attempts.clear();
-    return redirectToSources(config.managementOrigin, attempt.actionId, result, cookies);
+    // A runtime update may have replaced this Worker by now; storage writes can be refused.
+    try {
+      await dependencies.attempts.clear();
+    } catch {
+      // The attempt record expires on its own; the new version finishes the journal.
+    }
+    return redirectToDashboard(config.managementOrigin, attempt, outcome, cookies);
   };
 
   return Object.freeze({

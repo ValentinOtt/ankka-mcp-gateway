@@ -17,10 +17,12 @@ import {
   CUSTOMER_OPERATION_COOKIE,
   createCustomerOperationRouter,
   customerOperationCookiePresent,
+  type CustomerOperationActionView,
   type CustomerOperationAttempt,
   type CustomerOperationAttemptPort,
+  type CustomerOperationResult,
   type CustomerOperationRouterDependencies,
-  type CustomerOperationSourceActionView,
+  type CustomerOperationRuntimeUpdateInput,
 } from '../src/customer-operation-router';
 import { responseJson } from './boundary';
 
@@ -97,7 +99,7 @@ interface Harness {
   readonly revoked: () => boolean;
 }
 
-function transport(): Harness {
+function transport(scope = SOURCE_SCOPES): Harness {
   const calls: string[] = [];
   let revoked = false;
   return {
@@ -107,7 +109,7 @@ function transport(): Harness {
       const url = String(input);
       calls.push(url);
       if (url.endsWith('/oauth2/token')) {
-        return json({ access_token: ACCESS_TOKEN, token_type: 'bearer', scope: SOURCE_SCOPES });
+        return json({ access_token: ACCESS_TOKEN, token_type: 'bearer', scope });
       }
       if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
         return json({ success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }] });
@@ -129,10 +131,13 @@ interface ApplyRecord {
 function dependencies(input: {
   readonly port: CustomerOperationAttemptPort;
   readonly harness: Harness;
-  readonly action: CustomerOperationSourceActionView | null;
+  readonly action: CustomerOperationActionView | null;
   readonly applied: ApplyRecord[];
   readonly applyStatus?: number;
   readonly operational?: boolean;
+  readonly runtimeAction?: CustomerOperationActionView | null;
+  readonly updates?: CustomerOperationRuntimeUpdateInput[];
+  readonly updateResult?: CustomerOperationResult;
 }): CustomerOperationRouterDependencies {
   return {
     attempts: input.port,
@@ -141,8 +146,13 @@ function dependencies(input: {
       if (input.operational === false) throw new Error('operation_unavailable');
     },
     readSourceAction: async (actionId) => actionId === ACTION_ID ? input.action : null,
+    readRuntimeAction: async (actionId) => actionId === ACTION_ID ? input.runtimeAction ?? null : null,
+    runRuntimeUpdate: async (update) => {
+      input.updates?.push(update);
+      return input.updateResult ?? 'applied';
+    },
     issueRelayTicket: async (operation) => {
-      if (operation !== 'source-add') throw new Error('unexpected operation');
+      if (operation !== 'source-add' && operation !== 'upgrade') throw new Error('unexpected operation');
       return { relayTicket: RELAY_TICKET, expiresAt: NOW + 120_000 };
     },
     beginRelay: async ({ operation, gatewayState, pkceChallenge, gatewayCallback }) =>
@@ -197,14 +207,42 @@ const errorSchema = v.strictObject({
   error: v.string(),
 });
 
+const runtimeClaim = {
+  schemaVersion: 2,
+  actionType: 'runtime_update',
+  actionId: ACTION_ID,
+  actionKey: ACTION_KEY,
+  actorEmail: 'admin@example.com',
+  accountId: ACCOUNT_ID,
+  controlPlaneOrigin: 'https://deploy.example.com',
+  workerName: 'ankka-gateway',
+  workersSubdomain: 'customer',
+  managementOrigin: ORIGIN,
+  operation: 'update',
+  from: { release: RELEASE, artifactSha256: `sha256:${ARTIFACT_SHA256}`, versionId: '11111111-1111-4111-8111-111111111111' },
+  to: { release: 'gateway-v0.1.35', artifactSha256: `sha256:${'e'.repeat(64)}`, versionId: null },
+  expiresAt: ACTION_EXPIRES_AT,
+};
+
+function runtimeStartRequest(): Request {
+  return new Request(`${ORIGIN}${CUSTOMER_OPERATION_OAUTH_START_PATH}`, {
+    method: 'POST',
+    headers: { origin: ORIGIN, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      handoff: base64UrlEncode(new TextEncoder().encode(JSON.stringify(runtimeClaim))),
+    }),
+  });
+}
+
 /** Starts an attempt and walks the code relay the way the live relay does; returns the callback URL and cookie. */
-async function authorize(target: ReturnType<typeof router>) {
-  const start = await target.fetch(startRequest(baseClaim));
+async function authorize(target: ReturnType<typeof router>, request = startRequest(baseClaim), scopes = SOURCE_SCOPES) {
+  const start = await target.fetch(request);
   expect(start.status).toBe(200);
   const cookie = cookieValue(start);
   const authorization = await responseJson(start, authorizationSchema);
   const url = new URL(authorization.authorizationUrl);
-  expect(url.searchParams.get('scope')).toBe(SOURCE_SCOPES);
+  expect(url.searchParams.get('scope')).toBe(scopes);
   expect(url.searchParams.get('client_id')).toBe(CLIENT_ID);
   const relayState = url.searchParams.get('state');
   if (relayState === null) throw new Error('relay state missing');
@@ -305,6 +343,44 @@ describe('gateway-local operation router', () => {
     expect(applied).toHaveLength(1);
   });
 
+  it('turns a runtime update handoff into one upgrade consent and hands the grant to the updater', async () => {
+    const attempts = attemptPort();
+    const applied: ApplyRecord[] = [];
+    const updates: CustomerOperationRuntimeUpdateInput[] = [];
+    const upgradeTransport = transport('workers-scripts.write');
+    const upgradeTarget = router(dependencies({
+      port: attempts.port, harness: upgradeTransport, applied, updates, action: null,
+      runtimeAction: { status: 'authorization_required', expiresAt: ACTION_EXPIRES_AT },
+    }));
+    const { cookie, callback } = await authorize(upgradeTarget, runtimeStartRequest(), 'workers-scripts.write');
+    const pending = attempts.current();
+    expect(pending?.kind).toBe('runtime');
+    expect(pending?.operation).toBe('upgrade');
+    expect(pending?.target).toEqual({ release: 'gateway-v0.1.35', artifactSha256: `sha256:${'e'.repeat(64)}` });
+    expect(pending?.controlPlaneOrigin).toBe('https://deploy.example.com');
+    expect(attempts.writes.join('\n')).not.toContain(ACTION_KEY);
+
+    const result = await upgradeTarget.fetch(new Request(callback, { headers: { cookie } }));
+    expect(result.status).toBe(303);
+    const location = new URL(result.headers.get('location') ?? '');
+    expect(location.pathname).toBe('/settings');
+    expect(location.searchParams.get('runtimeAction')).toBe(ACTION_ID);
+    expect(location.searchParams.get('runtimeActionResult')).toBe('applied');
+    expect(applied).toHaveLength(0);
+    expect(updates).toEqual([{
+      accessToken: ACCESS_TOKEN,
+      actionId: ACTION_ID,
+      actionKey: ACTION_KEY,
+      actorEmail: 'admin@example.com',
+      actionExpiresAt: ACTION_EXPIRES_AT,
+      controlPlaneOrigin: 'https://deploy.example.com',
+      operation: 'update',
+      target: { release: 'gateway-v0.1.35', artifactSha256: `sha256:${'e'.repeat(64)}` },
+    }]);
+    expect(upgradeTransport.revoked()).toBe(true);
+    expect(attempts.current()).toBeNull();
+  });
+
   it('cancels nothing itself when consent is denied and reports it to the Sources page', async () => {
     const attempts = attemptPort();
     const harness = transport();
@@ -384,10 +460,13 @@ describe('gateway-local operation router', () => {
     await attempts.port.write({
       schemaVersion: 1,
       attemptId: `attempt_${'z'.repeat(24)}`,
+      kind: 'source',
       operation: 'source-add',
       actionId: `action_${'m'.repeat(32)}`,
       actorEmail: 'admin@example.com',
       actionExpiresAt: ACTION_EXPIRES_AT,
+      controlPlaneOrigin: 'https://deploy.example.com',
+      target: null,
       stateHash: 'h'.repeat(43),
       phase: 'authorizing',
       expiresAt: NOW + 300_000,

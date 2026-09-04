@@ -57,37 +57,45 @@ the release and approve a fresh, operation-scoped Cloudflare authorization.
 
 ## Update sequence
 
-The updater:
+An update starts in the gateway dashboard and runs on the gateway itself:
 
-1. reads the currently active Worker version and deployment;
-2. uploads the verified candidate;
-3. stages the candidate at 0% beside the current version at 100%;
-4. probes the exact candidate version;
-5. activates the candidate at 100% only after the probe succeeds;
-6. probes the active version through normal routing and re-verifies the deployment; and
-7. records the result in the team's Durable Object.
+1. The dashboard prepares the update and hands the browser to the gateway's
+   own `/__ankka/operation` page, which asks Cloudflare for a one-time
+   `upgrade` grant (Workers scripts write only) through the public OAuth
+   client and callback certified at install.
+2. The gateway reads its active Worker version and current bindings, then
+   fetches the pinned release descriptor and every manifest file from the
+   control plane's `/api/releases/<channel>/files/<path>` route and verifies
+   the signature and every digest with the update key it was installed with.
+3. It uploads the new management assets, records a handover (the action, the
+   target, and the action key sealed under the ownership wrap key), arms its
+   own alarm, and uploads the new Worker version with the existing secrets
+   and object namespace inherited. The upload activates at once and replaces
+   the version that ran the update.
+4. The grant is revoked and the browser returns to Settings, which polls the
+   action. The new version's alarm finds itself running the target release
+   and completes the journal with `finalize`; if the old version still runs
+   after five minutes, it marks the action as needing recovery instead.
 
-Gateway traffic is not gradually split between versions.
+Gateway traffic is not gradually split between versions, and no candidate is
+probed before activation: the bytes are the signed release the hosted
+installer would deploy for a fresh install, verified on the gateway before
+the upload. The grant remains request-local and is never persisted. The new
+version's Cloudflare version id is not recorded, because the version that
+could learn it no longer runs by then.
 
-Only an exact HTTP 409 `runtime_probe_version_mismatch` from the normal-routing
-active probe is retried, with 250 ms pauses inside one total 10-second deadline.
-Candidate probes, other errors, and provider mutations are not retried by this
-check.
-
-The connected callback displays a pending loader while the approved operation
-runs. An explicit terminal result is emitted only after execution,
-temporary-route cleanup, and the grant revocation attempt and discard. The
-grant remains request-local and is never persisted. Automatic return requires
-a valid success result and a complete document; EOF alone is not success.
-
-If staging or activation fails, the updater attempts to restore and verify the
-previous version. An unverified provider outcome becomes recovery-required
-instead of success.
+Anything that fails before the upload fails the action in the journal with
+the stage and cause as its code and leaves the running version untouched.
+An upload whose outcome is unknown is left to the handover: the alarm either
+proves the new release or reports recovery-required.
 
 ## Rollback
 
 A successful update retains the previous Cloudflare version. Rollback is a new
-operator-approved action with a fresh Cloudflare authorization.
+operator-approved action with a fresh Cloudflare authorization. Through the
+gateway's own route it succeeds only while the control plane still pins the
+release being rolled back to; otherwise it stops with `release_unavailable`
+before any upload. Serving exact earlier releases is still open.
 
 The only persisted rollback changes are Worker code and management assets. It
 does not roll back Durable Object data, sources, Access, DNS, Portal
