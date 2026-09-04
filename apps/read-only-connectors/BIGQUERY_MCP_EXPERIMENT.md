@@ -31,19 +31,26 @@ shared operator connection without a Google login. Direct calls listed tables,
 read metadata, and returned `1` from the constant query. Code Mode exposed
 exactly the same three tools and also returned `1` from that query.
 
-Revocation remains a release blocker. After the second identity was removed
-from the source policy and the updated policy was verified, its existing
-Portal grant still executed direct and Code Mode calls more than five minutes
-later. Fresh-grant denial and effective invalidation of existing access remain
-unproven. See [Team access](../../docs/TEAM_ACCESS.md#revocation-qualification).
+Removing the second identity from the source policy blocked a fresh client
+authorization before an OAuth code or token was issued. Its existing Portal
+grant still executed direct and Code Mode calls more than five minutes later,
+including after successful token refreshes. This observation alone does not
+establish a provider defect: Access policy edits and session revocation are
+separate operations. A subsequent test explicitly revoked all sessions for the
+Portal application: the existing token received HTTP 401 for direct and Code
+Mode discovery and calls at the first check after 15 seconds, and its refresh
+token was rejected with `invalid_grant` after 90 seconds. The source assignment
+was restored and verified. This qualifies the tested Portal-wide procedure,
+which also disconnects other team members. See
+[Team access](../../docs/TEAM_ACCESS.md#revocation-qualification).
 Deployment receipts and private test details remain outside this repository.
 
 The live `tools/list` response confirmed the reviewed tool names and argument
 names. Unlike the current documentation, its SQL input does not yet include
 `timeoutMs` or `jobTimeoutMs`; sending those fields produced an invalid-argument
 tool error. The prototype now sends only the required project and constant
-query. General SQL remains deliberately disabled; query cost controls and
-the access-revocation checks remain necessary before production qualification.
+query. General SQL remains deliberately disabled; query cost controls remain
+necessary before production qualification.
 
 The Worker belongs in your Cloudflare account. Cloudflare Access with Managed
 OAuth protects its exact hostname; the Worker verifies the signed Access JWT.
@@ -121,7 +128,10 @@ key nor the resulting access tokens. Do not use an exposed or shared test key.
 8. In Cloudflare Access, assign intended people to the source's recorded policy
    and ensure they can enter the Portal. Keep the bridge application limited
    to its operator. Verify a client can call the constant query through the
-   Portal without a Google login, then revoke source access and verify denial.
+   Portal without a Google login, then verify fresh-authorization denial after
+   removing its source assignment. To invalidate existing clients, follow the
+   [qualified Portal session-revocation procedure](../../docs/TEAM_ACCESS.md#qualified-procedure-for-existing-portal-sessions)
+   and account for its effect on every team member connected to that Portal.
    A successful direct bridge login does not satisfy this Portal check.
 
 ## Rotate the Google key
