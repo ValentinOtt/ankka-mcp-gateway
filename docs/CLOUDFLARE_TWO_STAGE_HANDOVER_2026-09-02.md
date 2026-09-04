@@ -1547,3 +1547,15 @@ deploying the production relay. Both are operator steps.
   the payload's bootstrap for one, comparing its keys with the hosted
   derivation. Lesson: a provider identifier format is part of the contract
   too; derive keys with the provider's grammar, not only the byte budget.
+- 2026-09-04 (15:18), seventh real install, on gateway-v0.1.32, the first
+  whose management page works: both consents (the hosted result page needed
+  its reload once more), the passes behind alarms, workers.dev closed, the
+  final runtime uploaded and the bootstrap nonce dropped, and after the
+  Access login `https://manageseven.zimtente.com/sources` rendered the
+  Gateway as ready with `/api/status`, `/api/sources` and `/api/update`
+  answering 200. The API shows the final runtime bindings active, only the
+  ownership wrap key as a secret, the custom domain, both Access
+  applications with their policies, the portal and its DNS record. This
+  closes the activation sequence's install path on a second account; what
+  remains open is the hosted result page's first-poll 503 and the recovery
+  router still converging in one invocation.
