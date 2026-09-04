@@ -27,7 +27,7 @@ type PreviewScenario = typeof PREVIEW_SCENARIOS[number]
 const PREVIEW_STORAGE_KEY = 'ankka-gateway-ui-preview-scenario'
 const ACTION_ID = `action_${'a'.repeat(32)}`
 const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai'
-const HANDOFF = `${CONTROL_PLANE_ORIGIN}/manage#${'a'.repeat(40)}`
+const HANDOFF = `${window.location.origin}/__ankka/operation#${'a'.repeat(40)}`
 
 const status: GatewayStatus = {
   schemaVersion: 1,

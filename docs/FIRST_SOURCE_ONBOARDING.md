@@ -10,9 +10,11 @@ client-side capability flag alone is not sufficient.
 1. Install an empty gateway and sign in as its administrator.
 2. In Sources, discover one supported HTTPS MCP endpoint and review its exact
    read-only tool selection. Save the secret-free draft.
-3. Review and authorize that draft's source installation. The short-lived
-   Cloudflare installer grant creates the exact source resources. It is not an
-   upstream credential and is not retained for Team management.
+3. Review and authorize that draft's source installation. The gateway asks
+   Cloudflare directly for a short-lived grant limited to Access applications
+   and MCP portals, creates the exact source resources with it, and revokes
+   it. It is not an upstream credential and is not retained for Team
+   management.
 4. The new source starts with a single deny-Everyone Access policy. Installing
    it grants nobody access, including administrators and existing team members.
 5. Connect the upstream once through Cloudflare's operator authentication flow.

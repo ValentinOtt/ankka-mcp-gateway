@@ -270,6 +270,8 @@ export function planTeamAccessChange(value, context) {
 const API_ORIGIN = 'https://api.cloudflare.com';
 const BOOTSTRAP_PATH = '/__ankka/bootstrap';
 const SOURCE_ACTION_PATH = '/__ankka/source-action';
+// Later operations are authorized on the gateway itself; see the installer's operation router.
+const SOURCE_OPERATION_PATH = '/__ankka/operation';
 const RUNTIME_ACTION_PATH = '/__ankka/runtime-action';
 const TEARDOWN_ACTION_PATH = '/__ankka/teardown-action';
 const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';
@@ -5208,7 +5210,7 @@ async function handleSourceActions(request, env) {
     actionId,
     status: 'authorization_required',
     expiresAt: new Date(expiresAt).toISOString(),
-    handoffUrl: `${CONTROL_PLANE_ORIGIN}/manage#${fragment}`,
+    handoffUrl: `${managementOrigin}${SOURCE_OPERATION_PATH}#${fragment}`,
   });
 }
 

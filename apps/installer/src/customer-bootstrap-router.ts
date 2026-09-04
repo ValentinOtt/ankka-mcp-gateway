@@ -1,7 +1,10 @@
 import * as v from 'valibot';
 
 import { CLOUDFLARE_CODE_RELAY_CALLBACK } from './cloudflare-code-relay';
-import { exactOperationScopes } from './cloudflare-operation-authority';
+import {
+  exactOperationScopes,
+  type CustomerCloudflareOperation,
+} from './cloudflare-operation-authority';
 import {
   consumeCustomerBootstrapCapability,
   initialCustomerBootstrapState,
@@ -231,10 +234,11 @@ export function validCustomerBootstrapRelayAuthorization(
   value: CustomerBootstrapRelayStart,
   publicClientId: string,
   challenge: string,
+  operation: CustomerCloudflareOperation = 'install',
 ): boolean {
   try {
     const url = new URL(value.authorizationUrl);
-    const expectedScopes = exactOperationScopes('install').join(' ');
+    const expectedScopes = exactOperationScopes(operation).join(' ');
     const expectedKeys = [
       'response_type', 'client_id', 'redirect_uri', 'scope', 'state',
       'code_challenge', 'code_challenge_method',

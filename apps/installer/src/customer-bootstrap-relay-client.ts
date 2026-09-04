@@ -5,7 +5,11 @@ import {
   CLOUDFLARE_CODE_RELAY_CALLBACK,
   CLOUDFLARE_CODE_RELAY_ORIGIN,
 } from './cloudflare-code-relay';
-import { exactOperationScopes } from './cloudflare-operation-authority';
+import {
+  exactOperationScopes,
+  isCustomerCloudflareOperation,
+  type CustomerCloudflareOperation,
+} from './cloudflare-operation-authority';
 import { DeployError } from './errors';
 import { type BoundedRead, fetchBoundedText } from './http';
 import type { CustomerBootstrapRelayStart } from './customer-bootstrap-router';
@@ -41,6 +45,7 @@ function validAuthorizationUrl(
   value: string,
   expectedClientId: string,
   expectedChallenge: string,
+  operation: CustomerCloudflareOperation,
 ): boolean {
   try {
     const url = new URL(value);
@@ -55,7 +60,7 @@ function validAuthorizationUrl(
       url.searchParams.get('response_type') === 'code' &&
       url.searchParams.get('client_id') === expectedClientId &&
       url.searchParams.get('redirect_uri') === CLOUDFLARE_CODE_RELAY_CALLBACK &&
-      url.searchParams.get('scope') === exactOperationScopes('install').join(' ') &&
+      url.searchParams.get('scope') === exactOperationScopes(operation).join(' ') &&
       url.searchParams.get('code_challenge') === expectedChallenge &&
       url.searchParams.get('code_challenge_method') === 'S256' &&
       state.length <= 8_192 && SEALED_RELAY_STATE.test(state);
@@ -64,7 +69,12 @@ function validAuthorizationUrl(
   }
 }
 
-/** Calls the code-only relay from the customer Worker; no Cloudflare token is involved. */
+/**
+ * Calls the code-only relay from the customer Worker; no Cloudflare token is
+ * involved. The operation selects the relay route and the exact scope set the
+ * returned authorization must carry; the install is the default so the
+ * bootstrap shell keeps its contract.
+ */
 export async function beginCustomerBootstrapRelay(input: {
   readonly publicClientId: string;
   readonly relayTicket: string;
@@ -72,10 +82,13 @@ export async function beginCustomerBootstrapRelay(input: {
   readonly pkceChallenge: string;
   readonly gatewayCallback: string;
   readonly transport: CustomerCloudflareTransport;
+  readonly operation?: CustomerCloudflareOperation;
 }): Promise<CustomerBootstrapRelayStart> {
+  const operation = input.operation ?? 'install';
   if (!CLIENT_ID.test(input.publicClientId) || input.relayTicket.length < 40 ||
       input.relayTicket.length > 4096 || !RELAY_TICKET.test(input.relayTicket) ||
-      !TOKEN.test(input.gatewayState) || !TOKEN.test(input.pkceChallenge)) throw new Error('relay_rejected');
+      !TOKEN.test(input.gatewayState) || !TOKEN.test(input.pkceChallenge) ||
+      !isCustomerCloudflareOperation(operation)) throw new Error('relay_rejected');
   let callback: URL;
   try {
     callback = new URL(input.gatewayCallback);
@@ -88,7 +101,7 @@ export async function beginCustomerBootstrapRelay(input: {
   try {
     read = await fetchBoundedText(
       input.transport,
-      `${CLOUDFLARE_CODE_RELAY_ORIGIN}/oauth/start/install`,
+      `${CLOUDFLARE_CODE_RELAY_ORIGIN}/oauth/start/${operation}`,
       {
         method: 'POST',
         headers: { accept: 'application/json', 'content-type': 'application/json' },
@@ -119,7 +132,7 @@ export async function beginCustomerBootstrapRelay(input: {
   } catch {
     throw new Error('relay_rejected');
   }
-  if (!validAuthorizationUrl(parsed.authorizationUrl, input.publicClientId, input.pkceChallenge)) {
+  if (!validAuthorizationUrl(parsed.authorizationUrl, input.publicClientId, input.pkceChallenge, operation)) {
     throw new Error('relay_rejected');
   }
   return Object.freeze({ authorizationUrl: parsed.authorizationUrl });

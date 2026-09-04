@@ -28,7 +28,16 @@ import {
   CUSTOMER_INSTALL_OAUTH_START_PATH,
   CUSTOMER_INSTALL_ROOT_PATH,
   CUSTOMER_INSTALL_STATUS_PATH,
+  CUSTOMER_OPERATION_ROOT_PATH,
 } from './customer-install-paths';
+import type { CustomerCloudflareOperation } from './cloudflare-operation-authority';
+import {
+  createCustomerOperationRouter,
+  customerOperationAttemptSchema,
+  customerOperationCookiePresent,
+  type CustomerOperationAttempt,
+  type CustomerOperationAttemptPort,
+} from './customer-operation-router';
 import {
   CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
   convergeCustomerStage2,
@@ -64,6 +73,33 @@ const envSchema = v.object({
   ZERO_TRUST_READY: v.literal('true'),
   ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY: v.pipe(v.string(), v.regex(TOKEN)),
 });
+
+const OPERATION_ATTEMPT_KEY = 'ankka-mcp-gateway/customer-operation-attempt/v1';
+/** The payload's public view of one prepared action; other fields stay untouched. */
+const sourceActionViewSchema = v.looseObject({
+  schemaVersion: v.literal(1),
+  actionId: v.string(),
+  status: v.string(),
+  expiresAt: v.string(),
+});
+
+/** The one in-flight operation attempt, kept in the object's own storage without secrets. */
+class DurableCustomerOperationAttemptPort implements CustomerOperationAttemptPort {
+  constructor(private readonly storage: DurableObjectStorage) {}
+
+  async read(): Promise<CustomerOperationAttempt | null> {
+    const parsed = v.safeParse(customerOperationAttemptSchema, await this.storage.get(OPERATION_ATTEMPT_KEY));
+    return parsed.success ? parsed.output : null;
+  }
+
+  async write(attempt: CustomerOperationAttempt): Promise<void> {
+    await this.storage.put(OPERATION_ATTEMPT_KEY, attempt);
+  }
+
+  async clear(): Promise<void> {
+    await this.storage.delete(OPERATION_ATTEMPT_KEY);
+  }
+}
 
 interface FinalGatewayEnv extends Record<string, unknown> {
   ADMIN_STATE: DurableObjectNamespace;
@@ -270,6 +306,86 @@ export class AdminState extends RuntimeAdminState {
     });
   }
 
+  /** A finished install whose ownership trust still names the certified callback. */
+  private async assertOperational(config: ParsedFinalEnv): Promise<CustomerGatewayOwnershipState> {
+    const ownership = await readCustomerGatewayOwnershipState(this.finalState.storage);
+    const bootstrap = await new CustomerBootstrapDurableStatePort(this.finalState.storage).read();
+    const callback = `https://${config.ANKKA_MANAGEMENT_HOSTNAME}${CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH}`;
+    if (bootstrap === null || bootstrap.installId !== config.ANKKA_INSTALL_ID ||
+        bootstrap.status !== 'READY' || ownership.ownershipCertificate === null ||
+        ownership.certificateSha256 === null || ownership.trust === null ||
+        ownership.trust.gatewayCallback !== callback) {
+      throw new Error('operation_unavailable');
+    }
+    return ownership;
+  }
+
+  private async issueOperationRelayTicket(config: ParsedFinalEnv, operation: CustomerCloudflareOperation) {
+    const ownership = await this.assertOperational(config);
+    if (ownership.ownershipCertificate === null || ownership.certificateSha256 === null ||
+        ownership.trust === null) throw new Error('operation_unavailable');
+    const privateKey = await openCustomerGatewayOwnershipPrivateKey({
+      storage: this.finalState.storage,
+      wrappingKey: config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY,
+    });
+    return requestCustomerGatewayRelayTicket({
+      certificate: ownership.ownershipCertificate,
+      certificateSha256: ownership.certificateSha256,
+      gatewayCallback: ownership.trust.gatewayCallback,
+      operation,
+      ownershipPrivateKey: privateKey,
+      transport: (input, init) => fetch(input, init),
+    });
+  }
+
+  /** Reads one prepared action through the payload's own internal route. */
+  private async readSourceAction(actionId: string) {
+    const response = await super.fetch(new Request(`https://admin-state.invalid/source-actions/${actionId}`));
+    if (response.status !== 200) return null;
+    const parsed = v.safeParse(sourceActionViewSchema, await response.json());
+    if (!parsed.success || parsed.output.actionId !== actionId) return null;
+    const expiresAt = Date.parse(parsed.output.expiresAt);
+    return Number.isSafeInteger(expiresAt) ? { status: parsed.output.status, expiresAt } : null;
+  }
+
+  /** Submits the signed claim to the payload's apply route without leaving the object. */
+  private applySourceAction(input: { readonly body: string; readonly signature: string }): Promise<Response> {
+    return super.fetch(new Request('https://admin-state.invalid/source-actions/apply', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-ankka-source-action-signature': input.signature },
+      body: input.body,
+    }));
+  }
+
+  /** Authorizes and applies a later operation with the public client the trust names. */
+  private async operationRouter(config: ParsedFinalEnv, managementOrigin: string) {
+    const ownership = await this.assertOperational(config);
+    if (ownership.trust === null) throw new Error('operation_unavailable');
+    const publicClientId = ownership.trust.publicClientId;
+    return createCustomerOperationRouter({
+      accountId: config.CLOUDFLARE_ACCOUNT_ID,
+      installId: config.ANKKA_INSTALL_ID,
+      publicClientId,
+      managementOrigin,
+      workerName: config.ANKKA_WORKER_NAME,
+      workersSubdomain: config.ANKKA_WORKERS_SUBDOMAIN,
+      release: config.ANKKA_GATEWAY_RELEASE,
+      artifactSha256: config.ANKKA_GATEWAY_RELEASE_SHA256.slice('sha256:'.length),
+    }, {
+      attempts: new DurableCustomerOperationAttemptPort(this.finalState.storage),
+      transport: (target, init) => fetch(target, init),
+      assertOperational: () => this.assertOperational(config).then(() => undefined),
+      readSourceAction: (actionId) => this.readSourceAction(actionId),
+      issueRelayTicket: (operation) => this.issueOperationRelayTicket(config, operation),
+      beginRelay: (input) => beginCustomerBootstrapRelay({
+        ...input,
+        publicClientId,
+        transport: (target, init) => fetch(target, init),
+      }),
+      applySourceAction: (input) => this.applySourceAction(input),
+    });
+  }
+
   /**
    * The bootstrap shell arms this alarm right before it uploads this runtime;
    * the pass that uploaded it cannot reach storage once the object restarts
@@ -313,6 +429,18 @@ export class AdminState extends RuntimeAdminState {
       now: Date.now,
     });
     if (installation !== null) return installation;
+    // A later operation owns its page and start route; it also claims the
+    // certified callback while the browser carries an operation attempt.
+    const operationRoute = url.pathname.startsWith(CUSTOMER_OPERATION_ROOT_PATH) ||
+      (url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH && customerOperationCookiePresent(request));
+    if (url.origin === managementOrigin && operationRoute) {
+      try {
+        const router = await this.operationRouter(config, managementOrigin);
+        return await router.fetch(request);
+      } catch {
+        return unavailable();
+      }
+    }
     if (url.origin !== managementOrigin || !url.pathname.startsWith(CUSTOMER_INSTALL_ROOT_PATH)) {
       return super.fetch(request);
     }
@@ -382,7 +510,8 @@ export default {
       const config = parsedEnv(env);
       const url = new URL(request.url);
       if (url.pathname === CUSTOMER_INSTALL_CONTINUE_PATH) return notFound();
-      if (url.pathname.startsWith(CUSTOMER_INSTALL_ROOT_PATH)) {
+      if (url.pathname.startsWith(CUSTOMER_INSTALL_ROOT_PATH) ||
+          url.pathname.startsWith(CUSTOMER_OPERATION_ROOT_PATH)) {
         if (url.origin !== `https://${config.ANKKA_MANAGEMENT_HOSTNAME}`) return notFound();
         return env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(request);
       }

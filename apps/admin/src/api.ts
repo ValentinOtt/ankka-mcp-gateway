@@ -372,13 +372,27 @@ function validControlPlaneOrigin(value: string): boolean {
   }
 }
 
-export function validHandoffUrl(value: string, expectedOrigin: string): string | null {
-  if (!validControlPlaneOrigin(expectedOrigin)) return null
+/** The gateway's own page that turns one prepared action into one Cloudflare consent. */
+export const OPERATION_HANDOFF_PATH = '/__ankka/operation'
+
+function validPageOrigin(value: string): boolean {
+  if (value.length === 0 || value.length > 2_048) return false
   try {
     const url = new URL(value)
-    return url.origin === expectedOrigin && !url.username && !url.password && !url.port &&
-      url.pathname === '/manage' &&
-      url.search === '' && /^#[A-Za-z0-9_-]{40,4096}$/u.test(url.hash) ? url.href : null
+    return url.origin === value && !url.username && !url.password
+  } catch {
+    return false
+  }
+}
+
+/** A handoff is only ever this gateway's operation page with a fragment; nothing else is navigated to. */
+export function validHandoffUrl(value: string, expectedOrigin: string): string | null {
+  if (!validPageOrigin(expectedOrigin)) return null
+  try {
+    const url = new URL(value)
+    return url.origin === expectedOrigin && !url.username && !url.password &&
+      url.pathname === OPERATION_HANDOFF_PATH &&
+      url.search === '' && /^#[A-Za-z0-9_-]{40,8192}$/u.test(url.hash) ? url.href : null
   } catch {
     return null
   }
