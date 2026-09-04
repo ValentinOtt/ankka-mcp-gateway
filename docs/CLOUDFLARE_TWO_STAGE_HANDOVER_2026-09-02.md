@@ -1313,3 +1313,50 @@ deploying the production relay. Both are operator steps.
   `47fe8738…`, deterministic across two dry runs) and the SBOM generated;
   signing, the R2 publication, the GitHub release and the repin are the
   operator's next ceremony.
+- 2026-09-03 (night), correction and continuation: the previous entry's
+  claim that the hosted health poll passed was wrong. The third retry reached
+  `phase: provisioned` because the shell existed, but the readiness read was
+  made against `/health`, which on the deployed shell is answered by the
+  static-assets SPA fallback (only `/__ankka/*` and `/api/*` run the Worker
+  first), and its `redirect: 'error'` option is rejected by workerd. PR #65
+  reads readiness from `/__ankka/install/status` with `redirect: 'manual'`,
+  names the handoff step in the session, and adds `readiness_*` reasons.
+  PR #66 binds install relay tickets to the certificate's bootstrap callback
+  (the shell's own origin) instead of the management callback, which the
+  relay had been refusing at the install start. gateway-v0.1.22 was signed by
+  the operator, published (R2 create-only, immutable GitHub prerelease, source
+  `840defb`) and pinned; the relay was redeployed from `b35c6c2`. With that,
+  Stage 2 from a second account ran through the shell's `continue` and
+  `oauth/start`, the relay's ticket and start routes, and Cloudflare's consent
+  form. Three findings: (1) the hosted result page redirects the moment the
+  server-side readiness poll succeeds, before the new `workers.dev` hostname
+  has propagated to the browser's vantage point, so the first load can be
+  Cloudflare's placeholder page and a reload is needed (open); (2) the Stage 2
+  OAuth client was private, so Cloudflare's consent refused users outside the
+  parent account until the operator made it public (client URL domain
+  verification through the `cloudflare_oauth_client_publisher` TXT record);
+  (3) after consent, the shell's callback fails inside the payload's bootstrap
+  at the portal create and is recorded as `provider_recovery_required`, while
+  the same create succeeds with an account API token, and nothing named the
+  provider outcome.
+- 2026-09-04: PR #67 makes that failure name itself. The payload returns a
+  fixed-word `provider` detail (kind, step, status, HTTP status, provider
+  code) beside its 409; the shell folds it into a secret-free `failureReason`
+  (`payload_<kind>_<step>_<status>[_http_n][_code_n]`, otherwise
+  `converge_<code>`, `grant_<code>`, `payload_request_<stage>_<outcome>` or
+  `unexpected`), stores it next to `failureCode`, and exposes it on the
+  callback answer and on `/__ankka/install/status` as
+  `failure: { code, reason }`. The payload still logs nothing.
+  gateway-v0.1.23 was cut from `d6a9b69` (manifest `c9bb3097…`, identical
+  across a dry run and the written build; artifact `c9d49faa…`), published to
+  R2 and GitHub, and pinned on deploy.ankka.ai (version `43d11a51`). Operator
+  decision: a second release signing key, `release-2026-09-dev1` (public key
+  `WGwI3OF_w3t_v20ybyvrXbm0j1akX_D7_whaImOg5rI`), lives in the operator's
+  local keychain so the assistant can run the canary ceremony end to end;
+  v0.1.23 is the first release signed with it. The production key
+  `release-2026-08-v1` stays in the operator's vault for stable. Because
+  deploy.ankka.ai serves the canary channel, dev-key-signed releases reach
+  real installs; revoking the key means deleting it and repinning. Next: one
+  browser install run, then read `failure.reason` from the shell's status
+  route and fix the cause. Also open: the lifecycle canary client reports a
+  successful run as unknown.
