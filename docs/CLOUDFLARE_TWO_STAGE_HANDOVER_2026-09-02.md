@@ -1426,3 +1426,21 @@ deploying the production relay. Both are operator steps.
   failed (console tracking starts before the next attempt), a way to start
   over from a `handed_off` session before it expires, and showing the
   server's failure reason on the result page.
+- 2026-09-04 (dawn), first real install run end to end by the assistant:
+  on gateway-v0.1.27 the browser flow (Claude in Chrome on the test
+  account) completed both consents; the hosted page's handoff poll
+  navigated to the shell by itself this time, the shell's callback ran the
+  converger, and the payload's bootstrap created the portal, its Access
+  application and policy and the DNS record under the OAuth token. The
+  run stopped at the receipt re-verification with
+  `verify_portal_access_application_unknown`, plus `revocation_unconfirmed`:
+  the discovery of the just-created application got an answer that settled
+  nothing (a rate limit, a 5xx or a body that was not JSON) and counted it
+  as a failure at once. PR #78 makes the verification read such an answer
+  again up to three more times with a short back-off and name a resource
+  that never settles with the last HTTP status and provider code; the grant
+  keeps the last refused revocation's status as the `revoke_failed` detail
+  and the callback reports it when the convergence itself succeeded
+  (gateway-v0.1.28, version `26dbaf1d`). The full token-mode harness passes
+  against v0.1.28. Open: why the OAuth-token discovery is unsettled where
+  the API-token harness never is, and the refused revocation.
