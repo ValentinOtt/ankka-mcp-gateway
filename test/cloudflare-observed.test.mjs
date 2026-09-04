@@ -254,6 +254,18 @@ test('verifies Cloudflare prerequisites and reduces exact receipt-owned state to
   assert.deepEqual(plan.changes.map((change) => change.action), Array(7).fill('noop'));
 });
 
+test('adding the Claude callback preserves existing receipt hashes and planner noops', async () => {
+  const data = await fixture();
+  data.portalApp.oauth_configuration.dynamic_client_registration.allowed_uris = [
+    'https://claude.ai/api/mcp/auth_callback',
+  ];
+  const observed = await readCloudflareObservedState({
+    cloudflare: data.cloudflare, config: config(), target, access, receipt: data.receipt,
+  });
+  const plan = await buildGatewayPlan(config(), observed, { release: 'test', access });
+  assert.deepEqual(plan.changes.map(({ action }) => action), Array(7).fill('noop'));
+});
+
 test('canary Service Auth readback is digest-only and idempotent for both applications', async () => {
   const data = await fixture({
     gatewayConfig: canaryConfig(), accessInput: { canaryServiceTokenId: CANARY_SERVICE_ID },

@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Allow Claude's exact hosted OAuth callback when creating a Gateway Portal,
+  including through the installer. Local MCP clients retain localhost and
+  loopback support. Existing Portal settings and installation receipt hashes
+  remain unchanged; older Portals can add the callback in Cloudflare.
 - Recognize the runtime's complete source-installation receipt after a
   successful apply. The return notice now agrees with the verified action
   status instead of reporting `apply_response_invalid`; incomplete or
