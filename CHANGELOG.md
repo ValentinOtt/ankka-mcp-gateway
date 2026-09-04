@@ -4,11 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
-- Write portal server mappings with Cloudflare's `id` field. The gateway,
-  operator CLI, and cleanup Worker retain the existing read and receipt
-  representation, while the provider fixture now rejects the response-only
-  `server_id` on writes. This fixes source provisioning stopping at the portal
-  update after its MCP server, Access application, and policy were created.
+- Send identical `id` and `server_id` values in portal server mappings to
+  accommodate Cloudflare's differing guide and API schema. Retained receipt
+  hashes remain unchanged. Provider failures can name a field from a fixed
+  validation vocabulary without returning or retaining provider message text.
 - Let the initiating administrator renew an expired source installation with
   fresh Cloudflare consent. Renewal rotates the action key, retains the same
   journal and receipts, and resumes through the existing ownership checks.

@@ -800,6 +800,30 @@ async function expireSourceAction(gateway, actionId) {
   });
 }
 
+for (const [message, label] of [
+  ['servers[0].server_id is required: synthetic-private-value', 'field_server_id'],
+  ['Not valid ID format: synthetic-private-value', 'id_format'],
+  ['synthetic-private-value', null],
+]) {
+  test(`portal rejection exposes only a fixed validation label (${label ?? 'none'})`, async () => fixture(async (gateway) => {
+    const prepared = await prepareNewSource(gateway);
+    const beforePortal = structuredClone(gateway.provider.state.portal);
+    gateway.provider.hook(({ record }) => {
+      if (record.method !== 'PUT' || !record.pathname.includes('/mcp/portals/')) return undefined;
+      return Response.json({ success: false, errors: [{ code: 7001, message }] }, { status: 400 });
+    });
+    const response = await gateway.apply(prepared, {}, null);
+    assert.equal(response.status, 409);
+    const result = await response.json();
+    assert.equal(result.detail, `portal_update_blocked_http_400_code_7001${label ? `_${label}` : ''}`);
+    assert.equal(JSON.stringify(result).includes('synthetic-private-value'), false);
+    const retained = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+    assert.equal(JSON.stringify(retained).includes('synthetic-private-value'), false);
+    assert.equal(retained.actions.at(-1).resources.length, 3);
+    assert.deepEqual(gateway.provider.state.portal, beforePortal);
+  }));
+}
+
 async function renewPreparedSource(gateway, prepared) {
   const response = await gateway.api(`/api/source-actions/${prepared.claim.actionId}/renew`, {
     method: 'POST', body: { schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id },
@@ -855,7 +879,7 @@ for (const portalCommitted of [false, true]) {
     if (!portalCommitted) {
       assert.equal(mutations[0].method, 'PUT');
       assert.equal(mutations[0].body.servers.some((mapping) => mapping.id === retained.resources[0].provider.id), true);
-      assert.equal(mutations[0].body.servers.some((mapping) => Object.hasOwn(mapping, 'server_id')), false);
+      assert.equal(mutations[0].body.servers.every((mapping) => mapping.server_id === mapping.id), true);
     }
     assert.equal((await gateway.view()).members.some((member) => member.sourceIds.includes(prepared.source.id)), false);
     assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).teardownDisabled, true);

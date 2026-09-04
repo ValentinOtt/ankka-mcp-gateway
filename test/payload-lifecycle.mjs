@@ -524,12 +524,12 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
       }
     }
 
-    // Portal writes require `id`; reads also expose the `server_id` alias.
-    // Do not accept the response-only field as the outgoing identifier.
+    // Exercise both published request shapes: the guide uses `id`, while
+    // the API schema requires `server_id`. They must name the same server.
     const portalWrite = (pathname === PORTALS && method === 'POST') ||
       (pathname.startsWith(`${PORTALS}/`) && method === 'PUT');
     if (portalWrite && record.body.servers?.some((mapping) =>
-      !v.is(v.pipe(v.string(), v.minLength(1)), mapping.id) || Object.hasOwn(mapping, 'server_id'))) {
+      !v.is(v.pipe(v.string(), v.minLength(1)), mapping.id) || mapping.server_id !== mapping.id)) {
       return Response.json({ success: false, result: null, errors: [{ code: 7001 }] }, { status: 400 });
     }
     const portalBody = portalWrite ? { ...record.body } : null;
