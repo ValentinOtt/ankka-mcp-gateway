@@ -39,3 +39,14 @@ provider calls are counted. Cleanup removes the payload's recorded
 resources, the management application, the custom domain, marker-tagged
 DNS records and the Worker. It does not cover the OAuth grant itself; that
 still needs a consent.
+
+`runtime-update.live.ts` runs the gateway's own updater
+(`customer-runtime-update.ts`) from this process against a real installed
+Worker, with the API token standing in for the `upgrade` grant and the
+journal replaced by a log. It downloads the pinned release from the control
+plane, verifies it, uploads the assets and the new version with the existing
+secrets inherited, and leaves that Worker running the pinned release with its
+journal untouched; use it on a test install only. Extra env:
+`ANKKA_LIVE_WORKER_NAME`, `ANKKA_LIVE_TARGET_RELEASE`,
+`ANKKA_LIVE_TARGET_SHA256` (with its `sha256:` prefix),
+`ANKKA_LIVE_UPDATE_KEY_ID`, `ANKKA_LIVE_UPDATE_PUBLIC_KEY`.
