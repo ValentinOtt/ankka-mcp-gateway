@@ -3395,11 +3395,38 @@ function initialRuntimeUpdates(environment) {
 
 async function runtimeUpdates(storage, environment) {
   const retained = safeRuntimeUpdates(await storage.get(UPDATES_KEY));
-  if (retained) return retained;
+  if (retained) return followRunningRelease(storage, retained, environment);
   const initial = initialRuntimeUpdates(environment);
   if (!initial) return null;
   await storage.put(UPDATES_KEY, initial);
   return initial;
+}
+
+// The Worker can change outside the journal: an operator-run update, or a
+// Cloudflare-side rollback to an earlier version. Once no action is in
+// flight, the journal follows the release the object actually runs, keeps the
+// recorded one as the rollback reference, and the public status follows too.
+async function followRunningRelease(storage, state, environment) {
+  if (state.current.release === environment.release &&
+      state.current.artifactSha256 === environment.releaseSha256) return state;
+  const now = Date.now();
+  if (state.actions.some((action) =>
+    !['succeeded', 'failed'].includes(action.status) && action.expiresAt > now)) return state;
+  const current = runtimeVersion({
+    release: environment.release, artifactSha256: environment.releaseSha256, versionId: null,
+  });
+  if (!current) return state;
+  const followed = await saveRuntimeUpdates(storage, {
+    ...state, revision: state.revision + 1, current, previous: state.current,
+  });
+  if (!followed) return state;
+  const status = safePublicStatus(await storage.get(STATUS_KEY));
+  if (status) {
+    await storage.put(STATUS_KEY, Object.freeze({
+      ...status, release: current.release, updatedAt: new Date().toISOString(),
+    }));
+  }
+  return followed;
 }
 
 function publicRuntimeAction(action) {

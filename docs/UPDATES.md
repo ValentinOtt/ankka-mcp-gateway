@@ -106,6 +106,12 @@ retained gateway state.
 The original installation receipt remains the ownership authority for later
 removal, even after updates.
 
+A Worker can also change outside the journal: an operator-run update, or a
+Cloudflare-side rollback to an earlier version. Once no action is in flight,
+the journal follows the release the gateway actually runs and keeps the
+recorded one as the rollback reference, so the next update starts from the
+real installed release instead of refusing with a conflict.
+
 Customer-local Team writes and default-deny source creation can establish a
 minimum compatible runtime before their first provider mutation. An older
 runtime cannot be restored below that recorded floor, and automatic teardown
