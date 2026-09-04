@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Add an experimental customer-owned bridge to Google's hosted BigQuery MCP.
+  It exposes dataset-scoped table listing and metadata plus the exact constant
+  query `SELECT 1 AS bridge_ok`. General SQL remains disabled pending cost
+  controls; the existing budget-capped REST reader is unchanged. The setup guide
+  covers direct secret configuration, the operator callback, and Portal checks.
 - Pause source installation before Portal attachment when Cloudflare still
   needs operator authentication, tool synchronization, or a missing selected
   tool. The dashboard links to the recorded server and explains the next step.
