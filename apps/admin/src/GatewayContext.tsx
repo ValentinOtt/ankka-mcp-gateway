@@ -286,8 +286,12 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     const runtimeActionId = url.searchParams.get('runtimeAction')
 
     const delay = () => new Promise<void>((resolve) => window.setTimeout(resolve, 1500))
+    // The gateway names what stopped an update it ran itself, next to the result.
+    const rawReason = url.searchParams.get('runtimeActionReason')
+    const returnReason = rawReason !== null && /^[a-z][a-z0-9_]{0,120}$/u.test(rawReason) ? rawReason : null
     const pollRuntime = async (actionId: string) => {
       if (url.searchParams.has('runtimeActionResult')) removeResultParameter('runtimeActionResult')
+      if (url.searchParams.has('runtimeActionReason')) removeResultParameter('runtimeActionReason')
       while (active) {
         try {
           const action = await apiRef.current.getRuntimeAction(actionId)
@@ -307,7 +311,11 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
             return
           }
           if (action.status === 'failed' || action.status === 'recovery_required') {
-            setUpdateNotice({ tone: 'error', message: 'The runtime action did not converge. Start a fresh authorization.' })
+            const cause = action.failureCode ?? returnReason
+            setUpdateNotice({
+              tone: 'error',
+              message: `The runtime action did not converge${cause === null ? '' : ` (${cause})`}. ${action.status === 'recovery_required' ? 'Review the Worker versions in Cloudflare before authorizing again.' : 'Start a fresh authorization.'}`,
+            })
             return
           }
           setUpdateNotice({
