@@ -178,7 +178,7 @@ describe('customer-owned Cloudflare grant', () => {
     expect(recovered.waits).toEqual([300, 600]);
 
     const refused = await exchange([503, 503, 503]);
-    await expect(refused.revoke).rejects.toMatchObject({ code: 'revoke_failed' });
+    await expect(refused.revoke).rejects.toMatchObject({ code: 'revoke_failed', detail: 'http_503' });
     expect(refused.revokeCalls()).toBe(3);
     expect(refused.waits).toEqual([300, 600]);
   });

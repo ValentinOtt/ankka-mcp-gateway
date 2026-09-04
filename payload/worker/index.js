@@ -314,6 +314,8 @@ const MCP_MAX_PAGES = 20;
 const MCP_MAX_TOOLS = 500;
 const MAX_ENABLED_TOOLS_PER_SOURCE = 500;
 const REQUEST_LIFETIME_SECONDS = 5 * 60;
+const VERIFY_DISCOVERY_ATTEMPTS = 4;
+const VERIFY_DISCOVERY_BACKOFF_MS = 1_000;
 const MAX_CLOCK_SKEW_SECONDS = 30;
 const MAX_PROVIDER_PAGES = 20;
 const PROVIDER_PAGE_SIZE = 100;
@@ -2405,9 +2407,19 @@ export async function verifyBootstrapReceiptProviderStateWithReason(value, env, 
     for (const kind of claim.resources.map((resourceValue) => resourceValue.kind)) {
       const expected = receipt.resources.find((resourceValue) => resourceValue.kind === kind);
       if (!expected) return failure(`${kind}_missing`);
-      const observed = await discoverResource(state, kind, claim.cloudflareAccessToken);
+      // A provider answer that settles nothing (rate limit, 5xx, not JSON) is
+      // read again a few times before it counts; the resource was created
+      // moments ago and the provider is allowed to be briefly unsettled.
+      let observed = await discoverResource(state, kind, claim.cloudflareAccessToken);
+      for (let attempt = 1; attempt < VERIFY_DISCOVERY_ATTEMPTS && observed.status === 'unknown'; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, VERIFY_DISCOVERY_BACKOFF_MS * attempt));
+        observed = await discoverResource(state, kind, claim.cloudflareAccessToken);
+      }
       if (observed.status !== 'present') {
-        return failure(`${kind}_${isText(observed.status) ? observed.status : 'unknown'}`);
+        const status = isText(observed.status) ? observed.status : 'unknown';
+        const http = Number.isSafeInteger(observed.httpStatus) ? `_http_${observed.httpStatus}` : '';
+        const code = Number.isSafeInteger(observed.providerCode) ? `_code_${observed.providerCode}` : '';
+        return failure(`${kind}_${status}${http}${code}`);
       }
       if (canonicalJson(observed.provider) !== canonicalJson(expected.provider)) {
         return failure(`${kind}_locator_mismatch`);

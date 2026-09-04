@@ -215,11 +215,13 @@ export class EphemeralCustomerCloudflareGrant {
     );
     const wait = input.wait ?? ((milliseconds: number) =>
       new Promise<void>((resolve) => { setTimeout(resolve, milliseconds); }));
-    let failed = false;
+    let failed: string | null = null;
     for (const token of tokens) {
       let revoked = false;
       // A revocation that is refused once is retried briefly: an unconfirmed
-      // revocation turns an otherwise finished install into INCOMPLETE.
+      // revocation turns an otherwise finished install into INCOMPLETE. The
+      // last refusal is kept as a detail: its HTTP status, or transport.
+      let last = 'transport';
       for (let attempt = 1; attempt <= REVOKE_ATTEMPTS && !revoked; attempt += 1) {
         try {
           await withDeadline(async (signal) => {
@@ -233,16 +235,19 @@ export class EphemeralCustomerCloudflareGrant {
               signal,
             });
             await readBoundedText(response, 'oauth_revoke_failed', 16 * 1024);
-            if (!response.ok) throw new CustomerCloudflareGrantError('revoke_failed');
+            if (!response.ok) {
+              last = `http_${response.status}`;
+              throw new CustomerCloudflareGrantError('revoke_failed', last);
+            }
           }, 'oauth_revoke_failed');
           revoked = true;
         } catch {
           if (attempt < REVOKE_ATTEMPTS) await wait(REVOKE_BACKOFF_MS * attempt);
         }
       }
-      if (!revoked) failed = true;
+      if (!revoked) failed = last;
     }
-    if (failed) throw new CustomerCloudflareGrantError('revoke_failed');
+    if (failed !== null) throw new CustomerCloudflareGrantError('revoke_failed', failed);
   }
 
   discard(): void {
