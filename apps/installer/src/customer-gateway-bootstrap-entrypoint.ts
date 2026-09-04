@@ -29,6 +29,7 @@ import {
   CUSTOMER_INSTALL_ROOT_PATH,
   CUSTOMER_INSTALL_STATUS_PATH,
 } from './customer-install-paths';
+import type { CustomerInstallStatus } from './customer-install-status';
 
 declare const __ANKKA_FINAL_RUNTIME_SOURCE__: string;
 
@@ -157,7 +158,9 @@ export class AdminState extends RuntimeAdminState {
     if (request.method === 'GET' && url.pathname === CUSTOMER_INSTALL_STATUS_PATH) {
       const ownership = await readCustomerGatewayOwnershipState(this.bootstrapState.storage);
       const state = await new CustomerBootstrapDurableStatePort(this.bootstrapState.storage).read();
-      return new Response(JSON.stringify({
+      // Typed against the schema the hosted readiness check parses with, so
+      // the shell cannot answer in a shape the hosted runtime rejects.
+      const body: CustomerInstallStatus = {
         schemaVersion: 1,
         role: 'customer-gateway-bootstrap',
         status: state?.status ?? 'INCOMPLETE',
@@ -168,7 +171,11 @@ export class AdminState extends RuntimeAdminState {
         failure: state?.failureCode
           ? { code: state.failureCode, reason: state.failureReason ?? null }
           : null,
-      }), { status: 200, headers: secureHeaders('application/json; charset=utf-8') });
+      };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: secureHeaders('application/json; charset=utf-8'),
+      });
     }
     if (request.method === 'GET' && url.pathname === '/health' && url.search === '') {
       const ownership = await readCustomerGatewayOwnershipState(this.bootstrapState.storage);
