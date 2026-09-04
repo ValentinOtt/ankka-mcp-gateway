@@ -280,7 +280,8 @@ function prepareHeaders(input: Readonly<Record<string, string>>, hasBody: boolea
       !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || typeof value !== "string" ||
       value.length > CONNECTOR_REQUEST_LIMITS.headerBytes || hasControlCharacters(value) || names.has(lower) ||
       forbiddenHeaders.has(lower) || lower.startsWith("x-forwarded-") || lower.startsWith("cf-") ||
-      ((lower === "accept" || lower === "content-type") && value !== "application/json")
+      (lower === "accept" && value !== "application/json" && value !== "application/json, text/event-stream") ||
+      (lower === "content-type" && value !== "application/json")
     ) {
       throw new ConnectorRequestError("CONNECTOR_CONFIGURATION_INVALID");
     }
@@ -291,7 +292,7 @@ function prepareHeaders(input: Readonly<Record<string, string>>, hasBody: boolea
     }
     headers.set(name, value);
   }
-  headers.set("Accept", "application/json");
+  if (!headers.has("Accept")) headers.set("Accept", "application/json");
   if (hasBody) {
     headers.set("Content-Type", "application/json");
   } else {

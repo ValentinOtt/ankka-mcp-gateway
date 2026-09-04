@@ -23,6 +23,7 @@ support data as a canary.
 | `google-search-console` | Domain property, final web-search performance, sitemap metadata | Named `sc-domain:` properties; service account with `webmasters.readonly` |
 | `google-analytics` | Daily traffic, realtime active users by device | Named GA4 properties; service account with `analytics.readonly` |
 | `bigquery` | Dataset/table listings, table schemas, one budget-capped read-only SQL query | Named projects and datasets; read-only IAM service account; mandatory dry-run statement gate and per-query byte budget |
+| `bigquery-mcp` | Google hosted MCP table listing, table metadata, and a constant connectivity query | Exact project/dataset pairs; customer-owned service-account key; general SQL disabled |
 
 The ordinary MCP tools work with Portal Code Mode enabled. This is separate
 from the earlier [Search Console Code Mode experiment](../search-console-adapter/README.md),
@@ -36,6 +37,12 @@ browser-consent flow or domain-wide delegation. The `bigquery` reader speaks
 Google's REST API with the hosted MCP read tools' names and arguments; it does
 not remove the separate native BigQuery manual-OAuth block, which continues to
 gate Google's hosted endpoint.
+
+The experimental [hosted BigQuery MCP bridge](BIGQUERY_MCP_EXPERIMENT.md) calls
+Google's official MCP from a Worker in your Cloudflare account. Its setup guide
+covers the operator OAuth callback, source resume, team access checks, and key
+rotation. It exposes only a constant SQL probe until query cost controls are
+qualified, and does not replace the budget-capped `bigquery` REST reader.
 
 The API reference and scope review for Notion, HubSpot, and Zendesk is in
 [the API evidence record](../../docs/READ_CONNECTOR_API_EVIDENCE.md). Gorgias uses

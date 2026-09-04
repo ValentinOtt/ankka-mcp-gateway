@@ -18,5 +18,5 @@
     "skipLibCheck": true,
     "useUnknownInCatchVariables": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "worker-configuration.d.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "test-live/**/*.ts", "vitest.live.config.ts", "worker-configuration.d.ts"]
 }

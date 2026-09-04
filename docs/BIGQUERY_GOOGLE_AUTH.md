@@ -1,12 +1,20 @@
 # Google BigQuery authentication compatibility
 
-Reviewed 2026-08-30. **Blocked: Google authentication is not implemented or
-deployed.** Public discovery works, but Cloudflare's documented manual OAuth
+Direct endpoint review: 2026-08-30. **Direct Google shared authentication remains
+blocked.** Public discovery works, but Cloudflare's documented manual OAuth
 path does not provide the shared operator credential this gateway requires.
-No Google client, credential, IAM policy, dataset, export, or adapter was
-created. An isolated Cloudflare source was created for a live setup check; it
+During that review no Google client, credential, IAM policy, dataset, export, or
+adapter was created. An isolated Cloudflare source was created for a live setup check; it
 is not attached to a Portal and all six tool overrides are disabled. Existing
 sources and Portal Code Mode were not changed.
+
+The selected follow-up is an experimental
+[bridge to Google's hosted MCP](../apps/read-only-connectors/BIGQUERY_MCP_EXPERIMENT.md)
+running in your Cloudflare account. Direct client connectivity through that
+bridge is proven; Ankka source provisioning and shared Portal access still
+need qualification. The direct-endpoint block below remains enforced. The
+bridge uses a customer-owned service-account secret and currently restricts
+SQL to a constant connectivity query while cost controls are unresolved.
 
 ## Compatibility result
 

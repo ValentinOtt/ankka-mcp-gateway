@@ -1,5 +1,6 @@
 import type { ReadConnector } from '../connector';
 import { createBigQueryConnector } from './bigquery';
+import { createBigQueryMcpConnector } from './bigquery-mcp';
 import { createNotionConnector } from './notion';
 import { createHubSpotConnector } from './hubspot';
 import { createZendeskConnector } from './zendesk';
@@ -16,6 +17,7 @@ export function createConnector(provider: string, config: string, token: string)
     case 'google-search-console': return createGoogleSearchConsoleConnector(config, token);
     case 'google-analytics': return createGoogleAnalyticsConnector(config, token);
     case 'bigquery': return createBigQueryConnector(config, token);
+    case 'bigquery-mcp': return createBigQueryMcpConnector(config, token);
     default: throw new Error('CONNECTOR_CONFIGURATION_INVALID');
   }
 }
