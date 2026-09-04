@@ -1,5 +1,7 @@
 import * as v from 'valibot';
 
+import { isBootstrapPlan, hostedWorkerName, verifyHostedDeployPlan, type HostedDeployPlan } from './bootstrap-plan';
+import { issueWorkerSetupPermit } from './worker-setup-permit';
 import { canonicalJson } from './canonical-json';
 import {
   issueCloudflareBootstrapOwnershipHandoff,
@@ -15,6 +17,7 @@ import {
   verifyWorkerBootstrapSubdomain,
   type CloudflareManagementTransport,
 } from './cloudflare-management-surface';
+import { discoverHostedAccountZones, ensureHostedWorkersSubdomain, setupZonesSchema } from './hosted-account-setup';
 import { PUBLIC_ORIGIN } from './constants';
 import {
   createCustomerBootstrapCapability,
@@ -42,10 +45,6 @@ import {
   adaptVerifiedReleaseBundleForGatewayDeployments,
 } from './release-direct-upload-adapter';
 import type { VerifiedReleaseBundle } from './release';
-import {
-  verifyStaticDeployPlanIntegrity,
-  type StaticDeployPlan,
-} from './schema';
 import { parseVerifiedReleaseBundle } from './verified-release-bundle';
 
 const ACCOUNT_ID = /^[a-f0-9]{32}$/u;
@@ -80,6 +79,7 @@ const deploymentSchema = v.strictObject({
   recovery: v.picklist(['created', 'recovered']),
 });
 const provisionSchema = v.strictObject({
+  availableZones: v.optional(setupZonesSchema),
   schemaVersion: v.literal(1),
   accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
   bootstrapId: v.pipe(v.string(), v.regex(BOOTSTRAP_ID)),
@@ -152,16 +152,6 @@ function managementTransport(transport: FetchTransport): CloudflareManagementTra
   return (request) => transport(request);
 }
 
-function managementWorkerName(plan: StaticDeployPlan): string {
-  const matches = plan.managementResources.filter((resource) =>
-    resource.kind === 'management_worker');
-  const workerName = matches[0]?.name;
-  if (matches.length !== 1 || workerName === undefined || !WORKER_NAME.test(workerName)) {
-    invalid('release_invalid');
-  }
-  return workerName;
-}
-
 function exactBootstrapOrigin(value: string, workerName: string, subdomain: string): boolean {
   try {
     const url = new URL(value);
@@ -210,7 +200,7 @@ export async function createHostedStage1Secrets(input: {
   });
 }
 
-function validateSecrets(input: HostedStage1Secrets, now: number, plan: StaticDeployPlan): void {
+function validateSecrets(input: HostedStage1Secrets, now: number, plan: HostedDeployPlan): void {
   if (!BOOTSTRAP_ID.test(input.capability.bootstrapId) ||
       !TOKEN.test(input.capability.secret) ||
       !SHA256_COMMITMENT.test(input.capability.secretCommitment) ||
@@ -225,7 +215,7 @@ export function expectedCustomerBootstrapBindings(input: {
   readonly customerOauthClientId: string;
   readonly issuerKeyId: string;
   readonly issuerPublicKey: string;
-  readonly plan: StaticDeployPlan;
+  readonly plan: HostedDeployPlan;
   readonly release: ReturnType<typeof parseVerifiedReleaseBundle>;
   readonly capability: CustomerBootstrapCapability;
   readonly workerName: string;
@@ -239,7 +229,7 @@ export function expectedCustomerBootstrapBindings(input: {
     ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${input.plan.releaseArtifactSha256}`,
     ANKKA_INSTALL_ID: input.plan.managementOwnershipMarker,
     ANKKA_INSTALLER_ORIGIN: PUBLIC_ORIGIN,
-    ANKKA_MANAGEMENT_HOSTNAME: input.plan.gatewayConfiguration.managementHostname,
+    ANKKA_MANAGEMENT_HOSTNAME: isBootstrapPlan(input.plan) ? new URL(input.bootstrapCallback).hostname : input.plan.gatewayConfiguration.managementHostname,
     ANKKA_PLAN_HASH: input.plan.planHash,
     ANKKA_PLAN_ID: input.plan.planId,
     ANKKA_UPDATE_CHANNEL: input.release.channel,
@@ -263,7 +253,7 @@ export async function provisionHostedStage1(input: {
   readonly oauth: CloudflareOauthConfig;
   readonly transport: FetchTransport;
   readonly bundle: VerifiedReleaseBundle;
-  readonly plan: StaticDeployPlan;
+  readonly plan: HostedDeployPlan;
   readonly secrets: HostedStage1Secrets;
   readonly customerOauthClientId: string;
   readonly issuerKeyId: string;
@@ -278,7 +268,7 @@ export async function provisionHostedStage1(input: {
   if (!Number.isSafeInteger(startedAt) || startedAt < 0 ||
       !CLIENT_ID.test(input.customerOauthClientId) ||
       !KEY_ID.test(input.issuerKeyId) || !TOKEN.test(input.issuerPublicKey)) invalid();
-  const plan = await verifyStaticDeployPlanIntegrity(input.plan);
+  const plan = await verifyHostedDeployPlan(input.plan);
   validateSecrets(input.secrets, startedAt, plan);
   if (`sha256:${await sha256Hex(input.secrets.capability.secret)}` !==
       input.secrets.capability.secretCommitment) invalid();
@@ -290,7 +280,7 @@ export async function provisionHostedStage1(input: {
       parsedRelease.manifest.components.workerBootstrap.files[0]?.sha256 !==
         plan.bootstrapWorkerSourceSha256) invalid('release_invalid');
   const releases = await adaptVerifiedReleaseBundleForGatewayDeployments(input.bundle);
-  const workerName = managementWorkerName(plan);
+  const workerName = hostedWorkerName(plan);
   const fixedTransport = managementTransport(input.transport);
   const provider = input.provider ?? DEFAULT_PROVIDER;
 
@@ -300,7 +290,11 @@ export async function provisionHostedStage1(input: {
     config: input.oauth,
     transport: input.transport,
     deploy: async ({ accessToken, accountId }) => {
-      const workersSubdomain = await provider.getAccountWorkersSubdomain({
+      const availableZones = isBootstrapPlan(plan)
+        ? await discoverHostedAccountZones({ accessToken, accountId, transport: input.transport }) : undefined;
+      const workersSubdomain = isBootstrapPlan(plan)
+        ? await ensureHostedWorkersSubdomain({ accessToken, accountId, transport: input.transport, suggestedSubdomain: `ankka-${plan.installSeed}` })
+        : await provider.getAccountWorkersSubdomain({
         accessToken,
         accountId,
         transport: fixedTransport,
@@ -377,6 +371,7 @@ export async function provisionHostedStage1(input: {
         serializedHandoff: handoff,
       });
       return Object.freeze({
+        availableZones,
         bootstrapCallback,
         bootstrapOrigin,
         deployment,
@@ -387,6 +382,7 @@ export async function provisionHostedStage1(input: {
   });
 
   return parseHostedStage1Provision({
+    availableZones: result.deployment.availableZones,
     schemaVersion: 1,
     accountId: result.accountId,
     bootstrapId: input.secrets.capability.bootstrapId,
@@ -489,7 +485,7 @@ async function readBootstrapHealth(input: {
  */
 export async function completeHostedStage1Handoff(input: {
   readonly provision: HostedStage1Provision;
-  readonly plan: StaticDeployPlan;
+  readonly plan: HostedDeployPlan;
   readonly capabilitySecret: string;
   readonly customerOauthClientId: string;
   readonly issuerKeyId: string;
@@ -499,7 +495,7 @@ export async function completeHostedStage1Handoff(input: {
   readonly now: () => number;
 }): Promise<HostedStage1Handoff> {
   const provision = parseHostedStage1Provision(input.provision);
-  const plan = await verifyStaticDeployPlanIntegrity(input.plan);
+  const plan = await verifyHostedDeployPlan(input.plan);
   const now = input.now();
   if (!Number.isSafeInteger(now) || now < 0 || now >= provision.capabilityExpiresAt ||
       !TOKEN.test(input.capabilitySecret) || !CLIENT_ID.test(input.customerOauthClientId) ||
@@ -526,6 +522,22 @@ export async function completeHostedStage1Handoff(input: {
   const health = await readBootstrapHealth({ provision, transport: input.transport });
   if (health.installId !== plan.managementOwnershipMarker) {
     throw new DeployError(502, 'bootstrap_failed', 'handoff_install_id_mismatch');
+  }
+  if (isBootstrapPlan(plan)) {
+    if (provision.availableZones === undefined) invalid();
+    const setupPermit = await issueWorkerSetupPermit({
+      bootstrapPlan: plan, serializedHandoff: provision.handoff,
+      availableZones: provision.availableZones, ownershipPublicKey: health.ownershipPublicKey,
+      bootstrapCallback: provision.bootstrapCallback, publicClientId: input.customerOauthClientId,
+      issuerKeyId: input.issuerKeyId,
+    }, input.issuerPrivateKey);
+    const bytes = new TextEncoder().encode(canonicalJson({
+      bootstrapId: provision.bootstrapId, secret: input.capabilitySecret, setupPermit,
+    }));
+    if (bytes.byteLength > MAX_HANDOFF_FRAGMENT_BYTES) invalid();
+    const url = new URL(CUSTOMER_INSTALL_ROOT_PATH, provision.bootstrapOrigin);
+    url.hash = base64UrlEncode(bytes);
+    return Object.freeze({ handoffUrl: url.toString(), bootstrapOrigin: provision.bootstrapOrigin, expiresAt: provision.capabilityExpiresAt });
   }
   let ownershipCertificate: string;
   try {

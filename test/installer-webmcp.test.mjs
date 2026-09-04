@@ -16,7 +16,7 @@ const AUTHORIZATION_URL = 'https://dash.cloudflare.com/oauth2/auth?client_id=x&s
 const HANDOFF_URL = `https://ankka-gateway-example-acg-${'a'.repeat(24)}.tenant.workers.dev/__ankka/install#${'A'.repeat(64)}`;
 const syntheticPrivate = 'SYNTHETIC_PRIVATE_VALUE_MUST_NOT_ESCAPE';
 const expectedNames = [
-  'get_installer_status', 'configure_gateway', 'begin_authorization', 'finish_secure_setup', 'begin_cleanup',
+  'get_installer_status', 'prepare_deployment', 'begin_authorization', 'finish_secure_setup', 'begin_cleanup',
 ];
 
 function sessionFixture(overrides = {}) {
@@ -183,52 +183,26 @@ test('get_installer_status reflects the durable session without leaking anything
   assert.match(status.status.approvals.second, /never held by Ankka/u);
 });
 
-test('configure_gateway saves the selection with derived hostnames, creates the plan, and rejects bad arguments', async (t) => {
+test('prepare_deployment creates a bootstrap plan without collecting gateway details', async (t) => {
   const b = await browser(t);
-  const rejected = await b.invoke('configure_gateway', { gatewayName: 'Example Gateway' });
-  assert.equal(rejected.ok, false);
+  const rejected = await b.invoke('prepare_deployment', { gatewayName: 'Example Gateway' });
   assert.equal(rejected.error.code, 'invalid_arguments');
-  const widened = await b.invoke('configure_gateway', {
-    gatewayName: 'Example Gateway', zoneName: 'example.com', adminEmail: 'owner@example.com', accountId: 'x',
-  });
-  assert.equal(widened.error.code, 'invalid_arguments');
-  assert.equal(b.requests.filter((request) => request.url === '/api/selection').length, 0);
-
-  const saved = await b.invoke('configure_gateway', {
-    gatewayName: 'Example Gateway', zoneName: 'Example.com', adminEmail: 'Owner@Example.com',
-  });
+  const saved = await b.invoke('prepare_deployment', {});
   assert.equal(saved.ok, true);
-  const selection = b.requests.find((request) => request.url === '/api/selection');
-  assert.equal(selection.method, 'PUT');
-  assert.equal(selection.headers['x-csrf-token'], 'synthetic-csrf');
-  assert.equal(selection.credentials, 'same-origin');
-  assert.equal(selection.redirect, 'error');
-  assert.deepEqual(JSON.parse(selection.body), SELECTION);
+  assert.equal(b.requests.some((request) => request.url === '/api/selection'), false);
   const plan = b.requests.find((request) => request.url === '/api/plan');
   assert.equal(plan.method, 'POST');
+  assert.equal(plan.headers['x-csrf-token'], 'synthetic-csrf');
+  assert.equal(plan.credentials, 'same-origin');
+  assert.deepEqual(JSON.parse(plan.body), {});
   assert.equal(saved.status.plan.releaseId, 'gateway-v1.2.3');
-  assert.equal(b.document.querySelector('[data-route="/review"]').hidden, false);
-
-  const failing = await browser(t, {
-    request: (url) => url === '/api/selection'
-      ? Response.json({ code: 'bad_request', reason: 'zone_name_invalid' }, { status: 400 })
-      : undefined,
-  });
-  const invalid = await failing.invoke('configure_gateway', {
-    gatewayName: 'Example Gateway', zoneName: 'not a domain', adminEmail: 'owner@example.com',
-  });
-  assert.equal(invalid.ok, false);
-  assert.deepEqual(invalid.error, {
-    code: 'bad_request', reason: 'zone_name_invalid', retryable: false,
-    message: 'Enter the storefront domain you host on Cloudflare, such as example.com.',
-  });
 });
 
-test('begin_authorization returns the Cloudflare link only for a planned gateway and never opens it itself', async (t) => {
+test('begin_authorization prepares deployment and returns the Cloudflare link and never opens it itself', async (t) => {
   const unplanned = await browser(t);
-  const refused = await unplanned.invoke('begin_authorization', {});
-  assert.equal(refused.error.code, 'plan_unavailable');
-  assert.equal(unplanned.requests.some((request) => request.url === '/api/bootstrap'), false);
+  const prepared = await unplanned.invoke('begin_authorization', {});
+  assert.equal(prepared.ok, true);
+  assert.equal(unplanned.requests.some((request) => request.url === '/api/bootstrap'), true);
 
   const planned = await browser(t, { session: sessionFixture({ selection: SELECTION, plan: PLAN }) });
   const started = await planned.invoke('begin_authorization', {});

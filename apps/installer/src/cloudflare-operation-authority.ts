@@ -98,6 +98,7 @@ export type CloudflareResourceOwnershipState =
   (typeof CLOUDFLARE_RESOURCE_OWNERSHIP_STATES)[number];
 
 export const CLOUDFLARE_OPERATION_MUTATIONS = Object.freeze([
+  'register-account-workers-subdomain',
   'create-bootstrap-worker',
   'recover-bootstrap-worker',
   'delete-bootstrap-worker',
@@ -161,7 +162,7 @@ export interface FixedCloudflareOperationAuthority {
 const frozen = <Value extends string>(values: readonly Value[]): readonly Value[] =>
   Object.freeze([...values]);
 
-const BOOTSTRAP_SCOPES = frozen([CLOUDFLARE_OAUTH_SCOPE.workersScriptsWrite]);
+const BOOTSTRAP_SCOPES = frozen([CLOUDFLARE_OAUTH_SCOPE.workersScriptsWrite, CLOUDFLARE_OAUTH_SCOPE.zoneRead]);
 
 // The customer Worker creates the initial Access, Portal, DNS, and final
 // Worker surface. workers-routes.read is retained only for reviewed custom
@@ -177,7 +178,7 @@ const INSTALL_SCOPES = frozen([
   CLOUDFLARE_OAUTH_SCOPE.zoneRead,
 ]);
 
-const WORKER_RELEASE_SCOPES = BOOTSTRAP_SCOPES;
+const WORKER_RELEASE_SCOPES = frozen([CLOUDFLARE_OAUTH_SCOPE.workersScriptsWrite]);
 const SOURCE_SCOPES = frozen([
   CLOUDFLARE_OAUTH_SCOPE.accessAppsAndPoliciesWrite,
   CLOUDFLARE_OAUTH_SCOPE.mcpPortalsWrite,
@@ -257,13 +258,13 @@ const OPERATION_AUTHORITY: Readonly<Record<FixedCloudflareOperation, FixedCloudf
       'ankka-installer',
       BOOTSTRAP_SCOPES,
       DIRECT_WORKER_RELEASE,
-      ['accounts-list', 'workers-container', 'workers-durable-object-namespaces',
+      ['accounts-list', 'zones-list', 'workers-container', 'workers-durable-object-namespaces',
         'workers-scripts', 'workers-assets', 'workers-versions', 'workers-deployments',
         'workers-subdomain'],
       ['absent', 'same-installation-incomplete'],
       // Delete/disable mutations are available only to the same fixed executor
       // for bounded rollback before the request-local grant is revoked.
-      ['create-bootstrap-worker', 'recover-bootstrap-worker', 'delete-bootstrap-worker',
+      ['register-account-workers-subdomain', 'create-bootstrap-worker', 'recover-bootstrap-worker', 'delete-bootstrap-worker',
         'delete-bootstrap-admin-state-namespace', 'publish-worker-release',
         'activate-worker-release', 'enable-workers-dev', 'disable-workers-dev'],
       ['bootstrap-surface-only', 'bootstrap-capability-committed', 'exact-release-active',
@@ -355,7 +356,7 @@ const OPERATION_AUTHORITY: Readonly<Record<FixedCloudflareOperation, FixedCloudf
     'uninstall-finalize': authority(
       'uninstall-finalize',
       'ankka-installer',
-      BOOTSTRAP_SCOPES,
+      WORKER_RELEASE_SCOPES,
       DEPLOYMENT_READ_ONLY,
       ['accounts-list', 'workers-container', 'workers-scripts',
         'workers-durable-object-namespaces', 'workers-deployments'],
@@ -403,9 +404,9 @@ const UNINSTALL_RESOURCE_SCOPES: Readonly<Record<
   ReceiptOwnedCloudflareResourceKind,
   readonly CloudflareOauthScope[]
 >> = Object.freeze({
-  worker: BOOTSTRAP_SCOPES,
-  durable_object_namespace: BOOTSTRAP_SCOPES,
-  worker_custom_domain: BOOTSTRAP_SCOPES,
+  worker: WORKER_RELEASE_SCOPES,
+  durable_object_namespace: WORKER_RELEASE_SCOPES,
+  worker_custom_domain: WORKER_RELEASE_SCOPES,
   mcp_server: frozen([CLOUDFLARE_OAUTH_SCOPE.mcpPortalsWrite]),
   mcp_portal: frozen([CLOUDFLARE_OAUTH_SCOPE.mcpPortalsWrite]),
   access_application: frozen([CLOUDFLARE_OAUTH_SCOPE.accessAppsAndPoliciesWrite]),

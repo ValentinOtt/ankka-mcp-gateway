@@ -57,6 +57,8 @@ import {
 import type { VerifiedReleaseBundle } from './release';
 import type { ReviewedGatewayDeployActivation } from './reviewed-activation';
 import { buildStaticDeployPlan, parseDeploySelection } from './schema';
+import { buildBootstrapDeployPlan, isBootstrapPlan } from './bootstrap-plan';
+import { certifyWorkerSetup, setupConfigurationRequestSchema, WORKER_SETUP_CERTIFY_PATH } from './worker-setup-permit';
 import { buildPublicUpdateChannel } from './update-channel';
 import {
   buildSignedInstallerAssetResponse,
@@ -80,7 +82,6 @@ import { parseVerifiedReleaseBundle } from './verified-release-bundle';
  */
 
 const CALLBACK_PATH = new URL(OAUTH_CALLBACK_URL).pathname;
-const BOOTSTRAP_SCOPES = exactOperationScopes('bootstrap');
 const PLAN_TTL_MS = 30 * 60 * 1_000;
 const PLAN_RENEWAL_MARGIN_MS = 60 * 1_000;
 const HANDOFF_RETRY_MS = 3_000;
@@ -102,6 +103,7 @@ export const TWO_STAGE_API_ROUTES = Object.freeze([
   '/api/plan',
   '/api/bootstrap',
   '/api/bootstrap/handoff',
+  WORKER_SETUP_CERTIFY_PATH,
   '/api/cleanup',
   CALLBACK_PATH,
 ] as const);
@@ -293,15 +295,15 @@ function uniqueQuery(url: URL, key: string): string | null {
   return values[0] ?? null;
 }
 
-function echoedScopeIsExact(value: string): boolean {
+function echoedScopeIsExact(value: string, kind: 'bootstrap' | 'cleanup'): boolean {
   if (value.length > 1_024) return false;
   const values = [...new Set(value.split(/\s+/u).filter(Boolean))].sort();
-  const expected = [...BOOTSTRAP_SCOPES].sort();
+  const expected = [...exactOperationScopes(kind === 'cleanup' ? 'uninstall-finalize' : 'bootstrap')].sort();
   return values.length === expected.length && values.every((scope, index) => scope === expected[index]);
 }
 
 /** Accepts only `code`, `state`, the echoed exact scope, and the standard denial fields. */
-function parseCallbackQuery(url: URL): CallbackQuery {
+function parseCallbackQuery(url: URL, kind: 'bootstrap' | 'cleanup'): CallbackQuery {
   const keys = [...url.searchParams.keys()];
   const state = uniqueQuery(url, 'state');
   const code = uniqueQuery(url, 'code');
@@ -316,7 +318,7 @@ function parseCallbackQuery(url: URL): CallbackQuery {
     (code === null) === (oauthError === null) ||
     (code !== null && (code.length < 8 || code.length > 4_096)) ||
     (oauthError !== null && (oauthError.length < 1 || oauthError.length > 128)) ||
-    (echoedScope !== null && !echoedScopeIsExact(echoedScope))
+    (echoedScope !== null && !echoedScopeIsExact(echoedScope, kind))
   ) throw new DeployError(400, 'callback_invalid');
   if (oauthError !== null) return Object.freeze({ state, code: null, denied: true });
   if (code === null) throw new DeployError(400, 'callback_invalid');
@@ -340,16 +342,17 @@ function provisionFailureCode(error: DeployError): HostedStage1FailureCode {
 async function readJsonBody<Schema extends v.GenericSchema>(
   request: Request,
   schema: Schema,
+  maxBytes = MAX_JSON_BYTES,
 ): Promise<v.InferOutput<Schema>> {
   if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) {
     throw new DeployError(400, 'bad_request');
   }
   const declared = Number(request.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > MAX_JSON_BYTES) throw new DeployError(413, 'bad_request');
+  if (Number.isFinite(declared) && declared > maxBytes) throw new DeployError(413, 'bad_request');
   let decoded: unknown;
   try {
     const text = await request.text();
-    if (text.length > MAX_JSON_BYTES) throw new DeployError(413, 'bad_request');
+    if (new TextEncoder().encode(text).byteLength > maxBytes) throw new DeployError(413, 'bad_request');
     decoded = JSON.parse(text);
   } catch (error) {
     if (error instanceof DeployError) throw error;
@@ -545,9 +548,11 @@ export function createTwoStageDeployRuntime(
     session: SessionHandle,
     current: HostedStage1Session,
   ): Promise<HostedStage1Session> {
-    if (current.selection === null) throw new DeployError(409, 'session_conflict', 'selection_missing');
     const snapshot = await loadSnapshot(context.env);
-    const plan = await buildStaticDeployPlan(current.selection, snapshot.bundle.manifest, context.now + PLAN_TTL_MS);
+    const plan = current.selection === null
+      ? await buildBootstrapDeployPlan(snapshot.bundle.manifest, context.now + PLAN_TTL_MS,
+        current.plan !== null && isBootstrapPlan(current.plan) ? current.plan.installSeed : undefined)
+      : await buildStaticDeployPlan(current.selection, snapshot.bundle.manifest, context.now + PLAN_TTL_MS);
     return session.client.freezePlan(plan);
   }
 
@@ -564,6 +569,7 @@ export function createTwoStageDeployRuntime(
     await requireMutation(request, context, session);
     let current = await session.client.read();
     if (current === null) throw new DeployError(404, 'session_invalid');
+    if (current.plan === null) current = await freezePlanFor(context, session, current);
     if (current.plan === null) throw new DeployError(409, 'session_conflict', 'plan_missing');
     if (current.plan.expiresAt < context.now + CUSTOMER_BOOTSTRAP_TTL_MS + PLAN_RENEWAL_MARGIN_MS) {
       current = await freezePlanFor(context, session, current);
@@ -604,6 +610,7 @@ export function createTwoStageDeployRuntime(
       context.now,
     );
     const authorizationUrl = buildHostedBootstrapAuthorizationUrl({
+      kind: 'cleanup',
       clientId: context.config.CLOUDFLARE_OAUTH_CLIENT_ID,
       state: start.state,
       challenge: start.challenge,
@@ -624,8 +631,8 @@ export function createTwoStageDeployRuntime(
 
   async function oauthCallback(request: Request, context: RuntimeContext): Promise<Response> {
     const cleared = [clearBootstrapCookie()];
-    const query = parseCallbackQuery(new URL(request.url));
     const cookie = await openCookie(request, context);
+    const query = parseCallbackQuery(new URL(request.url), cookie.kind);
     if (!constantTimeEqual(query.state, cookie.state)) throw new DeployError(400, 'callback_invalid');
     const session = await requireSession(request, context);
     const current = await session.client.read();
@@ -723,6 +730,18 @@ export function createTwoStageDeployRuntime(
       const kind = error instanceof Error && error.name === 'ValiError' ? 'schema' : 'unexpected';
       throw new DeployError(500, 'internal_error', `handoff_${step}_${kind}`);
     }
+  }
+
+  async function postWorkerConfiguration(request: Request, context: RuntimeContext): Promise<Response> {
+    const input = await readJsonBody(request, setupConfigurationRequestSchema, 64 * 1024);
+    const issuer = await issuerKey(context);
+    const snapshot = await loadSnapshot(context.env);
+    const result = await certifyWorkerSetup({
+      request: input, manifest: snapshot.bundle.manifest,
+      issuerPublicKey: issuer.publicKey, issuerPrivateKey: issuer.privateKey, issuerKeyId: issuer.keyId,
+      publicClientId: context.config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID, now: context.now,
+    });
+    return json(result);
   }
 
   async function getHandoff(request: Request, context: RuntimeContext): Promise<Response> {
@@ -839,6 +858,8 @@ export function createTwoStageDeployRuntime(
         return putSelection(request, runtime);
       case 'POST /api/plan':
         return postPlan(request, runtime);
+      case `POST ${WORKER_SETUP_CERTIFY_PATH}`:
+        return postWorkerConfiguration(request, runtime);
       case 'POST /api/bootstrap':
         return postBootstrap(request, runtime);
       case 'POST /api/cleanup':

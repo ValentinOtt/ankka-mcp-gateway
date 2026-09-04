@@ -1,6 +1,7 @@
 import * as v from 'valibot';
 
 import { boundaryObjectSchema, type BoundaryObject } from './boundary';
+import { isBootstrapPlan, parseHostedDeployPlan, verifyHostedDeployPlan, type HostedDeployPlan } from './bootstrap-plan';
 import { canonicalJson } from './canonical-json';
 import { FAILURE_REASON_PATTERN, isFailureReason } from './errors';
 import {
@@ -21,10 +22,7 @@ import {
   deploySelectionFromStaticPlan,
   forbiddenStoredKeyPath,
   parseDeploySelection,
-  parseStaticDeployPlan,
-  verifyStaticDeployPlanIntegrity,
   type DeploySelection,
-  type StaticDeployPlan,
 } from './schema';
 
 /**
@@ -147,7 +145,7 @@ export interface HostedStage1Session {
   readonly updatedAt: number;
   readonly expiresAt: number;
   readonly selection: DeploySelection | null;
-  readonly plan: StaticDeployPlan | null;
+  readonly plan: HostedDeployPlan | null;
   readonly provision: HostedStage1Provision | null;
   readonly attempt: HostedStage1Attempt | null;
   readonly provisionedAttemptId: string | null;
@@ -253,11 +251,11 @@ function exactSelection(value: BoundaryObject | null): DeploySelection | null {
   return parsed;
 }
 
-function exactPlan(value: BoundaryObject | null): StaticDeployPlan | null {
+function exactPlan(value: BoundaryObject | null): HostedDeployPlan | null {
   if (value === null) return null;
-  let parsed: StaticDeployPlan;
+  let parsed: HostedDeployPlan;
   try {
-    parsed = parseStaticDeployPlan(value);
+    parsed = parseHostedDeployPlan(value);
   } catch {
     invalid();
   }
@@ -277,7 +275,7 @@ function exactProvision(value: BoundaryObject | null): HostedStage1Provision | n
   return parsed;
 }
 
-function provisionMatchesPlan(provision: HostedStage1Provision, plan: StaticDeployPlan): boolean {
+function provisionMatchesPlan(provision: HostedStage1Provision, plan: HostedDeployPlan): boolean {
   return provision.plan.id === plan.planId &&
     provision.plan.hash === plan.planHash &&
     provision.release.id === plan.releaseId &&
@@ -289,7 +287,7 @@ function phaseInvariantsHold(session: HostedStage1Session): boolean {
   const {
     phase, selection, plan, provision, attempt, provisionedAttemptId, handedOffAt, failure, cleanup,
   } = session;
-  const planMatchesSelection = plan === null || (selection !== null &&
+  const planMatchesSelection = plan === null || isBootstrapPlan(plan) || (selection !== null &&
     canonicalJson(deploySelectionFromStaticPlan(plan)) === canonicalJson(selection));
   const provisionConsistent = provision === null ||
     (plan !== null && provisionMatchesPlan(provision, plan));
@@ -301,7 +299,7 @@ function phaseInvariantsHold(session: HostedStage1Session): boolean {
         handedOffAt === null && failure === null &&
         (cleanup === null || cleanup.completedAt !== null);
     case 'authorizing':
-      return selection !== null && plan !== null && provision === null &&
+      return plan !== null && provision === null &&
         provisionedAttemptId === null && handedOffAt === null && failure === null &&
         attempt !== null && attempt.kind === 'bootstrap' && attempt.capability !== null &&
         attempt.capability.expiresAt === attempt.expiresAt &&
@@ -432,19 +430,18 @@ export function saveHostedStage1Selection(input: {
   });
 }
 
-/** Freezes the exact static plan for the stored selection after recomputing both plan commitments. */
+/** Freezes a bootstrap plan, or a matching in-flight static plan, after verifying its commitments. */
 export async function freezeHostedStage1Plan(input: {
   readonly current: HostedStage1Session;
-  readonly plan: StaticDeployPlan;
+  readonly plan: HostedDeployPlan;
   readonly now: number;
 }): Promise<HostedStage1Session> {
   const current = currentSession(input.current, input.now);
   requireLive(current, input.now);
   if (current.phase !== 'draft' && current.phase !== 'failed') wrongPhase();
-  if (current.selection === null) wrongPhase();
-  const plan = await verifyStaticDeployPlanIntegrity(input.plan);
+  const plan = await verifyHostedDeployPlan(input.plan);
   if (plan.expiresAt <= input.now ||
-      canonicalJson(deploySelectionFromStaticPlan(plan)) !== canonicalJson(current.selection)) invalid();
+      (!isBootstrapPlan(plan) && canonicalJson(deploySelectionFromStaticPlan(plan)) !== canonicalJson(current.selection))) invalid();
   return advance(current, input.now, { phase: 'draft', plan, failure: null });
 }
 
@@ -738,8 +735,8 @@ export function publicHostedStage1Session(state: HostedStage1Session): HostedSta
       planId: session.plan.planId,
       releaseId: session.plan.releaseId,
       expiresAt: session.plan.expiresAt,
-      managementHostname: session.plan.gatewayConfiguration.managementHostname,
-      portalHostname: session.plan.gatewayConfiguration.portalHostname,
+      managementHostname: isBootstrapPlan(session.plan) ? '' : session.plan.gatewayConfiguration.managementHostname,
+      portalHostname: isBootstrapPlan(session.plan) ? '' : session.plan.gatewayConfiguration.portalHostname,
     }),
     attempt: session.attempt === null ? null : Object.freeze({
       attemptId: session.attempt.attemptId,

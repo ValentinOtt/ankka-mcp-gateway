@@ -243,6 +243,12 @@ function selectionResourceSlug(selection: DeploySelection): string {
 }
 
 export interface StaticDeployPlan {
+  bootstrapIdentity?: {
+    planId: string;
+    planHash: string;
+    installId: string;
+    workerName: string;
+  } | undefined;
   schemaVersion: 1;
   planId: string;
   planHash: string;
@@ -335,6 +341,12 @@ const gatewayResourceSchema = v.strictObject({
   hostname: v.nullable(stringSchema),
 });
 const staticDeployPlanSchema = v.strictObject({
+  bootstrapIdentity: v.optional(v.strictObject({
+    planId: v.pipe(v.string(), v.regex(/^plan-[a-f0-9]{24}$/u)),
+    planHash: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+    installId: v.pipe(v.string(), v.regex(/^acg-[a-f0-9]{24}$/u)),
+    workerName: v.pipe(v.string(), v.regex(/^ankka-gateway-acg-[a-f0-9]{24}$/u)),
+  })),
   schemaVersion: v.literal(1),
   releaseId: stringSchema,
   releaseArtifactSha256: stringSchema,
@@ -372,6 +384,7 @@ export async function buildStaticDeployPlan(
   selection: DeploySelection,
   manifest: ReleaseManifest,
   expiresAt: number,
+  bootstrapIdentity?: StaticDeployPlan['bootstrapIdentity'],
 ): Promise<StaticDeployPlan> {
   if (!Number.isSafeInteger(expiresAt) || expiresAt <= 0) throw new DeployError(500, 'release_invalid');
   const bootstrapWorkerSource = manifest.components.workerBootstrap.files.filter(
@@ -390,8 +403,8 @@ export async function buildStaticDeployPlan(
     sourceCommit: manifest.sourceCommit,
     selection,
   }));
-  const managementOwnershipMarker = `acg-${managementOwnershipDigest.slice(0, 24)}`;
-  const workerName = `ankka-gateway-${slug}-${managementOwnershipMarker}`;
+  const managementOwnershipMarker = bootstrapIdentity?.installId ?? `acg-${managementOwnershipDigest.slice(0, 24)}`;
+  const workerName = bootstrapIdentity?.workerName ?? `ankka-gateway-${slug}-${managementOwnershipMarker}`;
   const managementAdminEmails = Object.freeze([
     selection.basics.adminEmail,
     ...selection.basics.additionalAdminEmails,
@@ -417,7 +430,13 @@ export async function buildStaticDeployPlan(
     { kind: 'portal_access_policy', key: 'portal-access-policy', name: `${selection.basics.gatewayName} portal users`, hostname: selection.basics.portalHostname },
     { kind: 'dns_record', key: 'portal-dns', name: selection.basics.portalHostname, hostname: selection.basics.portalHostname },
   ]);
+  const identity: Pick<StaticDeployPlan, 'bootstrapIdentity'> = {};
+  if (bootstrapIdentity !== undefined) identity.bootstrapIdentity = {
+    planId: bootstrapIdentity.planId, planHash: bootstrapIdentity.planHash,
+    installId: bootstrapIdentity.installId, workerName: bootstrapIdentity.workerName,
+  };
   const boundPlan = {
+    ...identity,
     schemaVersion: 1,
     releaseId: manifest.release,
     releaseArtifactSha256: manifest.artifact.treeSha256,
@@ -562,7 +581,12 @@ export function parseStaticDeployPlan<Input>(value: Input): StaticDeployPlan {
           JSON.stringify(canonical.firstSource.portalUserEmails) !== JSON.stringify(input.portalAudienceEmails))
     ) throw new DeployError(500, 'session_invalid');
     const marker = input.managementOwnershipMarker;
-    const workerName = `ankka-gateway-${selectionResourceSlug(canonical)}-${marker}`;
+    if (input.bootstrapIdentity !== undefined &&
+        (input.bootstrapIdentity.installId !== marker ||
+         input.bootstrapIdentity.workerName !== `ankka-gateway-${marker}`)) {
+      throw new DeployError(500, 'session_invalid');
+    }
+    const workerName = input.bootstrapIdentity?.workerName ?? `ankka-gateway-${selectionResourceSlug(canonical)}-${marker}`;
     const expectedManagementResources: readonly ManagementResource[] = [
       { kind: 'management_worker', key: 'management-worker', name: workerName, hostname: canonical.basics.managementHostname },
       { kind: 'management_durable_object', key: 'management-state', name: `${workerName}-state`, hostname: null },
@@ -632,10 +656,13 @@ export async function verifyStaticDeployPlanIntegrity<Input>(
     sourceCommit: plan.sourceCommit,
     selection,
   }));
-  if (plan.managementOwnershipMarker !== `acg-${ownershipDigest.slice(0, 24)}`) {
+  if (plan.bootstrapIdentity === undefined && plan.managementOwnershipMarker !== `acg-${ownershipDigest.slice(0, 24)}`) {
     throw new DeployError(500, 'session_invalid');
   }
+  const identity: Pick<StaticDeployPlan, 'bootstrapIdentity'> = {};
+  if (plan.bootstrapIdentity !== undefined) identity.bootstrapIdentity = plan.bootstrapIdentity;
   const boundPlan = {
+    ...identity,
     schemaVersion: 1,
     releaseId: plan.releaseId,
     releaseArtifactSha256: plan.releaseArtifactSha256,

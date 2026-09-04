@@ -47,6 +47,10 @@ function text(value) {
 }
 
 const SELECTION_ERROR_MESSAGES = Object.freeze({
+  active_zone_required: 'Your Cloudflare account needs an active domain before you can install a gateway.',
+  zone_discovery_rejected: 'Cloudflare did not allow domain discovery. Check that you approved domain read access for the selected account.',
+  zone_discovery_limit: 'This setup supports accounts with up to 100 active domains. Use the source deployment flow for larger accounts.',
+  account_worker_subdomain_create_rejected: 'Cloudflare could not register your Workers subdomain. Try again, or register one in Workers & Pages.',
   selection_contract_invalid: 'The setup form is incomplete. Check every field.',
   gateway_name_invalid: 'Enter a gateway name between 2 and 80 letters, numbers, spaces, or hyphens.',
   admin_email_invalid: 'Enter a valid administrator email.',
@@ -78,7 +82,7 @@ const FAILURE_MESSAGES = Object.freeze({
   authorization_rejected: 'The Cloudflare approval was declined.',
   callback_invalid: 'Cloudflare returned an approval that did not match this browser session.',
   cleanup_failed: 'The removal of the incomplete install could not be completed.',
-  grant_invalid: 'Cloudflare granted something other than the single temporary permission requested, or more than one account was selected.',
+  grant_invalid: 'Cloudflare granted permissions different from those requested, or more than one account was selected.',
   provision_failed: 'The Gateway shell could not be installed with the temporary permission.',
   revocation_unconfirmed: 'The temporary permission could not be confirmed as revoked. Check Cloudflare Connected Applications before retrying.',
   session_expired: 'The setup session expired.',
@@ -215,11 +219,6 @@ function minutesLeft(timestamp) {
   return Math.max(0, Math.ceil((timestamp - (state.now || Date.now())) / 60000));
 }
 
-function deriveHostnames(zoneName) {
-  const zone = zoneName.trim().toLowerCase().replace(/\.$/u, '');
-  return zone ? { managementHostname: `manage.${zone}`, portalHostname: `mcp.${zone}` } : { managementHostname: '', portalHostname: '' };
-}
-
 function validAuthorizationUrl(value) {
   try {
     const url = new URL(value);
@@ -270,40 +269,6 @@ function provisionSummary() {
 async function loadSession() {
   await api('/api/session');
   state.handoffFailed = false;
-}
-
-function fillForm() {
-  const basics = selectionBasics();
-  const form = byId('gateway-form');
-  if (!basics || form.dataset.filled === 'true') return;
-  byId('gateway-name').value = basics.gatewayName;
-  byId('zone-name').value = basics.zoneName;
-  byId('admin-email').value = basics.adminEmail;
-  byId('management-hostname').value = basics.managementHostname;
-  byId('portal-hostname').value = basics.portalHostname;
-  form.dataset.filled = 'true';
-}
-
-function selectionFromForm() {
-  const zoneName = byId('zone-name').value.trim().toLowerCase();
-  const derived = deriveHostnames(zoneName);
-  return {
-    schemaVersion: 1,
-    basics: {
-      gatewayName: byId('gateway-name').value.trim(),
-      zoneName,
-      adminEmail: byId('admin-email').value.trim().toLowerCase(),
-      additionalAdminEmails: [],
-      managementHostname: byId('management-hostname').value.trim().toLowerCase() || derived.managementHostname,
-      portalHostname: byId('portal-hostname').value.trim().toLowerCase() || derived.portalHostname,
-    },
-    firstSource: null,
-  };
-}
-
-async function saveGatewayAndPlan(selection) {
-  await api('/api/selection', { method: 'PUT', body: selection });
-  await api('/api/plan', { method: 'POST', body: {} });
 }
 
 async function beginAuthorization(kind) {
@@ -369,9 +334,7 @@ function renderSteps() {
 }
 
 function renderWelcome() {
-  fillForm();
-  const basics = selectionBasics();
-  byId('save-gateway').textContent = basics ? 'Save changes and review' : 'Save and review';
+  byId('save-gateway').textContent = 'Deploy to Cloudflare';
 }
 
 function renderReview() {
@@ -388,7 +351,7 @@ function renderReview() {
   const expiry = byId('plan-expiry');
   expiry.textContent = plan
     ? `This review plan performs no writes. It stays valid until ${formatWhen(plan.expiresAt)} and is refreshed automatically when you connect.`
-    : 'Describe your gateway first to create the review plan.';
+    : 'Prepare your initial Gateway deployment to continue.';
   byId('connect-cloudflare').hidden = !plan;
   byId('review-missing').hidden = Boolean(plan);
 }
@@ -415,7 +378,7 @@ function renderDeploy() {
     : 'Approve the first step in Cloudflare';
   byId('deploy-lede').textContent = state.authorizationKind === 'cleanup'
     ? 'Cloudflare will ask for one temporary permission to edit Workers. Ankka uses it once to remove exactly the incomplete Gateway shell it installed earlier, then revokes it.'
-    : 'Cloudflare will ask for one temporary permission to edit Workers and for you to pick exactly one account. Ankka uses it once to install the small Gateway shell, then revokes it before anything else happens.';
+    : 'Choose one Cloudflare account and approve temporary permissions to edit Workers and read domains. Ankka deploys the initial Worker and discovers your domains, then revokes the grant before handing you over.';
 }
 
 function renderResult() {
@@ -551,26 +514,10 @@ async function runAction(pending, action, fallback) {
   }
 }
 
-byId('gateway-form').addEventListener('submit', async (event) => {
+byId('gateway-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  try {
-    await runAction('Saving your gateway and creating the review plan…', async () => {
-      await saveGatewayAndPlan(selectionFromForm());
-    }, 'The gateway could not be saved.');
-    route('/review');
-  } catch { /* The notice already explains the failure. */ }
+  void startApproval('bootstrap');
 });
-
-byId('zone-name').addEventListener('input', () => {
-  const derived = deriveHostnames(byId('zone-name').value);
-  const management = byId('management-hostname');
-  const portal = byId('portal-hostname');
-  if (!management.dataset.edited) management.value = derived.managementHostname;
-  if (!portal.dataset.edited) portal.value = derived.portalHostname;
-});
-for (const id of ['management-hostname', 'portal-hostname']) {
-  byId(id).addEventListener('input', () => { byId(id).dataset.edited = 'true'; });
-}
 
 async function startApproval(kind) {
   try {
@@ -603,8 +550,6 @@ window.addEventListener('popstate', () => {
   state.route = ROUTES.has(window.location.pathname) ? window.location.pathname : '/';
   render();
 });
-
-const STRING_SCHEMA = Object.freeze({ type: 'string', minLength: 1, maxLength: 253 });
 
 function validAgentInput(schema, input) {
   if (input === undefined || input === null) return Object.keys(schema.properties).length === 0 || !(schema.required ?? []).length;
@@ -645,7 +590,7 @@ function publicStatus() {
     failure: current?.failure?.code ?? null,
     cleanup: current?.cleanup ? { reason: current.cleanup.reason, completed: current.cleanup.completedAt !== null } : null,
     approvals: {
-      first: 'Temporary Cloudflare permission to edit Workers, used once to install the Gateway shell, then revoked.',
+      first: 'Temporary Cloudflare permissions to edit Workers and read domains, used for the initial setup, then revoked.',
       second: 'Requested by your own Gateway to finish its setup; never held by Ankka.',
     },
   };
@@ -676,7 +621,7 @@ async function registerAgentTools() {
   const tools = [
     {
       name: 'get_installer_status',
-      description: 'Read the current Ankka MCP Gateway setup step: the described gateway, the review plan, the installed Gateway shell, and any failure or pending removal. Performs no writes.',
+      description: 'Read the current Ankka MCP Gateway setup step: the initial deployment, its release plan, the installed Gateway shell, and any failure or pending removal. Performs no writes.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, untrustedContentHint: false },
       execute: async () => {
@@ -686,47 +631,22 @@ async function registerAgentTools() {
       },
     },
     {
-      name: 'configure_gateway',
-      description: 'Describe the gateway (name, storefront domain hosted on Cloudflare, administrator email) and create the review plan. Management and portal hostnames are derived beneath the domain unless supplied. Performs no Cloudflare writes.',
-      inputSchema: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['gatewayName', 'zoneName', 'adminEmail'],
-        properties: {
-          gatewayName: { type: 'string', minLength: 2, maxLength: 80 },
-          zoneName: { type: 'string', minLength: 3, maxLength: 253 },
-          adminEmail: { type: 'string', minLength: 3, maxLength: 254 },
-          managementHostname: STRING_SCHEMA,
-          portalHostname: STRING_SCHEMA,
-        },
-      },
+      name: 'prepare_deployment',
+      description: 'Prepare a deployment of the initial Gateway Worker. Gateway name, domain selection, and administrators are configured later inside the Worker. Performs no Cloudflare writes.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false, untrustedContentHint: false },
-      execute: async (input) => runAgentAction('Saving your gateway and creating the review plan…', async () => {
-        const derived = deriveHostnames(input.zoneName);
-        await saveGatewayAndPlan({
-          schemaVersion: 1,
-          basics: {
-            gatewayName: input.gatewayName.trim(),
-            zoneName: input.zoneName.trim().toLowerCase(),
-            adminEmail: input.adminEmail.trim().toLowerCase(),
-            additionalAdminEmails: [],
-            managementHostname: (input.managementHostname ?? derived.managementHostname).trim().toLowerCase(),
-            portalHostname: (input.portalHostname ?? derived.portalHostname).trim().toLowerCase(),
-          },
-          firstSource: null,
-        });
-        byId('gateway-form').dataset.filled = '';
+      execute: async () => runAgentAction('Preparing your Gateway deployment…', async () => {
+        await api('/api/plan', { method: 'POST', body: {} });
         route('/review', true);
         return { status: publicStatus() };
       }),
     },
     {
       name: 'begin_authorization',
-      description: 'Create the first Cloudflare approval link: one temporary permission to edit Workers, used once to install the Gateway shell, then revoked. Return the link to the user; do not open or approve it for them. Requires a review plan.',
+      description: 'Create the first Cloudflare approval link: temporary permissions to edit Workers and read available domains, used for the initial deployment and then revoked. Return the link to the user; do not open or approve it for them.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true, untrustedContentHint: false },
       execute: async () => runAgentAction('Creating your Cloudflare approval link…', async () => {
-        if (!planSummary()) throw new Error('plan_unavailable');
         const prepared = await beginAuthorization('bootstrap');
         route('/deploy', true);
         return {

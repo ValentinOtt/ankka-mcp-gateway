@@ -24,7 +24,7 @@
       <main id="main" tabindex="-1">
         <nav class="step-indicators" aria-label="Installation progress">
           <ol class="steps">
-            <li><a href="/" data-route-link="/" data-step="describe" aria-label="Describe your gateway"><span class="step-dot" aria-hidden="true"></span></a></li>
+            <li><a href="/" data-route-link="/" data-step="describe" aria-label="Deploy your gateway"><span class="step-dot" aria-hidden="true"></span></a></li>
             <li><a href="/review" data-route-link="/review" data-step="review" aria-label="Review and connect Cloudflare"><span class="step-dot" aria-hidden="true"></span></a></li>
             <li><a href="/deploy" data-route-link="/deploy" data-step="approve" aria-label="Approve in Cloudflare"><span class="step-dot" aria-hidden="true"></span></a></li>
             <li><a href="/result" data-route-link="/result" data-step="finish" aria-label="Finish secure setup"><span class="step-dot" aria-hidden="true"></span></a></li>
@@ -37,19 +37,13 @@
           <h1 id="welcome-title">One approved gateway for your team’s agents, inside your own Cloudflare account</h1>
           <p class="lede">Installation takes two short Cloudflare approvals. Neither leaves a permanent permission with Ankka.</p>
           <div class="summary-card">
-            <div class="summary-row"><span>Approval 1</span><strong>Installs the small Gateway shell. Ankka asks for one temporary permission to edit Workers, uses it once, and revokes it before anything else happens.</strong></div>
-            <div class="summary-row"><span>Approval 2</span><strong>Lets your own Gateway finish its setup. It asks Cloudflare directly; Ankka never holds that permission.</strong></div>
+            <div class="summary-row"><span>Approval 1</span><strong>Installs the small Gateway shell and reads your available domains. If needed, it registers your account’s Workers subdomain. Ankka revokes the temporary permission before handing you over.</strong></div>
+            <div class="summary-row"><span>Approval 2</span><strong>After you choose and review the configuration, your own Gateway asks Cloudflare for permission to finish setup.</strong></div>
             <div class="summary-row"><span>Afterwards</span><strong>No Cloudflare token is stored anywhere. Team membership is managed in Cloudflare Access.</strong></div>
           </div>
           <form id="gateway-form" novalidate>
-            <div class="field-grid">
-              <label><span>Gateway name</span><input id="gateway-name" name="gatewayName" autocomplete="organization" maxlength="80" required><small>Shown in Cloudflare and on your gateway’s management page.</small></label>
-              <label><span>Storefront domain</span><input id="zone-name" name="zoneName" inputmode="url" autocomplete="off" placeholder="example.com" required><small>A domain you host on Cloudflare. Your gateway lives beneath it.</small></label>
-              <label><span>Administrator email</span><input id="admin-email" name="adminEmail" type="email" autocomplete="email" required><small>The Cloudflare user who approves the installation and administers the gateway.</small></label>
-              <label><span>Management page</span><input id="management-hostname" name="managementHostname" inputmode="url" autocomplete="off" placeholder="manage.example.com"><small>Derived from your domain. Change it if you prefer another hostname.</small></label>
-              <label><span>MCP portal</span><input id="portal-hostname" name="portalHostname" inputmode="url" autocomplete="off" placeholder="mcp.example.com"><small>Derived from your domain. This is what your agents connect to.</small></label>
-            </div>
-            <div class="button-row"><button id="save-gateway" class="primary-button" type="submit">Save and review</button></div>
+            <p>You’ll choose your gateway name, domain, and administrators on the setup page in your own Cloudflare account. Your account needs an active domain and Cloudflare Zero Trust; no Workers subdomain setup is needed.</p>
+            <div class="button-row"><button id="save-gateway" class="primary-button" type="submit">Deploy to Cloudflare</button></div>
           </form>
         </section>
 
@@ -58,17 +52,17 @@
           <p class="lede">Nothing has been created yet. Connecting starts the first of two short approvals.</p>
           <div id="review-summary" class="summary-card"></div>
           <p id="plan-expiry" class="caption tabular"></p>
-          <div id="review-missing" class="callout" role="note" hidden><strong>Describe your gateway first</strong><p>The review plan is created from the gateway name, storefront domain, and administrator email.</p><div class="button-row"><button class="secondary-button" type="button" data-go="/">Describe your gateway</button></div></div>
-          <div class="callout"><strong>What Cloudflare will ask</strong><p>Choose exactly one account and approve a single temporary permission to edit Workers. Ankka uses it once to install the small Gateway shell in that account, then revokes it. You will see the exact permission on Cloudflare’s screen.</p></div>
+          <div id="review-missing" class="callout" role="note" hidden><strong>Deploy your gateway first</strong><p>The initial deployment uses a generated Worker name. Choose your gateway details after it is deployed.</p><div class="button-row"><button class="secondary-button" type="button" data-go="/">Deploy your gateway</button></div></div>
+          <div class="callout"><strong>What Cloudflare will ask</strong><p>Choose exactly one account and approve temporary permissions to edit Workers and read your domains. Ankka installs the initial Worker, reads the available domains, and revokes the grant before opening your setup page.</p></div>
           <div class="button-row split"><button class="secondary-button" type="button" data-go="/">Back</button><button id="connect-cloudflare" class="primary-button" type="button">Connect Cloudflare</button></div>
         </section>
 
         <section class="panel" data-route="/deploy" aria-labelledby="deploy-title" hidden>
           <h1 id="deploy-title">Approve the first step in Cloudflare</h1>
-          <p id="deploy-lede" class="lede">Cloudflare will ask for one temporary permission to edit Workers and for you to pick exactly one account. Ankka uses it once to install the small Gateway shell, then revokes it before anything else happens.</p>
+          <p id="deploy-lede" class="lede">Choose one Cloudflare account and approve temporary permissions to edit Workers and read domains. Ankka deploys the initial Worker and discovers your domains, then revokes the grant before handing you over.</p>
           <p id="approval-expiry" class="caption tabular"></p>
-          <div id="authorization-handoff" class="callout" hidden><strong>Continue to Cloudflare</strong><p>If Cloudflare did not open automatically, use this short-lived approval link. Sign in as the administrator you named.</p><a id="authorization-link" class="primary-button" hidden>Continue to Cloudflare</a></div>
-          <div class="callout"><strong>Away from the computer?</strong><p>Approval links expire after ten minutes and leave nothing behind when they lapse. Come back to this page any time and start a fresh approval; your setup is kept.</p></div>
+          <div id="authorization-handoff" class="callout" hidden><strong>Continue to Cloudflare</strong><p>If Cloudflare did not open automatically, use this short-lived approval link. Sign in with permission to deploy in your team’s account.</p><a id="authorization-link" class="primary-button" hidden>Continue to Cloudflare</a></div>
+          <div class="callout"><strong>Away from the computer?</strong><p>Approval links expire after ten minutes. Return here to retry or remove an incomplete deployment.</p></div>
           <div class="button-row split"><button class="secondary-button" type="button" data-go="/review">Back</button><button id="restart-approval" class="secondary-button" type="button">Start a fresh approval</button></div>
         </section>
 
@@ -91,7 +85,7 @@
             <button id="fresh-approval" class="primary-button" type="button" hidden>Start a fresh approval</button>
             <button id="begin-cleanup" class="danger-button" type="button" hidden>Remove the incomplete install</button>
             <a id="cleanup-link" class="danger-button" hidden>Continue to Cloudflare</a>
-            <button id="describe-again" class="secondary-button" type="button" data-go="/" hidden>Describe a gateway</button>
+            <button id="describe-again" class="secondary-button" type="button" data-go="/" hidden>Start a new deployment</button>
           </div>
         </section>
 
@@ -99,10 +93,10 @@
       </main>
     </div>
 
-    <footer><p>This installer keeps only the setup you type here, for one hour, plus the
-      short-lived approval material needed to hand your Gateway its one-time key. It
+    <footer><p>This installer keeps the initial deployment and available domain list for one hour, plus the
+      short-lived approval material needed to hand your Gateway its one-time key. When you review your setup, your Worker sends the configuration here to certify its exact callback address. It
       stores no Cloudflare token and sends no analytics. Prefer to run everything
       yourself? Deploy from the public source repository instead.</p></footer>
-    <script src="/assets/installer-cafdf608.js"></script>
+    <script src="/assets/installer-2e80dceb.js"></script>
   </body>
 </html>

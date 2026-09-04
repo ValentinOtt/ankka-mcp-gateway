@@ -1,11 +1,17 @@
 import * as v from 'valibot';
 
+import { boundaryObjectSchema } from './boundary';
+import { parseDeploySelection, type DeploySelection } from './schema';
+import type { CustomerWorkerSetupPublicState } from './customer-worker-setup';
+import { DeployError } from './errors';
+
 import { CLOUDFLARE_CODE_RELAY_CALLBACK } from './cloudflare-code-relay';
 import {
   exactOperationScopes,
   type CustomerCloudflareOperation,
 } from './cloudflare-operation-authority';
 import {
+  authenticatedSession,
   consumeCustomerBootstrapCapability,
   initialCustomerBootstrapState,
   parseCustomerBootstrapState,
@@ -54,6 +60,9 @@ export interface CustomerBootstrapRelayStart {
 }
 
 export interface CustomerBootstrapRouterDependencies {
+  readonly acceptSetup?: (permit: string) => Promise<void>;
+  readonly readSetup?: () => Promise<CustomerWorkerSetupPublicState>;
+  readonly configureSetup?: (selection: DeploySelection) => Promise<CustomerWorkerSetupPublicState>;
   readonly now?: () => number;
   readonly randomBytes?: BootstrapRandomBytes;
   readonly state: CustomerBootstrapStatePort;
@@ -333,13 +342,20 @@ export function createCustomerBootstrapRouter(
 
         if (request.method === 'POST' && url.pathname === CUSTOMER_INSTALL_CONTINUE_PATH) {
           if (!sameOriginMutation(request)) return json({ schemaVersion: 1, error: 'forbidden' }, 403);
-          const input = await smallJson(request, v.strictObject({
-            bootstrapId: v.pipe(v.string(), v.regex(/^boot_[A-Za-z0-9_-]{24}$/u)),
-            secret: v.pipe(v.string(), v.regex(TOKEN)),
-            serializedHandoff: v.pipe(v.string(), v.minLength(1), v.maxLength(MAX_HANDOFF_BYTES)),
-            serializedPlan: v.pipe(v.string(), v.minLength(1), v.maxLength(MAX_BODY_BYTES)),
-            ownershipCertificate: v.pipe(v.string(), v.minLength(1), v.maxLength(MAX_HANDOFF_BYTES)),
-          }));
+          const input = await smallJson(request, v.union([
+            v.strictObject({
+              bootstrapId: v.pipe(v.string(), v.regex(/^boot_[A-Za-z0-9_-]{24}$/u)),
+              secret: v.pipe(v.string(), v.regex(TOKEN)),
+              setupPermit: v.pipe(v.string(), v.minLength(1), v.maxLength(56 * 1024)),
+            }),
+            v.strictObject({
+              bootstrapId: v.pipe(v.string(), v.regex(/^boot_[A-Za-z0-9_-]{24}$/u)),
+              secret: v.pipe(v.string(), v.regex(TOKEN)),
+              serializedHandoff: v.pipe(v.string(), v.minLength(1), v.maxLength(MAX_HANDOFF_BYTES)),
+              serializedPlan: v.pipe(v.string(), v.minLength(1), v.maxLength(MAX_BODY_BYTES)),
+              ownershipCertificate: v.pipe(v.string(), v.minLength(1), v.maxLength(MAX_HANDOFF_BYTES)),
+            }),
+          ]));
           const consumed = dependencies.randomBytes === undefined
             ? await consumeCustomerBootstrapCapability({
               current, bootstrapId: input.bootstrapId, secret: input.secret, now: now(),
@@ -348,11 +364,16 @@ export function createCustomerBootstrapRouter(
               current, bootstrapId: input.bootstrapId, secret: input.secret, now: now(),
               randomBytes: dependencies.randomBytes,
             });
-          await dependencies.acceptHandoff({
-            serializedHandoff: input.serializedHandoff,
-            serializedPlan: input.serializedPlan,
-            ownershipCertificate: input.ownershipCertificate,
-          });
+          if ('setupPermit' in input) {
+            if (dependencies.acceptSetup === undefined) throw new CustomerBootstrapStateError('invalid');
+            await dependencies.acceptSetup(input.setupPermit);
+          } else {
+            await dependencies.acceptHandoff({
+              serializedHandoff: input.serializedHandoff,
+              serializedPlan: input.serializedPlan,
+              ownershipCertificate: input.ownershipCertificate,
+            });
+          }
           await persistTransition(current, consumed.state);
           return json(
             { schemaVersion: 1, status: 'INCOMPLETE', next: CUSTOMER_INSTALL_OAUTH_START_PATH },
@@ -361,6 +382,20 @@ export function createCustomerBootstrapRouter(
               sessionCookie(consumed.sessionSecret, consumed.expiresAt, now()),
             ],
           );
+        }
+
+        if ((request.method === 'GET' && url.pathname === '/__ankka/install/setup') ||
+            (request.method === 'POST' && url.pathname === '/__ankka/install/configuration')) {
+          if (request.method === 'POST' && !sameOriginMutation(request)) return json({ error: 'forbidden' }, 403);
+          const secret = readSessionCookie(request);
+          if (secret === null) return json({ error: 'bootstrap_session_required' }, 403);
+          await authenticatedSession(current, secret, now());
+          if (current.oauth !== null || current.status !== 'INCOMPLETE') return json({ error: 'setup_locked' }, 409);
+          if (request.method === 'GET' && dependencies.readSetup !== undefined) return json(await dependencies.readSetup());
+          if (request.method === 'POST' && dependencies.configureSetup !== undefined) {
+            return json(await dependencies.configureSetup(parseDeploySelection(await smallJson(request, boundaryObjectSchema))));
+          }
+          return notFound();
         }
 
         if (request.method === 'POST' && url.pathname === CUSTOMER_INSTALL_OAUTH_START_PATH) {
@@ -492,6 +527,10 @@ export function createCustomerBootstrapRouter(
         }
         return notFound();
       } catch (error) {
+        if (url.pathname === '/__ankka/install/configuration' && error instanceof DeployError &&
+            error.code === 'bad_request' && error.status === 400) {
+          return json({ error: 'invalid_configuration', reason: error.reason ?? 'selection_contract_invalid' }, 400);
+        }
         const status = error instanceof CustomerBootstrapStateError && error.code === 'expired' ? 410 : 409;
         return json(
           { schemaVersion: 1, error: 'bootstrap_unavailable' },

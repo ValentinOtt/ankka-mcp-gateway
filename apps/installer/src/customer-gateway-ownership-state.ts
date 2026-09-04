@@ -156,8 +156,8 @@ export async function acceptCustomerGatewayOwnershipHandoff(input: {
   if (
     statement.accountId !== input.config.accountId ||
     statement.installId !== input.config.installId ||
-    statement.plan.id !== input.config.plan.id ||
-    statement.plan.hash !== input.config.plan.hash ||
+    (plan.bootstrapIdentity?.planId ?? statement.plan.id) !== input.config.plan.id ||
+    (plan.bootstrapIdentity?.planHash ?? statement.plan.hash) !== input.config.plan.hash ||
     plan.planId !== statement.plan.id ||
     plan.planHash !== statement.plan.hash ||
     plan.managementOwnershipMarker !== statement.installId ||

@@ -5,6 +5,7 @@ import { canonicalJson } from './canonical-json';
 import { parseGatewayWorkerSubdomainState } from './cloudflare-gateway-runtime-state';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 import { parseStaticDeployPlan, type StaticDeployPlan } from './schema';
+import { isBootstrapPlan, parseHostedDeployPlan, type HostedDeployPlan } from './bootstrap-plan';
 
 const ACCOUNT_ID_PATTERN = /^[a-f0-9]{32}$/u;
 const ZONE_ID_PATTERN = ACCOUNT_ID_PATTERN;
@@ -773,7 +774,7 @@ function reviewedManagementProjection(
     .slice(0, 20)
     .replace(/-$/u, '');
   const ownershipMarker = parsed.managementOwnershipMarker;
-  const expectedWorkerName = `ankka-gateway-${slug}-${ownershipMarker}`;
+  const expectedWorkerName = parsed.bootstrapIdentity?.workerName ?? `ankka-gateway-${slug}-${ownershipMarker}`;
   const expectedApplicationName = `${parsed.gatewayConfiguration.gatewayName} management [${ownershipMarker}]`;
   const expectedPolicyName = `${parsed.gatewayConfiguration.gatewayName} administrators [${ownershipMarker}]`;
   if (
@@ -1300,14 +1301,15 @@ export async function recoverManagementAdminAllowPolicy(
 }
 
 function validateWorkerSubdomainInput(
-  input: CloudflareManagementCall & { readonly accountId: string; readonly plan: StaticDeployPlan },
+  input: CloudflareManagementCall & { readonly accountId: string; readonly plan: HostedDeployPlan },
   stage: CloudflareManagementStage,
 ): ValidatedWorkerSubdomainInput {
   const call = commonInput(input, stage);
   if (!ACCOUNT_ID_PATTERN.test(input.accountId)) {
     fail('invalid_input', stage, 'not_sent');
   }
-  const plan = reviewedManagementProjection(input.plan, stage);
+  const parsed = parseHostedDeployPlan(input.plan);
+  const plan = isBootstrapPlan(parsed) ? parsed : reviewedManagementProjection(parsed, stage);
   if (!WORKER_NAME_PATTERN.test(plan.workerName)) fail('invalid_input', stage, 'not_sent');
   return { call, workerName: plan.workerName };
 }
@@ -1323,7 +1325,7 @@ function parseSubdomainState(value: BoundaryValue): WorkerSubdomainState | null 
 export async function setWorkerBootstrapSubdomain(
   input: CloudflareManagementCall & {
     readonly accountId: string;
-    readonly plan: StaticDeployPlan;
+    readonly plan: HostedDeployPlan;
     readonly enabled: boolean;
   },
 ): Promise<WorkerSubdomainState> {
@@ -1348,7 +1350,7 @@ export async function setWorkerBootstrapSubdomain(
 export async function verifyWorkerBootstrapSubdomain(
   input: CloudflareManagementCall & {
     readonly accountId: string;
-    readonly plan: StaticDeployPlan;
+    readonly plan: HostedDeployPlan;
     readonly expectedEnabled: boolean;
   },
 ): Promise<WorkerSubdomainState> {

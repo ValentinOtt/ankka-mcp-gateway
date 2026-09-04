@@ -33,7 +33,8 @@ import {
   type HostedStage1SessionPort,
   type HostedStage1SessionSqlStorage,
 } from './hosted-stage1-session-durable-state';
-import { parseDeploySelection, parseStaticDeployPlan, type DeploySelection, type StaticDeployPlan } from './schema';
+import { parseDeploySelection, type DeploySelection } from './schema';
+import { parseHostedDeployPlan, type HostedDeployPlan } from './bootstrap-plan';
 
 /**
  * Clean hosted two-stage Durable Object.
@@ -348,7 +349,7 @@ export class TwoStageDeploySession {
         const input = v.parse(bodySchemas['/plan'], body);
         const current = await this.existing();
         const session = await freezeHostedStage1Plan({
-          current, plan: parseStaticDeployPlan(input.plan), now,
+          current, plan: parseHostedDeployPlan(input.plan), now,
         });
         await this.commit(current, session, now);
         return { session };
@@ -493,7 +494,7 @@ export class TwoStageDeploySessionClient {
     return this.sessionOf(await this.call('/selection', { selection }));
   }
 
-  async freezePlan(plan: StaticDeployPlan): Promise<HostedStage1Session> {
+  async freezePlan(plan: HostedDeployPlan): Promise<HostedStage1Session> {
     return this.sessionOf(await this.call('/plan', { plan }));
   }
 

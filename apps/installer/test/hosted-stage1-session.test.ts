@@ -317,7 +317,7 @@ describe('hosted Stage 1 session model', () => {
     await expect(freezeHostedStage1Plan({ current: fixture.withSelection, plan: expiredPlan, now: NOW + 20 }))
       .rejects.toMatchObject({ code: 'invalid' });
     await expect(freezeHostedStage1Plan({ current: fixture.initial, plan: fixture.plan, now: NOW + 20 }))
-      .rejects.toMatchObject({ code: 'phase' });
+      .rejects.toMatchObject({ code: 'invalid' });
 
     const lateSecrets = await createHostedStage1Secrets({ now: NOW + 15 * 60_000, randomBytes: fixture.randomBytes });
     await expect(authorizeHostedStage1Bootstrap({

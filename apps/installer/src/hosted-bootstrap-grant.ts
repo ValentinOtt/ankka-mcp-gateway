@@ -17,14 +17,14 @@ import {
 import { DeployError } from './errors';
 import { readBoundedText } from './http';
 
-const BOOTSTRAP_SCOPES = exactOperationScopes('bootstrap');
 
 export function buildHostedBootstrapAuthorizationUrl(input: {
+  readonly kind?: 'bootstrap' | 'cleanup';
   readonly clientId: string;
   readonly state: string;
   readonly challenge: string;
 }): string {
-  return buildAuthorizationUrl({ ...input, scopes: BOOTSTRAP_SCOPES });
+  return buildAuthorizationUrl({ ...input, scopes: exactOperationScopes(input.kind === 'cleanup' ? 'uninstall-finalize' : 'bootstrap') });
 }
 
 export interface HostedBootstrapExecutionResult<Deployment> {
@@ -76,6 +76,7 @@ function accountReadError<Thrown>(error: Thrown): DeployError {
 }
 
 export async function executeHostedBootstrapGrant<Deployment>(input: {
+  readonly kind?: 'bootstrap' | 'cleanup';
   readonly code: string;
   readonly verifier: string;
   readonly config: CloudflareOauthConfig;
@@ -109,7 +110,7 @@ export async function executeHostedBootstrapGrant<Deployment>(input: {
     transport: inspectingTransport,
   });
   try {
-    grant.assertUsable(BOOTSTRAP_SCOPES);
+    grant.assertUsable(exactOperationScopes(input.kind === 'cleanup' ? 'uninstall-finalize' : 'bootstrap'));
     if (refreshTokenReturned) throw new DeployError(403, 'oauth_grant_invalid');
     const result = await grant.withAccessToken(async (accessToken) => {
       let accountId: string;

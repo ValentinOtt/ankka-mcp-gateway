@@ -1,3 +1,4 @@
+import { buildBootstrapDeployPlan } from '../src/bootstrap-plan';
 import * as v from 'valibot';
 import { describe, expect, it } from 'vitest';
 
@@ -375,9 +376,9 @@ function bootstrapBindings(input: {
     ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${input.plan.releaseArtifactSha256}`,
     ANKKA_INSTALL_ID: input.plan.managementOwnershipMarker,
     ANKKA_INSTALLER_ORIGIN: 'https://deploy.ankka.ai',
-    ANKKA_MANAGEMENT_HOSTNAME: input.plan.gatewayConfiguration.managementHostname,
-    ANKKA_PLAN_HASH: input.plan.planHash,
-    ANKKA_PLAN_ID: input.plan.planId,
+    ANKKA_MANAGEMENT_HOSTNAME: input.plan.bootstrapIdentity === undefined ? input.plan.gatewayConfiguration.managementHostname : new URL(input.bootstrapCallback).hostname,
+    ANKKA_PLAN_HASH: input.plan.bootstrapIdentity?.planHash ?? input.plan.planHash,
+    ANKKA_PLAN_ID: input.plan.bootstrapIdentity?.planId ?? input.plan.planId,
     ANKKA_UPDATE_CHANNEL: 'stable',
     ANKKA_UPDATE_KEY_ID: UPDATE_KEY_ID,
     ANKKA_UPDATE_PUBLIC_KEY: UPDATE_PUBLIC_KEY,
@@ -389,9 +390,11 @@ function bootstrapBindings(input: {
   });
 }
 
-async function fixture(fault: CustomerStage2ActionName | null = null) {
+async function fixture(fault: CustomerStage2ActionName | null = null, workerSetup = false) {
   const selection = parseDeploySelection(selectionInput);
-  const plan = await buildStaticDeployPlan(selection, manifest, NOW + 60 * 60_000);
+  const bootstrap = await buildBootstrapDeployPlan(manifest, NOW + 60 * 60_000);
+  const identity = workerSetup ? { planId: bootstrap.planId, planHash: bootstrap.planHash, workerName: bootstrap.workerName, installId: bootstrap.managementOwnershipMarker } : undefined;
+  const plan = await buildStaticDeployPlan(selection, manifest, NOW + 60 * 60_000, identity);
   const workerName = required(
     plan.managementResources.find((resource) => resource.kind === 'management_worker')?.name,
     'management Worker',
@@ -446,7 +449,7 @@ async function fixture(fault: CustomerStage2ActionName | null = null) {
     config: {
       accountId: ACCOUNT_ID,
       installId: plan.managementOwnershipMarker,
-      plan: { id: plan.planId, hash: plan.planHash },
+      plan: { id: plan.bootstrapIdentity?.planId ?? plan.planId, hash: plan.bootstrapIdentity?.planHash ?? plan.planHash },
       workerName,
       release: { id: plan.releaseId, artifactSha256: plan.releaseArtifactSha256 },
       bootstrapSecretCommitment: commitment,
@@ -596,8 +599,8 @@ function withoutBootstrapRuntime(
 }
 
 describe('customer Stage 2 convergence', () => {
-  it('converges the fixed lifecycle and persists no OAuth secret material', async () => {
-    const test = await fixture();
+  it.each([false, true])('converges the fixed lifecycle and persists no OAuth secret material (Worker setup: %s)', async (workerSetup) => {
+    const test = await fixture(null, workerSetup);
     await expect(convergeCustomerStage2({
       ...test.baseInput,
       attemptId: `attempt_${'a'.repeat(24)}`,
