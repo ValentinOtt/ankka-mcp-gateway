@@ -15,20 +15,68 @@ This keeps the credential boundary simple:
 ## Revocation qualification
 
 Removing an email from a source policy does not by itself prove that an
-already-connected client has lost access. In canary qualification, a member's
-existing Portal grant continued to execute direct and Code Mode calls more
-than five minutes after its source-policy removal was verified. Portal admission remained unchanged.
+already-connected client has lost access. Canary qualification keeps Portal
+admission and the operator's source access unchanged while removing only the
+test member's source assignment:
 
-Existing-grant invalidation and fresh-grant denial remain release gates. Do
-not describe a policy update as immediate revocation until calls using the
-previously authorized grant are denied. Record the observation window and
-verify the result with harmless reads.
+| Connection | Observed result |
+| --- | --- |
+| Existing Portal grant | Direct and Code Mode calls still succeeded more than five minutes after the policy removal was verified. |
+| Fresh client authorization started after removal | The browser stopped at **No allowed servers available** before issuing an OAuth code or token. |
+| Existing grant refreshed after removal | Refreshes at 15, 60, 180, and 300 seconds succeeded; source discovery and direct and Code Mode reads still worked. |
 
-Cloudflare documents separate
-[session revocation controls](https://developers.cloudflare.com/cloudflare-one/access-controls/access-settings/session-management/#revoke-user-sessions)
-for an entire application or a user across applications. Their scope is broader
-than removing one person's source assignment; review the affected access
-before using them. Their effect on this Portal workflow is not yet qualified.
+The fresh-client result proves admission denial, not a tool-call test using a
+new token. These observations do not establish a provider defect or indefinite
+access. Cloudflare marks
+[email selectors](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/#cloudflare-access-selectors)
+as checked at login, not continuously. The
+[Portal authorization grant](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/#session-lifecycle)
+retains authentication, server selection, and upstream OAuth state.
+
+Cloudflare's
+[Managed OAuth documentation](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/#managed-oauth-settings)
+says Access policies are reevaluated on refresh, but does not explicitly define
+whether refreshing Portal admission reevaluates every linked source policy.
+Do not infer a source-access expiry bound from the Portal access-token lifetime.
+
+### Qualified procedure for existing Portal sessions
+
+A separate canary test removed the member's source assignment and then invoked
+Cloudflare's application-token revocation for the exact Portal application.
+The same client had first passed source discovery and harmless reads:
+
+- At the first check, 15 seconds after Cloudflare accepted revocation, the old
+  access token received HTTP 401 for both `tools/list` and `tools/call`, in
+  direct mode and Code Mode.
+- A refresh attempt 90 seconds after revocation received HTTP 400
+  `invalid_grant`; no replacement access token was issued.
+- The original source assignment was restored after the test, and both source
+  and Portal policies were read back and verified.
+
+This qualifies application-token revocation for the tested Portal workflow.
+The observed timing is not a propagation guarantee. Restoring a source policy
+does not restore revoked client credentials.
+
+When you need to remove existing access:
+
+1. Remove the person's assignment from the relevant source policy and verify
+   the saved audience. For departure from the team, also remove Portal admission.
+2. Identify the exact Portal Access application from the installation receipt.
+   Cloudflare's
+   [application-token revocation](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/methods/revoke_tokens/)
+   uses `POST /accounts/{account_id}/access/apps/{app_id}/revoke_tokens`.
+   **This revokes every session for that Portal**, including other team members;
+   account for their need to reconnect before invoking it.
+3. Verify that the previously authorized client cannot list or call source
+   tools, and that its refresh token cannot renew access. Verify that a fresh
+   authorization cannot select the removed source. A successful revocation API
+   response alone is not proof of denied access.
+
+Cloudflare also documents
+[user session revocation across applications](https://developers.cloudflare.com/cloudflare-one/access-controls/access-settings/session-management/#revoke-user-sessions).
+That broader operation was not tested. The qualified application-level
+procedure does not establish a way to revoke only one person's session for one
+source. A source policy update alone must not promise immediate disconnection.
 
 ## Why V1 does not use an API token
 
