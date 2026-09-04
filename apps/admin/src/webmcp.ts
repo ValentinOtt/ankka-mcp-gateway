@@ -107,9 +107,9 @@ function createTool<TSchema extends v.GenericSchema, TResult>(
 }
 
 async function handoff(api: GatewayAdminApi, prepare: () => Promise<PreparedAction>) {
-  const status = await api.getStatus()
+  await api.getStatus()
   const prepared = await prepare()
-  const authorizationUrl = validHandoffUrl(prepared.handoffUrl, status.controlPlaneOrigin)
+  const authorizationUrl = validHandoffUrl(prepared.handoffUrl, window.location.origin)
   if (!authorizationUrl || !new RegExp(ACTION_ID, 'u').test(prepared.actionId)) {
     throw new GatewayApiError(502, 'webmcp_handoff_invalid')
   }

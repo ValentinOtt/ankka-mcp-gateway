@@ -349,7 +349,7 @@ describe('GatewayProvider', () => {
     const client = api({
       getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>().mockResolvedValueOnce(emptyActions).mockResolvedValueOnce(emptyActions).mockResolvedValue(pendingActions),
       prepareSourceAction: vi.fn(async () => ({ schemaVersion: 1 as const, actionId: pendingAction.actionId, status: 'authorization_required' as const,
-        expiresAt: pendingAction.expiresAt, handoffUrl: `https://deploy.ankka.ai/manage#${'synthetic'.repeat(8)}` })),
+        expiresAt: pendingAction.expiresAt, handoffUrl: `${window.location.origin}/__ankka/operation#${'synthetic'.repeat(8)}` })),
     })
     render(<GatewayProvider api={client}><SourceActionsProbe /></GatewayProvider>)
     await screen.findByText('not checking')

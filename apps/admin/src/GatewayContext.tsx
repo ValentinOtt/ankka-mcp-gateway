@@ -256,11 +256,17 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
   useEffect(() => {
     const url = new URL(window.location.href)
     const actionId = url.searchParams.get('sourceAction')
-    const denied = url.searchParams.get('sourceActionResult') === 'denied'
+    const result = url.searchParams.get('sourceActionResult')
+    const denied = result === 'denied'
     if (url.searchParams.has('sourceActionResult')) removeResultParameter('sourceActionResult')
     if (denied && actionId && ACTION_ID.test(actionId)) {
       // The authenticated endpoint checks again that provisioning has not started.
       void cancelSourceApply(actionId).catch(() => {})
+    }
+    if (result === 'failed') {
+      setSourceNotice({ tone: 'neutral', message: 'Cloudflare approved the request, but your gateway could not complete the installation. Check the action status below before authorizing again.' })
+    } else if (result === 'revocation_unconfirmed') {
+      setSourceNotice({ tone: 'neutral', message: 'The source was installed, but the temporary Cloudflare permission could not be confirmed revoked. Review active OAuth grants in your Cloudflare profile.' })
     }
   }, [cancelSourceApply])
 
@@ -369,7 +375,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
         const trustedStatus = status ?? await apiRef.current.getStatus()
         if (status === null) setStatus(trustedStatus)
         const prepared = await apiRef.current.prepareSourceAction(current.revision, sourceId)
-        const handoffUrl = validHandoffUrl(prepared.handoffUrl, trustedStatus.controlPlaneOrigin)
+        const handoffUrl = validHandoffUrl(prepared.handoffUrl, window.location.origin)
         if (!handoffUrl) throw new Error('The authorization link could not be verified.')
         return { ...prepared, handoffUrl }
       } catch (cause) {
@@ -383,7 +389,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       const trustedStatus = status ?? await apiRef.current.getStatus()
       if (status === null) setStatus(trustedStatus)
       const prepared = await apiRef.current.prepareRuntimeAction(operation)
-      const handoffUrl = validHandoffUrl(prepared.handoffUrl, trustedStatus.controlPlaneOrigin)
+      const handoffUrl = validHandoffUrl(prepared.handoffUrl, window.location.origin)
       if (!handoffUrl) throw new Error('The authorization link could not be verified.')
       return { ...prepared, handoffUrl }
     }),
@@ -391,7 +397,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       const trustedStatus = status ?? await apiRef.current.getStatus()
       if (status === null) setStatus(trustedStatus)
       const prepared = await apiRef.current.prepareTeardownAction()
-      const handoffUrl = validHandoffUrl(prepared.handoffUrl, trustedStatus.controlPlaneOrigin)
+      const handoffUrl = validHandoffUrl(prepared.handoffUrl, window.location.origin)
       if (!handoffUrl) throw new Error('The teardown handoff could not be verified.')
       return { ...prepared, handoffUrl }
     }),

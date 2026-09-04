@@ -1572,3 +1572,18 @@ deploying the production relay. Both are operator steps.
   inline. The test account keeps the afternoon-seven install, the canary
   dashboard and the manual test portal; every other install residue since
   August is removed.
+- 2026-09-04 (16:30), the first source on the new install path did not
+  apply: the dashboard's "Authorize and apply" handed the browser to
+  `deploy.ankka.ai/manage#…`, the operation page of the hosted runtime that
+  PR #56 retired, so the two-stage installer served its home form and the
+  action waited for a consent nobody could give. Source, update and teardown
+  actions all carried that handoff. The fix moves source authorization onto
+  the gateway: the payload now hands off to the management origin's
+  `/__ankka/operation`, where the final runtime's entrypoint runs a
+  `source-add` consent (the two narrow scopes the authority catalogue already
+  named, and the deployed relay already accepted) through the certified
+  public client and callback, applies the action in process over the
+  payload's signed apply route, and revokes the grant. No control-plane hop,
+  no workers.dev toggle, nothing durable beyond an attempt record without
+  secrets. Update and teardown still point at the retired page and are the
+  next move.

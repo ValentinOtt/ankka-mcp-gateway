@@ -4,6 +4,14 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Authorize source installations on the gateway itself. The dashboard's
+  "Authorize and apply" handoff now opens the gateway's own
+  `/__ankka/operation` page, which asks Cloudflare for a one-time `source-add`
+  grant (Access applications and MCP portals only) through the public OAuth
+  client and callback certified at install, applies the prepared action in
+  place, and revokes the grant. The retired hosted `/manage` page is no
+  longer navigated to, so source installs work again on two-stage gateways;
+  runtime update and teardown handoffs still await the same move.
 - Retire the legacy hosted installer runtime, its Durable Object, journals,
   executors, management handoffs, and analytics sink. The two-stage runtime
   shipped in gateway-v0.1.21 is the only hosted mutation path.

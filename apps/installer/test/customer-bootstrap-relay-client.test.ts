@@ -175,3 +175,26 @@ describe('customer bootstrap code-relay client', () => {
     expect(called).toBe(false);
   });
 });
+
+describe('customer operation code-relay client', () => {
+  it('selects the fixed source-add relay route and requires exactly that operation’s scopes', async () => {
+    const calls: string[] = [];
+    const url = authorizationUrl();
+    url.searchParams.set('scope', 'zone-access.write mcp-portals.write');
+    const result = await beginCustomerBootstrapRelay({
+      ...input(async (request) => {
+        calls.push(String(request));
+        return json({ schemaVersion: 1, authorizationUrl: url.toString() });
+      }),
+      operation: 'source-add',
+    });
+    expect(result).toEqual({ authorizationUrl: url.toString() });
+    expect(calls).toEqual([`${CLOUDFLARE_CODE_RELAY_ORIGIN}/oauth/start/source-add`]);
+
+    // The install scope set is wider than a source installation may hold.
+    await expect(beginCustomerBootstrapRelay({
+      ...input(async () => json({ schemaVersion: 1, authorizationUrl: authorizationUrl().toString() })),
+      operation: 'source-add',
+    })).rejects.toThrow('relay_rejected');
+  });
+});

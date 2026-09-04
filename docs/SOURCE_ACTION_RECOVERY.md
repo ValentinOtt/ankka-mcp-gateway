@@ -55,6 +55,29 @@ request was never armed or sent. There is no Resume feature that reconstructs
 an action key or OAuth grant. Credentials remain request-local under the existing
 one-action contract.
 
+## Authorization on the gateway
+
+Preparing a source installation returns a handoff to the gateway's own
+`/__ankka/operation` page on the management origin, with the one-time action
+key in the URL fragment. That page posts the fragment to the gateway, which
+checks the claim against its own identity and the retained action, records
+one attempt (identifiers, a state hash, and expiries only), and starts a
+Cloudflare consent for exactly the `source-add` scopes through the public
+OAuth client and callback that the ownership trust certified at install. The
+PKCE verifier and the action key travel only in one HttpOnly cookie.
+
+On the callback the gateway exchanges the code itself, checks the grant's
+account, submits the HMAC-signed apply claim to its own action route in
+process, revokes the grant, and sends the browser back to
+`/sources?sourceAction=<id>&sourceActionResult=<result>`. The result is
+`applied`, `denied` (consent refused; the page cancels the untouched action),
+`failed` (the gateway refused or could not finish the apply; read the action
+status), or `revocation_unconfirmed` (installed, but the temporary grant could
+not be confirmed revoked). No control-plane page, token, or callback is
+involved; Ankka's hosted installer never sees the grant. Runtime updates and
+teardowns still prepare hosted `/manage` handoffs and are not yet served by
+this route.
+
 ## Operational limits and release review
 
 Uncertain actions remain blocked for separately reviewed recovery; this change

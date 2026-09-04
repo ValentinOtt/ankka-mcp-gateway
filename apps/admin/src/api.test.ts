@@ -168,7 +168,7 @@ describe('HttpGatewayAdminApi', () => {
   it('sends the exact reviewed runtime target without changing legacy request shape', async () => {
     const action = {
       schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, status: 'authorization_required',
-      expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: `https://deploy.ankka.ai/manage#${'a'.repeat(40)}`, operation: 'update',
+      expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: `${window.location.origin}/__ankka/operation#${'a'.repeat(40)}`, operation: 'update',
     }
     const fetch = vi.fn(async () => Response.json(action))
     vi.stubGlobal('fetch', fetch)
@@ -237,7 +237,7 @@ describe('HttpGatewayAdminApi', () => {
     const actionId = `action_${'a'.repeat(32)}`
     const expiresAt = '2030-01-01T00:00:00.000Z'
     const action = { schemaVersion: 1, action: 'access', actionId, status: 'succeeded', expiresAt, failureCode: null, canCancel: false }
-    const handoffUrl = `https://deploy.ankka.ai/manage#${'a'.repeat(40)}`
+    const handoffUrl = `${window.location.origin}/__ankka/operation#${'a'.repeat(40)}`
     for (const payload of [
       { schemaVersion: 1, actionId, status: 'authorization_required', expiresAt, handoffUrl },
       { schemaVersion: 1, action: { ...action, status: 'authorization_required' } },
@@ -363,13 +363,16 @@ describe('HttpGatewayAdminApi', () => {
     )
   })
 
-  it('accepts only the short-lived hosted management handoff shape', () => {
-    const expected = 'https://canary-deploy.example.com'
-    expect(validHandoffUrl(`${expected}/manage#${'a'.repeat(40)}`, expected)).toContain('/manage#')
-    expect(validHandoffUrl(`https://evil.example/manage#${'a'.repeat(40)}`, expected)).toBeNull()
-    expect(validHandoffUrl(`https://user:password@canary-deploy.example.com/manage#${'a'.repeat(40)}`, expected)).toBeNull()
-    expect(validHandoffUrl(`${expected}/manage?token=secret`, expected)).toBeNull()
-    expect(validHandoffUrl(`${expected}/manage#${'a'.repeat(40)}`, `${expected}/path`)).toBeNull()
+  it('accepts only this gateway’s own operation handoff shape', () => {
+    const expected = 'https://manage.example.com'
+    expect(validHandoffUrl(`${expected}/__ankka/operation#${'a'.repeat(40)}`, expected)).toContain('/__ankka/operation#')
+    expect(validHandoffUrl(`https://evil.example/__ankka/operation#${'a'.repeat(40)}`, expected)).toBeNull()
+    expect(validHandoffUrl(`https://user:password@manage.example.com/__ankka/operation#${'a'.repeat(40)}`, expected)).toBeNull()
+    expect(validHandoffUrl(`${expected}/__ankka/operation?token=secret`, expected)).toBeNull()
+    // The retired hosted handoff is never navigated to, even from a trusted control plane.
+    expect(validHandoffUrl(`${expected}/manage#${'a'.repeat(40)}`, expected)).toBeNull()
+    expect(validHandoffUrl(`https://deploy.ankka.ai/__ankka/operation#${'a'.repeat(40)}`, expected)).toBeNull()
+    expect(validHandoffUrl(`${expected}/__ankka/operation#${'a'.repeat(40)}`, `${expected}/path`)).toBeNull()
   })
 
   it('rejects a non-canonical control-plane origin in management status', async () => {

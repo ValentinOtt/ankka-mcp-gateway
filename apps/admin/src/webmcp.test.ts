@@ -89,7 +89,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
   }
   const prepared: PreparedAction = {
     schemaVersion: 1, actionId, status: 'authorization_required', expiresAt,
-    handoffUrl: `https://deploy.ankka.ai/manage#${'x'.repeat(40)}`,
+    handoffUrl: `${window.location.origin}/__ankka/operation#${'x'.repeat(40)}`,
   }
   const sourceAction: SourceAction = {
     schemaVersion: 1, actionId, sourceId, status: 'applying', expiresAt, failureCode: null,
@@ -537,12 +537,13 @@ describe('safe errors and verified handoffs', () => {
   })
 
   it.each([
-    `https://other.example.com/manage#${'x'.repeat(40)}`,
-    `http://deploy.ankka.ai/manage#${'x'.repeat(40)}`,
-    `https://deploy.ankka.ai/other#${'x'.repeat(40)}`,
-    `https://deploy.ankka.ai/manage?token=${syntheticSensitiveText}#${'x'.repeat(40)}`,
-    `https://operator:${syntheticSensitiveText}@deploy.ankka.ai/manage#${'x'.repeat(40)}`,
-    'https://deploy.ankka.ai/manage#short',
+    `https://other.example.com/__ankka/operation#${'x'.repeat(40)}`,
+    `https://deploy.ankka.ai/__ankka/operation#${'x'.repeat(40)}`,
+    `${window.location.origin}/other#${'x'.repeat(40)}`,
+    `${window.location.origin}/manage#${'x'.repeat(40)}`,
+    `${window.location.origin}/__ankka/operation?token=${syntheticSensitiveText}#${'x'.repeat(40)}`,
+    `${window.location.protocol}//operator:${syntheticSensitiveText}@${window.location.host}/__ankka/operation#${'x'.repeat(40)}`,
+    `${window.location.origin}/__ankka/operation#short`,
   ])('refuses an invalid handoff without exposing it: %s', async (handoffUrl) => {
     const { api, tool, prepared } = fixture()
     api.prepareTeardownAction.mockResolvedValue({ ...prepared, handoffUrl })

@@ -108,7 +108,7 @@ describe('WebMcpTools', () => {
       actionId: `action_${'a'.repeat(32)}`,
       status: 'authorization_required' as const,
       expiresAt: '2026-08-27T12:10:00.000Z',
-      handoffUrl: `https://deploy.ankka.ai/manage#${'b'.repeat(40)}`,
+      handoffUrl: `${window.location.origin}/__ankka/operation#${'b'.repeat(40)}`,
     }
     const prepareTeardownAction = vi.fn(async () => prepared)
     const api: GatewayAdminApi = {

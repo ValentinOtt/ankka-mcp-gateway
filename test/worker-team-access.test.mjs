@@ -228,6 +228,10 @@ async function authorizeNewSource(gateway, sourceId, revision) {
   } });
   assert.equal(response.status, 200, await response.clone().text());
   const prepared = await response.json();
+  // The dashboard hands the browser to the gateway's own operation page, never to the control plane.
+  assert.equal(new URL(prepared.handoffUrl).origin, MANAGEMENT_ORIGIN);
+  assert.equal(new URL(prepared.handoffUrl).pathname, '/__ankka/operation');
+  assert.equal(new URL(prepared.handoffUrl).search, '');
   const claim = JSON.parse(Buffer.from(new URL(prepared.handoffUrl).hash.slice(1), 'base64url').toString('utf8'));
   return { claim };
 }
