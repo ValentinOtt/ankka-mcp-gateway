@@ -13,8 +13,105 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# The gates of `npm run check` run as parallel jobs on one cached module
+# tree. The final `check` job is the required status on main; it passes only
+# when every gate passed, so the branch rule is unchanged.
 jobs:
-  check:
+  install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      modules-key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm run check:toolchain
+      - id: key
+        run: echo "key=node-modules-v1-${{ runner.os }}-${{ hashFiles('.nvmrc', 'package-lock.json') }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+          key: ${{ steps.key.outputs.key }}
+      - if: steps.modules.outputs.cache-hit != 'true'
+        run: npm ci
+
+  lint-typecheck:
+    needs: install
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+          key: ${{ needs.install.outputs.modules-key }}
+      - if: steps.modules.outputs.cache-hit != 'true'
+        run: npm ci
+      - run: npm run check:toolchain
+      - run: npm run lint
+      - run: npm run typecheck
+
+  build-app-tests:
+    needs: install
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+          key: ${{ needs.install.outputs.modules-key }}
+      - if: steps.modules.outputs.cache-hit != 'true'
+        run: npm ci
+      - run: npm run check:toolchain
+      - run: npm run build
+      - run: npm run test:apps
+
+  core-tests:
+    needs: install
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+          key: ${{ needs.install.outputs.modules-key }}
+      - if: steps.modules.outputs.cache-hit != 'true'
+        run: npm ci
+      - run: npm run check:toolchain
+      - run: npm run build:admin
+      - run: npm run test:core
+
+  boundary-history:
+    needs: install
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -25,6 +122,33 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+          key: ${{ needs.install.outputs.modules-key }}
+      - if: steps.modules.outputs.cache-hit != 'true'
+        run: npm ci
       - run: npm run check:toolchain
-      - run: npm ci
-      - run: npm run check
+      - run: npm run check:boundary
+      - run: npm run check:history
+
+  check:
+    needs: [lint-typecheck, build-app-tests, core-tests, boundary-history]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every gate passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "gate results: $RESULTS"
+          for result in $RESULTS; do
+            if [ "$result" != "success" ]; then
+              echo "a gate did not pass"
+              exit 1
+            fi
+          done
