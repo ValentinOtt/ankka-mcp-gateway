@@ -787,6 +787,122 @@ test('a fresh empty Portal can install its first source without implicitly grant
   assert.equal(gateway.provider.state.portal.servers[0].default_disabled, true);
 }, await portalOnlyClaim()));
 
+async function expireSourceAction(gateway, actionId) {
+  const state = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+  const now = Date.now();
+  await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, { ...state,
+    actions: state.actions.map((action) => {
+      if (action.actionId !== actionId) return action;
+      const expired = { ...action, issuedAt: now - 700_000, expiresAt: now - 100_000 };
+      if (action.renewedAt !== undefined) expired.renewedAt = expired.issuedAt;
+      return expired;
+    }),
+  });
+}
+
+async function renewPreparedSource(gateway, prepared) {
+  const response = await gateway.api(`/api/source-actions/${prepared.claim.actionId}/renew`, {
+    method: 'POST', body: { schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id },
+  });
+  assert.equal(response.status, 200, await response.clone().text());
+  const renewed = await response.json();
+  const claim = JSON.parse(Buffer.from(new URL(renewed.handoffUrl).hash.slice(1), 'base64url').toString('utf8'));
+  assert.equal(claim.actionId, prepared.claim.actionId);
+  assert.notEqual(claim.actionKey, prepared.claim.actionKey);
+  return { ...prepared, claim };
+}
+
+for (const portalCommitted of [false, true]) {
+  test(`renewed source consent reconciles retained portal work without recreating resources (committed: ${portalCommitted})`, async () => fixture(async (gateway) => {
+    const prepared = await prepareNewSource(gateway);
+    gateway.provider.hook(({ record, state }) => {
+      if (record.method !== 'PUT' || !record.pathname.includes('/mcp/portals/')) return undefined;
+      if (portalCommitted) state.portal = { id: state.portal.id, ...record.body };
+      return envelope(null, 503);
+    });
+    assert.equal((await gateway.apply(prepared, {}, null)).status, 409);
+    const path = `/api/source-actions/${prepared.claim.actionId}/renew`;
+    const options = { method: 'POST', body: { schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id } };
+    assert.equal((await gateway.api(path, options)).status, 409, 'unexpired work cannot renew');
+    await expireSourceAction(gateway, prepared.claim.actionId);
+    const before = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.at(-1);
+    assert.equal(before.resources.length, 3);
+    assert.equal((await (await gateway.api('/api/source-actions')).json()).actions.at(-1).canRenew, true);
+    assert.equal((await gateway.api(path, { ...options, email: OWNER })).status, 409);
+    assert.equal((await gateway.api(path, { ...options, email: MEMBER })).status, 401);
+    assert.equal((await gateway.api(path, { ...options, extraHeaders: { origin: 'https://other.example.com' } })).status, 403);
+    assert.equal((await gateway.api(path, { ...options, body: { ...options.body, revision: 999 } })).status, 409);
+    gateway.provider.hook(undefined);
+    const baseline = gateway.provider.requests.length;
+    const renewed = await renewPreparedSource(gateway, prepared);
+    const retained = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.at(-1);
+    for (const field of ['resources', 'pending', 'portalUpdate', 'sourceHash', 'sourceRevision', 'failureCode']) {
+      assert.deepEqual(retained[field], before[field], field);
+    }
+    assertNoMutation(gateway.provider, baseline);
+    const pending = (await (await gateway.api('/api/source-actions')).json()).actions.at(-1);
+    assert.equal(pending.state, 'authorization_required');
+    assert.equal(pending.canCancel, false);
+    assert.equal(pending.canRenew, false);
+    assert.equal((await gateway.api(path, options)).status, 409, 'one renewal per consent window');
+    assert.equal((await gateway.api(`/api/source-actions/${retained.actionId}`, { method: 'DELETE' })).status, 409);
+    assert.equal((await gateway.apply(prepared, { expiresAt: renewed.claim.expiresAt }, null)).status, 400, 'old key is revoked');
+    const result = await gateway.apply(renewed, {}, null);
+    assert.equal(result.status, 200, await result.clone().text());
+    assert.equal((await result.json()).status, 'succeeded');
+    const mutations = gateway.provider.requests.slice(baseline).filter((request) => request.method !== 'GET');
+    assert.equal(mutations.length, portalCommitted ? 0 : 1);
+    if (!portalCommitted) {
+      assert.equal(mutations[0].method, 'PUT');
+      assert.equal(mutations[0].body.servers.some((mapping) => mapping.id === retained.resources[0].provider.id), true);
+      assert.equal(mutations[0].body.servers.some((mapping) => Object.hasOwn(mapping, 'server_id')), false);
+    }
+    assert.equal((await gateway.view()).members.some((member) => member.sourceIds.includes(prepared.source.id)), false);
+    assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).teardownDisabled, true);
+  }));
+}
+
+test('renewal refuses unknown Access application creation and leaves its evidence untouched', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  gateway.provider.hook(({ record }) => record.method === 'POST' && record.pathname === API_APPS
+    ? envelope(null, 503) : undefined);
+  assert.equal((await gateway.apply(prepared, {}, null)).status, 409);
+  await expireSourceAction(gateway, prepared.claim.actionId);
+  const retained = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+  assert.deepEqual(retained.actions.at(-1).pending, { kind: 'source_access_application', phase: 'send_armed', provider: null });
+  const snapshot = await (await gateway.api('/api/source-actions')).json();
+  assert.equal(snapshot.actions.at(-1).canRenew, false);
+  const baseline = gateway.provider.requests.length;
+  const response = await gateway.api(`/api/source-actions/${prepared.claim.actionId}/renew`, {
+    method: 'POST', body: { schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id },
+  });
+  assert.equal(response.status, 409);
+  assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), retained);
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('concurrent renewals rotate one key and retained resource drift prevents further writes', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  gateway.provider.hook(({ record }) => record.method === 'PUT' && record.pathname.includes('/mcp/portals/')
+    ? envelope(null, 503) : undefined);
+  assert.equal((await gateway.apply(prepared, {}, null)).status, 409);
+  await expireSourceAction(gateway, prepared.claim.actionId);
+  gateway.provider.hook(undefined);
+  const responses = await Promise.all([0, 1].map(() => gateway.api(`/api/source-actions/${prepared.claim.actionId}/renew`, {
+    method: 'POST', body: { schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id },
+  })));
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409]);
+  const renewed = await responses.find((response) => response.status === 200).json();
+  const claim = JSON.parse(Buffer.from(new URL(renewed.handoffUrl).hash.slice(1), 'base64url').toString('utf8'));
+  const retained = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.at(-1);
+  gateway.provider.state.servers.get(retained.resources[0].provider.id).hostname = 'https://changed.example.net/mcp';
+  const baseline = gateway.provider.requests.length;
+  const applied = await gateway.apply({ ...prepared, claim }, {}, null);
+  assert.equal(applied.status, 409);
+  assert.equal((await applied.json()).error, 'source_resource_drift');
+  assertNoMutation(gateway.provider, baseline);
+}));
+
 for (const createdBeforeFailure of [false, true]) {
   test(`source create uncertainty preserves its journal and floor (provider committed: ${createdBeforeFailure})`, async () => fixture(async (gateway) => {
     const prepared = await prepareNewSource(gateway);
@@ -821,6 +937,13 @@ for (const createdBeforeFailure of [false, true]) {
     assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.at(-1), retained);
     assertNoMutation(gateway.provider, baseline);
     assert.equal((await gateway.view()).members.some((member) => member.sourceIds.includes(prepared.source.id)), false);
+    await expireSourceAction(gateway, prepared.claim.actionId);
+    const renewed = await renewPreparedSource(gateway, prepared);
+    const resumed = await gateway.apply(renewed, {}, null);
+    assert.equal(resumed.status, 200, await resumed.clone().text());
+    const serverCreates = gateway.provider.requests.slice(baseline).filter((request) =>
+      request.method === 'POST' && request.pathname.endsWith('/mcp/servers'));
+    assert.equal(serverCreates.length, createdBeforeFailure ? 0 : 1);
   }));
 }
 

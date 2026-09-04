@@ -4,6 +4,16 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Write portal server mappings with Cloudflare's `id` field. The gateway,
+  operator CLI, and cleanup Worker retain the existing read and receipt
+  representation, while the provider fixture now rejects the response-only
+  `server_id` on writes. This fixes source provisioning stopping at the portal
+  update after its MCP server, Access application, and policy were created.
+- Let the initiating administrator renew an expired source installation with
+  fresh Cloudflare consent. Renewal rotates the action key, retains the same
+  journal and receipts, and resumes through the existing ownership checks.
+  Unacknowledged Access application creation, legacy policy profiles, changed
+  drafts, and conflicting lifecycle work remain blocked.
 - Authorize source installations on the gateway itself. The dashboard's
   "Authorize and apply" handoff now opens the gateway's own
   `/__ankka/operation` page, which asks Cloudflare for a one-time `source-add`

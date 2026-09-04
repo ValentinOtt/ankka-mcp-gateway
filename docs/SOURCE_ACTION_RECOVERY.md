@@ -16,7 +16,7 @@ of a later source installation.
 | Installation completed | The journal records verified completion. The page refreshes installed sources. This does not itself grant member access or verify upstream authentication. |
 | Authorization expired before work began | The retained journal proves execution did not start. Its initiating administrator can cancel, then start a fresh authorization from the saved draft. |
 | Authorization closed | The attempt has ended without retained write evidence. Review the saved draft before a new authorization. |
-| Recovery required | Execution or provisioning may be incomplete, uncertain, or still finishing. Keep the journal and review status before separately authorized recovery. |
+| Recovery required | The journal is retained. After the previous approval expires, its initiating administrator can renew consent when the gateway can safely reconcile the recorded resources. Otherwise review ownership in Cloudflare. |
 
 The page checks a blocking action every five seconds for at most 60 automatic
 checks. It then leaves the status and **Check status** control visible. A manual
@@ -29,7 +29,8 @@ disabled until status can be read again.
 `GET /api/source-actions` returns only safe summaries and an optional blocking
 action pointer. Each summary includes the existing action ID, source ID,
 recorded status, expiry and fixed failure code, plus its issue time, derived
-display state and actor-specific `canCancel`. The pointer identifies a source,
+display state and actor-specific `canCancel` and `canRenew`. Older responses may
+omit `canRenew`, which clients treat as unavailable. The pointer identifies a source,
 runtime, teardown or Team action without exposing the initiating identity,
 Cloudflare resource identifiers, authorization URL, action key or grant.
 Collection reads are available during execution; mutations remain serialized.
@@ -51,9 +52,35 @@ The user must separately authorize any replacement attempt.
 
 Expiry never clears an armed write, resource receipt, Portal update or uncertain
 execution. An absent resource in the Cloudflare dashboard does not prove that a
-request was never armed or sent. There is no Resume feature that reconstructs
-an action key or OAuth grant. Credentials remain request-local under the existing
+request was never armed or sent. Credentials remain request-local under the existing
 one-action contract.
+
+## Renewing a recorded installation
+
+**Renew consent and resume** posts to
+`/api/source-actions/<actionId>/renew` with the saved source ID and revision.
+The gateway requires the initiating administrator, a same-origin request, an
+expired approval, the current default-deny source profile, an unchanged source,
+and no other blocking lifecycle action. The serialized check preserves the
+action ID, source hash, resource receipts, pending write and Portal desired hash.
+It issues a new action key and ten-minute approval window; the old key cannot
+be used again. Only the key hash and a renewal timestamp are saved. The runtime
+compatibility floor advances before saving the renewed journal.
+
+The browser completes a fresh `source-add` consent through the same gateway
+operation page. The executor verifies every retained resource, reconciles a
+recorded pending write, and accepts only the recorded Portal baseline or exact
+desired mapping before continuing. It never grants Team access as part of
+recovery. Concurrent renewals cannot create two valid approval windows, and
+cancellation still cannot erase retained write evidence.
+
+A source Access application whose creation was armed but returned no provider
+ID remains blocked. Cloudflare stores these applications at account level,
+while the operation grant's zone listing can omit them. That listing cannot
+prove absence, so renewal must not create a second application. Legacy source
+policy profiles and drift also require separate review. Denying or abandoning
+a renewed consent retains the journal; check status after its approval expires
+to renew again when eligible.
 
 ## Authorization on the gateway
 
@@ -83,9 +110,9 @@ teardown handoffs are not yet served by it.
 
 ## Operational limits and release review
 
-Uncertain actions remain blocked for separately reviewed recovery; this change
-does not add provider reconciliation, automatic cleanup, or permanent management
-credentials. It does not change source allowlists, default-deny installation,
+Uncertain ownership and drift remain blocked for separate review. Renewal adds
+no automatic cleanup or permanent management credentials. It does not change
+source allowlists, default-deny installation,
 Team permissions or the separation between administrators and approved members.
 While Team editing is deferred, manage the approved members' shared read-only
 access directly in Cloudflare under a separate operational authorization.

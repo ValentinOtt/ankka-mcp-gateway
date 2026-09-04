@@ -53,7 +53,9 @@ function actionGuidance(action: SourceActionSummary, pollingPaused: boolean): st
         ? 'This authorization was cancelled. You can authorize the saved draft again.'
         : 'This attempt is closed. Review the saved draft before starting another authorization.'
     case 'recovery_required':
-      return 'Provisioning may be incomplete or still finishing. Check status before reviewing recovery in Cloudflare. The action journal is retained and starting again is blocked.'
+      return action.canRenew === true
+        ? 'Renew Cloudflare consent to resume this recorded installation. The gateway checks the retained resources before continuing.'
+        : 'Provisioning may be incomplete or still finishing. Check status after the previous approval expires. The journal is retained; uncertain resource ownership requires review in Cloudflare.'
   }
 }
 
@@ -209,10 +211,13 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     } catch (error) { setFormError(error instanceof Error ? error.message : 'The source draft could not be saved.') }
   }
 
-  const authorize = async (sourceId: string) => {
-    if (!installationEnabled || applyBlocked) return
+  const authorize = async (sourceId: string, renewActionId?: string) => {
+    if (!installationEnabled || isBusy || isCheckingSourceActions || sourceActionsError !== null ||
+        (renewActionId === undefined && applyBlocked)) return
     try {
-      const prepared = await prepareSourceApply(sourceId)
+      const prepared = renewActionId === undefined
+        ? await prepareSourceApply(sourceId)
+        : await prepareSourceApply(sourceId, renewActionId)
       window.location.assign(prepared.handoffUrl)
     } catch { /* The provider keeps the safe error visible. */ }
   }
@@ -271,13 +276,18 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                   Started <time dateTime={action.issuedAt}>{actionTime(action.issuedAt)}</time> · Authorization expires <time dateTime={action.expiresAt}>{actionTime(action.expiresAt)}</time>
                 </p>
                 <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Action: {action.actionId}</p>
+                {action.canRenew === true && action.state === 'recovery_required' ? (
+                  <div className="mt-3">
+                    <Button variant="secondary" className="pressable" disabled={!installationEnabled || isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void authorize(action.sourceId, action.actionId)}>Renew consent and resume</Button>
+                  </div>
+                ) : null}
                 {action.canCancel ? (
                   <div className="mt-3 flex flex-wrap items-center gap-3">
                     <Button variant="secondary" className="pressable" disabled={isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void cancelSourceApply(action.actionId).catch(() => {})}>Cancel authorization</Button>
                     <p className="max-w-[65ch] text-xs leading-5 text-kumo-subtle">The existing consent link will stop working. You can then authorize the saved draft again.</p>
                   </div>
                 ) : action.state === 'authorization_required' || action.state === 'authorization_expired' ? (
-                  <p className="mt-3 text-xs leading-5 text-kumo-subtle">Only the administrator who started this authorization can cancel it while work has not begun.</p>
+                  <p className="mt-3 text-xs leading-5 text-kumo-subtle">Only the administrator who started this authorization can cancel it, and only before provisioning starts.</p>
                 ) : null}
               </article>
             ))}
@@ -290,7 +300,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           <div className="flex flex-col justify-between gap-4 border-b border-kumo-line pb-5 sm:flex-row sm:items-start">
             <div>
               <h2 id="add-source-title" className="text-base font-semibold text-subheading">Add an MCP source</h2>
-              <p className="mt-1 max-w-[65ch] text-sm leading-6 text-kumo-subtle">Choose allowed tools. New sources start with nobody assigned; grant access in Team. Do not enter credentials here.</p>
+              <p className="mt-1 max-w-[65ch] text-sm leading-6 text-kumo-subtle">Choose allowed tools. New sources start with nobody assigned; grant access in Cloudflare Access. Do not enter credentials here.</p>
             </div>
             <StatusPill tone="attention">Exact tools only</StatusPill>
           </div>

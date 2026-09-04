@@ -1007,20 +1007,23 @@ async function mutatePortal(
     return;
   }
   const expected = normalizePortalDesired(change.desired, marker);
+  const body = { ...expected,
+    servers: expected.servers.map(({ server_id, ...mapping }) => ({ id: server_id, ...mapping })),
+  };
   if (change.action === 'create') {
     if (await cloudflare.getPortal(change.key) !== null) fail('resource_collision');
     await assertNoAccessAppBaseline(
       cloudflare,
       (app) => isPortalAppCandidate(app, mutation.config.gateway.hostname),
     );
-    await cloudflare.createPortal({ id: change.key, ...expected });
+    await cloudflare.createPortal({ id: change.key, ...body });
     return;
   }
   const live = await exactRead(() => cloudflare.getPortal(change.provider.id), change.provider.id);
   if (live === null) fail('ownership_conflict');
   assertMarker(live.description, marker);
   if (live.hostname !== mutation.config.gateway.hostname) fail('ownership_conflict');
-  await cloudflare.updatePortal(change.provider.id, expected);
+  await cloudflare.updatePortal(change.provider.id, body);
 }
 
 async function mutatePortalAccessApplication(

@@ -58,7 +58,7 @@ interface GatewayContextValue {
   clearUpdateNotice(): void
   discoverSource(url: string): Promise<SourceDiscovery>
   saveSourceDraft(source: SourceDraftInput): Promise<ManagedSources>
-  prepareSourceApply(sourceId: string): Promise<PreparedAction>
+  prepareSourceApply(sourceId: string, renewActionId?: string): Promise<PreparedAction>
   prepareRuntimeAction(operation: RuntimeOperation): Promise<PreparedAction>
   prepareTeardownAction(): Promise<PreparedAction>
   getTeam(): Promise<Team>
@@ -370,11 +370,17 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       setSourceNotice({ tone: 'success', message: 'Draft saved inside your gateway. The live Portal was not changed.' })
       return next
     }),
-    prepareSourceApply: (sourceId) => runBusy(async () => {
+    prepareSourceApply: (sourceId, renewActionId) => runBusy(async () => {
       const current = sources ?? await refreshSources()
       if (current.installationEnabled !== true) throw new GatewayApiError(409, 'source_addition_paused')
       const actions = await refreshSourceActions()
-      if (actions.blockingAction) {
+      const renewal = renewActionId === undefined ? null : actions.actions.find((action) =>
+        action.actionId === renewActionId && action.sourceId === sourceId && action.canRenew === true)
+      if (renewActionId !== undefined && (!renewal || actions.blockingAction?.kind !== 'source' ||
+          actions.blockingAction.actionId !== renewActionId)) {
+        throw new GatewayApiError(409, 'source_action_conflict', { reason: 'recovery_required' })
+      }
+      if (actions.blockingAction && !renewal) {
         const action = actions.blockingAction
         const summary = actions.actions.find((candidate) => candidate.actionId === action.actionId)
         throw new GatewayApiError(409, 'source_action_conflict', {
@@ -385,7 +391,9 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       try {
         const trustedStatus = status ?? await apiRef.current.getStatus()
         if (status === null) setStatus(trustedStatus)
-        const prepared = await apiRef.current.prepareSourceAction(current.revision, sourceId)
+        const prepared = renewActionId === undefined
+          ? await apiRef.current.prepareSourceAction(current.revision, sourceId)
+          : await apiRef.current.prepareSourceAction(current.revision, sourceId, renewActionId)
         const handoffUrl = validHandoffUrl(prepared.handoffUrl, window.location.origin)
         if (!handoffUrl) throw new Error('The authorization link could not be verified.')
         return { ...prepared, handoffUrl }

@@ -21,6 +21,18 @@ describe('HttpGatewayAdminApi', () => {
     updatedAt: '2026-08-29T00:00:00.000Z',
   } as const
 
+  it('renews an exact source action through its same-origin endpoint', async () => {
+    const actionId = `action_${'a'.repeat(32)}`
+    const prepared = { schemaVersion: 1, actionId, status: 'authorization_required',
+      expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: 'https://manage.example.com/__ankka/operation#synthetic' }
+    const fetch = vi.fn(async () => Response.json(prepared))
+    vi.stubGlobal('fetch', fetch)
+    await expect(new HttpGatewayAdminApi().prepareSourceAction(4, 'source-test', actionId)).resolves.toEqual(prepared)
+    expect(fetch).toHaveBeenCalledExactlyOnceWith(`/api/source-actions/${actionId}/renew`, expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ schemaVersion: 1, revision: 4, sourceId: 'source-test' }),
+    }))
+  })
+
   it('accepts the protected public BigQuery catalogue with nullable summaries and a fixed setup block', async () => {
     const discovery = {
       schemaVersion: 1, status: 'authorization_required', endpoint: 'https://bigquery.googleapis.com/mcp',
