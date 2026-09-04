@@ -563,7 +563,7 @@ async function fixture(fault: CustomerStage2ActionName | null = null) {
       },
       verifyReady: async () => {
         payloadVerifyCalls += 1;
-        return true;
+        return { verified: true, reason: null };
       },
     },
     transport: cloudflare.transport,
@@ -614,6 +614,27 @@ describe('customer Stage 2 convergence', () => {
     expect(durableBytes).not.toContain(ACCESS_TOKEN);
     expect(durableBytes).not.toContain(BOOTSTRAP_NONCE_KEY);
     expect(durableBytes).not.toMatch(/code_verifier|authorization_code|access_token|refresh_token/iu);
+  });
+
+  it('names the resource the payload could not re-verify', async () => {
+    const test = await fixture();
+    await expect(convergeCustomerStage2({
+      ...test.baseInput,
+      attemptId: `attempt_${'v'.repeat(24)}`,
+      payload: {
+        ...test.baseInput.payload,
+        verifyReady: async () => ({ verified: false, reason: 'dns_record_absent' }),
+      },
+    })).rejects.toMatchObject({ code: 'payload_recovery_required', reason: 'verify_dns_record_absent' });
+    // A verdict without a usable reason still names the step.
+    await expect(convergeCustomerStage2({
+      ...test.baseInput,
+      attemptId: `attempt_${'w'.repeat(24)}`,
+      payload: {
+        ...test.baseInput.payload,
+        verifyReady: async () => ({ verified: false, reason: 'Not A Reason' }),
+      },
+    })).rejects.toMatchObject({ code: 'payload_recovery_required', reason: 'verify_unknown' });
   });
 
   it('recovers an Access application created before its locator was journaled', async () => {

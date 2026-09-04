@@ -17,6 +17,8 @@ const VERIFIER = /^[A-Za-z0-9_-]{43}$/u;
 const CODE = /^[A-Za-z0-9._~-]{8,4096}$/u;
 const ACCOUNT_ID = /^[a-f0-9]{32}$/u;
 const MAX_PROVIDER_BYTES = 128 * 1024;
+const REVOKE_ATTEMPTS = 3;
+const REVOKE_BACKOFF_MS = 300;
 
 const accountEnvelopeSchema = v.looseObject({
   success: v.literal(true),
@@ -204,30 +206,41 @@ export class EphemeralCustomerCloudflareGrant {
   async revoke(input: {
     readonly clientId: string;
     readonly transport: CustomerCloudflareTransport;
+    /** Test seam for the back-off between attempts; production sleeps. */
+    readonly wait?: (milliseconds: number) => Promise<void>;
   }): Promise<void> {
     if (!CLIENT_ID.test(input.clientId)) invalid();
     const tokens = [this.#accessToken, this.#refreshToken].filter(
       (token): token is string => token !== undefined,
     );
+    const wait = input.wait ?? ((milliseconds: number) =>
+      new Promise<void>((resolve) => { setTimeout(resolve, milliseconds); }));
     let failed = false;
     for (const token of tokens) {
-      try {
-        await withDeadline(async (signal) => {
-          const response = await input.transport(OAUTH_REVOKE_URL, {
-            method: 'POST',
-            headers: {
-              accept: 'application/json',
-              'content-type': 'application/x-www-form-urlencoded',
-            },
-            body: new URLSearchParams({ token, client_id: input.clientId }),
-            signal,
-          });
-          await readBoundedText(response, 'oauth_revoke_failed', 16 * 1024);
-          if (!response.ok) throw new CustomerCloudflareGrantError('revoke_failed');
-        }, 'oauth_revoke_failed');
-      } catch {
-        failed = true;
+      let revoked = false;
+      // A revocation that is refused once is retried briefly: an unconfirmed
+      // revocation turns an otherwise finished install into INCOMPLETE.
+      for (let attempt = 1; attempt <= REVOKE_ATTEMPTS && !revoked; attempt += 1) {
+        try {
+          await withDeadline(async (signal) => {
+            const response = await input.transport(OAUTH_REVOKE_URL, {
+              method: 'POST',
+              headers: {
+                accept: 'application/json',
+                'content-type': 'application/x-www-form-urlencoded',
+              },
+              body: new URLSearchParams({ token, client_id: input.clientId }),
+              signal,
+            });
+            await readBoundedText(response, 'oauth_revoke_failed', 16 * 1024);
+            if (!response.ok) throw new CustomerCloudflareGrantError('revoke_failed');
+          }, 'oauth_revoke_failed');
+          revoked = true;
+        } catch {
+          if (attempt < REVOKE_ATTEMPTS) await wait(REVOKE_BACKOFF_MS * attempt);
+        }
       }
+      if (!revoked) failed = true;
     }
     if (failed) throw new CustomerCloudflareGrantError('revoke_failed');
   }
