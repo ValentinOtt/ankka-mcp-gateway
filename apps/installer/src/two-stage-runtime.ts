@@ -99,6 +99,7 @@ export const TWO_STAGE_API_ROUTES = Object.freeze([
   '/health',
   ...RELEASE_DESCRIPTOR_ROUTES,
   '/api/session',
+  '/api/session/new',
   '/api/selection',
   '/api/plan',
   '/api/bootstrap',
@@ -512,12 +513,13 @@ export function createTwoStageDeployRuntime(
     return json(body, 200, cookies);
   }
 
-  async function freshSession(request: Request, context: RuntimeContext): Promise<Response> {
+  async function freshSession(request: Request, context: RuntimeContext, cookies: readonly string[] = []): Promise<Response> {
     if (policy === 'required') await enforceAnonymousSessionRateLimit(request, context.env);
     const sessionId = await mintAuthenticatedSessionId(context.config.DEPLOY_SESSION_ENCRYPTION_KEY);
     const session = handle(context, sessionId);
     const state = await session.client.initialize();
     return publicResponse(context, session, state, [
+      ...cookies,
       sessionCookie(sessionId, Math.ceil(HOSTED_STAGE1_SESSION_TTL_MS / 1_000)),
     ]);
   }
@@ -541,6 +543,19 @@ export function createTwoStageDeployRuntime(
     const selection = parseDeploySelection(await readJsonBody(request, boundaryObjectSchema));
     const state = await session.client.saveSelection(selection);
     return publicResponse(context, session, state);
+  }
+
+  async function postNewSession(request: Request, context: RuntimeContext): Promise<Response> {
+    const session = await requireSession(request, context);
+    await requireMutation(request, context, session);
+    await readJsonBody(request, v.strictObject({}));
+    const current = await session.client.read();
+    if (current === null) throw new DeployError(404, 'session_invalid');
+    if (!['draft', 'failed', 'handed_off'].includes(current.phase)) {
+      throw new DeployError(409, 'session_conflict');
+    }
+    // Keep the previous session's evidence and recovery intact until its normal expiry.
+    return freshSession(request, context, [clearBootstrapCookie()]);
   }
 
   async function freezePlanFor(
@@ -854,6 +869,8 @@ export function createTwoStageDeployRuntime(
     switch (`${request.method} ${path}`) {
       case 'GET /api/session':
         return getSession(request, runtime);
+      case 'POST /api/session/new':
+        return postNewSession(request, runtime);
       case 'PUT /api/selection':
         return putSelection(request, runtime);
       case 'POST /api/plan':
