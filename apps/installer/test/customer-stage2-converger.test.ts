@@ -162,6 +162,7 @@ interface ProviderState {
   policyCreates: number;
   domainCreates: number;
   finalUploads: number;
+  nonceDeletes: number;
 }
 
 function inheritedBinding(name: string): BoundaryObject {
@@ -189,6 +190,7 @@ function provider(plan: StaticDeployPlan) {
     policyCreates: 0,
     domainCreates: 0,
     finalUploads: 0,
+    nonceDeletes: 0,
   };
   const calls: string[] = [];
 
@@ -302,6 +304,11 @@ function provider(plan: StaticDeployPlan) {
         bindings: required(state.finalBindings ?? undefined, 'final bindings'),
         exports: { AdminState: { type: 'durable-object', storage: 'sqlite' } },
       });
+    }
+    if (request.method === 'DELETE' && url.pathname.endsWith('/secrets/ANKKA_BOOTSTRAP_NONCE')) {
+      // Secrets survive uploads; the final runtime removes the nonce explicitly.
+      state.nonceDeletes += 1;
+      return json(null);
     }
     if (url.pathname === `/client/v4/accounts/${ACCOUNT_ID}/workers/scripts/${workerName}` &&
         request.method === 'PUT') {
