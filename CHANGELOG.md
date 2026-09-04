@@ -27,6 +27,11 @@ Notable public product and repository changes are recorded here.
   source grant, the gateway Worker for an update) instead of listing
   accounts, which an operation grant cannot see. The first gateway-local
   source authorization had stopped with `grant_account_ambiguous_accounts_0`.
+- Let the runtime-update journal follow a release the Worker received outside
+  an action (an operator-run update or a Cloudflare-side rollback): once no
+  action is in flight, the recorded current release becomes the rollback
+  reference and the running release is current, so the next update no longer
+  stops with `runtime_action_conflict`.
 - Retire the legacy hosted installer runtime, its Durable Object, journals,
   executors, management handoffs, and analytics sink. The two-stage runtime
   shipped in gateway-v0.1.21 is the only hosted mutation path.

@@ -1490,6 +1490,57 @@ async function exerciseSignedRuntimeUpdate(bindExpectedTarget) {
   }
 }
 
+test('the runtime journal follows a release the Worker received outside an action', async () => {
+  const { env } = await installReadyGateway();
+  const storage = env.ADMIN_STATE.objects.get('v1:management').storage;
+  const readJournal = async (environment) => {
+    const response = await new AdminState({ storage }, environment).fetch(
+      new Request('https://admin-state.invalid/runtime-updates'),
+    );
+    assert.equal(response.status, 200, await response.clone().text());
+    return response.json();
+  };
+  const installed = await readJournal(env);
+  assert.equal(installed.current.release, env.ANKKA_GATEWAY_RELEASE);
+  assert.equal(installed.previous, null);
+
+  // An operator-run update or a Cloudflare-side rollback changes the bindings
+  // without an action; the journal follows the running release and keeps the
+  // recorded one as the rollback reference, and the public status follows.
+  const outside = {
+    ...env, ANKKA_GATEWAY_RELEASE: 'gateway-v0.1.3', ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${'3'.repeat(64)}`,
+  };
+  const followed = await readJournal(outside);
+  assert.equal(followed.revision, installed.revision + 1);
+  assert.deepEqual(followed.current, {
+    release: 'gateway-v0.1.3', artifactSha256: `sha256:${'3'.repeat(64)}`, versionId: null,
+  });
+  assert.deepEqual(followed.previous, installed.current);
+  assert.equal((await storage.get('ankka-mcp-gateway/public-status/v1')).release, 'gateway-v0.1.3');
+  assert.deepEqual(await readJournal(outside), followed, 'a matching release changes nothing');
+
+  const now = Date.now();
+  const prepared = await new AdminState({ storage }, outside).fetch(new Request('https://admin-state.invalid/runtime-updates', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: canonicalJson({
+      actionId: `action_${'a'.repeat(32)}`, actionKeyHash: `sha256:${'b'.repeat(64)}`,
+      actorEmail: 'admin@example.com', expiresAt: now + 60_000, issuedAt: now, operation: 'update',
+      to: { release: 'gateway-v0.1.4', artifactSha256: `sha256:${'4'.repeat(64)}`, versionId: null },
+    }),
+  }));
+  assert.equal(prepared.status, 200, await prepared.clone().text());
+  assert.equal((await prepared.json()).from.release, 'gateway-v0.1.3');
+
+  // While that action is in flight the journal holds still: the handover's
+  // finalize, not a binding read, decides what the new release means.
+  const later = {
+    ...outside, ANKKA_GATEWAY_RELEASE: 'gateway-v0.1.5', ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${'5'.repeat(64)}`,
+  };
+  const held = await readJournal(later);
+  assert.equal(held.current.release, 'gateway-v0.1.3');
+  assert.equal(held.revision, followed.revision + 1, 'only the prepared action advanced the journal');
+});
+
 test('signed runtime updates require explicit authorization, journal progress in customer storage, and retain rollback', () => (
   exerciseSignedRuntimeUpdate(false)
 ));
