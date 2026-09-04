@@ -139,6 +139,8 @@ function dependencies(input: {
   readonly action: CustomerOperationActionView | null;
   readonly applied: ApplyRecord[];
   readonly applyStatus?: number;
+  /** A provider step the apply names next to its error code. */
+  readonly applyDetail?: string;
   readonly operational?: boolean;
   readonly runtimeAction?: CustomerOperationActionView | null;
   readonly updates?: CustomerOperationRuntimeUpdateInput[];
@@ -178,7 +180,12 @@ function dependencies(input: {
       input.applied.push({ body, signature });
       return input.applyStatus === undefined
         ? json({ schemaVersion: 1, actionId: ACTION_ID, status: 'succeeded' })
-        : Response.json({ schemaVersion: 1, error: 'source_action_rejected' }, { status: input.applyStatus });
+        : Response.json(
+          input.applyDetail === undefined
+            ? { schemaVersion: 1, error: 'source_action_rejected' }
+            : { schemaVersion: 1, error: 'source_action_rejected', detail: input.applyDetail },
+          { status: input.applyStatus },
+        );
     },
     now: () => NOW + 4,
   };
@@ -445,12 +452,18 @@ describe('gateway-local operation router', () => {
     const applied: ApplyRecord[] = [];
     const target = router(dependencies({
       port: attempts.port, harness, applied, applyStatus: 409,
+      applyDetail: 'source_access_policy_create_blocked_http_400_code_12130',
       action: { status: 'authorization_required', expiresAt: ACTION_EXPIRES_AT },
     }));
     const { cookie, callback } = await authorize(target);
     const result = await target.fetch(new Request(callback, { headers: { cookie } }));
     expect(result.status).toBe(303);
-    expect(new URL(result.headers.get('location') ?? '').searchParams.get('sourceActionResult')).toBe('failed');
+    const location = new URL(result.headers.get('location') ?? '');
+    expect(location.searchParams.get('sourceActionResult')).toBe('failed');
+    // The apply's own error code and the provider step it names travel as one reason word.
+    expect(location.searchParams.get('sourceActionReason')).toBe(
+      'apply_source_action_rejected_source_access_policy_create_blocked_http_400_code_12130',
+    );
     expect(applied).toHaveLength(1);
     expect(harness.revoked()).toBe(true);
     expect(attempts.current()).toBeNull();
