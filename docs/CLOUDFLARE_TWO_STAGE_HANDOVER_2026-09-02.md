@@ -1625,3 +1625,16 @@ deploying the production relay. Both are operator steps.
   (deploy.ankka.ai version dc5e7c11) and the token-mode updater moved the
   ninth install onto it. The source retry on that release and the first
   dashboard-driven update are the next two live proofs.
+- 2026-09-04 (19:00–20:00), the source retry on gateway-v0.1.37 reached the
+  new account probe and named the next gap: the AI-controls endpoints answer
+  with `success` and `result` only, so the probe's envelope check refused a
+  healthy read (`grant_provider_unavailable_envelope_invalid`; PR #93). The
+  first dashboard-driven update then stopped before consent with
+  `runtime_action_conflict`: the journal's current release was still the
+  install's, because the token-mode updates had moved the Worker without an
+  action, and the payload required the two to agree. The journal now follows
+  the running release once no action is in flight and keeps the recorded one
+  as the rollback reference (PR #94). gateway-v0.1.38 (deploy.ankka.ai
+  version b74072f9) and gateway-v0.1.39 (02925555) went out with these; the
+  ninth install moves to v0.1.39 by the token-mode updater, and the source
+  retry and the first dashboard-driven update follow on it.
