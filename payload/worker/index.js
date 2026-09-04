@@ -1910,7 +1910,14 @@ async function discoverResource(state, kind, token) {
       : providerOutcome(response.status === 'absent' ? 'absent' : response.status, response);
   }
   if (kind === 'source_access_application' || kind === 'portal_access_application') {
-    const response = await providerList(`/zones/${zone}/access/apps`, token);
+    // An MCP application has no domain and is stored with the account: the
+    // zone listing never shows it, so the source application is looked up in
+    // the account listing. The portal application, a zone hostname, keeps
+    // the zone listing.
+    const applications = kind === 'source_access_application'
+      ? `/accounts/${account}/access/apps`
+      : `/zones/${zone}/access/apps`;
+    const response = await providerList(applications, token);
     if (response.status !== 'ok') return providerOutcome(response.status, response);
     const candidates = response.result.filter((value) => accessApplicationCandidate(value, kind, state));
     if (candidates.length === 0) return Object.freeze({ status: 'absent', provider: null });
@@ -1918,7 +1925,7 @@ async function discoverResource(state, kind, token) {
     // The exact application shape, including Managed OAuth, is proven on the
     // single-application read; the list is only used to bound the candidate set.
     const read = await providerCall(
-      `/zones/${zone}/access/apps/${encodeURIComponent(candidates[0].id)}`,
+      `${applications}/${encodeURIComponent(candidates[0].id)}`,
       token,
     );
     if (read.status !== 'ok') {

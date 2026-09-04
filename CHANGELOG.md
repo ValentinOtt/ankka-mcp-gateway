@@ -32,6 +32,11 @@ Notable public product and repository changes are recorded here.
   action is in flight, the recorded current release becomes the rollback
   reference and the running release is current, so the next update no longer
   stops with `runtime_action_conflict`.
+- Find a source's Access application in the account listing. Cloudflare
+  stores an MCP-type application (no hostname of its own) with the account,
+  and the zone listing never shows it, so the gateway created the application
+  and then failed to see it, leaving the first real source installation in
+  recovery-required after its MCP server and application existed.
 - Retire the legacy hosted installer runtime, its Durable Object, journals,
   executors, management handoffs, and analytics sink. The two-stage runtime
   shipped in gateway-v0.1.21 is the only hosted mutation path.
