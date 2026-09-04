@@ -493,7 +493,7 @@ describe('clean hosted two-stage runtime', () => {
     const notReady = await read(h, browser, '/api/bootstrap/handoff');
     expect(notReady.status).toBe(503);
     expect(await parsed(notReady, handoffResponseSchema)).toMatchObject({
-      status: 'not_ready', retryAfterMs: 3_000, reason: 'readiness_http_404',
+      code: 'bootstrap_not_ready', status: 'not_ready', retryAfterMs: 3_000, reason: 'readiness_http_404',
     });
     expect(notReady.headers.get('set-cookie')).toBeNull();
     expect(browser.bootstrapCookie).not.toBeNull();

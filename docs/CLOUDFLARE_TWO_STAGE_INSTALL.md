@@ -500,6 +500,12 @@ Source credentials such as Google or BLS are entered only after management
 Access is enforced and are submitted directly to the customer Gateway. They do
 not transit `deploy.ankka.ai` or `auth.ankka.ai`.
 
+Recovery in the final runtime follows the same shape: the callback on the
+management origin exchanges and checks the account, hands the grant to the
+same in-memory driver, and the converger's passes run from the object's
+alarm under the same per-invocation budget; the page the callback answers
+follows the status route behind Access.
+
 ## Fixed operations
 
 | Operation | Executor | Scope ceiling |
