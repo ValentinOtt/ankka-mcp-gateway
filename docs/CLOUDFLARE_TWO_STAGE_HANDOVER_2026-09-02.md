@@ -1638,3 +1638,21 @@ deploying the production relay. Both are operator steps.
   version b74072f9) and gateway-v0.1.39 (02925555) went out with these; the
   ninth install moves to v0.1.39 by the token-mode updater, and the source
   retry and the first dashboard-driven update follow on it.
+- 2026-09-04 (20:00–21:30), the first dashboard-driven update worked end to
+  end: the ninth install went from gateway-v0.1.39 to v0.1.40 through its
+  own `/__ankka/operation` page, an `upgrade` consent, the gateway-run
+  updater, the sealed handover and the new version's `finalize`, and the
+  Settings page reported "Update activated and health-checked. Durable
+  Object data was preserved." A fresh tenth install (`manageten`) on v0.1.40
+  repeated it to v0.1.41 in about thirty seconds. The source apply then
+  named two more gaps in the provisioning path itself: Cloudflare stores an
+  MCP-type Access application with the account, so the zone listing never
+  showed the application the gateway had just created (PR #96), and the
+  application's policy could not be created through the zone path either
+  (PR #98); both moved to the account paths. A runtime update also left its
+  operation attempt record behind, because the replaced Worker version could
+  no longer clear it, and every later operation answered `operation_pending`
+  until it expired (PR #97). The ninth and tenth installs keep their source
+  actions in recovery-required, with an MCP server and an Access application
+  each retained in Cloudflare; a reviewed recovery path for retained writes
+  is still unbuilt, so the next source proof runs on a fresh install.
