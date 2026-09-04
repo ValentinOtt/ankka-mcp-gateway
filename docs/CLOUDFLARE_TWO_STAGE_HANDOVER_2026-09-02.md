@@ -1510,3 +1510,22 @@ deploying the production relay. Both are operator steps.
   the handoff route as "not yet". Open: that page fix (its source is not in
   this repository), and the recovery router in the final runtime still
   converging in one invocation.
+- 2026-09-04 (13:50), the finished install's management page: after the
+  Access login, `/sources` showed "Couldn't load the gateway" because
+  `/api/status` and `/api/sources` answered 503 `unavailable`. The shell ran
+  the payload's bootstrap in-process and skipped what the payload's own
+  public bootstrap route does afterwards: publishing the public status and
+  the management control into the management object, which the management
+  API reads. The shell also kept the receipt in the management object, where
+  the payload's teardown never looks (it reads the installation object,
+  `v1:<install id>`). PR #83 runs the bootstrap and the receipt verification
+  in the installation object through two internal requests the Worker entry
+  never forwards, and publishes the status and control into the management
+  object through a function the payload now exports for hosts that run its
+  bootstrap themselves (`publishBootstrapCompletion`, written exactly as the
+  route writes them). A failed publication answers
+  `management_publication_failed`. The harness now asserts the management
+  object answers `/status`, `/sources` and `/management-control`, and a
+  root test compares the shell's records with the route's, which is the
+  check that would have caught this. Lesson: a route the shell replaces has
+  to be replaced whole; its side effects were the contract.

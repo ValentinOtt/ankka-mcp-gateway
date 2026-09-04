@@ -1,7 +1,7 @@
 import * as v from 'valibot';
 
 // @ts-expect-error The payload is validated as a release input, not a TS package.
-import { AdminState as RuntimeAdminState, processBootstrap, verifyBootstrapReceiptProviderStateWithReason } from '../../../payload/worker/index.js';
+import { AdminState as RuntimeAdminState, processBootstrap, publishBootstrapCompletion, verifyBootstrapReceiptProviderStateWithReason } from '../../../payload/worker/index.js';
 import { PUBLIC_ORIGIN } from './constants';
 import { CustomerBootstrapConvergenceDriver } from './customer-bootstrap-convergence-driver';
 import { beginCustomerBootstrapRelay } from './customer-bootstrap-relay-client';
@@ -30,6 +30,11 @@ import {
   initializeCustomerStage2Sql,
 } from './customer-stage2-durable-state';
 import { prepareCustomerBootstrapClaimFromPlan } from './customer-bootstrap-request';
+import {
+  customerInstallationObjectName,
+  handleCustomerInstallationObjectRequest,
+  verifyReceiptInInstallationObject,
+} from './customer-installation-object';
 import {
   CUSTOMER_INSTALL_CONTINUE_PATH,
   CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH,
@@ -184,10 +189,14 @@ export class AdminState extends RuntimeAdminState {
       const config = parsedEnv(bootstrapEnv);
       initializeCustomerBootstrapSql(bootstrapState.storage);
       initializeCustomerStage2Sql(bootstrapState.storage);
-      await initializeCustomerGatewayOwnershipState({
-        storage: bootstrapState.storage,
-        wrappingKey: config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY,
-      });
+      // The installation object only holds the payload's receipt; the
+      // ownership key and the install state live in the management object.
+      if (bootstrapState.id.name !== customerInstallationObjectName(config.ANKKA_INSTALL_ID)) {
+        await initializeCustomerGatewayOwnershipState({
+          storage: bootstrapState.storage,
+          wrappingKey: config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY,
+        });
+      }
     });
     this.convergence = new CustomerBootstrapConvergenceDriver({
       state: new CustomerBootstrapDurableStatePort(bootstrapState.storage),
@@ -250,24 +259,41 @@ export class AdminState extends RuntimeAdminState {
       },
       finalRuntimeSource: __ANKKA_FINAL_RUNTIME_SOURCE__,
       payload: {
-        // The shell runs the payload in-process, so it hands the payload the
-        // strict runtime environment that also names the zone and the
-        // Zero Trust readiness the converger has established by now.
-        bootstrap: (request, { target }) => processBootstrap(
-          request,
-          customerPayloadEnvironment(this.bootstrapEnv, target),
-          this.bootstrapState.storage,
-        ),
+        // The bootstrap runs in the installation object, where the payload
+        // keeps the receipt for verification and teardown; the public status
+        // and the management control it publishes afterwards land in this,
+        // the management object, exactly as the payload's own route writes
+        // them. Without them the management API answers "unavailable".
+        bootstrap: async (request, { target }) => {
+          const claimText = await request.clone().text();
+          const response = await this.installationObject().fetch(request);
+          if (response.status !== 200) return response;
+          const published = await publishBootstrapCompletion(
+            JSON.parse(claimText),
+            JSON.parse(await response.clone().text()),
+            customerPayloadEnvironment(this.bootstrapEnv, target),
+            Date.now(),
+            (internal: Request) => super.fetch(internal),
+          );
+          if (published !== true) {
+            return new Response(JSON.stringify({
+              schemaVersion: 1,
+              error: 'management_publication_failed',
+              retryable: false,
+            }), { status: 409, headers: { 'content-type': 'application/json; charset=utf-8' } });
+          }
+          return response;
+        },
         verifyReady: async ({ accessToken: token, plan, target }) => {
           const claim = await prepareCustomerBootstrapClaimFromPlan({
             plan,
             target,
             nowMs: Date.now(),
           });
-          return verifyBootstrapReceiptProviderStateWithReason({
-            ...claim,
-            cloudflareAccessToken: token,
-          }, customerPayloadEnvironment(this.bootstrapEnv, target), this.bootstrapState.storage, Date.now());
+          return verifyReceiptInInstallationObject(this.installationObject(), {
+            claim: { ...claim, cloudflareAccessToken: token },
+            target,
+          });
         },
       },
       transport: (target, init) => fetch(target, init),
@@ -276,10 +302,23 @@ export class AdminState extends RuntimeAdminState {
     });
   }
 
+  private installationObject(): DurableObjectStub {
+    const namespace = this.bootstrapEnv.ADMIN_STATE;
+    return namespace.get(namespace.idFromName(customerInstallationObjectName(parsedEnv(this.bootstrapEnv).ANKKA_INSTALL_ID)));
+  }
+
   async fetch(request: Request): Promise<Response> {
     await this.bootstrapReady;
     const config = parsedEnv(this.bootstrapEnv);
     const url = new URL(request.url);
+    // Internal only: the Worker entry never forwards these two requests.
+    const installation = await handleCustomerInstallationObjectRequest(request, {
+      bootstrapEnv: this.bootstrapEnv,
+      storage: this.bootstrapState.storage,
+      payload: { processBootstrap, verifyReceipt: verifyBootstrapReceiptProviderStateWithReason },
+      now: Date.now,
+    });
+    if (installation !== null) return installation;
     if (request.method === 'GET' && url.pathname === CUSTOMER_INSTALL_STATUS_PATH) {
       const ownership = await readCustomerGatewayOwnershipState(this.bootstrapState.storage);
       const state = await new CustomerBootstrapDurableStatePort(this.bootstrapState.storage).read();

@@ -117,6 +117,7 @@ const recoveryResponseSchema = v.strictObject({
     'bootstrap_recovery_required',
     'bootstrap_requires_repair',
     'bootstrap_request_mismatch',
+    'management_publication_failed',
   ]),
   retryable: v.boolean(),
   /** Secret-free numbers and fixed words naming the provider outcome that stopped the payload. */
@@ -348,7 +349,9 @@ export interface CustomerBootstrapReadyResult {
 export type CustomerBootstrapRecoveryReason =
   | 'bootstrap_recovery_required'
   | 'bootstrap_requires_repair'
-  | 'bootstrap_request_mismatch';
+  | 'bootstrap_request_mismatch'
+  /** The host could not publish the management status and control after a ready bootstrap. */
+  | 'management_publication_failed';
 
 export interface CustomerBootstrapRecoveryResult {
   readonly schemaVersion: 1;

@@ -4608,6 +4608,38 @@ function adminStateStub(env, name) {
   }
 }
 
+/**
+ * What this route publishes into the management object after a ready
+ * bootstrap, for a host that runs the bootstrap in an object of its own: the
+ * public status and the management control, written through `adminState`
+ * exactly as the route writes them. Resolves false when the claim, the
+ * environment, the ready body or either write is not what this payload
+ * accepts; nothing is logged and nothing else is written.
+ */
+export async function publishBootstrapCompletion(claimValue, ready, env, nowMs, adminState) {
+  const environment = parseEnvironment(env, true);
+  if (!environment || !isCallable(adminState)) return false;
+  const claim = await parseClaim(claimValue, environment, nowMs);
+  if (!claim || !isRecord(ready) || ready.status !== 'ready') return false;
+  const control = await managementControlFromReadyResponse(claim, ready, env);
+  if (!control) return false;
+  const publish = async (path, body) => {
+    let response;
+    try {
+      response = await adminState(new Request(`https://admin-state.invalid${path}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: canonicalJson(body),
+      }));
+    } catch {
+      return false;
+    }
+    return response instanceof Response && response.status === 200;
+  };
+  if (!await publish(INTERNAL_PUBLISH_PATH, publicStatusFromReadyResponse(claim))) return false;
+  return publish(INTERNAL_CONTROL_PATH, control);
+}
+
 async function handleBootstrap(request, env, nowMs = Date.now()) {
   if (request.method !== 'POST') {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'POST' });

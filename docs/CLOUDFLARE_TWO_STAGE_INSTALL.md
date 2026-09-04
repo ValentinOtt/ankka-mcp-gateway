@@ -470,6 +470,13 @@ to start or take over an installation.
    settles `INCOMPLETE` with `grant_lost` rather than resuming from anything
    durable, and an attempt older than fifteen minutes is revoked and settled
    `INCOMPLETE` with `convergence_deadline` instead of running on.
+   The Gateway resources step runs the payload's bootstrap in the
+   installation object, where the payload keeps the receipt it later
+   verifies and tears down, and then publishes the public status and the
+   management control into the management object exactly as the payload's
+   own bootstrap route does; the management API reads those two records, so
+   a failed publication stops the install with
+   `management_publication_failed`.
 7. The last pass disables `workers.dev`, records the terminal verification
    of everything but the runtime, marks the attempt finalizing, arms an
    alarm, and only then publishes the clean recovery-capable final runtime,
