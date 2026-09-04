@@ -12,8 +12,8 @@ const COMPONENTS = Object.freeze({
   admin: null,
   installer: [
     'assets/ankka-85bfe235.svg',
+    'assets/installer-2e80dceb.js',
     'assets/installer-953fc6de.css',
-    'assets/installer-cafdf608.js',
     'index.html',
   ],
   worker: ['index.js'],
@@ -21,7 +21,7 @@ const COMPONENTS = Object.freeze({
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: 'ece161a6849085ad5e06b3c8813b4ea92c54eaa1403942ee95b2ce286f4e7a1b',
+  installer: 'f76d645bd8dbce882495e5d9e6d023b62c02b3fa4f5ecfe3edce88ccffaddc02',
   worker: '30dd72700675cdf68b654e59a39348df34166be35fb27051c36c058ff68e1d71',
   'worker-cleanup': '35b1d075e05285bd7a3cff7dc11afc7ebda258276f3380204a19510b3c1f8a9a',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
@@ -222,7 +222,7 @@ test('installer assets cover the exact hosted two-stage session, plan, approval,
     assert.match(combined, new RegExp(route.replaceAll('/', '\\/'), 'u'));
   }
   for (const endpoint of [
-    '/api/session', '/api/selection', '/api/plan', '/api/bootstrap', '/api/bootstrap/handoff', '/api/cleanup',
+    '/api/session', '/api/plan', '/api/bootstrap', '/api/bootstrap/handoff', '/api/cleanup',
   ]) assert.ok(script.includes(`'${endpoint}'`), endpoint);
   for (const legacy of [
     '/api/discovery', '/api/deploy', '/api/oauth/handoff', '/api/management', '/api/uninstall',
@@ -240,7 +240,7 @@ test('installer assets cover the exact hosted two-stage session, plan, approval,
   assert.match(script, /window\.location\.assign\(prepared\.authorizationUrl\)/u);
   assert.match(script, /document\.modelContext/u);
   for (const tool of [
-    'get_installer_status', 'configure_gateway', 'begin_authorization', 'finish_secure_setup', 'begin_cleanup',
+    'get_installer_status', 'prepare_deployment', 'begin_authorization', 'finish_secure_setup', 'begin_cleanup',
   ]) assert.ok(script.includes(`name: '${tool}'`), tool);
   assert.match(script, /The one-time handoff is never returned to the caller/u);
   for (const copy of [

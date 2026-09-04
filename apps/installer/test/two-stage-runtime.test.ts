@@ -4,6 +4,8 @@ import type { BoundaryObject } from '../src/boundary';
 import { BOOTSTRAP_COOKIE, PUBLIC_ORIGIN, REQUIRED_OAUTH_SCOPES, SESSION_COOKIE } from '../src/constants';
 import { base64UrlDecode, base64UrlEncode } from '../src/crypto';
 import { DeployError } from '../src/errors';
+import { parseDeploySelection, verifyStaticDeployPlanIntegrity } from '../src/schema';
+import { configuredSetupSchema, signWorkerSetupConfiguration } from '../src/worker-setup-permit';
 import type { HostedStage1Provider } from '../src/hosted-stage1-bootstrap';
 import type { PinnedR2Release, R2ReleaseBundleProvider, R2ReleaseReadBucket } from '../src/r2-release-provider';
 import type { VerifiedReleaseBundle, VerifiedReleasePayloadBlob } from '../src/release';
@@ -222,7 +224,7 @@ interface Harness {
   readonly cleanupCalls: { code: string; verifier: string; phase: string }[];
 }
 
-async function harness(options: { policy?: 'disabled' | 'required' } = {}): Promise<Harness> {
+async function harness(options: { policy?: 'disabled' | 'required'; ownershipPublicKey?: string } = {}): Promise<Harness> {
   const clock = { now: NOW };
   const events: string[] = [];
   const customer = { installId: '', release: '', healthStatus: 404, tokenStatus: 200 };
@@ -237,11 +239,19 @@ async function harness(options: { policy?: 'disabled' | 'required' } = {}): Prom
     if (url.pathname === '/oauth2/token') {
       events.push('token-exchange');
       if (customer.tokenStatus !== 200) return new Response('{}', { status: customer.tokenStatus });
-      return Response.json({ access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write' });
+      return Response.json({ access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write zone.read' });
     }
     if (url.hostname === 'api.cloudflare.com' && url.pathname === '/client/v4/accounts') {
       events.push('account-read');
       return Response.json({ success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }] });
+    }
+    if (url.pathname === '/client/v4/zones') {
+      events.push('zone-discovery');
+      return Response.json({ success: true, errors: [], result: [{ id: '1'.repeat(32), name: 'example.com', status: 'active', account: { id: ACCOUNT_ID } }] });
+    }
+    if (url.pathname.endsWith('/workers/subdomain')) {
+      events.push('subdomain-read');
+      return Response.json({ success: true, errors: [], result: { subdomain: 'tenant' } });
     }
     if (url.pathname === '/oauth2/revoke') {
       events.push('revoke');
@@ -258,7 +268,7 @@ async function harness(options: { policy?: 'disabled' | 'required' } = {}): Prom
         status: 'INCOMPLETE',
         installId: customer.installId,
         release: customer.release,
-        ownershipPublicKey: CUSTOMER_OWNERSHIP_PUBLIC_KEY,
+        ownershipPublicKey: options.ownershipPublicKey ?? CUSTOMER_OWNERSHIP_PUBLIC_KEY,
         failure: null,
       }, { headers: { 'access-control-allow-origin': PUBLIC_ORIGIN, vary: 'Origin' } });
     }
@@ -492,6 +502,43 @@ describe('clean hosted two-stage runtime', () => {
     expect(queried.status).toBe(404);
   });
 
+  it('starts without gateway fields and certifies the Worker-signed review without another provider grant', async () => {
+    const key = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+    const ownershipPublicKey = base64UrlEncode(new Uint8Array(await crypto.subtle.exportKey('raw', key.publicKey)));
+    const h = await harness({ ownershipPublicKey });
+    const browser = await openSession(h);
+    const approval = await mutate(h, browser, 'POST', '/api/bootstrap', {});
+    expect(approval.status).toBe(200);
+    const start = await parsed(approval, bootstrapResponseSchema);
+    const state = new URL(start.authorizationUrl).searchParams.get('state');
+    expect((await callback(h, browser, `code=${AUTHORIZATION_CODE}&state=${state}`)).status).toBe(303);
+    const provisioned = await currentPhase(h, browser);
+    expect(provisioned.phase).toBe('provisioned');
+    expect(provisioned.selection).toBeNull();
+    h.customer.installId = provisioned.provision?.installId ?? '';
+    h.customer.release = provisioned.plan?.releaseId ?? '';
+    h.customer.healthStatus = 200;
+    const ready = await parsed(await read(h, browser, '/api/bootstrap/handoff'), handoffResponseSchema);
+    const fragment = v.parse(v.strictObject({ bootstrapId: v.string(), secret: v.string(), setupPermit: v.string() }),
+      JSON.parse(new TextDecoder().decode(base64UrlDecode(new URL(ready.handoffUrl ?? '').hash.slice(1)))));
+    const request = await signWorkerSetupConfiguration(fragment.setupPermit, parseDeploySelection({ ...selectionInput, firstSource: null }), key.privateKey);
+    const response = await h.worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/bootstrap/configure`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request),
+    }), h.env);
+    expect(response.status).toBe(200);
+    const configured = await parsed(response, configuredSetupSchema);
+    const plan = await verifyStaticDeployPlanIntegrity(JSON.parse(configured.serializedPlan));
+    expect(plan.bootstrapIdentity?.planId).toBe(provisioned.plan?.planId);
+    expect(plan.gatewayConfiguration.managementHostname).toBe('manage.example.com');
+    expect(h.events).toEqual(['token-exchange', 'account-read', 'zone-discovery', 'subdomain-read', 'worker-deploy', 'subdomain-enable', 'subdomain-verify', 'revoke', 'customer-health']);
+    for (const state of h.namespace.states.values()) {
+      const stored = state.storage.sqlFake.state?.stateJson ?? '';
+      expect(stored).not.toContain('owner@example.com');
+      expect(stored).not.toContain(ACCESS_TOKEN);
+      expect(stored).not.toContain(fragment.secret);
+    }
+  });
+
   it('walks selection, plan, one temporary approval, callback provisioning, and token-free handoff', async () => {
     const h = await harness();
     const health = await h.worker.fetch(new Request(`${PUBLIC_ORIGIN}/health`), h.env);
@@ -499,7 +546,7 @@ describe('clean hosted two-stage runtime', () => {
 
     const { browser, state, authorizationUrl } = await authorized(h);
     expect(authorizationUrl.origin).toBe('https://dash.cloudflare.com');
-    expect(authorizationUrl.searchParams.get('scope')).toBe('workers-scripts.write');
+    expect(authorizationUrl.searchParams.get('scope')).toBe('workers-scripts.write zone.read');
     expect(authorizationUrl.searchParams.get('code_challenge_method')).toBe('S256');
     expect(authorizationUrl.searchParams.get('client_id')).toBe(CLIENT_ID);
     const authorizing = await currentPhase(h, browser);
@@ -595,7 +642,7 @@ describe('clean hosted two-stage runtime', () => {
       `code=short&state=${state}`,
       `state=${state}`,
       `code=${AUTHORIZATION_CODE}&code=${AUTHORIZATION_CODE}&state=${state}`,
-      `code=${AUTHORIZATION_CODE}&state=${state}&scope=workers-scripts.write%20zone.read`,
+      `code=${AUTHORIZATION_CODE}&state=${state}&scope=workers-scripts.write%20dns.write`,
     ];
     for (const query of cases) {
       browser.bootstrapCookie = savedCookie;
@@ -670,9 +717,9 @@ describe('clean hosted two-stage runtime', () => {
     }), h.env);
     expect(noSession.status).toBe(401);
     const planWithoutSelection = await mutate(h, browser, 'POST', '/api/plan', {});
-    expect(planWithoutSelection.status).toBe(409);
+    expect(planWithoutSelection.status).toBe(200);
     const bootstrapWithoutPlan = await mutate(h, browser, 'POST', '/api/bootstrap', {});
-    expect(bootstrapWithoutPlan.status).toBe(409);
+    expect(bootstrapWithoutPlan.status).toBe(200);
 
     const routes: readonly (readonly [string, string, number])[] = [
       ['GET', '/api/discovery', 404],

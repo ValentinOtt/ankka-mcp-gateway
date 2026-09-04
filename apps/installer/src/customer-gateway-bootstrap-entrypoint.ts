@@ -2,6 +2,9 @@ import * as v from 'valibot';
 
 // @ts-expect-error The payload is validated as a release input, not a TS package.
 import { AdminState as RuntimeAdminState, processBootstrap, publishBootstrapCompletion, verifyBootstrapReceiptProviderStateWithReason } from '../../../payload/worker/index.js';
+import { createCustomerWorkerSetup } from './customer-worker-setup';
+import { customerSetupPage } from './customer-setup-page';
+import { verifyStaticDeployPlanIntegrity } from './schema';
 import { PUBLIC_ORIGIN } from './constants';
 import { CustomerBootstrapConvergenceDriver } from './customer-bootstrap-convergence-driver';
 import { beginCustomerBootstrapRelay } from './customer-bootstrap-relay-client';
@@ -127,16 +130,6 @@ function unavailable(): Response {
   return new Response(JSON.stringify({ schemaVersion: 1, error: 'bootstrap_unavailable' }), {
     status: 503,
     headers: secureHeaders('application/json; charset=utf-8'),
-  });
-}
-
-function handoffPage(): Response {
-  const nonce = crypto.randomUUID().replaceAll('-', '');
-  const headers = secureHeaders('text/html; charset=utf-8');
-  headers.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Install Ankka Gateway</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}button{font:inherit;padding:.75rem 1rem}pre{white-space:pre-wrap}</style><h1>Finishing your Ankka Gateway</h1><p id="message">Checking the secure handoff…</p><button id="retry" hidden>Try again</button><script nonce="${nonce}">(()=>{const message=document.querySelector('#message');const retry=document.querySelector('#retry');let handoff=null;const decode=()=>{const raw=location.hash.slice(1);if(!raw)return null;const normalized=raw.replace(/-/g,'+').replace(/_/g,'/');return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(normalized.padEnd(Math.ceil(normalized.length/4)*4,'=')),c=>c.charCodeAt(0))))};const run=async()=>{retry.hidden=true;try{handoff=handoff??decode();history.replaceState(null,'','${CUSTOMER_INSTALL_ROOT_PATH}');if(!handoff)throw new Error();let response=await fetch('${CUSTOMER_INSTALL_CONTINUE_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(handoff),credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error();message.textContent='One more Cloudflare approval will finish setup.';response=await fetch('${CUSTOMER_INSTALL_OAUTH_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:'{}',credentials:'same-origin',cache:'no-store'});const value=await response.json();if(!response.ok||typeof value.authorizationUrl!=='string')throw new Error();location.assign(value.authorizationUrl)}catch{message.textContent='The setup link expired or could not be verified. Return to deploy.ankka.ai and try again.';retry.hidden=false}};retry.addEventListener('click',run);run()})();</script></html>`, {
-    status: 200,
-    headers,
   });
 }
 
@@ -327,11 +320,41 @@ export class AdminState extends RuntimeAdminState {
         ownershipPublicKey: ownership.publicKey,
       }), { status: 200, headers });
     }
-    if (url.pathname !== CUSTOMER_INSTALL_CONTINUE_PATH &&
+    if (url.pathname !== '/__ankka/install/setup' && url.pathname !== '/__ankka/install/configuration' &&
+        url.pathname !== CUSTOMER_INSTALL_CONTINUE_PATH &&
         url.pathname !== CUSTOMER_INSTALL_OAUTH_START_PATH &&
         url.pathname !== CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH) {
       return super.fetch(request);
     }
+    const setup = createCustomerWorkerSetup({
+      storage: this.bootstrapState.storage,
+      config: {
+        accountId: config.CLOUDFLARE_ACCOUNT_ID, installId: config.ANKKA_INSTALL_ID,
+        workerName: config.ANKKA_WORKER_NAME, planId: config.ANKKA_PLAN_ID, planHash: config.ANKKA_PLAN_HASH,
+        bootstrapCallback: config.ANKKA_BOOTSTRAP_CALLBACK, secretCommitment: config.ANKKA_BOOTSTRAP_SECRET_SHA256,
+        expiresAt: config.expiresAt, issuerPublicKey: config.CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY,
+        issuerKeyId: config.CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID, publicClientId: config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
+        wrappingKey: config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY,
+      }, transport: (target, init) => fetch(target, init), now: Date.now,
+    });
+    const configured = await setup.configured();
+    const configuredPlan = configured === null ? null : await verifyStaticDeployPlanIntegrity(JSON.parse(configured.serializedPlan));
+    let managementHostname = configuredPlan?.gatewayConfiguration.managementHostname ?? config.ANKKA_MANAGEMENT_HOSTNAME;
+    const acceptFinalHandoff = async (evidence: { serializedHandoff: string; serializedPlan: string; ownershipCertificate: string }): Promise<void> => {
+      await acceptCustomerGatewayOwnershipHandoff({
+        storage: this.bootstrapState.storage,
+        config: {
+          accountId: config.CLOUDFLARE_ACCOUNT_ID, installId: config.ANKKA_INSTALL_ID, workerName: config.ANKKA_WORKER_NAME,
+          plan: { id: config.ANKKA_PLAN_ID, hash: config.ANKKA_PLAN_HASH },
+          release: { id: config.ANKKA_GATEWAY_RELEASE, artifactSha256: config.ANKKA_GATEWAY_RELEASE_SHA256.slice('sha256:'.length) },
+          bootstrapSecretCommitment: config.ANKKA_BOOTSTRAP_SECRET_SHA256, bootstrapExpiresAt: config.expiresAt,
+          bootstrapCallback: config.ANKKA_BOOTSTRAP_CALLBACK,
+          gatewayCallback: `https://${managementHostname}${CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH}`,
+          publicClientId: config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
+          pinnedIssuerPublicKey: config.CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY, issuerKeyId: config.CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID,
+        }, ...evidence, now: Date.now(),
+      });
+    };
     const router = createCustomerBootstrapRouter({
       accountId: config.CLOUDFLARE_ACCOUNT_ID,
       installId: config.ANKKA_INSTALL_ID,
@@ -342,43 +365,32 @@ export class AdminState extends RuntimeAdminState {
     }, {
       state: new CustomerBootstrapDurableStatePort(this.bootstrapState.storage),
       transport: (input, init) => fetch(input, init),
-      acceptHandoff: ({ serializedHandoff, serializedPlan, ownershipCertificate }) =>
-        acceptCustomerGatewayOwnershipHandoff({
-          storage: this.bootstrapState.storage,
-          config: {
-            accountId: config.CLOUDFLARE_ACCOUNT_ID,
-            installId: config.ANKKA_INSTALL_ID,
-            workerName: config.ANKKA_WORKER_NAME,
-            plan: { id: config.ANKKA_PLAN_ID, hash: config.ANKKA_PLAN_HASH },
-            release: {
-              id: config.ANKKA_GATEWAY_RELEASE,
-              artifactSha256: config.ANKKA_GATEWAY_RELEASE_SHA256.slice('sha256:'.length),
-            },
-            bootstrapSecretCommitment: config.ANKKA_BOOTSTRAP_SECRET_SHA256,
-            bootstrapExpiresAt: config.expiresAt,
-            bootstrapCallback: config.ANKKA_BOOTSTRAP_CALLBACK,
-            gatewayCallback: `https://${config.ANKKA_MANAGEMENT_HOSTNAME}${CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH}`,
-            publicClientId: config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
-            pinnedIssuerPublicKey: config.CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY,
-            issuerKeyId: config.CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID,
-          },
-          serializedHandoff,
-          serializedPlan,
-          ownershipCertificate,
-          now: Date.now(),
-        }).then(() => undefined),
+      acceptHandoff: acceptFinalHandoff,
+      acceptSetup: (permit) => setup.accept(permit),
+      readSetup: () => setup.read(),
+      configureSetup: (selection) => this.bootstrapState.blockConcurrencyWhile(async () => {
+        const state = await new CustomerBootstrapDurableStatePort(this.bootstrapState.storage).read();
+        if (state?.oauth !== null) throw new Error('setup_locked');
+        return setup.configure(selection);
+      }),
       beginRelay: (input) => beginCustomerBootstrapRelay({
         ...input,
         publicClientId: config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
         transport: (target, init) => fetch(target, init),
       }),
       issueRelayTicket: async () => {
+        const reviewed = await setup.configured();
+        if (reviewed !== null) {
+          const plan = await verifyStaticDeployPlanIntegrity(JSON.parse(reviewed.serializedPlan));
+          managementHostname = plan.gatewayConfiguration.managementHostname;
+          await acceptFinalHandoff(reviewed);
+        }
         const ownership = await readCustomerGatewayOwnershipState(this.bootstrapState.storage);
         if (ownership.ownershipCertificate === null || ownership.certificateSha256 === null ||
             ownership.trust === null ||
             ownership.trust.publicClientId !== config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID ||
             ownership.trust.gatewayCallback !==
-              `https://${config.ANKKA_MANAGEMENT_HOSTNAME}${CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH}`) {
+              `https://${managementHostname}${CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH}`) {
           throw new Error('customer_gateway_ownership_invalid');
         }
         const privateKey = await openCustomerGatewayOwnershipPrivateKey({
@@ -395,7 +407,7 @@ export class AdminState extends RuntimeAdminState {
         });
       },
       startConvergence: (input) => this.convergence.start(input),
-      callbackResponse: (outcome, cookies) => customerInstallProgressPage(config.ANKKA_MANAGEMENT_HOSTNAME, outcome, cookies),
+      callbackResponse: (outcome, cookies) => customerInstallProgressPage(managementHostname, outcome, cookies),
     });
     return router.fetch(request);
   }
@@ -408,12 +420,13 @@ export default {
       const url = new URL(request.url);
       if (url.origin !== new URL(config.ANKKA_BOOTSTRAP_CALLBACK).origin) return unavailable();
       if (request.method === 'GET' && url.pathname === CUSTOMER_INSTALL_ROOT_PATH &&
-          url.search === '') return handoffPage();
+          url.search === '') return customerSetupPage();
       if (!(
         request.method === 'GET' && (url.pathname === '/health' ||
+          url.pathname === '/__ankka/install/setup' ||
           url.pathname === CUSTOMER_INSTALL_STATUS_PATH ||
           url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH) ||
-        request.method === 'POST' && (url.pathname === CUSTOMER_INSTALL_CONTINUE_PATH ||
+        request.method === 'POST' && (url.pathname === '/__ankka/install/configuration' || url.pathname === CUSTOMER_INSTALL_CONTINUE_PATH ||
           url.pathname === CUSTOMER_INSTALL_OAUTH_START_PATH)
       )) return new Response(null, { status: 404, headers: secureHeaders('text/plain; charset=utf-8') });
       return env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(request);

@@ -25,6 +25,8 @@ import {
   CUSTOMER_INSTALL_STATUS_PATH,
 } from '../src/customer-install-paths';
 import { responseJson } from './boundary';
+import { parseDeploySelection } from '../src/schema';
+import { selectionInput } from './fixtures';
 
 const NOW = 1_800_000_000_000;
 const ORIGIN = 'https://ankka-gateway-example.customer.workers.dev';
@@ -105,6 +107,61 @@ function expectSessionCleared(response: Response): void {
 }
 
 describe('restricted customer bootstrap router', () => {
+  it('protects Worker configuration with the consumed session and locks edits during approval', async () => {
+    const capability = await createCustomerBootstrapCapability({ now: NOW });
+    let stored: CustomerBootstrapState | undefined;
+    const accepted: string[] = [];
+    const configured: string[] = [];
+    const selection = parseDeploySelection({ ...selectionInput, firstSource: null });
+    const publicSetup = { availableZones: [{ id: 'e'.repeat(32), name: 'example.com' }], selection: null, plan: null, expiresAt: capability.expiresAt };
+    const router = createCustomerBootstrapRouter({
+      accountId: ACCOUNT_ID, installId: INSTALL_ID, bootstrapId: capability.bootstrapId,
+      secretCommitment: capability.secretCommitment, capabilityExpiresAt: capability.expiresAt, publicClientId: CLIENT_ID,
+    }, {
+      now: () => NOW + 1,
+      state: {
+        read: async () => stored,
+        compareAndSet: async (revision, next) => {
+          if ((stored?.revision ?? null) !== revision) return false;
+          stored = next;
+          return true;
+        },
+      },
+      transport: async () => { throw new Error('no provider call expected'); },
+      acceptHandoff: async () => { throw new Error('no final handoff expected'); },
+      acceptSetup: async (permit) => { accepted.push(permit); },
+      readSetup: async () => publicSetup,
+      configureSetup: async (value) => { configured.push(value.basics.gatewayName); return publicSetup; },
+      issueRelayTicket: async () => ({ relayTicket: RELAY_TICKET, expiresAt: NOW + 120_000 }),
+      beginRelay: async ({ gatewayState, pkceChallenge, gatewayCallback }) => buildFixedRelayAuthorization({
+        clientId: CLIENT_ID, relayStateKey: RELAY_KEY,
+        gateway: { accountId: ACCOUNT_ID, installId: INSTALL_ID, callback: gatewayCallback }, operation: 'install',
+        gatewayState, pkceChallenge, nonce: base64UrlEncode(new Uint8Array(32).fill(8)), now: NOW + 1,
+      }),
+      startConvergence: async () => { throw new Error('no grant expected'); },
+    });
+    expect((await router.fetch(new Request(`${ORIGIN}/__ankka/install/setup`))).status).toBe(403);
+    const continued = await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_CONTINUE_PATH}`, {
+      method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ bootstrapId: capability.bootstrapId, secret: capability.secret, setupPermit: 'signed-permit' }),
+    }));
+    expect(accepted).toEqual(['signed-permit']);
+    const cookie = cookieValue(continued, SESSION_COOKIE);
+    const post = (path: string, origin = ORIGIN, body = JSON.stringify(selection)) => router.fetch(new Request(`${ORIGIN}/__ankka/install/${path}`, {
+      method: 'POST', headers: { origin, cookie, 'content-type': 'application/json' }, body,
+    }));
+    expect((await post('configuration', 'https://another.example')).status).toBe(403);
+    expect(configured).toHaveLength(0);
+    const invalid = await post('configuration', ORIGIN, JSON.stringify({ ...selection, basics: { ...selection.basics, portalHostname: selection.basics.managementHostname } }));
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({ error: 'invalid_configuration', reason: 'gateway_hostnames_invalid' });
+    expect((await post('configuration')).status).toBe(200);
+    expect(configured).toEqual([selection.basics.gatewayName]);
+    expect((await post('oauth/start', ORIGIN, '{}')).status).toBe(200);
+    expect((await post('configuration')).status).toBe(409);
+    expect(configured).toHaveLength(1);
+  });
+
   it('runs code relay -> customer exchange -> verify -> revoke and permanently closes bootstrap', async () => {
     const capability = await createCustomerBootstrapCapability({ now: NOW });
     let stored: CustomerBootstrapState | undefined;

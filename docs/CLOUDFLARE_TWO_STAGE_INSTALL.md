@@ -1,5 +1,16 @@
 # Cloudflare two-stage installation candidate
 
+> **Source change: Worker-hosted configuration (2026-09-04).** The initial
+> `bootstrap` operation now requests `workers-scripts.write zone.read`, discovers
+> up to 100 active domains in the selected account, and registers an account
+> Workers subdomain only after explicit absence. Existing subdomains are reused
+> and never removed with a gateway. Name, hostnames, and administrators are
+> collected and reviewed in the deployed Worker before the second approval.
+> See [the current setup contract](WORKER_HOSTED_SETUP.md). Historical canaries
+> below qualify the earlier scope set; a fresh live canary is required for the
+> expanded initial approval and first-time subdomain registration.
+
+
 > **Status:** live-qualified, feature-disabled candidate. It is not wired into the
 > production installer, signed release schema, or production routes. This
 > document records the 2026-09-01–02 canaries, subsequent Cloudflare support
@@ -295,11 +306,10 @@ workers-scripts.write
 zone.read
 ```
 
-`zone.read` belongs only to customer-side installation. The current
-architecture requires an exact zone and collision-checked management/Portal
-hostnames; moving zone discovery into Stage 1 would widen Ankka's grant for UI
-convenience. If a future Cloudflare API can resolve a user-entered domain with
-less authority, this scope should be removed after a positive canary.
+`zone.read` remains part of customer-side installation to revalidate the chosen
+zone. The Worker-hosted configuration change also adds it to Stage 1 for the
+domain dropdown. This expands the initial grant and needs new live
+qualification; the historical Stage 1 evidence used Workers permission alone.
 
 Every endpoint/scope pair in the Stage 2 table and the final clean self-update
 passed the disposable live canary. This is release-pinned evidence, not a
@@ -336,7 +346,7 @@ differently from the newer resource-scoped list endpoints, explaining the live
 
 The V1 credential boundary is therefore explicit:
 
-- Stage 1 uses only a temporary `workers-scripts.write` grant handled by
+- Stage 1 uses a temporary `workers-scripts.write zone.read` grant handled by
   `deploy.ankka.ai`;
 - Stage 2 and later fixed operations use fresh temporary OAuth grants exchanged
   and consumed inside the customer Gateway;
@@ -400,7 +410,9 @@ must explain the policy block without asking for broader permissions.
    selected account.
 2. The token is exchanged into callback-local memory. It is never persisted,
    logged, returned to the browser, or exposed to a generic request proxy.
-3. The installer chooses a fresh Worker identity, installation ID, one-time
+3. The installer discovers active zones in the selected account and ensures an
+   account Workers subdomain exists. It reuses the existing setting or registers
+   a generated label after explicit absence. It chooses a fresh Worker identity, installation ID, one-time
    256-bit bootstrap capability, dedicated 256-bit ownership wrapping secret,
    and exact signed release. Only the capability commitment and the wrapping
    secret as a Cloudflare `secret_text` binding enter the Worker. Neither is
@@ -419,23 +431,29 @@ must explain the policy block without asking for broader permissions.
 6. An installer page polls only the inert customer `/health` route with no
    token or capability. The route allows only the exact installer origin and
    reports the reviewed asset, SQLite availability, `INCOMPLETE` state, and
-   ownership public key. The installer signs an ownership certificate binding
-   that key to the exact provider read-back and signed handoff; this needs no
+   ownership public key. The installer signs a setup permit binding that key,
+   the domain choices, bootstrap plan, and ownership handoff; this needs no
    Cloudflare management grant.
 7. Only after that proof does the installer release the one-time capability
    from its short-lived authenticated `__Host-` HttpOnly cookie into a URL
    fragment. The customer origin clears the fragment before consuming the
    capability same-origin; Ankka does not cross-origin POST it into the Worker.
-8. A consumed/replayed capability and post-consumption health check are
-   verified before Stage 2 starts.
+8. The Worker collects and reviews the gateway configuration. Its ownership
+   key signs a token-free request to the hosted issuer, which certifies the
+   exact final callback and plan for the already-deployed Worker. Stage 2
+   starts only after review. See [the setup contract](WORKER_HOSTED_SETUP.md).
 
 The restricted runtime exposes only:
 
 ```text
 GET  /health
-POST /bootstrap/continue
-POST /oauth/start
-GET  /oauth/callback
+GET  /__ankka/install
+GET  /__ankka/install/status
+POST /__ankka/install/continue
+GET  /__ankka/install/setup
+POST /__ankka/install/configuration
+POST /__ankka/install/oauth/start
+GET  /__ankka/install/oauth/callback
 ```
 
 Everything else fails closed. Discovering the temporary hostname is not enough
@@ -510,7 +528,7 @@ follows the status route behind Access.
 
 | Operation | Executor | Scope ceiling |
 | --- | --- | --- |
-| `bootstrap` | hosted installer | `workers-scripts.write` |
+| `bootstrap` | hosted installer | `workers-scripts.write zone.read` |
 | `install` | customer Gateway | the seven exact Stage 2 scopes above |
 | `upgrade` / `rollback` | customer Gateway | `workers-scripts.write` |
 | `source-add` / `source-update` / `source-remove` | customer Gateway | `zone-access.write`, `mcp-portals.write` |
@@ -524,10 +542,10 @@ deferred until its exact mutations and scope ceiling are demonstrated.
 
 ### Later-operation relay-ticket issuance
 
-Stage 1 issues the initial `install` ticket only from its exact provider
-read-back and token-free customer health proof. After adoption, the Gateway
-requests tickets only by proving possession of the customer-owned Ed25519 key
-certified during installation. A signed preflight is required before challenge
+Stage 1 issues the setup permit from its exact provider read-back and
+token-free customer health proof. Once configuration is reviewed and certified,
+the Gateway requests the initial `install` ticket by proving possession of its
+certified Ed25519 ownership key. Later operations use the same ownership proof. A signed preflight is required before challenge
 allocation, the relay stores hashes only, and successful proof consumes the
 challenge exactly once. The certificate fixes the account, Worker, namespace,
 callback, and public client, while the route fixes the operation; neither the

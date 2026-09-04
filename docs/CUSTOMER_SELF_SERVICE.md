@@ -21,7 +21,7 @@ data and cannot deploy a gateway.
 
 Installation requires:
 
-- a Cloudflare account with an active zone;
+- a Cloudflare account with an active zone (up to 100 active zones in the hosted setup);
 - Cloudflare Zero Trust configured for that account;
 - permission to create Workers, Durable Objects, DNS, Access applications and
   policies, and MCP Portal resources;
@@ -35,35 +35,44 @@ configuration file.
 
 ## Cloudflare permissions
 
-The first sign-in is read-only and requests exactly:
+The first approval selects exactly one account and requests:
 
-- `account-settings.read`
-- `memberships.read`
-- `user-details.read`
+- `workers-scripts.write`
 - `zone.read`
 
-After discovery, the installer attempts bounded provider-side revocation and
-always discards its local copy. Installation and installer-assisted updates,
-rollback, and removal use a separate, short-lived grant requesting exactly:
+Ankka discovers that account's active domains and deploys the initial Worker.
+It reuses an existing account Workers subdomain. If none exists, it registers
+a generated subdomain and verifies it. You do not need a placeholder Worker or
+manual `workers.dev` setup. The account subdomain is shared by Workers and is
+never included in gateway cleanup or removal.
 
-- `access-acct.write`
-- `access.write`
-- `account-settings.read`
+The grant stays in the hosted callback's request memory and is revoked before
+handoff to your Worker. Your Worker collects and reviews the gateway details,
+then requests a fresh installation grant:
+
+- `access-acct.read`
+- `zone-access.write`
 - `dns.write`
 - `mcp-portals.write`
-- `memberships.read`
-- `user-details.read`
 - `workers-routes.read`
 - `workers-scripts.write`
 - `zone.read`
 
-If Cloudflare does not confirm discovery-grant revocation, the installer tells
-you to revoke Ankka MCP Gateway in Cloudflare Connected Applications before
-starting a mutation.
+The second grant is handled by your Worker. It rechecks the selected account,
+zone, and hostname availability before creating the remaining resources.
+Updates, rollback, and removal request only their operation's permissions;
+adding domain discovery to initial setup does not widen those grants. The
+[operation contract](../apps/installer/src/cloudflare-operation-authority.ts)
+is authoritative.
 
-Compare Cloudflare's consent screen with these lists. Stop if a permission is
-missing or unexpected; the installer also rejects any release that asks for a
-different set.
+If revocation cannot be confirmed, follow the installer's recovery instructions
+and revoke the connection in Cloudflare Connected Applications. Compare each
+consent screen with the operation you requested.
+
+The Worker configuration flow and expanded first approval are implemented in
+source. Their exact combined scope set and first-time account subdomain
+registration still require a fresh live canary before production promotion;
+older canary results do not qualify these changes.
 
 V1 Team membership is managed directly in Cloudflare. Do not create or add a
 Team-management API token to the gateway. Cloudflare does not support scoping
@@ -75,13 +84,20 @@ credential boundary instead of completing this flow. See
 
 The public installer is designed to:
 
-1. ask you to sign in with Cloudflare;
-2. discover your eligible accounts and active zones without making changes;
-3. collect the gateway name, two hostnames, and initial administrators;
-4. show the complete secret-free deployment plan;
-5. request a short-lived Cloudflare grant only after you approve that plan;
-6. create and verify the gateway management surface and empty MCP Portal; and
-7. return the MCP URL and management URL.
+1. start at [deploy.ankka.ai](https://deploy.ankka.ai) without entering gateway details;
+2. choose one Cloudflare account and approve initial Worker deployment and domain discovery;
+3. revoke that grant and open the setup page in your own Worker;
+4. choose a domain from the dropdown, gateway name, two hostnames, and administrators;
+5. review the complete deployment plan and edit it if needed;
+6. approve a fresh grant so your Worker can install and verify the remaining resources; and
+7. open the MCP URL and management URL.
+
+Each review sends the chosen configuration, signed by your Worker's ownership
+key, to the hosted issuer to certify the exact final callback address. This
+request contains no Cloudflare grant. The draft and signed response live in
+your Worker; the initial domain list and deployment evidence remain in the
+hosted session for its one-hour lifetime. The setup capability expires after
+ten minutes. MCP source credentials never enter this flow.
 
 Installation does not add an upstream MCP source. The default-deny onboarding
 candidate restores a separate Sources workflow: discover and review the exact
@@ -94,8 +110,8 @@ not main-branch documentation, to determine availability.
 If discovery finds an existing or conflicting installation, the installer
 stops instead of adopting or overwriting it.
 
-Fresh-hostname checks are read-only and run before the installer creates its
-journal or any Gateway resource. If the requested hostname already has a DNS
+Fresh-hostname checks are read-only and run in the second stage before final
+Gateway resources are created. The initial Worker already exists at this point. If the requested hostname already has a DNS
 record, that record is left untouched; start a new static plan with an unused
 hostname, or intentionally retire the old hostname outside the installer.
 
@@ -257,9 +273,10 @@ When a browser provides `document.modelContext`, the installer and gateway
 dashboard register WebMCP tools as a progressive enhancement. Browsers without
 that API keep the normal interface.
 
-Installer tools are `begin_cloudflare_discovery`, `configure_gateway`,
-`create_review_plan`, `get_installer_status`, `begin_authorization`,
-`create_removal_plan`, and `begin_removal`.
+Installer tools are `get_installer_status`, `prepare_deployment`,
+`begin_authorization`, `finish_secure_setup`, and `begin_cleanup`.
+`prepare_deployment` takes no gateway fields; configuration happens in your
+Worker after the first approval.
 
 Dashboard tools cover Gateway capabilities and status, sources, read-only Team
 state and retained-action recovery, signed update review and handoffs, and

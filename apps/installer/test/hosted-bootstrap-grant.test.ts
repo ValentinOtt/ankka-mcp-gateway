@@ -55,11 +55,11 @@ function streamedJson(value: BoundaryValue, signal: AbortSignal | null | undefin
 }
 
 describe('hosted Stage 1 bootstrap grant', () => {
-  it('builds confidential Authorization Code + PKCE with one scope and no refresh request', () => {
+  it('builds confidential Authorization Code + PKCE with domain discovery and no refresh request', () => {
     const url = new URL(buildHostedBootstrapAuthorizationUrl({
       clientId: CLIENT_ID, state: STATE, challenge: CHALLENGE,
     }));
-    expect(url.searchParams.get('scope')).toBe('workers-scripts.write');
+    expect(url.searchParams.get('scope')).toBe('workers-scripts.write zone.read');
     expect(url.searchParams.get('response_type')).toBe('code');
     expect(url.searchParams.get('code_challenge')).toBe(CHALLENGE);
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
@@ -83,7 +83,7 @@ describe('hosted Stage 1 bootstrap grant', () => {
         if (request.url.endsWith('/oauth2/token')) return json({
           access_token: ACCESS_TOKEN,
           token_type: 'bearer',
-          scope: 'workers-scripts.write',
+          scope: 'workers-scripts.write zone.read',
         });
         if (request.url.startsWith('https://api.cloudflare.com/client/v4/accounts')) return json({
           success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }],
@@ -119,7 +119,7 @@ describe('hosted Stage 1 bootstrap grant', () => {
       transport: async (input) => {
         const url = String(input);
         if (url.endsWith('/oauth2/token')) return json({
-          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write',
+          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write zone.read',
         });
         if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) return json({
           success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }],
@@ -141,7 +141,7 @@ describe('hosted Stage 1 bootstrap grant', () => {
       transport: async (input) => {
         const url = String(input);
         if (url.endsWith('/oauth2/token')) return json({
-          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write',
+          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write zone.read',
         });
         if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) return json({
           success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }],
@@ -163,7 +163,7 @@ describe('hosted Stage 1 bootstrap grant', () => {
       transport: async (input) => {
         const url = String(input);
         if (url.endsWith('/oauth2/token')) return json({
-          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write',
+          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write zone.read',
         });
         if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) return json({
           success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }],
@@ -186,7 +186,7 @@ describe('hosted Stage 1 bootstrap grant', () => {
       transport: async (input) => {
         const url = String(input);
         if (url.endsWith('/oauth2/token')) return json({
-          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write',
+          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write zone.read',
         });
         if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) return json({
           success: true,
@@ -224,7 +224,7 @@ describe('hosted Stage 1 bootstrap grant', () => {
           access_token: ACCESS_TOKEN,
           refresh_token: refreshToken,
           token_type: 'bearer',
-          scope: 'workers-scripts.write',
+          scope: 'workers-scripts.write zone.read',
         });
         if (url.endsWith('/oauth2/revoke')) {
           const body = init?.body;
@@ -250,7 +250,7 @@ describe('hosted Stage 1 bootstrap grant', () => {
       transport: async (input) => {
         const url = String(input);
         if (url.endsWith('/oauth2/token')) return json({
-          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write',
+          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write zone.read',
         });
         if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
           return json({
@@ -277,7 +277,7 @@ describe('hosted Stage 1 bootstrap grant', () => {
       transport: async (input) => {
         const url = String(input);
         if (url.endsWith('/oauth2/token')) return json({
-          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write',
+          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write zone.read',
         });
         if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
           return json({
@@ -304,7 +304,7 @@ describe('hosted Stage 1 bootstrap grant', () => {
       transport: async (input, init) => {
         const url = String(input);
         if (url.endsWith('/oauth2/token')) return streamedJson({
-          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write',
+          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: 'workers-scripts.write zone.read',
         }, init?.signal);
         if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) return streamedJson({
           success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }],

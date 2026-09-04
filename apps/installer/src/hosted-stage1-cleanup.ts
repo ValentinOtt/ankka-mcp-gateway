@@ -25,7 +25,7 @@ import type { HostedStage1Session } from './hosted-stage1-session';
 import { readBoundedText, withDeadline } from './http';
 import type { CloudflareOauthConfig, FetchTransport } from './oauth';
 import type { VerifiedReleaseBundle } from './release';
-import type { StaticDeployPlan } from './schema';
+import type { HostedDeployPlan } from './bootstrap-plan';
 import { parseVerifiedReleaseBundle } from './verified-release-bundle';
 
 /**
@@ -143,7 +143,7 @@ interface ProviderResponse {
 }
 
 interface CleanupRoot {
-  readonly plan: StaticDeployPlan;
+  readonly plan: HostedDeployPlan;
   readonly provision: HostedStage1Provision;
 }
 
@@ -444,6 +444,7 @@ export async function executeHostedStage1Cleanup(input: HostedStage1CleanupInput
   let result;
   try {
     result = await executeHostedBootstrapGrant({
+      kind: 'cleanup',
       code: input.code,
       verifier: input.verifier,
       config: input.oauth,

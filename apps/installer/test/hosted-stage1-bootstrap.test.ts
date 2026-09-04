@@ -1,4 +1,6 @@
 import * as v from 'valibot';
+import { buildBootstrapDeployPlan } from '../src/bootstrap-plan';
+import { verifyWorkerSetupPermit } from '../src/worker-setup-permit';
 
 import type { BoundaryValue } from '../src/boundary';
 import type { CustomerInstallStatus } from '../src/customer-install-status';
@@ -140,7 +142,7 @@ function oauthTransport(events: string[]) {
       return Response.json({
         access_token: ACCESS_TOKEN,
         token_type: 'bearer',
-        scope: 'workers-scripts.write',
+        scope: 'workers-scripts.write zone.read',
       });
     }
     if (url.hostname === 'api.cloudflare.com' && url.pathname === '/client/v4/accounts') {
@@ -151,6 +153,15 @@ function oauthTransport(events: string[]) {
         messages: [],
         result: [{ id: ACCOUNT_ID }],
       });
+    }
+    if (url.pathname === '/client/v4/zones') {
+      events.push('zone-discovery');
+      return Response.json({ success: true, errors: [], result: [{ id: '1'.repeat(32), name: 'example.com', status: 'active', account: { id: ACCOUNT_ID } }] });
+    }
+    if (url.pathname.endsWith('/workers/subdomain')) {
+      expect(request.method).toBe('GET');
+      events.push('subdomain-read');
+      return Response.json({ success: true, errors: [], result: { subdomain: 'tenant' } });
     }
     if (url.pathname === '/oauth2/revoke') {
       events.push('revoke');
@@ -210,7 +221,7 @@ function provider(events: string[]): HostedStage1Provider {
   });
 }
 
-async function setup() {
+async function setup(workerSetup = false) {
   const bundle = await releaseBundle();
   const selection = parseDeploySelection({
     schemaVersion: 1,
@@ -224,7 +235,9 @@ async function setup() {
     },
     firstSource: null,
   });
-  const plan = await buildStaticDeployPlan(selection, bundle.manifest, NOW + 20 * 60_000);
+  const plan = workerSetup
+    ? await buildBootstrapDeployPlan(bundle.manifest, NOW + 20 * 60_000)
+    : await buildStaticDeployPlan(selection, bundle.manifest, NOW + 20 * 60_000);
   const secrets = await createHostedStage1Secrets({ now: NOW });
   // SAFETY: Ed25519 generateKey always yields a key pair; the union only exists for symmetric algorithms.
   const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']) as CryptoKeyPair;
@@ -281,11 +294,12 @@ function streamedHealth(value: BoundaryValue, signal: AbortSignal | null | undef
 }
 
 describe('hosted Stage 1 coordinator', () => {
-  it('revokes before token-free readiness and releases the capability only in the customer fragment', async () => {
-    const fixture = await setup();
+  it.each([false, true])('revokes before token-free readiness and releases the capability only in the customer fragment (Worker setup: %s)', async (workerSetup) => {
+    const fixture = await setup(workerSetup);
     expect(fixture.events).toEqual([
       'token-exchange',
       'account-read',
+      ...(workerSetup ? ['zone-discovery'] : []),
       'subdomain-read',
       'worker-deploy',
       'subdomain-enable',
@@ -331,6 +345,16 @@ describe('hosted Stage 1 coordinator', () => {
     expect(url.origin).toBe(fixture.provision.bootstrapOrigin.slice(0, -1));
     expect(url.pathname).toBe('/__ankka/install');
     expect(url.search).toBe('');
+    if (workerSetup) {
+      const payload = v.parse(v.strictObject({ bootstrapId: v.string(), secret: v.string(), setupPermit: v.string() }),
+        JSON.parse(new TextDecoder().decode(base64UrlDecode(url.hash.slice(1)))));
+      const permit = await verifyWorkerSetupPermit(payload.setupPermit, fixture.publicKey, NOW + 3);
+      expect(permit.availableZones).toEqual([{ id: '1'.repeat(32), name: 'example.com' }]);
+      expect(permit.bootstrapPlan.planId).toBe(fixture.plan.planId);
+      expect(payload.secret).toBe(fixture.secrets.capability.secret);
+      expect(payload.setupPermit).not.toContain(ACCESS_TOKEN);
+      return;
+    }
     const payload = v.parse(v.strictObject({
       bootstrapId: v.string(),
       ownershipCertificate: v.string(),

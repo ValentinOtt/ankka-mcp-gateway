@@ -240,7 +240,7 @@ export async function createCustomerBootstrapRecoverySession(input: {
   return Object.freeze({ sessionSecret, expiresAt, state });
 }
 
-async function authenticatedSession(
+export async function authenticatedSession(
   current: CustomerBootstrapState,
   sessionSecret: string,
   now: number,

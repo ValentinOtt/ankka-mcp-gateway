@@ -9,13 +9,13 @@ import {
 } from '../src/cloudflare-operation-authority';
 
 describe('fixed Cloudflare OAuth operation authority', () => {
-  it('keeps Stage 1 at workers-scripts.write only', () => {
+  it('adds zone discovery to Stage 1 without widening release or removal grants', () => {
     const bootstrap = fixedCloudflareOperationAuthority('bootstrap');
     expect(bootstrap).toMatchObject({
       operation: 'bootstrap',
       executor: 'ankka-installer',
       enabled: true,
-      scopes: ['workers-scripts.write'],
+      scopes: ['workers-scripts.write', 'zone.read'],
       workerRelease: {
         mutationPath: 'direct-script-upload',
         activation: 'implicit-with-direct-upload',
