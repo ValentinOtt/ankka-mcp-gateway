@@ -32,6 +32,7 @@ const ACCOUNT_ID = env('ANKKA_LIVE_ACCOUNT_ID');
 const ZONE_ID = env('ANKKA_LIVE_ZONE_ID');
 const ZONE_NAME = env('ANKKA_LIVE_ZONE_NAME');
 const PREFIX = process.env.ANKKA_LIVE_PREFIX ?? 'harness';
+const GATEWAY_NAME = process.env.ANKKA_LIVE_GATEWAY_NAME ?? `Ankka ${PREFIX}`;
 const ADMIN_EMAIL = env('ANKKA_LIVE_ADMIN_EMAIL');
 const MANIFEST_PATH = env('ANKKA_LIVE_MANIFEST');
 const PAYLOAD_SPECIFIER = process.env.ANKKA_LIVE_PAYLOAD ?? '../../../payload/worker/index.js';
@@ -147,7 +148,7 @@ describe('token-mode Stage 2 bootstrap against the test account', () => {
     const selection = parseDeploySelection({
       schemaVersion: 1,
       basics: {
-        gatewayName: `Ankka ${PREFIX}`,
+        gatewayName: GATEWAY_NAME,
         zoneName: ZONE_NAME,
         adminEmail: ADMIN_EMAIL,
         additionalAdminEmails: [],
