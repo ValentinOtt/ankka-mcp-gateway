@@ -392,6 +392,9 @@ describe('token-mode Stage 1 + Stage 2 against the test account', () => {
         transport,
         now: Date.now,
         checkpoints: CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
+        // The shell arms the final runtime's alarm here; this process has no
+        // object to restart, so the hook only marks where the upload begins.
+        handover: async () => { console.log(`handover armed after ${trace.length - callsBeforePass} calls in this pass`); },
       }).catch((error: Error) => {
         const code = 'code' in error ? String(error.code) : '';
         const reason = 'reason' in error ? String(error.reason) : '';
@@ -399,13 +402,27 @@ describe('token-mode Stage 1 + Stage 2 against the test account', () => {
         throw error;
       });
       passes.push(trace.length - callsBeforePass);
-      const stop = result.verified ? 'complete' : `${result.checkpoint.action}:${result.checkpoint.phase}`;
+      const stop = result.verified
+        ? 'complete'
+        : 'paused' in result ? `${result.checkpoint.action}:${result.checkpoint.phase}` : 'handed_over';
       console.log(`converger pass ${passes.length}: ${passes[passes.length - 1]} provider calls, ${stop}`);
-      if (result.verified || passes.length > 8) break;
+      if (result.verified || 'handedOver' in result || passes.length > 8) break;
     }
     console.log('converger result:', JSON.stringify(result));
     console.log(`converger provider calls: ${passes.reduce((sum, calls) => sum + calls, 0)} over ${passes.length} passes`);
-    expect(result.verified).toBe(true);
+    expect(result).toEqual({ verified: false, handedOver: true });
     for (const calls of passes) expect(calls).toBeLessThanOrEqual(45);
+    // What the final runtime's own presence proves in the shell, this process
+    // reads back through the API: the temporary address is closed and the
+    // final runtime's bindings are the ones being served.
+    const subdomain = await api('GET', `/accounts/${ACCOUNT_ID}/workers/scripts/${workerName}/subdomain`);
+    console.log('workers.dev after handover:', JSON.stringify(subdomain.body));
+    expect(v.safeParse(v.looseObject({ result: v.looseObject({ enabled: v.literal(false) }) }), subdomain.body).success).toBe(true);
+    const settings = await api('GET', `/accounts/${ACCOUNT_ID}/workers/scripts/${workerName}/settings`);
+    const bindingNames = v.safeParse(v.looseObject({ result: v.looseObject({ bindings: v.array(v.looseObject({ name: v.string() })) }) }), settings.body);
+    const names = bindingNames.success ? bindingNames.output.result.bindings.map((binding) => binding.name) : [];
+    console.log('final runtime bindings:', names.join(' '));
+    expect(names).toContain('CF_ACCESS_AUD');
+    expect(names).not.toContain('ANKKA_BOOTSTRAP_NONCE');
   });
 });

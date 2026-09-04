@@ -710,7 +710,11 @@ describe('customer Stage 2 convergence', () => {
       passes.push({ result, calls: counted.calls });
       if (result.verified) break;
     }
-    expect(passes.map((pass) => (pass.result.verified ? 'complete' : `${pass.result.checkpoint.action}:${pass.result.checkpoint.phase}`)))
+    expect(passes.map((pass) => (pass.result.verified
+      ? 'complete'
+      : 'paused' in pass.result
+        ? `${pass.result.checkpoint.action}:${pass.result.checkpoint.phase}`
+        : 'handed_over')))
       .toEqual([
         'management_admin_policy:verified',
         'gateway_resources:submitted',
@@ -734,6 +738,40 @@ describe('customer Stage 2 convergence', () => {
     for (const pass of passes) expect(pass.calls).toBeLessThanOrEqual(30);
     const durableBytes = test.journal.serializedWrites.join('\n');
     expect(durableBytes).not.toContain(ACCESS_TOKEN);
+  });
+
+  it('hands the final runtime upload over when the caller cannot outlive it', async () => {
+    const test = await fixture();
+    const attemptId = `attempt_${'i'.repeat(24)}`;
+    const observed: string[] = [];
+    let writesWhenArmed = -1;
+    const result = await convergeCustomerStage2({
+      ...test.baseInput,
+      attemptId,
+      handover: async () => {
+        observed.push(`handover uploads=${test.cloudflare.state.finalUploads} workersDev=${test.cloudflare.state.workersDevEnabled}`);
+        writesWhenArmed = test.journal.serializedWrites.length;
+      },
+    });
+    expect(result).toEqual({ verified: false, handedOver: true });
+    // Everything that needs the journal happened first; the upload came after the hook.
+    expect(observed).toEqual(['handover uploads=0 workersDev=false']);
+    expect(test.cloudflare.state).toMatchObject({
+      appCreates: 1,
+      policyCreates: 1,
+      domainCreates: 1,
+      finalUploads: 1,
+      nonceDeletes: 1,
+      workersDevEnabled: false,
+      finalActive: true,
+    });
+    const journal = required(test.journal.value ?? undefined, 'journal');
+    expect(customerStage2Action(journal, 'workers_dev_disable')?.phase).toBe('verified');
+    expect(customerStage2Action(journal, 'terminal_verify')?.phase).toBe('verified');
+    expect(customerStage2Action(journal, 'final_runtime')?.phase).toBe('send_armed');
+    expect(journal.completedAt).toBeNull();
+    // No journal write after the handover: the object may already be restarting.
+    expect(test.journal.serializedWrites).toHaveLength(writesWhenArmed);
   });
 
   it('re-proves every terminal resource on a completed journal without mutating again', async () => {

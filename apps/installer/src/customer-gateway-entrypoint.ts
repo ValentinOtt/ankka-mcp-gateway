@@ -2,6 +2,7 @@ import * as v from 'valibot';
 
 // @ts-expect-error The payload is validated as a release input, not a TS package.
 import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceiptProviderStateWithReason } from '../../../payload/worker/index.js';
+import { finalizeCustomerBootstrapHandover } from './customer-bootstrap-handover';
 import { beginCustomerBootstrapRelay } from './customer-bootstrap-relay-client';
 import {
   CustomerBootstrapDurableStatePort,
@@ -201,6 +202,23 @@ export class AdminState extends RuntimeAdminState {
     });
   }
 
+  /**
+   * The bootstrap shell arms this alarm right before it uploads this runtime;
+   * the pass that uploaded it cannot reach storage once the object restarts
+   * here, so this is where a finalizing install becomes READY.
+   */
+  async alarm(): Promise<void> {
+    await this.recoveryReady;
+    try {
+      await finalizeCustomerBootstrapHandover(
+        new CustomerBootstrapDurableStatePort(this.finalState.storage),
+        Date.now(),
+      );
+    } catch {
+      // A conflicting write means another pass already settled the attempt.
+    }
+  }
+
   async fetch(request: Request): Promise<Response> {
     await this.recoveryReady;
     const config = parsedEnv(this.finalEnv);
@@ -258,6 +276,7 @@ export class AdminState extends RuntimeAdminState {
         converge: (accessToken, attemptId) => convergeCustomerStage2({
           accessToken,
           attemptId,
+          handover: undefined,
           storage: this.finalState.storage,
           journal,
           runtime: {

@@ -1,5 +1,6 @@
 import {
   consumeCustomerBootstrapOauthCallback,
+  markCustomerBootstrapFinalizing,
   markCustomerBootstrapIncomplete,
   markCustomerBootstrapReady,
   type CustomerBootstrapState,
@@ -41,10 +42,15 @@ export interface CustomerBootstrapCallbackIncomplete extends CustomerBootstrapCa
   readonly failureCode: CustomerBootstrapCallbackFailureCode;
 }
 
-/** One converger pass: complete, or stopped at a checkpoint to continue in a later invocation. */
+/**
+ * One converger pass: complete, stopped at a checkpoint to continue in a
+ * later invocation, or handed over to the final runtime. `handover`, when
+ * given, must reach the converger so it is called before the upload.
+ */
 export type CustomerBootstrapConverge = (
   accessToken: string,
   attemptId: string,
+  handover: (() => Promise<void>) | undefined,
 ) => Promise<CustomerStage2ConvergerResult>;
 
 type PersistTransition = (
@@ -214,11 +220,24 @@ export interface CustomerBootstrapContinueInput {
   readonly transport: CustomerCloudflareTransport;
   readonly persist: PersistTransition;
   readonly converge: CustomerBootstrapConverge;
+  /**
+   * Present where the final runtime upload restarts the caller's own
+   * runtime: arranges for the final runtime to close the install once the
+   * attempt is marked finalizing. Absent where the upload restarts nothing.
+   */
+  readonly armHandover?: (() => Promise<void>) | undefined;
 }
 
 export type CustomerBootstrapContinueResult =
   | Readonly<{
     status: 'CONVERGING';
+    state: CustomerBootstrapState;
+    failureCode: null;
+    failureReason: null;
+  }>
+  | Readonly<{
+    /** The final runtime is uploaded; it marks READY itself. The grant is revoked. */
+    status: 'HANDED_OVER';
     state: CustomerBootstrapState;
     failureCode: null;
     failureReason: null;
@@ -234,15 +253,29 @@ export type CustomerBootstrapContinueResult =
 export async function continueCustomerBootstrapConvergence(
   input: CustomerBootstrapContinueInput,
 ): Promise<CustomerBootstrapContinueResult> {
+  let current = input.current;
   let failureCode: CustomerBootstrapCallbackFailureCode | null = null;
   let failureReason: string | null = null;
   let verified = false;
   let paused = false;
+  let handedOver = false;
+  const armHandover = input.armHandover;
+  const handover = armHandover === undefined
+    ? undefined
+    : async (): Promise<void> => {
+      // The last durable word of this runtime: from here on only the final
+      // runtime may settle the attempt, so it is told to expect one.
+      const finalizing = markCustomerBootstrapFinalizing({ current, attemptId: input.attemptId });
+      await input.persist(current, finalizing);
+      current = finalizing;
+      await armHandover();
+    };
   try {
     await input.grant.withAccessToken(async (accessToken) => {
-      const result = await input.converge(accessToken, input.attemptId);
+      const result = await input.converge(accessToken, input.attemptId, handover);
       if (result.verified === false) {
-        paused = true;
+        if ('handedOver' in result) handedOver = true;
+        else paused = true;
         return;
       }
       if (!convergenceComplete(result)) throw new CustomerCloudflareGrantError('provider_unavailable');
@@ -255,7 +288,7 @@ export async function continueCustomerBootstrapConvergence(
   if (paused && failureCode === null) {
     return Object.freeze({
       status: 'CONVERGING',
-      state: input.current,
+      state: current,
       failureCode: null,
       failureReason: null,
     });
@@ -268,17 +301,27 @@ export async function continueCustomerBootstrapConvergence(
   } finally {
     input.grant.discard();
   }
+  if (handedOver && failureCode === null) {
+    // No durable write here: the object may already be restarting on the
+    // final runtime, which refuses storage to this pass.
+    return Object.freeze({
+      status: 'HANDED_OVER',
+      state: current,
+      failureCode: null,
+      failureReason: null,
+    });
+  }
   if (verified && failureCode === null) {
     const ready = markCustomerBootstrapReady({
-      current: input.current,
+      current,
       attemptId: input.attemptId,
       now: input.now,
     });
-    await input.persist(input.current, ready);
+    await input.persist(current, ready);
     return Object.freeze({ status: 'READY', state: ready, failureCode: null, failureReason: null });
   }
   return settleIncomplete({
-    current: input.current,
+    current,
     attemptId: input.attemptId,
     failureCode: failureCode ?? 'provider_recovery_required',
     failureReason,
@@ -307,6 +350,7 @@ export async function executeCustomerBootstrapCallback(
       persist: input.persist,
       converge: input.converge,
     });
+    if (next.status === 'HANDED_OVER') throw new Error('handover_without_arming');
     if (next.status !== 'CONVERGING') return next;
   }
   const stopped = await continueCustomerBootstrapConvergence({
@@ -321,6 +365,8 @@ export async function executeCustomerBootstrapCallback(
       throw new CustomerStage2ConvergerError('provider_mismatch', 'convergence_passes_exhausted');
     },
   });
-  if (stopped.status === 'CONVERGING') throw new Error('convergence_passes_exhausted');
+  if (stopped.status === 'CONVERGING' || stopped.status === 'HANDED_OVER') {
+    throw new Error('convergence_passes_exhausted');
+  }
   return stopped;
 }

@@ -399,13 +399,19 @@ async function deleteBootstrapNonceSecret(input: CustomerWorkerSelfUpdateInput):
   }
 }
 
-/**
- * Publish the final runtime while inheriting only the exact customer-owned DO,
- * assets, and ownership-key secret from one verified active version.
- */
-export async function publishCustomerWorkerFinalRuntime(input: CustomerWorkerSelfUpdateInput & {
+interface FinalRuntimeUpload {
+  readonly workerId: string;
   readonly previousVersionId: string;
-}): Promise<CustomerWorkerActiveRelease> {
+}
+
+/**
+ * Upload the final runtime over the verified bootstrap version and drop the
+ * bootstrap nonce. Returns the already-active release when the bootstrap
+ * version is no longer active, else the upload's identifiers for a readback.
+ */
+async function uploadFinalRuntime(input: CustomerWorkerSelfUpdateInput & {
+  readonly previousVersionId: string;
+}): Promise<FinalRuntimeUpload | CustomerWorkerActiveRelease> {
   await validateUpdate(input);
   if (!VERSION_ID.test(input.previousVersionId)) fail('invalid', 'validate', 'not_sent');
   const workerId = await currentWorker(input);
@@ -445,14 +451,37 @@ export async function publishCustomerWorkerFinalRuntime(input: CustomerWorkerSel
     fail('provider_unknown', 'script_upload', 'unknown');
   }
   await deleteBootstrapNonceSecret(input);
+  return Object.freeze({ workerId, previousVersionId: before.versionId });
+}
+
+/**
+ * Upload the final runtime without reading the result back, for a caller
+ * whose own runtime is replaced by the upload and cannot record a readback.
+ */
+export async function uploadCustomerWorkerFinalRuntime(input: CustomerWorkerSelfUpdateInput & {
+  readonly previousVersionId: string;
+}): Promise<void> {
+  await uploadFinalRuntime(input);
+}
+
+/**
+ * Publish the final runtime while inheriting only the exact customer-owned DO,
+ * assets, and ownership-key secret from one verified active version, and
+ * read the activated release back exactly.
+ */
+export async function publishCustomerWorkerFinalRuntime(input: CustomerWorkerSelfUpdateInput & {
+  readonly previousVersionId: string;
+}): Promise<CustomerWorkerActiveRelease> {
+  const uploaded = await uploadFinalRuntime(input);
+  if ('deploymentId' in uploaded) return uploaded;
   const wait = input.wait ?? ((milliseconds: number) =>
     new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const active = await activeRelease(input);
-    if (active.versionId !== before.versionId &&
-        await exactFinalVersion(input, workerId, active.versionId)) {
+    if (active.versionId !== uploaded.previousVersionId &&
+        await exactFinalVersion(input, uploaded.workerId, active.versionId)) {
       return Object.freeze({
-        workerId,
+        workerId: uploaded.workerId,
         deploymentId: active.deploymentId,
         versionId: active.versionId,
         finalRuntimeSha256: input.finalRuntimeSha256,

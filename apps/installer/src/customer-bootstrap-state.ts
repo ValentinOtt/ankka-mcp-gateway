@@ -29,7 +29,7 @@ const bootstrapFailureCodeSchema = v.picklist([
 const bootstrapOauthAttemptSchema = v.strictObject({
   attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
   stateHash: v.pipe(v.string(), v.regex(TOKEN)),
-  phase: v.picklist(['authorizing', 'exchanging']),
+  phase: v.picklist(['authorizing', 'exchanging', 'finalizing']),
   expiresAt: v.pipe(v.number(), v.safeInteger()),
 });
 
@@ -385,6 +385,31 @@ export async function rejectCustomerBootstrapOauthCallback(input: {
     oauth: null,
     failureCode: 'authorization_rejected',
     failureReason: null,
+  });
+}
+
+/**
+ * Records that every provider write needing durable state is done and the
+ * final runtime is about to be uploaded. The upload restarts the object on
+ * the new code, which refuses storage to the pass that uploaded it, so only
+ * the final runtime moves a finalizing attempt on to READY.
+ */
+export function markCustomerBootstrapFinalizing(input: {
+  readonly current: CustomerBootstrapState;
+  readonly attemptId: string;
+}): CustomerBootstrapState {
+  const current = parseCustomerBootstrapState(input.current);
+  if (!current || !ATTEMPT_ID.test(input.attemptId)) invalid();
+  if (current.status === 'READY') throw new CustomerBootstrapStateError('final');
+  const oauth = current.oauth;
+  if (current.status !== 'CONVERGING' || !oauth || oauth.attemptId !== input.attemptId ||
+      oauth.phase !== 'exchanging') {
+    throw new CustomerBootstrapStateError('conflict');
+  }
+  return frozen({
+    ...current,
+    revision: current.revision + 1,
+    oauth: { ...oauth, phase: 'finalizing' },
   });
 }
 

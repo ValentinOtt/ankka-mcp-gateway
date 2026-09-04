@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import { exactOperationScopes } from '../src/cloudflare-operation-authority';
-import { CustomerBootstrapConvergenceDriver, CUSTOMER_BOOTSTRAP_CONVERGENCE_DEADLINE_MS } from
-  '../src/customer-bootstrap-convergence-driver';
+import {
+  CustomerBootstrapConvergenceDriver,
+  CUSTOMER_BOOTSTRAP_CONVERGENCE_DEADLINE_MS,
+  CUSTOMER_BOOTSTRAP_HANDOVER_ALARM_DELAY_MS,
+} from '../src/customer-bootstrap-convergence-driver';
+import { finalizeCustomerBootstrapHandover } from '../src/customer-bootstrap-handover';
 import type { CustomerBootstrapStatePort } from '../src/customer-bootstrap-router';
 import {
   consumeCustomerBootstrapCapability,
@@ -37,6 +41,7 @@ const PAUSED: CustomerStage2ConvergerResult = {
   paused: true,
   checkpoint: { action: 'gateway_resources', phase: 'submitted' },
 };
+const HANDED_OVER: CustomerStage2ConvergerResult = { verified: false, handedOver: true };
 
 function deterministicRandom(): (length: number) => Uint8Array {
   let call = 0;
@@ -214,6 +219,71 @@ describe('customer bootstrap convergence driver', () => {
       failureCode: 'provider_recovery_required',
       failureReason: 'verify_dns_record_absent',
     });
+  });
+
+  it('hands over to the final runtime: finalizing state, delayed alarm, revoked grant, then READY', async () => {
+    const converging = await convergingState();
+    const state = new MemoryState(converging.state);
+    const revocations = { count: 0 };
+    const scheduled: number[] = [];
+    const phasesSeen: string[] = [];
+    const driver = new CustomerBootstrapConvergenceDriver({
+      state,
+      transport: transportCounting(revocations),
+      publicClientId: CLIENT_ID,
+      converge: async (_accessToken, _attemptId, handover) => {
+        if (handover === undefined) throw new Error('handover hook missing');
+        phasesSeen.push(state.stored?.oauth?.phase ?? 'none');
+        await handover();
+        phasesSeen.push(state.stored?.oauth?.phase ?? 'none');
+        return HANDED_OVER;
+      },
+      now: () => NOW + 10,
+      schedule: async (delayMs) => { scheduled.push(delayMs); },
+    });
+    await driver.start({ attemptId: converging.attemptId, grant: grant() });
+    expect(await driver.continue()).toBe('settled');
+    expect(phasesSeen).toEqual(['exchanging', 'finalizing']);
+    expect(scheduled).toEqual([0, CUSTOMER_BOOTSTRAP_HANDOVER_ALARM_DELAY_MS]);
+    expect(revocations.count).toBe(1);
+    expect(state.stored).toMatchObject({ status: 'CONVERGING', oauth: { phase: 'finalizing' } });
+    // Until the object restarts on the final runtime, this code only looks again later.
+    expect(await driver.continue()).toBe('scheduled');
+    expect(scheduled).toEqual([0, CUSTOMER_BOOTSTRAP_HANDOVER_ALARM_DELAY_MS, CUSTOMER_BOOTSTRAP_HANDOVER_ALARM_DELAY_MS]);
+    expect(state.stored?.status).toBe('CONVERGING');
+    // The final runtime's alarm closes the install; a second look changes nothing.
+    expect(await finalizeCustomerBootstrapHandover(state, NOW + 20)).toBe('ready');
+    expect(state.stored).toMatchObject({ status: 'READY', oauth: null, session: null, readyAt: NOW + 20 });
+    expect(await finalizeCustomerBootstrapHandover(state, NOW + 21)).toBe('idle');
+    expect(await driver.continue()).toBe('idle');
+  });
+
+  it('settles a failed upload after arming the handover as INCOMPLETE with its reason', async () => {
+    const converging = await convergingState();
+    const state = new MemoryState(converging.state);
+    const revocations = { count: 0 };
+    const driver = new CustomerBootstrapConvergenceDriver({
+      state,
+      transport: transportCounting(revocations),
+      publicClientId: CLIENT_ID,
+      converge: async (_accessToken, _attemptId, handover) => {
+        if (handover === undefined) throw new Error('handover hook missing');
+        await handover();
+        throw new CustomerStage2ConvergerError('provider_mismatch', 'script_upload_rejected');
+      },
+      now: () => NOW + 10,
+      schedule: async () => undefined,
+    });
+    await driver.start({ attemptId: converging.attemptId, grant: grant() });
+    expect(await driver.continue()).toBe('settled');
+    expect(revocations.count).toBe(1);
+    expect(state.stored).toMatchObject({
+      status: 'INCOMPLETE',
+      oauth: null,
+      failureCode: 'provider_recovery_required',
+      failureReason: 'script_upload_rejected',
+    });
+    expect(await finalizeCustomerBootstrapHandover(state, NOW + 20)).toBe('idle');
   });
 
   it('stays idle when the durable state is not converging', async () => {
