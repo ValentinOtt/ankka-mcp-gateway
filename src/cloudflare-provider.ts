@@ -51,6 +51,7 @@ const RESOURCE_KEY = /^[a-z][a-z0-9-]{0,31}$/;
 const DESIRED_HASH = /^sha256:[0-9a-f]{64}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PORTAL_CNAME_TARGET = 'gateway.agents.cloudflare.com';
+const CLAUDE_OAUTH_CALLBACK = 'https://claude.ai/api/mcp/auth_callback';
 const stringSchema = v.string();
 const numberSchema = v.number();
 const functionSchema = v.function();
@@ -207,6 +208,7 @@ type PortalDesired = {
 
 type ManagedOauth = {
   readonly dynamic_client_registration: {
+    readonly allowed_uris: readonly string[];
     readonly allow_any_on_localhost: true;
     readonly allow_any_on_loopback: true;
     readonly enabled: true;
@@ -2029,6 +2031,7 @@ function normalizeManagedOauth(value: BoundaryValue): ManagedOauth {
     enabled: true,
     dynamic_client_registration: {
       enabled: true,
+      allowed_uris: [CLAUDE_OAUTH_CALLBACK],
       allow_any_on_localhost: true,
       allow_any_on_loopback: true,
     },
@@ -2037,6 +2040,8 @@ function normalizeManagedOauth(value: BoundaryValue): ManagedOauth {
 }
 
 function managedOauthMatches(live: BoundaryValue, desired: ManagedOauth): boolean {
+  // Callback defaults are applied on writes, outside retained receipt hashes.
+  // Older Portals remain recognizable without silently changing their clients.
   if (!isObject(live)
     || !isObject(live.dynamic_client_registration)
     || !isObject(live.grant)) return false;
@@ -2242,6 +2247,7 @@ function expectedManagedOauthConfiguration(): ManagedOauth {
     enabled: true,
     dynamic_client_registration: {
       enabled: true,
+      allowed_uris: [CLAUDE_OAUTH_CALLBACK],
       allow_any_on_localhost: true,
       allow_any_on_loopback: true,
     },

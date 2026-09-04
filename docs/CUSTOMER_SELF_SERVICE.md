@@ -168,6 +168,20 @@ Use the team-facing MCP Portal URL returned after installation. The client
 must support the MCP transport exposed by Cloudflare and complete your
 Cloudflare Access flow.
 
+New installations allow the public, non-secret Claude OAuth callback
+`https://claude.ai/api/mcp/auth_callback` in the Portal's Managed OAuth
+configuration. This supports Claude's hosted custom connectors, including
+Claude Desktop. In Claude, use **Always required** authentication and automatic
+OAuth client registration. Localhost and loopback callbacks remain enabled for
+local MCP clients.
+
+Existing Portals keep their current callback settings; updating the gateway
+Worker does not rewrite Access applications. To connect Claude to an older
+Portal, add that exact callback under **Managed OAuth → Allowed redirect URIs**
+in Cloudflare. Portal access, source access, and upstream authentication still
+apply. See [Claude's callback documentation](https://claude.com/docs/connectors/building/authentication#callback-urls)
+and [Cloudflare's Managed OAuth settings](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/#managed-oauth-settings).
+
 Only sources and exact tools approved by the operator are exposed. An MCP tool
 name or description is not proof that the operation is safe; upstream
 authorization remains authoritative.

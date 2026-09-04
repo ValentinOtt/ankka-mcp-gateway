@@ -116,6 +116,7 @@ function exactPortalApp({
       enabled: true,
       dynamic_client_registration: {
         enabled: true,
+        allowed_uris: ['https://claude.ai/api/mcp/auth_callback'],
         allow_any_on_localhost: true,
         allow_any_on_loopback: true,
       },
@@ -1158,6 +1159,9 @@ test('updates a receipt-owned base-only Portal app instead of replaying POST', a
   assert.equal(update.body.name, portal.name);
   assert.equal(Object.hasOwn(update.body, 'policies'), false);
   assert.equal(update.body.oauth_configuration.enabled, true);
+  assert.deepEqual(update.body.oauth_configuration.dynamic_client_registration.allowed_uris, [
+    'https://claude.ai/api/mcp/auth_callback',
+  ]);
 });
 
 test('updates a receipt-owned Portal app when its exact policy is reflected inline', async () => {

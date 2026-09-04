@@ -10,6 +10,7 @@ import worker, {
   parseSourceSave,
   safeManagementSources,
   saveDraftSource,
+  verifyBootstrapReceiptProviderState,
 } from '../payload/worker/index.js';
 import {
   APPROVED_CLOUDFLARE_CONTRACT,
@@ -624,6 +625,21 @@ test('bootstrap validates the private golden claim, explicitly creates seven res
   assert.equal(env.ADMIN_STATE.objects.get('v1:management').storage.snapshot(), undefined);
 });
 
+test('provider verification accepts a legacy Portal without rewriting its callback settings', async () => {
+  const claimInput = await claim();
+  const { env, provider: cloudflare, storage } = await installReadyGateway({ claimInput });
+  const portalApp = [...cloudflare.state.apps.values()].find((app) => app.type === 'mcp_portal');
+  delete portalApp.oauth_configuration.dynamic_client_registration.allowed_uris;
+  const priorRequests = cloudflare.requests.length;
+  const receipt = storage.snapshot();
+  assert.equal(await withProviderFetch(cloudflare.fetch, () => (
+    verifyBootstrapReceiptProviderState(claimInput, env, storage)
+  )), true);
+  assert.deepEqual(storage.snapshot(), receipt);
+  assert.ok(cloudflare.requests.slice(priorRequests).every(({ method }) => method === 'GET'));
+  assert.equal(Object.hasOwn(portalApp.oauth_configuration.dynamic_client_registration, 'allowed_uris'), false);
+});
+
 test('bootstrap accepts a large canonical envelope above 51 users and cancels limit+1 bodies', async () => {
   const maximumClaim = await maximumBootstrapClaim();
   const maximumBody = canonicalJson(maximumClaim);
@@ -676,6 +692,8 @@ test('bootstrap creates a real empty Portal without placeholder source resources
   assert.equal(portalClaim.expected.installationId, INSTALLATION_ID);
   assert.equal(result.status, 'ready');
   assert.equal(result.receipt.resourceCount, 4);
+  const portalApplication = [...cloudflare.state.apps.values()].find((app) => app.type === 'mcp_portal');
+  assert.deepEqual(portalApplication.oauth_configuration, MANAGED_OAUTH);
   assert.equal(result.receipt.revision, 5);
   assert.deepEqual(result.receipt.evidence.resources.map(({ kind }) => kind), PORTAL_RESOURCE_ORDER);
   assert.equal(result.receipt.evidence.resources.some(({ kind }) => kind === 'mcp_server'), false);
