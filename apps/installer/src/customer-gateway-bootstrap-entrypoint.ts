@@ -193,10 +193,11 @@ export class AdminState extends RuntimeAdminState {
       state: new CustomerBootstrapDurableStatePort(bootstrapState.storage),
       transport: (target, init) => fetch(target, init),
       publicClientId: parsedEnv(bootstrapEnv).CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
-      converge: (accessToken, attemptId) => this.converge(accessToken, attemptId),
+      converge: (accessToken, attemptId, handover) => this.converge(accessToken, attemptId, handover),
       now: Date.now,
-      // Every alarm is its own invocation with its own subrequest budget.
-      schedule: () => bootstrapState.storage.setAlarm(Date.now()),
+      // Every alarm is its own invocation with its own subrequest budget; the
+      // delayed one fires on the final runtime after the handover.
+      schedule: (delayMs) => bootstrapState.storage.setAlarm(Date.now() + delayMs),
     });
   }
 
@@ -206,11 +207,16 @@ export class AdminState extends RuntimeAdminState {
     await this.convergence.continue();
   }
 
-  private converge(accessToken: string, attemptId: string): Promise<CustomerStage2ConvergerResult> {
+  private converge(
+    accessToken: string,
+    attemptId: string,
+    handover: (() => Promise<void>) | undefined,
+  ): Promise<CustomerStage2ConvergerResult> {
     const config = parsedEnv(this.bootstrapEnv);
     return convergeCustomerStage2({
       accessToken,
       attemptId,
+      handover,
       storage: this.bootstrapState.storage,
       journal: new CustomerStage2DurableStatePort(this.bootstrapState.storage),
       runtime: {

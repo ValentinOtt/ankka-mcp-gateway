@@ -73,6 +73,7 @@ import type { CustomerStage2JournalPort } from './customer-stage2-durable-state'
 import {
   inspectCustomerWorkerFinalRuntime,
   publishCustomerWorkerFinalRuntime,
+  uploadCustomerWorkerFinalRuntime,
   type CustomerWorkerActiveRelease,
 } from './customer-worker-self-update';
 import { sha256Hex } from './crypto';
@@ -199,7 +200,20 @@ export interface CustomerStage2ConvergerPause {
   readonly checkpoint: CustomerStage2Checkpoint;
 }
 
-export type CustomerStage2ConvergerResult = CustomerBootstrapConvergenceResult | CustomerStage2ConvergerPause;
+/**
+ * The final runtime is uploaded and the object may restart on it at any
+ * moment; the journal keeps `final_runtime` armed and the final runtime
+ * itself moves the install to READY.
+ */
+export interface CustomerStage2ConvergerHandover {
+  readonly verified: false;
+  readonly handedOver: true;
+}
+
+export type CustomerStage2ConvergerResult =
+  | CustomerBootstrapConvergenceResult
+  | CustomerStage2ConvergerPause
+  | CustomerStage2ConvergerHandover;
 
 export interface CustomerStage2ConvergerInput {
   readonly accessToken: string;
@@ -215,6 +229,14 @@ export interface CustomerStage2ConvergerInput {
   readonly now: () => number;
   /** Absent: one run completes the install. Present: the run returns at the first checkpoint it crosses. */
   readonly checkpoints?: readonly CustomerStage2Checkpoint[];
+  /**
+   * Present in the bootstrap shell: called after every journal write and
+   * right before the final runtime upload. The upload restarts the Durable
+   * Object on the new code and refuses storage to this pass afterwards, so
+   * the run returns a handover instead of journaling the upload. Absent
+   * where no restart follows the upload (recovery, tests, harnesses).
+   */
+  readonly handover?: (() => Promise<void>) | undefined;
 }
 
 export type CustomerStage2ConvergerErrorCode =
@@ -866,10 +888,11 @@ async function convergeDomain(context: Context): Promise<ManagementCustomDomainL
   return locator;
 }
 
+/** Returns true when the upload was handed over to the final runtime. */
 async function convergeFinalRuntime(
   context: Context,
   application: ManagementAccessApplicationLocator,
-): Promise<CustomerWorkerActiveRelease> {
+): Promise<boolean> {
   const name = 'final_runtime' as const;
   const bindings = finalBindings(context, application);
   const record = jsonObject({
@@ -889,6 +912,18 @@ async function convergeFinalRuntime(
   const inspection = runtimeInspection(context, application);
   if (action?.phase === 'send_armed') {
     const source = context.input.finalRuntimeSource;
+    const handover = context.input.handover;
+    if (source !== undefined && handover !== undefined) {
+      // Last durable word from this code: the state is marked finalizing and
+      // an alarm is armed for the final runtime before anything is uploaded.
+      await handover();
+      await uploadCustomerWorkerFinalRuntime({
+        ...inspection,
+        finalRuntimeSource: source,
+        previousVersionId: context.journal.identity.bootstrapVersionId,
+      });
+      return true;
+    }
     const locator = source === undefined
       ? await inspectCustomerWorkerFinalRuntime(inspection)
       : await publishCustomerWorkerFinalRuntime({
@@ -911,7 +946,11 @@ async function convergeFinalRuntime(
   if (observed === null || !exact(observed, workerReleaseLocator(action?.locator ?? null))) {
     fail('provider_mismatch');
   }
-  return observed;
+  await persistTransition(context, completeCustomerStage2Journal(context.journal, {
+    attemptId: context.input.attemptId,
+    now: clock(context.input, context.journal.updatedAt),
+  }));
+  return false;
 }
 
 async function convergeWorkersDev(context: Context): Promise<void> {
@@ -956,14 +995,16 @@ async function terminalProof(
   application: ManagementAccessApplicationLocator,
   policy: ManagementAdminPolicyLocator,
   domain: ManagementCustomDomainLocator,
+  runtime: boolean,
 ): Promise<void> {
   await proveApplication(context, application);
   await provePolicy(context, application, policy);
   await proveGatewayResources(context);
   await proveDomain(context, domain);
+  await proveWorkersDevDisabled(context);
+  if (!runtime) return;
   const release = await proveFinalRuntime(context, application);
   if (release === null) fail('provider_mismatch');
-  await proveWorkersDevDisabled(context);
 }
 
 async function convergeTerminal(
@@ -973,9 +1014,9 @@ async function convergeTerminal(
   domain: ManagementCustomDomainLocator,
 ): Promise<void> {
   const name = 'terminal_verify' as const;
-  await terminalProof(context, application, policy, domain);
+  await terminalProof(context, application, policy, domain, false);
   const prerequisiteHash = `sha256:${await sha256Hex(canonicalJson(
-    context.journal.actions.slice(0, 6),
+    context.journal.actions.slice(0, 5),
   ))}`;
   const record = jsonObject({
     schemaVersion: 1,
@@ -1006,13 +1047,9 @@ async function convergeTerminal(
     action = customerStage2Action(context.journal, name);
   }
   if (action?.phase === 'submitted') {
-    await terminalProof(context, application, policy, domain);
+    await terminalProof(context, application, policy, domain, false);
     await verifyAction(context, name);
   }
-  await persistTransition(context, completeCustomerStage2Journal(context.journal, {
-    attemptId: context.input.attemptId,
-    now: clock(context.input, context.journal.updatedAt),
-  }));
 }
 
 function success(): CustomerBootstrapConvergenceResult {
@@ -1157,7 +1194,7 @@ export async function convergeCustomerStage2(
       const domain = domainLocator(
         customerStage2Action(journal, 'management_custom_domain')?.locator ?? null,
       );
-      await terminalProof(completed, application, policy, domain);
+      await terminalProof(completed, application, policy, domain, true);
       return success();
     }
     const acquiredAt = clock(input, journal.updatedAt);
@@ -1186,10 +1223,10 @@ export async function convergeCustomerStage2(
     const policy = await convergePolicy(context, application);
     await convergeGatewayResources(context);
     const domain = await convergeDomain(context);
-    await convergeFinalRuntime(context, application);
     await convergeWorkersDev(context);
     await convergeTerminal(context, application, policy, domain);
-    return success();
+    const handedOver = await convergeFinalRuntime(context, application);
+    return handedOver ? Object.freeze({ verified: false, handedOver: true }) : success();
   } catch (error) {
     if (error instanceof CustomerStage2Pause) {
       // The lease stays with this attempt: the next run continues it.

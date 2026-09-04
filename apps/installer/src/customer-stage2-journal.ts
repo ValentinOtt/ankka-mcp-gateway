@@ -8,14 +8,17 @@ import { deepFreezePlainData } from './plain-data';
 import { jsonValueSchema, type JsonObject, type JsonValue } from './boundary';
 
 export const CUSTOMER_STAGE2_JOURNAL_KEY = 'ankka-mcp-gateway/stage2-journal/v1';
+// The final runtime comes last: its upload restarts the Durable Object on the
+// new code and refuses storage to the pass that uploaded it, so everything
+// that must be journaled happens before it.
 export const CUSTOMER_STAGE2_ACTION_ORDER = Object.freeze([
   'management_access_application',
   'management_admin_policy',
   'gateway_resources',
   'management_custom_domain',
-  'final_runtime',
   'workers_dev_disable',
   'terminal_verify',
+  'final_runtime',
 ] as const);
 
 export type CustomerStage2ActionName = (typeof CUSTOMER_STAGE2_ACTION_ORDER)[number];

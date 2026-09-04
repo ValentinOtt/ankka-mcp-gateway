@@ -17,6 +17,8 @@ import { CustomerStage2ConvergerError } from './customer-stage2-converger';
 
 /** An attempt older than this settles INCOMPLETE on its next pass instead of running on. */
 export const CUSTOMER_BOOTSTRAP_CONVERGENCE_DEADLINE_MS = 15 * 60 * 1_000;
+/** How long after arming the handover the final runtime is expected to run its first pass. */
+export const CUSTOMER_BOOTSTRAP_HANDOVER_ALARM_DELAY_MS = 8_000;
 
 export interface CustomerBootstrapConvergenceDriverPorts {
   readonly state: CustomerBootstrapStatePort;
@@ -24,8 +26,8 @@ export interface CustomerBootstrapConvergenceDriverPorts {
   readonly publicClientId: string;
   readonly converge: CustomerBootstrapConverge;
   readonly now: () => number;
-  /** Arranges for `continue()` to run again in a fresh invocation. */
-  readonly schedule: () => Promise<void>;
+  /** Arranges for the next pass to run in a fresh invocation after `delayMs`. */
+  readonly schedule: (delayMs: number) => Promise<void>;
 }
 
 export type CustomerBootstrapConvergenceStep = 'scheduled' | 'settled' | 'idle';
@@ -46,6 +48,8 @@ interface PendingConvergence {
  */
 export class CustomerBootstrapConvergenceDriver {
   #pending: PendingConvergence | null = null;
+  /** When this runtime handed the attempt over to the final runtime, if it did. */
+  #handedOverAt: number | null = null;
 
   constructor(private readonly ports: CustomerBootstrapConvergenceDriverPorts) {}
 
@@ -61,7 +65,8 @@ export class CustomerBootstrapConvergenceDriver {
       startedAt: this.ports.now(),
       passes: 0,
     };
-    await this.ports.schedule();
+    this.#handedOverAt = null;
+    await this.ports.schedule(0);
   }
 
   /** Runs one pass of the attempt the durable state names. */
@@ -72,6 +77,19 @@ export class CustomerBootstrapConvergenceDriver {
       return 'idle';
     }
     const attemptId = current.oauth?.attemptId ?? null;
+    if (current.oauth?.phase === 'finalizing') {
+      // Handed over: the final runtime marks READY once the object restarts on
+      // it. Until then this code only keeps a later look scheduled.
+      this.forget();
+      const handedOverAt = this.#handedOverAt ?? this.ports.now();
+      this.#handedOverAt = handedOverAt;
+      if (this.ports.now() - handedOverAt > CUSTOMER_BOOTSTRAP_CONVERGENCE_DEADLINE_MS) {
+        await this.settle(current, attemptId, 'handover_timeout');
+        return 'settled';
+      }
+      await this.ports.schedule(CUSTOMER_BOOTSTRAP_HANDOVER_ALARM_DELAY_MS);
+      return 'scheduled';
+    }
     const pending = this.#pending;
     if (pending === null || attemptId === null || pending.attemptId !== attemptId) {
       this.forget();
@@ -100,6 +118,7 @@ export class CustomerBootstrapConvergenceDriver {
         transport: this.ports.transport,
         persist: (expected, next) => this.persist(expected, next),
         converge,
+        armHandover: () => this.ports.schedule(CUSTOMER_BOOTSTRAP_HANDOVER_ALARM_DELAY_MS),
       });
     } catch {
       // A durable conflict or a thrown port: the grant is dropped so nothing
@@ -109,9 +128,10 @@ export class CustomerBootstrapConvergenceDriver {
       return 'settled';
     }
     if (outcome.status === 'CONVERGING') {
-      await this.ports.schedule();
+      await this.ports.schedule(0);
       return 'scheduled';
     }
+    if (outcome.status === 'HANDED_OVER') this.#handedOverAt = this.ports.now();
     this.#pending = null;
     return 'settled';
   }

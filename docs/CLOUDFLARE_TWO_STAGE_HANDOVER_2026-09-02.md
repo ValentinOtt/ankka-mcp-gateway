@@ -1469,3 +1469,25 @@ deploying the production relay. Both are operator steps.
   Lesson: the customer's plan limits are part of the contract; a harness in
   Node proves the provider calls, not the platform they run on. Open: the
   recovery router in the final runtime still converges in one invocation.
+- 2026-09-04 (08:35), fourth real install, on gateway-v0.1.29: the browser
+  ran both consents, the callback answered at once with the progress page,
+  and the passes created everything under the OAuth token, verified the
+  receipt, attached the custom domain and uploaded the final runtime; the
+  management hostname answered with the Access login for the management
+  application. The last pass then died: Cloudflare restarts a Durable
+  Object as soon as its Worker has a new version and refuses storage to the
+  in-flight pass (documented under the object lifecycle), so journaling the
+  upload failed, `workers.dev` stayed enabled (closed by hand), the grant
+  was never revoked, and the durable state stayed CONVERGING. The
+  single-invocation design had the same flaw and had simply never reached
+  the upload on Cloudflare. PR #81 orders the final runtime last in the
+  journal, after `workers_dev_disable` and a `terminal_verify` that proves
+  everything but the runtime; right before the upload the shell marks the
+  attempt finalizing and arms an alarm, then only uploads, drops the
+  bootstrap nonce and revokes, writing nothing more. The final runtime's
+  alarm handler moves a finalizing attempt to READY; its own presence is
+  the proof the shell could not write. Recovery, tests and the Node harness
+  keep the journaled path, which now completes the journal after the final
+  runtime is verified. Measured against the real provider with the shell's
+  hook, the passes cost 25, 21, 22 and 23 provider calls (91 in all; the handover comes after 19 calls of the last pass, and the API then shows workers.dev closed and the final runtime bindings active). Open: the
+  recovery router in the final runtime still converges in one invocation.
