@@ -1397,3 +1397,32 @@ deploying the production relay. Both are operator steps.
   browser and no consent (gateway-v0.1.26, pinned as version `93fa6a7d`).
   Lesson for every shell, hosted and payload boundary: one shared schema
   and one test that runs the real counterpart, never two fixtures.
+- 2026-09-04 (before dawn): the first complete Stage 2 convergence, in token
+  mode. A full live harness (`apps/installer/test-live/stage2-full.live.ts`)
+  runs the hosted Stage 1 code against a test account with an API token
+  standing in for the grant (only the OAuth token and revoke endpoints and
+  the account list are answered locally), deploys the real shell Worker,
+  completes the handoff against it with the same readiness poll, then runs
+  the Stage 2 converger in-process against the real provider with the
+  shipped payload. It reached the final runtime self-update, which had never
+  been exercised against Cloudflare, and found two provider-facing defects
+  (PR #76): the inherit bindings named the exact previous version id, which
+  the script upload API now refuses (code 10057, only `latest`), and the
+  bootstrap nonce secret survived the upload because Cloudflare never drops
+  secrets on a deployment, so the exact readback rightly refused the version.
+  Inheriting from `latest` (the caller has just proven latest is the verified
+  bootstrap version and reads the result back exactly) and deleting the nonce
+  through the Workers Secrets API after the upload made the harness converge
+  end to end in about two minutes: shell deploy, readiness, handoff,
+  ownership readback, zone, Access organization, management application and
+  policy, portal, application, policy and DNS record, receipt verification,
+  custom domain, final runtime, workers.dev disable, terminal verification,
+  and cleanup. Shipped as gateway-v0.1.27, pinned on deploy.ankka.ai
+  (version `22f18653`). The first browser install driven by the assistant
+  (Claude in Chrome, test account) completed Stage 1 from the hosted page;
+  the page's handoff poll then reported an internal error although the
+  handoff endpoint could release the one-time link, and the diagnostic read
+  of that endpoint consumed the link. Open: the exact reason the page's poll
+  failed (console tracking starts before the next attempt), a way to start
+  over from a `handed_off` session before it expires, and showing the
+  server's failure reason on the result page.
