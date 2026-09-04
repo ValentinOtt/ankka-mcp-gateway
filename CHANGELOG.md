@@ -37,6 +37,10 @@ Notable public product and repository changes are recorded here.
   and the zone listing never shows it, so the gateway created the application
   and then failed to see it, leaving the first real source installation in
   recovery-required after its MCP server and application existed.
+- Clear a gateway-local operation's attempt record before a runtime update
+  uploads the new version. The replaced version could not clear it afterwards,
+  so every other operation on that gateway answered `operation_pending` for
+  up to ten minutes after an update.
 - Retire the legacy hosted installer runtime, its Durable Object, journals,
   executors, management handoffs, and analytics sink. The two-stage runtime
   shipped in gateway-v0.1.21 is the only hosted mutation path.

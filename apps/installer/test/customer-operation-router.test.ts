@@ -143,6 +143,8 @@ function dependencies(input: {
   readonly runtimeAction?: CustomerOperationActionView | null;
   readonly updates?: CustomerOperationRuntimeUpdateInput[];
   readonly updateResult?: CustomerOperationResult;
+  /** The attempt record as the updater sees it: cleared before the upload can replace the Worker. */
+  readonly attemptsDuringUpdate?: (CustomerOperationAttempt | null)[];
 }): CustomerOperationRouterDependencies {
   return {
     attempts: input.port,
@@ -154,6 +156,7 @@ function dependencies(input: {
     readRuntimeAction: async (actionId) => actionId === ACTION_ID ? input.runtimeAction ?? null : null,
     runRuntimeUpdate: async (update) => {
       input.updates?.push(update);
+      input.attemptsDuringUpdate?.push(await input.port.read());
       return input.updateResult ?? 'applied';
     },
     issueRelayTicket: async (operation) => {
@@ -356,9 +359,10 @@ describe('gateway-local operation router', () => {
     const attempts = attemptPort();
     const applied: ApplyRecord[] = [];
     const updates: CustomerOperationRuntimeUpdateInput[] = [];
+    const attemptsDuringUpdate: (CustomerOperationAttempt | null)[] = [];
     const upgradeTransport = transport('workers-scripts.write');
     const upgradeTarget = router(dependencies({
-      port: attempts.port, harness: upgradeTransport, applied, updates, action: null,
+      port: attempts.port, harness: upgradeTransport, applied, updates, attemptsDuringUpdate, action: null,
       runtimeAction: { status: 'authorization_required', expiresAt: ACTION_EXPIRES_AT },
     }));
     const { cookie, callback } = await authorize(upgradeTarget, runtimeStartRequest(), 'workers-scripts.write');
@@ -389,6 +393,9 @@ describe('gateway-local operation router', () => {
     expect(upgradeTransport.calls).toContain(
       `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/workers/workers/ankka-gateway`,
     );
+    // The upload replaces the Worker; the version that runs afterwards may not
+    // be able to clear this version's record, so it is gone before the update.
+    expect(attemptsDuringUpdate).toEqual([null]);
     expect(upgradeTransport.revoked()).toBe(true);
     expect(attempts.current()).toBeNull();
   });
