@@ -52,3 +52,17 @@ test('the publication refuses a claim, environment or ready body the payload doe
   const throwing = async () => { throw new Error('object unreachable'); };
   assert.equal(await publishBootstrapCompletion(goldenClaim(), body, env, Date.now(), throwing), false);
 });
+
+test('the publication needs the management bindings the final runtime carries, not only the bootstrap ones', async () => {
+  const objects = new Map();
+  const { env, body } = await installReadyGateway({ provider: cloudflareProvider(), objects, claimInput: goldenClaim() });
+  // The Stage 1 shell has no workers.dev subdomain binding until the converger
+  // hands it the final runtime's bindings; without it the control cannot be built.
+  const { ANKKA_WORKERS_SUBDOMAIN: _subdomain, ...stageOne } = env;
+  const sink = { calls: 0, fetch: async () => { sink.calls += 1; return Response.json({ ok: true }); } };
+  assert.equal(await publishBootstrapCompletion(goldenClaim(), body, stageOne, Date.now(), sink.fetch), false);
+  assert.equal(sink.calls, 0);
+  const probe = env.ADMIN_STATE.get('v1:overlay');
+  assert.equal(await publishBootstrapCompletion(goldenClaim(), body, { ...stageOne, ANKKA_WORKERS_SUBDOMAIN: env.ANKKA_WORKERS_SUBDOMAIN }, Date.now(), (request) => probe.fetch(request)), true);
+  assert.ok(objects.get('v1:overlay').storage.snapshot(CONTROL_KEY));
+});

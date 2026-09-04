@@ -385,15 +385,17 @@ describe('token-mode Stage 1 + Stage 2 against the test account', () => {
         bootstrap: { nonce: secrets.bootstrapNonce, expectedBindings },
         finalRuntimeSource,
         payload: {
-          bootstrap: async (request, { target }) => {
+          bootstrap: async (request, { target, bindings }) => {
             const environment = customerPayloadEnvironment(shellEnvironment, target);
             const claimText = await request.clone().text();
             const response = await payload.processBootstrap(request, environment, payloadStorage);
             if (response.status !== 200) return response;
-            // What the shell publishes into its management object after a ready bootstrap.
-            const managementObject = new payload.AdminState({ storage: managementStorage }, environment);
+            // What the shell publishes into its management object after a
+            // ready bootstrap, under the final runtime's bindings.
+            const managementEnvironment = customerPayloadEnvironment({ ...shellEnvironment, ...bindings }, target);
+            const managementObject = new payload.AdminState({ storage: managementStorage }, managementEnvironment);
             const published = await payload.publishBootstrapCompletion(
-              JSON.parse(claimText), JSON.parse(await response.clone().text()), environment, Date.now(),
+              JSON.parse(claimText), JSON.parse(await response.clone().text()), managementEnvironment, Date.now(),
               (internal: Request) => managementObject.fetch(internal),
             );
             console.log(`management publication: ${String(published)}`);

@@ -151,6 +151,12 @@ export interface CustomerStage2PayloadAdapter {
   readonly bootstrap: (request: Request, context: {
     readonly plan: StaticDeployPlan;
     readonly target: CustomerBootstrapTarget;
+    /**
+     * The final runtime's plain-text bindings, known by now: the host needs
+     * them to publish the management control the way the payload's own
+     * bootstrap route does, which reads the management environment.
+     */
+    readonly bindings: GatewayWorkerPlainTextBindings;
   }) => Promise<Response>;
   /**
    * Re-reads every receipt-owned Gateway resource with the request-local
@@ -801,7 +807,10 @@ async function verifyGatewayResources(context: Context): Promise<void> {
   }
 }
 
-async function convergeGatewayResources(context: Context): Promise<v.InferOutput<typeof gatewayLocatorSchema>> {
+async function convergeGatewayResources(
+  context: Context,
+  application: ManagementAccessApplicationLocator,
+): Promise<v.InferOutput<typeof gatewayLocatorSchema>> {
   const name = 'gateway_resources' as const;
   const projection = await prepareCustomerGatewayDesiredProjectionFromPlan({
     plan: context.plan,
@@ -830,7 +839,11 @@ async function convergeGatewayResources(context: Context): Promise<v.InferOutput
       },
       bootstrapNonce: bootstrap.nonce,
       cloudflareAccessToken: context.input.accessToken,
-      transport: (request) => context.input.payload.bootstrap(request, { plan, target: context.target }),
+      transport: (request) => context.input.payload.bootstrap(request, {
+        plan,
+        target: context.target,
+        bindings: finalBindings(context, application),
+      }),
       timeoutMs: 120_000,
       nowMs: clock(context.input, context.journal.updatedAt),
     });
@@ -1221,7 +1234,7 @@ export async function convergeCustomerStage2(
   try {
     const application = await convergeApplication(context);
     const policy = await convergePolicy(context, application);
-    await convergeGatewayResources(context);
+    await convergeGatewayResources(context, application);
     const domain = await convergeDomain(context);
     await convergeWorkersDev(context);
     await convergeTerminal(context, application, policy, domain);

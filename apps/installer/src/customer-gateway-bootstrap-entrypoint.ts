@@ -264,14 +264,16 @@ export class AdminState extends RuntimeAdminState {
         // and the management control it publishes afterwards land in this,
         // the management object, exactly as the payload's own route writes
         // them. Without them the management API answers "unavailable".
-        bootstrap: async (request, { target }) => {
+        bootstrap: async (request, { target, bindings }) => {
           const claimText = await request.clone().text();
           const response = await this.installationObject().fetch(request);
           if (response.status !== 200) return response;
+          // The control is built from the management environment, which
+          // only the final runtime carries as bindings; overlay them here.
           const published = await publishBootstrapCompletion(
             JSON.parse(claimText),
             JSON.parse(await response.clone().text()),
-            customerPayloadEnvironment(this.bootstrapEnv, target),
+            customerPayloadEnvironment({ ...this.bootstrapEnv, ...bindings }, target),
             Date.now(),
             (internal: Request) => super.fetch(internal),
           );
