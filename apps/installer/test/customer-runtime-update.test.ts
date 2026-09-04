@@ -228,6 +228,7 @@ function providerFake(release: SignedRelease): ProviderFake {
         main_module: 'index.js',
         bindings: [
           { name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' },
+          { name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY', type: 'secret_text' },
           { name: 'ASSETS', type: 'assets' },
           ...Object.entries(bindings).map(([name, text]) => ({ name, type: 'plain_text', text })),
         ],

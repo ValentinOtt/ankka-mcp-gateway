@@ -5,7 +5,6 @@ import { canonicalJson } from './canonical-json';
 import {
   parseActiveGatewayRuntime,
   parseCurrentGatewayWorker,
-  parseGatewayRuntimeBindings,
 } from './cloudflare-gateway-runtime-state';
 import {
   EXACT_PLAIN_TEXT_BINDINGS,
@@ -14,6 +13,7 @@ import {
   prepareVerifiedWorkerRelease,
   submitAssetBucketMutation,
   submitAssetUploadSessionMutation,
+  type GatewayWorkerPlainTextBindingName,
   type GatewayWorkerPlainTextBindings,
   type PreparedVerifiedWorkerRelease,
 } from './cloudflare-worker-direct-upload';
@@ -196,6 +196,85 @@ interface CurrentRuntime {
   readonly bindings: GatewayWorkerPlainTextBindings;
 }
 
+const finalVersionSchema = v.looseObject({
+  bindings: v.array(boundaryObjectSchema),
+  compatibility_date: v.literal(COMPATIBILITY_DATE),
+  main_module: v.literal(MAIN_MODULE),
+});
+const namedBindingSchema = v.looseObject({ name: v.string(), type: v.string() });
+const plainTextBindingSchema = v.strictObject({
+  name: v.string(),
+  text: v.pipe(v.string(), v.minLength(1), v.maxLength(4_096)),
+  type: v.literal('plain_text'),
+});
+
+/**
+ * The final runtime's exact binding set: the object namespace, the assets,
+ * the ownership wrap-key secret, and the sixteen plain-text bindings. The
+ * shared parser knows the bootstrap shape without the secret; an update
+ * starts from the version that already carries it and inherits it forward.
+ */
+function parseFinalRuntimeBindings(value: BoundaryValue): GatewayWorkerPlainTextBindings | null {
+  const parsed = v.safeParse(finalVersionSchema, value);
+  if (!parsed.success || parsed.output.bindings.length !== EXACT_PLAIN_TEXT_BINDINGS.length + 3 ||
+      Object.hasOwn(parsed.output, 'migrations') || Object.hasOwn(parsed.output, 'migration_tag')) return null;
+  const byName = new Map<string, BoundaryObject>();
+  for (const binding of parsed.output.bindings) {
+    const named = v.safeParse(namedBindingSchema, binding);
+    if (!named.success || byName.has(named.output.name)) return null;
+    byName.set(named.output.name, binding);
+  }
+  const admin = byName.get('ADMIN_STATE');
+  const assets = byName.get('ASSETS');
+  const wrapKey = byName.get('ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY');
+  if (admin?.type !== 'durable_object_namespace' || admin.class_name !== 'AdminState' ||
+      assets?.type !== 'assets' || wrapKey?.type !== 'secret_text') return null;
+  const text = (name: GatewayWorkerPlainTextBindingName): string | null => {
+    const plain = v.safeParse(plainTextBindingSchema, byName.get(name));
+    return plain.success && plain.output.name === name ? plain.output.text : null;
+  };
+  const ADMIN_EMAILS = text('ADMIN_EMAILS');
+  const ANKKA_INSTALL_ID = text('ANKKA_INSTALL_ID');
+  const ANKKA_GATEWAY_RELEASE = text('ANKKA_GATEWAY_RELEASE');
+  const ANKKA_GATEWAY_RELEASE_SHA256 = text('ANKKA_GATEWAY_RELEASE_SHA256');
+  const ANKKA_MANAGEMENT_HOSTNAME = text('ANKKA_MANAGEMENT_HOSTNAME');
+  const ANKKA_UPDATE_CHANNEL = text('ANKKA_UPDATE_CHANNEL');
+  const ANKKA_UPDATE_KEY_ID = text('ANKKA_UPDATE_KEY_ID');
+  const ANKKA_UPDATE_PUBLIC_KEY = text('ANKKA_UPDATE_PUBLIC_KEY');
+  const ANKKA_WORKERS_SUBDOMAIN = text('ANKKA_WORKERS_SUBDOMAIN');
+  const ANKKA_WORKER_NAME = text('ANKKA_WORKER_NAME');
+  const CF_ACCESS_AUD = text('CF_ACCESS_AUD');
+  const CF_ACCESS_ISSUER = text('CF_ACCESS_ISSUER');
+  const CLOUDFLARE_ACCOUNT_ID = text('CLOUDFLARE_ACCOUNT_ID');
+  const CLOUDFLARE_ZONE_ID = text('CLOUDFLARE_ZONE_ID');
+  const CLOUDFLARE_ZONE_NAME = text('CLOUDFLARE_ZONE_NAME');
+  const ZERO_TRUST_READY = text('ZERO_TRUST_READY');
+  if (ADMIN_EMAILS === null || ANKKA_INSTALL_ID === null || ANKKA_GATEWAY_RELEASE === null ||
+      ANKKA_GATEWAY_RELEASE_SHA256 === null || ANKKA_MANAGEMENT_HOSTNAME === null ||
+      ANKKA_UPDATE_CHANNEL === null || ANKKA_UPDATE_KEY_ID === null || ANKKA_UPDATE_PUBLIC_KEY === null ||
+      ANKKA_WORKERS_SUBDOMAIN === null || ANKKA_WORKER_NAME === null || CF_ACCESS_AUD === null ||
+      CF_ACCESS_ISSUER === null || CLOUDFLARE_ACCOUNT_ID === null || CLOUDFLARE_ZONE_ID === null ||
+      CLOUDFLARE_ZONE_NAME === null || ZERO_TRUST_READY === null) return null;
+  return Object.freeze({
+    ADMIN_EMAILS,
+    ANKKA_INSTALL_ID,
+    ANKKA_GATEWAY_RELEASE,
+    ANKKA_GATEWAY_RELEASE_SHA256,
+    ANKKA_MANAGEMENT_HOSTNAME,
+    ANKKA_UPDATE_CHANNEL,
+    ANKKA_UPDATE_KEY_ID,
+    ANKKA_UPDATE_PUBLIC_KEY,
+    ANKKA_WORKERS_SUBDOMAIN,
+    ANKKA_WORKER_NAME,
+    CF_ACCESS_AUD,
+    CF_ACCESS_ISSUER,
+    CLOUDFLARE_ACCOUNT_ID,
+    CLOUDFLARE_ZONE_ID,
+    CLOUDFLARE_ZONE_NAME,
+    ZERO_TRUST_READY,
+  });
+}
+
 async function readCurrentRuntime(input: CustomerRuntimeUpdateInput): Promise<CurrentRuntime> {
   const worker = parseCurrentGatewayWorker(await providerJson(
     input, 'current_read', accountUrl(input.accountId, `/workers/workers/${encodeURIComponent(input.workerName)}`),
@@ -210,7 +289,7 @@ async function readCurrentRuntime(input: CustomerRuntimeUpdateInput): Promise<Cu
   const version = await providerJson(
     input, 'current_read', accountUrl(input.accountId, `/workers/workers/${worker.id}/versions/${active.versionId}`),
   );
-  const bindings = parseGatewayRuntimeBindings(version);
+  const bindings = parseFinalRuntimeBindings(version);
   if (bindings === null || bindings.ANKKA_WORKER_NAME !== input.workerName ||
       bindings.CLOUDFLARE_ACCOUNT_ID !== input.accountId ||
       bindings.ANKKA_UPDATE_KEY_ID !== input.updateKeyId ||
