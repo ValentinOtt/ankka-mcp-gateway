@@ -51,7 +51,14 @@ const RESOURCE_KEY = /^[a-z][a-z0-9-]{0,31}$/;
 const DESIRED_HASH = /^sha256:[0-9a-f]{64}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PORTAL_CNAME_TARGET = 'gateway.agents.cloudflare.com';
-const CLAUDE_OAUTH_CALLBACK = 'https://claude.ai/api/mcp/auth_callback';
+// Public client callbacks; reviewed sources and scope in CUSTOMER_SELF_SERVICE.md.
+// ChatGPT's only wildcard covers its connector-specific OAuth callback path.
+const DEFAULT_OAUTH_CALLBACKS = Object.freeze([
+  'https://claude.ai/api/mcp/auth_callback',
+  'https://chatgpt.com/connector_platform_oauth_redirect',
+  'https://chatgpt.com/connector/oauth/*',
+  'https://www.cursor.com/agents/mcp/oauth/callback',
+]);
 const stringSchema = v.string();
 const numberSchema = v.number();
 const functionSchema = v.function();
@@ -2031,7 +2038,7 @@ function normalizeManagedOauth(value: BoundaryValue): ManagedOauth {
     enabled: true,
     dynamic_client_registration: {
       enabled: true,
-      allowed_uris: [CLAUDE_OAUTH_CALLBACK],
+      allowed_uris: [...DEFAULT_OAUTH_CALLBACKS],
       allow_any_on_localhost: true,
       allow_any_on_loopback: true,
     },
@@ -2247,7 +2254,7 @@ function expectedManagedOauthConfiguration(): ManagedOauth {
     enabled: true,
     dynamic_client_registration: {
       enabled: true,
-      allowed_uris: [CLAUDE_OAUTH_CALLBACK],
+      allowed_uris: [...DEFAULT_OAUTH_CALLBACKS],
       allow_any_on_localhost: true,
       allow_any_on_loopback: true,
     },

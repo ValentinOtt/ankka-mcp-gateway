@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Add ChatGPT and Cursor web OAuth callback defaults to newly created Portals
+  alongside Claude. ChatGPT's variable callback is limited to its documented
+  connector OAuth path. Keep local callbacks, existing Portal settings, and
+  receipt hashes compatible; document manual additions and client qualification.
+
 - Update the transitive `qs` dependency from 6.15.3 to 6.16.0 to resolve two
   upstream parsing and denial-of-service advisories. Existing dependency ranges
   and toolchain pins are unchanged.

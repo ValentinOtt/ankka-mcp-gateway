@@ -254,10 +254,14 @@ test('verifies Cloudflare prerequisites and reduces exact receipt-owned state to
   assert.deepEqual(plan.changes.map((change) => change.action), Array(7).fill('noop'));
 });
 
-test('adding the Claude callback preserves existing receipt hashes and planner noops', async () => {
+test('adding client callbacks preserves existing receipt hashes and planner noops', async () => {
   const data = await fixture();
   data.portalApp.oauth_configuration.dynamic_client_registration.allowed_uris = [
     'https://claude.ai/api/mcp/auth_callback',
+    'https://chatgpt.com/connector_platform_oauth_redirect',
+    'https://chatgpt.com/connector/oauth/*',
+    'https://www.cursor.com/agents/mcp/oauth/callback',
+    'https://client.example.com/oauth/callback',
   ];
   const observed = await readCloudflareObservedState({
     cloudflare: data.cloudflare, config: config(), target, access, receipt: data.receipt,

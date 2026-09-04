@@ -302,7 +302,14 @@ const SOURCE_ADDITION_PAUSED = false;
 const SOURCE_INITIAL_POLICY_VERSION = 2;
 const MANAGER = 'ankka-mcp-gateway';
 const PORTAL_CNAME_TARGET = 'gateway.agents.cloudflare.com';
-const CLAUDE_OAUTH_CALLBACK = 'https://claude.ai/api/mcp/auth_callback';
+// Public client callbacks; reviewed sources and scope in CUSTOMER_SELF_SERVICE.md.
+// ChatGPT's only wildcard covers its connector-specific OAuth callback path.
+const DEFAULT_OAUTH_CALLBACKS = Object.freeze([
+  'https://claude.ai/api/mcp/auth_callback',
+  'https://chatgpt.com/connector_platform_oauth_redirect',
+  'https://chatgpt.com/connector/oauth/*',
+  'https://www.cursor.com/agents/mcp/oauth/callback',
+]);
 const REQUEST_LIMIT_BYTES = 96 * 1024;
 const BOOTSTRAP_REQUEST_LIMIT_BYTES = 128 * 1024;
 const PROVIDER_RESPONSE_LIMIT_BYTES = 4 * 1024 * 1024;
@@ -1863,7 +1870,7 @@ function accessApplicationIdentityMatches(value, kind, state) {
 }
 
 function managedOauthMatches(value) {
-  // Keep existing receipt verification compatible with pre-Claude Portals.
+  // Keep existing receipt verification compatible with older Portal callbacks.
   // Callback defaults are applied when creating the application.
   const oauth = isRecord(value) ? value.oauth_configuration : null;
   const registration = isRecord(oauth) ? oauth.dynamic_client_registration : null;
@@ -2031,7 +2038,7 @@ async function createResource(state, kind, token) {
         enabled: true,
         dynamic_client_registration: {
           enabled: application.authentication.dynamicClientRegistration.enabled,
-          allowed_uris: [CLAUDE_OAUTH_CALLBACK],
+          allowed_uris: [...DEFAULT_OAUTH_CALLBACKS],
           allow_any_on_localhost: application.authentication.dynamicClientRegistration.allowAnyOnLocalhost,
           allow_any_on_loopback: application.authentication.dynamicClientRegistration.allowAnyOnLoopback,
         },

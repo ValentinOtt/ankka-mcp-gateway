@@ -184,19 +184,46 @@ Use the team-facing MCP Portal URL returned after installation. The client
 must support the MCP transport exposed by Cloudflare and complete your
 Cloudflare Access flow.
 
-New installations allow the public, non-secret Claude OAuth callback
-`https://claude.ai/api/mcp/auth_callback` in the Portal's Managed OAuth
-configuration. This supports Claude's hosted custom connectors, including
-Claude Desktop. In Claude, use **Always required** authentication and automatic
-OAuth client registration. Localhost and loopback callbacks remain enabled for
-local MCP clients.
+New installations configure these public, non-secret callbacks in the Portal's
+Managed OAuth **Allowed redirect URIs** for dynamic client registration (DCR).
+The provider documentation was reviewed on 2026-09-05.
+
+| Client surface | Callback allowed during registration |
+| --- | --- |
+| Claude hosted connectors, including Claude Desktop | `https://claude.ai/api/mcp/auth_callback` |
+| ChatGPT stable callback | `https://chatgpt.com/connector_platform_oauth_redirect` |
+| ChatGPT callback specific to a connector | `https://chatgpt.com/connector/oauth/*` |
+| Cursor web and Cursor Agents | `https://www.cursor.com/agents/mcp/oauth/callback` |
+
+ChatGPT uses the stable callback for eligible authorization servers with issuer
+identification and for older connections. Otherwise its callback contains a
+connector-specific ID. The single wildcard above is limited to that documented
+callback path; it does not allow other ChatGPT paths or hosts. Cloudflare uses
+the pattern to admit registration; the client still registers its concrete
+callback URI. See [ChatGPT's redirect URL documentation](https://developers.openai.com/plugins/build/auth#redirect-url)
+and [Cloudflare's Managed OAuth settings](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/#managed-oauth-settings).
+
+In Claude, use **Always required** authentication and automatic OAuth client
+registration. In ChatGPT, use OAuth with DCR when configuring the connection.
+For Cursor, add the Portal MCP URL and complete the offered OAuth login; these
+defaults do not require manually supplied client credentials. Localhost and
+loopback callbacks remain enabled for local clients, including Cursor Desktop's
+`http://localhost:8787/callback`. See [Claude's callback documentation](https://claude.com/docs/connectors/building/authentication#callback-urls)
+and [Cursor's callback documentation](https://cursor.com/docs/mcp#static-redirect-url).
 
 Existing Portals keep their current callback settings; updating the gateway
-Worker does not rewrite Access applications. To connect Claude to an older
-Portal, add that exact callback under **Managed OAuth → Allowed redirect URIs**
-in Cloudflare. Portal access, source access, and upstream authentication still
-apply. See [Claude's callback documentation](https://claude.com/docs/connectors/building/authentication#callback-urls)
-and [Cloudflare's Managed OAuth settings](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/#managed-oauth-settings).
+Worker does not rewrite Access applications. To enable another client on an
+older Portal, edit its **Managed OAuth → Allowed redirect URIs** in Cloudflare
+and add the relevant entries above while preserving existing entries. For
+ChatGPT, you can instead add only the exact callback shown in its connection
+setup. The same setting accepts an additional client's documented HTTPS callback
+without requiring an Ankka release. Keep custom entries as narrow as the client
+allows. Portal access, source access, and upstream authentication still apply.
+
+These are callback compatibility defaults, not proof of a client's identity or
+an end-to-end client qualification. Local callback support is not restricted to
+particular desktop products. CIMD support has not been established for the
+managed Portal; these settings configure DCR only.
 
 Only sources and exact tools approved by the operator are exposed. An MCP tool
 name or description is not proof that the operation is safe; upstream
@@ -206,6 +233,11 @@ Qualify the client and source together using the
 [connection review checklist](README.md#before-sharing-a-gateway). A successful
 catalogue discovery or local preview is not proof of live authentication,
 execution, or compatibility with every MCP client.
+Before marking Claude, ChatGPT, or Cursor as qualified for a release, test each
+client against the same release candidate: complete registration and consent,
+check the exact tools visible to the test member, execute a bounded read-only
+canary call, then verify token refresh and reconnection. Team revocation remains
+a separate release requirement; see [Team access](TEAM_ACCESS.md).
 
 ## Updates and rollback
 
