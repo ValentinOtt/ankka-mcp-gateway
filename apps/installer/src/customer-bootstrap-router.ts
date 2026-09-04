@@ -15,10 +15,13 @@ import {
   type CustomerBootstrapState,
 } from './customer-bootstrap-state';
 import {
-  executeCustomerBootstrapCallback,
-  type CustomerBootstrapConvergenceResult,
+  beginCustomerBootstrapCallback,
+  type CustomerBootstrapCallbackFailureCode,
 } from './customer-bootstrap-callback';
-import type { CustomerCloudflareTransport } from './customer-cloudflare-grant';
+import type {
+  CustomerCloudflareTransport,
+  EphemeralCustomerCloudflareGrant,
+} from './customer-cloudflare-grant';
 import {
   CUSTOMER_INSTALL_CONTINUE_PATH,
   CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH,
@@ -80,10 +83,26 @@ export interface CustomerBootstrapRouterDependencies {
     readonly gatewayCallback: string;
     readonly relayTicket: string;
   }) => Promise<CustomerBootstrapRelayStart>;
-  readonly converge: (
-    accessToken: string,
-    attemptId: string,
-  ) => Promise<CustomerBootstrapConvergenceResult>;
+  /**
+   * Takes the exchanged, account-checked grant into memory and arranges the
+   * converger passes. It returns once the passes are arranged, or once they
+   * have run when the host can run them inline.
+   */
+  readonly startConvergence: (input: {
+    readonly attemptId: string;
+    readonly grant: EphemeralCustomerCloudflareGrant;
+  }) => Promise<void>;
+  /** Renders the callback outcome for a browser; JSON when absent. */
+  readonly callbackResponse?: (
+    outcome: CustomerBootstrapCallbackOutcome,
+    cookies: readonly string[],
+  ) => Response;
+}
+
+export interface CustomerBootstrapCallbackOutcome {
+  readonly status: 'READY' | 'INCOMPLETE' | 'CONVERGING';
+  readonly failureCode: CustomerBootstrapCallbackFailureCode | null;
+  readonly failureReason: string | null;
 }
 
 export interface CustomerBootstrapRouterConfig {
@@ -428,7 +447,7 @@ export function createCustomerBootstrapRouter(
               [clearPkceCookie()],
             );
           }
-          const result = await executeCustomerBootstrapCallback({
+          const begun = await beginCustomerBootstrapCallback({
             current,
             sessionSecret,
             attemptId: pkce.attemptId,
@@ -440,20 +459,32 @@ export function createCustomerBootstrapRouter(
             now: callbackAt,
             transport: dependencies.transport,
             persist: persistTransition,
-            converge: dependencies.converge,
           });
-          return json(
-            {
-              schemaVersion: 1,
-              status: result.status,
-              failureCode: result.failureCode,
-              failureReason: result.failureReason ?? null,
-            },
-            200,
-            result.status === 'READY'
-              ? [clearPkceCookie(), clearSessionCookie()]
-              : [clearPkceCookie()],
-          );
+          let outcome: CustomerBootstrapCallbackOutcome;
+          if (begun.status === 'CONVERGING') {
+            await dependencies.startConvergence({ attemptId: begun.attemptId, grant: begun.grant });
+            // The host may have run every pass inline; report what the
+            // durable state says now rather than what began.
+            const stored = await dependencies.state.read();
+            const settled = (stored === undefined || stored === null ? null : parseCustomerBootstrapState(stored))
+              ?? begun.state;
+            outcome = {
+              status: settled.status,
+              failureCode: settled.failureCode,
+              failureReason: settled.failureReason ?? null,
+            };
+          } else {
+            outcome = {
+              status: begun.status,
+              failureCode: begun.failureCode,
+              failureReason: begun.failureReason ?? null,
+            };
+          }
+          const cookies = outcome.status === 'READY'
+            ? [clearPkceCookie(), clearSessionCookie()]
+            : [clearPkceCookie()];
+          return dependencies.callbackResponse?.(outcome, cookies) ??
+            json({ schemaVersion: 1, ...outcome }, 200, cookies);
         }
         return notFound();
       } catch (error) {

@@ -15,7 +15,11 @@ import {
   type CustomerGatewayOwnershipStorage,
 } from '../src/customer-gateway-ownership-state';
 import { customerPayloadEnvironment } from '../src/customer-payload-environment';
-import { convergeCustomerStage2 } from '../src/customer-stage2-converger';
+import {
+  CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
+  convergeCustomerStage2,
+  type CustomerStage2ConvergerResult,
+} from '../src/customer-stage2-converger';
 import type { CustomerStage2JournalPort } from '../src/customer-stage2-durable-state';
 import type { CustomerStage2Journal } from '../src/customer-stage2-journal';
 import {
@@ -360,32 +364,48 @@ describe('token-mode Stage 1 + Stage 2 against the test account', () => {
     const finalRuntimeSource = readFileSync(join(PUBLISH_DIR, 'objects', `${pin.channel === 'canary' ? 'ankka-mcp-gateway/releases/canary' : 'ankka-mcp-gateway/releases/stable'}/${pin.release}/payload/worker/index.js`), 'utf8');
     const payload = await import(PAYLOAD_URL);
     const journal = new MemoryJournal();
-    const result = await convergeCustomerStage2({
-      accessToken: TOKEN,
-      attemptId: `attempt_${base64UrlEncode(crypto.getRandomValues(new Uint8Array(18)))}`,
-      storage,
-      journal,
-      runtime: { updateChannel: bundle.channel, updateKeyId: bundle.keyId, updatePublicKey: bundle.publicKey },
-      bootstrap: { nonce: secrets.bootstrapNonce, expectedBindings },
-      finalRuntimeSource,
-      payload: {
-        bootstrap: (request, { target }) => payload.processBootstrap(request, customerPayloadEnvironment(shellEnvironment, target), payloadStorage),
-        verifyReady: async ({ accessToken, plan: renewed, target }) => {
-          const claim = await prepareCustomerBootstrapClaimFromPlan({ plan: renewed, target, nowMs: Date.now() });
-          return payload.verifyBootstrapReceiptProviderStateWithReason(
-            { ...claim, cloudflareAccessToken: accessToken }, customerPayloadEnvironment(shellEnvironment, target), payloadStorage, Date.now(),
-          );
+    const attemptId = `attempt_${base64UrlEncode(crypto.getRandomValues(new Uint8Array(18)))}`;
+    // The shell runs these same passes one alarm each; every pass must stay
+    // inside the Workers Free budget of 50 subrequests per invocation, and
+    // this is the only place the payload's own provider calls are counted.
+    const passes: number[] = [];
+    let result: CustomerStage2ConvergerResult;
+    for (;;) {
+      const callsBeforePass = trace.length;
+      result = await convergeCustomerStage2({
+        accessToken: TOKEN,
+        attemptId,
+        storage,
+        journal,
+        runtime: { updateChannel: bundle.channel, updateKeyId: bundle.keyId, updatePublicKey: bundle.publicKey },
+        bootstrap: { nonce: secrets.bootstrapNonce, expectedBindings },
+        finalRuntimeSource,
+        payload: {
+          bootstrap: (request, { target }) => payload.processBootstrap(request, customerPayloadEnvironment(shellEnvironment, target), payloadStorage),
+          verifyReady: async ({ accessToken, plan: renewed, target }) => {
+            const claim = await prepareCustomerBootstrapClaimFromPlan({ plan: renewed, target, nowMs: Date.now() });
+            return payload.verifyBootstrapReceiptProviderStateWithReason(
+              { ...claim, cloudflareAccessToken: accessToken }, customerPayloadEnvironment(shellEnvironment, target), payloadStorage, Date.now(),
+            );
+          },
         },
-      },
-      transport,
-      now: Date.now,
-    }).catch((error: Error) => {
-      const code = 'code' in error ? String(error.code) : '';
-      const reason = 'reason' in error ? String(error.reason) : '';
-      console.log(`converger failed: ${error.name} ${error.message} code=${code} reason=${reason}`);
-      throw error;
-    });
+        transport,
+        now: Date.now,
+        checkpoints: CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
+      }).catch((error: Error) => {
+        const code = 'code' in error ? String(error.code) : '';
+        const reason = 'reason' in error ? String(error.reason) : '';
+        console.log(`converger failed: ${error.name} ${error.message} code=${code} reason=${reason}`);
+        throw error;
+      });
+      passes.push(trace.length - callsBeforePass);
+      const stop = result.verified ? 'complete' : `${result.checkpoint.action}:${result.checkpoint.phase}`;
+      console.log(`converger pass ${passes.length}: ${passes[passes.length - 1]} provider calls, ${stop}`);
+      if (result.verified || passes.length > 8) break;
+    }
     console.log('converger result:', JSON.stringify(result));
+    console.log(`converger provider calls: ${passes.reduce((sum, calls) => sum + calls, 0)} over ${passes.length} passes`);
     expect(result.verified).toBe(true);
+    for (const calls of passes) expect(calls).toBeLessThanOrEqual(45);
   });
 });

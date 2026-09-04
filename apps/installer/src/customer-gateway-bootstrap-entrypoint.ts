@@ -3,12 +3,16 @@ import * as v from 'valibot';
 // @ts-expect-error The payload is validated as a release input, not a TS package.
 import { AdminState as RuntimeAdminState, processBootstrap, verifyBootstrapReceiptProviderStateWithReason } from '../../../payload/worker/index.js';
 import { PUBLIC_ORIGIN } from './constants';
+import { CustomerBootstrapConvergenceDriver } from './customer-bootstrap-convergence-driver';
 import { beginCustomerBootstrapRelay } from './customer-bootstrap-relay-client';
 import {
   CustomerBootstrapDurableStatePort,
   initializeCustomerBootstrapSql,
 } from './customer-bootstrap-durable-state';
-import { createCustomerBootstrapRouter } from './customer-bootstrap-router';
+import {
+  createCustomerBootstrapRouter,
+  type CustomerBootstrapCallbackOutcome,
+} from './customer-bootstrap-router';
 import {
   acceptCustomerGatewayOwnershipHandoff,
   initializeCustomerGatewayOwnershipState,
@@ -16,7 +20,11 @@ import {
   readCustomerGatewayOwnershipState,
 } from './customer-gateway-ownership-state';
 import { requestCustomerGatewayRelayTicket } from './customer-gateway-relay-ticket-client';
-import { convergeCustomerStage2 } from './customer-stage2-converger';
+import {
+  CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
+  convergeCustomerStage2,
+  type CustomerStage2ConvergerResult,
+} from './customer-stage2-converger';
 import {
   CustomerStage2DurableStatePort,
   initializeCustomerStage2Sql,
@@ -129,12 +137,43 @@ function handoffPage(): Response {
   });
 }
 
+function scriptLiteral<Value>(value: Value): string {
+  return JSON.stringify(value).replaceAll('<', '\\u003c');
+}
+
+/**
+ * Where the second Cloudflare approval lands. The passes run behind alarms,
+ * so the page follows the status route until the attempt settles; the
+ * temporary workers.dev address closes as the last step of a successful
+ * install, which the page reads as "open your Gateway" rather than an error.
+ */
+function convergencePage(
+  managementHostname: string,
+  outcome: CustomerBootstrapCallbackOutcome,
+  cookies: readonly string[],
+): Response {
+  const nonce = crypto.randomUUID().replaceAll('-', '');
+  const headers = secureHeaders('text/html; charset=utf-8');
+  headers.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
+  for (const cookie of cookies) headers.append('set-cookie', cookie);
+  const initial = scriptLiteral({
+    status: outcome.status,
+    failure: outcome.failureCode === null ? null : { code: outcome.failureCode, reason: outcome.failureReason },
+  });
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Install Ankka Gateway</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}code{font:.9375em ui-monospace,monospace}a{color:#1d4ed8}</style><h1 id="title">Finishing your Ankka Gateway</h1><p id="message">Cloudflare approved the install. Setting up the Gateway takes a few minutes; this page updates itself.</p><p id="detail"></p><script nonce="${nonce}">(()=>{const management=${scriptLiteral(`https://${managementHostname}/`)};const title=document.querySelector('#title');const message=document.querySelector('#message');const detail=document.querySelector('#detail');let misses=0;let sawConverging=false;const show=(state)=>{if(state.status==='READY'){title.textContent='Your Ankka Gateway is ready';message.textContent='';const link=document.createElement('a');link.href=management;link.textContent='Open your management page';message.append(link);detail.textContent='';return true}if(state.status==='INCOMPLETE'){title.textContent='Setup did not complete';message.textContent='The Gateway stopped before it was ready. Return to deploy.ankka.ai to remove this install and try again.';const failure=state.failure;detail.textContent=failure?'Reason: '+failure.code+(failure.reason?' / '+failure.reason:''):'';return true}sawConverging=true;return false};const closed=()=>{title.textContent='Setup finished';message.textContent='This temporary setup address has closed, which happens when the Gateway is ready. Open your management page; if it does not answer, return to deploy.ankka.ai.';const link=document.createElement('a');link.href=management;link.textContent=management;detail.textContent='';detail.append(link)};const poll=async()=>{try{const response=await fetch(${scriptLiteral(CUSTOMER_INSTALL_STATUS_PATH)},{credentials:'omit',cache:'no-store'});if(!response.ok)throw new Error();misses=0;if(show(await response.json()))return}catch{misses+=1;if(sawConverging&&misses>=3){closed();return}}setTimeout(poll,3000)};if(!show(${initial}))setTimeout(poll,3000)})();</script></html>`, {
+    status: 200,
+    headers,
+  });
+}
+
 interface BootstrapDurableObjectState extends DurableObjectState {
   blockConcurrencyWhile<T>(callback: () => Promise<T>): Promise<T>;
 }
 
 export class AdminState extends RuntimeAdminState {
   private readonly bootstrapReady: Promise<void>;
+  /** Grant and pass count of the running attempt, in memory only. */
+  private readonly convergence: CustomerBootstrapConvergenceDriver;
 
   constructor(
     private readonly bootstrapState: BootstrapDurableObjectState,
@@ -149,6 +188,85 @@ export class AdminState extends RuntimeAdminState {
         storage: bootstrapState.storage,
         wrappingKey: config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY,
       });
+    });
+    this.convergence = new CustomerBootstrapConvergenceDriver({
+      state: new CustomerBootstrapDurableStatePort(bootstrapState.storage),
+      transport: (target, init) => fetch(target, init),
+      publicClientId: parsedEnv(bootstrapEnv).CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
+      converge: (accessToken, attemptId) => this.converge(accessToken, attemptId),
+      now: Date.now,
+      // Every alarm is its own invocation with its own subrequest budget.
+      schedule: () => bootstrapState.storage.setAlarm(Date.now()),
+    });
+  }
+
+  /** One converger pass per alarm; the driver re-arms until the attempt settles. */
+  async alarm(): Promise<void> {
+    await this.bootstrapReady;
+    await this.convergence.continue();
+  }
+
+  private converge(accessToken: string, attemptId: string): Promise<CustomerStage2ConvergerResult> {
+    const config = parsedEnv(this.bootstrapEnv);
+    return convergeCustomerStage2({
+      accessToken,
+      attemptId,
+      storage: this.bootstrapState.storage,
+      journal: new CustomerStage2DurableStatePort(this.bootstrapState.storage),
+      runtime: {
+        updateChannel: config.ANKKA_UPDATE_CHANNEL,
+        updateKeyId: config.ANKKA_UPDATE_KEY_ID,
+        updatePublicKey: config.ANKKA_UPDATE_PUBLIC_KEY,
+      },
+      bootstrap: {
+        nonce: config.ANKKA_BOOTSTRAP_NONCE,
+        expectedBindings: {
+          ANKKA_BOOTSTRAP_CALLBACK: config.ANKKA_BOOTSTRAP_CALLBACK,
+          ANKKA_BOOTSTRAP_EXPIRES_AT: config.ANKKA_BOOTSTRAP_EXPIRES_AT,
+          ANKKA_BOOTSTRAP_ID: config.ANKKA_BOOTSTRAP_ID,
+          ANKKA_BOOTSTRAP_SECRET_SHA256: config.ANKKA_BOOTSTRAP_SECRET_SHA256,
+          ANKKA_GATEWAY_RELEASE: config.ANKKA_GATEWAY_RELEASE,
+          ANKKA_GATEWAY_RELEASE_SHA256: config.ANKKA_GATEWAY_RELEASE_SHA256,
+          ANKKA_INSTALL_ID: config.ANKKA_INSTALL_ID,
+          ANKKA_INSTALLER_ORIGIN: config.ANKKA_INSTALLER_ORIGIN,
+          ANKKA_MANAGEMENT_HOSTNAME: config.ANKKA_MANAGEMENT_HOSTNAME,
+          ANKKA_PLAN_HASH: config.ANKKA_PLAN_HASH,
+          ANKKA_PLAN_ID: config.ANKKA_PLAN_ID,
+          ANKKA_UPDATE_CHANNEL: config.ANKKA_UPDATE_CHANNEL,
+          ANKKA_UPDATE_KEY_ID: config.ANKKA_UPDATE_KEY_ID,
+          ANKKA_UPDATE_PUBLIC_KEY: config.ANKKA_UPDATE_PUBLIC_KEY,
+          ANKKA_WORKER_NAME: config.ANKKA_WORKER_NAME,
+          CLOUDFLARE_ACCOUNT_ID: config.CLOUDFLARE_ACCOUNT_ID,
+          CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID: config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
+          CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID: config.CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID,
+          CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY: config.CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY,
+        },
+      },
+      finalRuntimeSource: __ANKKA_FINAL_RUNTIME_SOURCE__,
+      payload: {
+        // The shell runs the payload in-process, so it hands the payload the
+        // strict runtime environment that also names the zone and the
+        // Zero Trust readiness the converger has established by now.
+        bootstrap: (request, { target }) => processBootstrap(
+          request,
+          customerPayloadEnvironment(this.bootstrapEnv, target),
+          this.bootstrapState.storage,
+        ),
+        verifyReady: async ({ accessToken: token, plan, target }) => {
+          const claim = await prepareCustomerBootstrapClaimFromPlan({
+            plan,
+            target,
+            nowMs: Date.now(),
+          });
+          return verifyBootstrapReceiptProviderStateWithReason({
+            ...claim,
+            cloudflareAccessToken: token,
+          }, customerPayloadEnvironment(this.bootstrapEnv, target), this.bootstrapState.storage, Date.now());
+        },
+      },
+      transport: (target, init) => fetch(target, init),
+      now: Date.now,
+      checkpoints: CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
     });
   }
 
@@ -260,65 +378,8 @@ export class AdminState extends RuntimeAdminState {
           transport: (target, init) => fetch(target, init),
         });
       },
-      converge: (accessToken, attemptId) => convergeCustomerStage2({
-        accessToken,
-        attemptId,
-        storage: this.bootstrapState.storage,
-        journal: new CustomerStage2DurableStatePort(this.bootstrapState.storage),
-        runtime: {
-          updateChannel: config.ANKKA_UPDATE_CHANNEL,
-          updateKeyId: config.ANKKA_UPDATE_KEY_ID,
-          updatePublicKey: config.ANKKA_UPDATE_PUBLIC_KEY,
-        },
-        bootstrap: {
-          nonce: config.ANKKA_BOOTSTRAP_NONCE,
-          expectedBindings: {
-            ANKKA_BOOTSTRAP_CALLBACK: config.ANKKA_BOOTSTRAP_CALLBACK,
-            ANKKA_BOOTSTRAP_EXPIRES_AT: config.ANKKA_BOOTSTRAP_EXPIRES_AT,
-            ANKKA_BOOTSTRAP_ID: config.ANKKA_BOOTSTRAP_ID,
-            ANKKA_BOOTSTRAP_SECRET_SHA256: config.ANKKA_BOOTSTRAP_SECRET_SHA256,
-            ANKKA_GATEWAY_RELEASE: config.ANKKA_GATEWAY_RELEASE,
-            ANKKA_GATEWAY_RELEASE_SHA256: config.ANKKA_GATEWAY_RELEASE_SHA256,
-            ANKKA_INSTALL_ID: config.ANKKA_INSTALL_ID,
-            ANKKA_INSTALLER_ORIGIN: config.ANKKA_INSTALLER_ORIGIN,
-            ANKKA_MANAGEMENT_HOSTNAME: config.ANKKA_MANAGEMENT_HOSTNAME,
-            ANKKA_PLAN_HASH: config.ANKKA_PLAN_HASH,
-            ANKKA_PLAN_ID: config.ANKKA_PLAN_ID,
-            ANKKA_UPDATE_CHANNEL: config.ANKKA_UPDATE_CHANNEL,
-            ANKKA_UPDATE_KEY_ID: config.ANKKA_UPDATE_KEY_ID,
-            ANKKA_UPDATE_PUBLIC_KEY: config.ANKKA_UPDATE_PUBLIC_KEY,
-            ANKKA_WORKER_NAME: config.ANKKA_WORKER_NAME,
-            CLOUDFLARE_ACCOUNT_ID: config.CLOUDFLARE_ACCOUNT_ID,
-            CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID: config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
-            CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID: config.CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID,
-            CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY: config.CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY,
-          },
-        },
-        finalRuntimeSource: __ANKKA_FINAL_RUNTIME_SOURCE__,
-        payload: {
-          // The shell's bindings stop at Stage 1; the payload parses a
-          // strict runtime environment that also names the zone and the
-          // Zero Trust readiness the converger has established by now.
-          bootstrap: (request, { target }) => processBootstrap(
-            request,
-            customerPayloadEnvironment(this.bootstrapEnv, target),
-            this.bootstrapState.storage,
-          ),
-          verifyReady: async ({ accessToken: token, plan, target }) => {
-            const claim = await prepareCustomerBootstrapClaimFromPlan({
-              plan,
-              target,
-              nowMs: Date.now(),
-            });
-            return verifyBootstrapReceiptProviderStateWithReason({
-              ...claim,
-              cloudflareAccessToken: token,
-            }, customerPayloadEnvironment(this.bootstrapEnv, target), this.bootstrapState.storage, Date.now());
-          },
-        },
-        transport: (target, init) => fetch(target, init),
-        now: Date.now,
-      }),
+      startConvergence: (input) => this.convergence.start(input),
+      callbackResponse: (outcome, cookies) => convergencePage(config.ANKKA_MANAGEMENT_HOSTNAME, outcome, cookies),
     });
     return router.fetch(request);
   }

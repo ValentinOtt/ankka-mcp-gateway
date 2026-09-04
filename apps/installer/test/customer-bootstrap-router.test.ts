@@ -11,7 +11,14 @@ import {
   createCustomerBootstrapCapability,
   type CustomerBootstrapState,
 } from '../src/customer-bootstrap-state';
-import { createCustomerBootstrapRouter } from '../src/customer-bootstrap-router';
+import type { CustomerBootstrapConverge } from '../src/customer-bootstrap-callback';
+import { CustomerBootstrapConvergenceDriver } from '../src/customer-bootstrap-convergence-driver';
+import {
+  createCustomerBootstrapRouter,
+  type CustomerBootstrapRouterDependencies,
+  type CustomerBootstrapStatePort,
+} from '../src/customer-bootstrap-router';
+import type { CustomerCloudflareTransport } from '../src/customer-cloudflare-grant';
 import {
   CUSTOMER_INSTALL_CONTINUE_PATH,
   CUSTOMER_INSTALL_OAUTH_START_PATH,
@@ -36,6 +43,26 @@ const INSTALL_SCOPES = [
   'access-acct.read', 'zone-access.write', 'dns.write', 'mcp-portals.write',
   'workers-routes.read', 'workers-scripts.write', 'zone.read',
 ];
+/** Runs every converger pass inline, the way a host without a per-invocation budget would. */
+function inlineConvergence(
+  state: CustomerBootstrapStatePort,
+  transport: CustomerCloudflareTransport,
+  converge: CustomerBootstrapConverge,
+  now: () => number = () => NOW + 1,
+): CustomerBootstrapRouterDependencies['startConvergence'] {
+  const driver = new CustomerBootstrapConvergenceDriver({
+    state,
+    transport,
+    publicClientId: CLIENT_ID,
+    converge,
+    now,
+    schedule: async () => {
+      await driver.continue();
+    },
+  });
+  return (input) => driver.start(input);
+}
+
 const COMPLETE_CONVERGENCE = Object.freeze({
   verified: true,
   ownershipReceipt: 'complete',
@@ -100,6 +127,15 @@ describe('restricted customer bootstrap router', () => {
       }
       throw new Error('unexpected request');
     };
+    const statePort: CustomerBootstrapStatePort = {
+      read: async () => stored,
+      compareAndSet: async (expectedRevision, state) => {
+        if ((stored?.revision ?? null) !== expectedRevision) return false;
+        stored = state;
+        persisted.push(JSON.stringify(state));
+        return true;
+      },
+    };
     const router = createCustomerBootstrapRouter({
       accountId: ACCOUNT_ID,
       installId: INSTALL_ID,
@@ -109,15 +145,7 @@ describe('restricted customer bootstrap router', () => {
       publicClientId: CLIENT_ID,
     }, {
       now: () => NOW + 1,
-      state: {
-        read: async () => stored,
-        compareAndSet: async (expectedRevision, state) => {
-          if ((stored?.revision ?? null) !== expectedRevision) return false;
-          stored = state;
-          persisted.push(JSON.stringify(state));
-          return true;
-        },
-      },
+      state: statePort,
       transport,
       acceptHandoff: async () => undefined,
       issueRelayTicket: async () => ({ relayTicket: RELAY_TICKET, expiresAt: NOW + 120_000 }),
@@ -132,10 +160,10 @@ describe('restricted customer bootstrap router', () => {
           nonce: base64UrlEncode(new Uint8Array(32).fill(8)),
           now: NOW + 1,
         }),
-      converge: async (accessToken) => {
+      startConvergence: inlineConvergence(statePort, transport, async (accessToken) => {
         convergedWith = accessToken;
         return COMPLETE_CONVERGENCE;
-      },
+      }),
     });
 
     const health = await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_STATUS_PATH}`));
@@ -225,6 +253,28 @@ describe('restricted customer bootstrap router', () => {
     let stored: CustomerBootstrapState | undefined;
     let revoked = false;
     let converged = false;
+    const statePort: CustomerBootstrapStatePort = {
+      read: async () => stored,
+      compareAndSet: async (expectedRevision, state) => {
+        if ((stored?.revision ?? null) !== expectedRevision) return false;
+        stored = state;
+        return true;
+      },
+    };
+    const transport: CustomerCloudflareTransport = async (input) => {
+      const url = String(input);
+      if (url.endsWith('/oauth2/token')) return json({
+        access_token: ACCESS_TOKEN, token_type: 'bearer', scope: INSTALL_SCOPES.join(' '),
+      });
+      if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) return json({
+        success: true,
+        errors: [],
+        messages: [],
+        result: [{ id: ACCOUNT_ID }, { id: 'f'.repeat(32) }],
+      });
+      if (url.endsWith('/oauth2/revoke')) { revoked = true; return json({ revoked: true }); }
+      throw new Error('unexpected request');
+    };
     const router = createCustomerBootstrapRouter({
       accountId: ACCOUNT_ID,
       installId: INSTALL_ID,
@@ -234,30 +284,10 @@ describe('restricted customer bootstrap router', () => {
       publicClientId: CLIENT_ID,
     }, {
       now: () => NOW + 1,
-      state: {
-        read: async () => stored,
-        compareAndSet: async (expectedRevision, state) => {
-          if ((stored?.revision ?? null) !== expectedRevision) return false;
-          stored = state;
-          return true;
-        },
-      },
+      state: statePort,
       acceptHandoff: async () => undefined,
       issueRelayTicket: async () => ({ relayTicket: RELAY_TICKET, expiresAt: NOW + 120_000 }),
-      transport: async (input) => {
-        const url = String(input);
-        if (url.endsWith('/oauth2/token')) return json({
-          access_token: ACCESS_TOKEN, token_type: 'bearer', scope: INSTALL_SCOPES.join(' '),
-        });
-        if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) return json({
-          success: true,
-          errors: [],
-          messages: [],
-          result: [{ id: ACCOUNT_ID }, { id: 'f'.repeat(32) }],
-        });
-        if (url.endsWith('/oauth2/revoke')) { revoked = true; return json({ revoked: true }); }
-        throw new Error('unexpected request');
-      },
+      transport,
       beginRelay: async ({ gatewayState, pkceChallenge, gatewayCallback }) =>
         buildFixedRelayAuthorization({
           clientId: CLIENT_ID,
@@ -266,7 +296,10 @@ describe('restricted customer bootstrap router', () => {
           operation: 'install', gatewayState, pkceChallenge,
           nonce: base64UrlEncode(new Uint8Array(32).fill(7)), now: NOW + 1,
         }),
-      converge: async () => { converged = true; return COMPLETE_CONVERGENCE; },
+      startConvergence: inlineConvergence(statePort, transport, async () => {
+        converged = true;
+        return COMPLETE_CONVERGENCE;
+      }),
     });
     await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_STATUS_PATH}`));
     const continued = await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_CONTINUE_PATH}`, {
@@ -312,6 +345,18 @@ describe('restricted customer bootstrap router', () => {
     let clock = NOW + 1;
     let relayStarts = 0;
     let tokenExchangeAttempted = false;
+    const statePort: CustomerBootstrapStatePort = {
+      read: async () => stored,
+      compareAndSet: async (expectedRevision, state) => {
+        if ((stored?.revision ?? null) !== expectedRevision) return false;
+        stored = state;
+        return true;
+      },
+    };
+    const transport: CustomerCloudflareTransport = async () => {
+      tokenExchangeAttempted = true;
+      throw new Error('token exchange must not run for an expired cookie');
+    };
     const router = createCustomerBootstrapRouter({
       accountId: ACCOUNT_ID,
       installId: INSTALL_ID,
@@ -321,20 +366,10 @@ describe('restricted customer bootstrap router', () => {
       publicClientId: CLIENT_ID,
     }, {
       now: () => clock,
-      state: {
-        read: async () => stored,
-        compareAndSet: async (expectedRevision, state) => {
-          if ((stored?.revision ?? null) !== expectedRevision) return false;
-          stored = state;
-          return true;
-        },
-      },
+      state: statePort,
       acceptHandoff: async () => undefined,
       issueRelayTicket: async () => ({ relayTicket: RELAY_TICKET, expiresAt: clock + 120_000 }),
-      transport: async () => {
-        tokenExchangeAttempted = true;
-        throw new Error('token exchange must not run for an expired cookie');
-      },
+      transport,
       beginRelay: async ({ gatewayState, pkceChallenge, gatewayCallback }) => {
         relayStarts += 1;
         return buildFixedRelayAuthorization({
@@ -348,7 +383,7 @@ describe('restricted customer bootstrap router', () => {
           now: clock,
         });
       },
-      converge: async () => COMPLETE_CONVERGENCE,
+      startConvergence: inlineConvergence(statePort, transport, async () => COMPLETE_CONVERGENCE, () => clock),
     });
     await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_STATUS_PATH}`));
     const continued = await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_CONTINUE_PATH}`, {
