@@ -44,6 +44,12 @@ the account, selected zone, and hostname availability, then runs the existing
 installation and revocation flow. Updates and removal retain their existing
 operation-specific scope sets.
 
+While installation or recovery holds its temporary grant, the customer Worker
+keeps one timer bounded by the existing fifteen-minute convergence deadline.
+This prevents ordinary idle hibernation between alarm passes when the progress
+page is not being polled. Settlement releases the timer; unexpected restarts
+still lose the grant and stop the attempt. No credential is persisted.
+
 In-flight fully configured plans remain readable for recovery. Newly started
 deployments use the configuration-free bootstrap path. Hosted session evidence
 expires after one hour; the Worker owns its setup draft. No MCP source-provider

@@ -45,9 +45,13 @@ interface PendingConvergence {
  * the grant: an object restart between passes loses it, and the attempt then
  * settles INCOMPLETE with `grant_lost` rather than resuming from anything
  * durable. The journal and its lease make a repeated pass harmless.
+ * A bounded timer prevents normal idle hibernation between alarms, including
+ * when the browser is closed. It carries no credential and performs no work;
+ * the alarm remains responsible for the next pass and deadline revocation.
  */
 export class CustomerBootstrapConvergenceDriver {
   #pending: PendingConvergence | null = null;
+  #retentionTimer: ReturnType<typeof setTimeout> | null = null;
   /** When this runtime handed the attempt over to the final runtime, if it did. */
   #handedOverAt: number | null = null;
 
@@ -66,7 +70,15 @@ export class CustomerBootstrapConvergenceDriver {
       passes: 0,
     };
     this.#handedOverAt = null;
-    await this.ports.schedule(0);
+    this.#retentionTimer = setTimeout(() => {
+      this.#retentionTimer = null;
+    }, CUSTOMER_BOOTSTRAP_CONVERGENCE_DEADLINE_MS + 1);
+    try {
+      await this.ports.schedule(0);
+    } catch (error) {
+      this.releaseRetention();
+      throw error;
+    }
   }
 
   /** Runs one pass of the attempt the durable state names. */
@@ -132,11 +144,17 @@ export class CustomerBootstrapConvergenceDriver {
       return 'scheduled';
     }
     if (outcome.status === 'HANDED_OVER') this.#handedOverAt = this.ports.now();
-    this.#pending = null;
+    this.forget();
     return 'settled';
   }
 
+  private releaseRetention(): void {
+    if (this.#retentionTimer !== null) clearTimeout(this.#retentionTimer);
+    this.#retentionTimer = null;
+  }
+
   private forget(): void {
+    this.releaseRetention();
     this.#pending?.grant.discard();
     this.#pending = null;
   }
