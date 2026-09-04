@@ -1239,6 +1239,8 @@ test('updates owned server, Portal, policy, and DNS resources through exact loca
   await provider(portalMock.fetchImpl).applyChange(portalFixture.input);
   assert.equal(Object.hasOwn(portalMock.calls[1].body, 'id'), false);
   assert.equal(portalMock.calls[1].body.hostname, 'mcp.example.com');
+  assert.equal(portalMock.calls[1].body.servers[0].id, serverResource.key);
+  assert.equal(Object.hasOwn(portalMock.calls[1].body.servers[0], 'server_id'), false);
 
   const sourceAppId = 'app_source_123';
   const sourcePolicyId = 'policy_source_123';

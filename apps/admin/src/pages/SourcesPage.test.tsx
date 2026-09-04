@@ -89,7 +89,34 @@ describe('source installation recovery', () => {
     expect(within(card).getByText(state === 'applying' ? 'Applying and verifying' : 'Recovery required')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Cancel authorization' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Renew consent and resume' })).not.toBeInTheDocument()
     expect(screen.queryByText(/nothing changed|start a fresh authorization/i)).not.toBeInTheDocument()
+  })
+
+  it('renews only the server-approved recorded action while ordinary Apply remains blocked', async () => {
+    const user = userEvent.setup()
+    const action = pendingAction({ state: 'recovery_required', status: 'recovery_required', canCancel: false, canRenew: true })
+    const api = actionApi(actionSnapshot(action))
+    api.prepareSourceAction = vi.fn().mockRejectedValue(new GatewayApiError(409, 'source_action_conflict'))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const renew = await screen.findByRole('button', { name: 'Renew consent and resume' })
+    expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeDisabled()
+    await user.click(renew)
+    await waitFor(() => expect(api.prepareSourceAction).toHaveBeenCalledExactlyOnceWith(sources.revision, draft.id, action.actionId))
+    expect(api.cancelSourceAction).not.toHaveBeenCalled()
+  })
+
+  it('rechecks renewal eligibility after clicking a stale recovery page', async () => {
+    const user = userEvent.setup()
+    const action = pendingAction({ state: 'recovery_required', status: 'recovery_required', canCancel: false, canRenew: true })
+    const api = actionApi(actionSnapshot(action))
+    api.getSourceActions = vi.fn().mockResolvedValueOnce(actionSnapshot(action))
+      .mockResolvedValue(actionSnapshot({ ...action, canRenew: false }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: 'Renew consent and resume' }))
+    await waitFor(() => expect(api.getSourceActions).toHaveBeenCalledTimes(2))
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+    expect(api.cancelSourceAction).not.toHaveBeenCalled()
   })
 
   it('does not offer cancellation to a different administrator', async () => {

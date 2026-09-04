@@ -141,6 +141,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
         expiresAt: new Date(Date.now() + (expired ? -60_000 : 540_000)).toISOString(),
         status: state === 'authorization_expired' ? 'authorization_required' : state,
         state, canCancel: state === 'authorization_required' || state === 'authorization_expired',
+        canRenew: state === 'recovery_required',
         failureCode: state === 'recovery_required' ? 'source_action_recovery_required' : null,
       }]
       const completedSource = this.#sources.sources.find((source) => source.id === 'source-2222222222222222')
@@ -243,10 +244,17 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return structuredClone(this.#sources)
   }
 
-  async prepareSourceAction(revision: number, sourceId: string): Promise<PreparedAction> {
+  async prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<PreparedAction> {
     if (!this.#sources.installationEnabled) throw new GatewayApiError(409, 'source_addition_paused')
     if (revision !== this.#sources.revision || !this.#sources.sources.some((source) => source.id === sourceId && source.status === 'draft')) throw new GatewayApiError(409, 'source_action_conflict', { reason: 'draft_changed' })
     const { blockingAction, actions } = await this.getSourceActions()
+    if (renewActionId !== undefined) {
+      const action = this.#sourceActions.find((entry) => entry.actionId === renewActionId && entry.sourceId === sourceId)
+      if (!action || action.canRenew !== true || blockingAction?.kind !== 'source' || blockingAction.actionId !== renewActionId) throw new GatewayApiError(409, 'source_action_conflict', { reason: 'recovery_required' })
+      Object.assign(action, { status: 'authorization_required', state: 'authorization_required',
+        issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 600_000).toISOString(), canCancel: false, canRenew: false })
+      return { schemaVersion: 1, actionId: action.actionId, status: 'authorization_required', expiresAt: action.expiresAt, handoffUrl: HANDOFF }
+    }
     if (blockingAction) throw new GatewayApiError(409, 'source_action_conflict', {
       reason: blockingAction.kind !== 'source' ? 'lifecycle_pending' : actions.some((action) => action.actionId === blockingAction.actionId && action.state === 'recovery_required') ? 'recovery_required' : 'source_pending',
       action: blockingAction,
@@ -262,8 +270,9 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
 
   async getSourceActions(): Promise<SourceActions> {
     for (const action of this.#sourceActions) {
-      if (action.state === 'authorization_required' && Date.now() >= Date.parse(action.expiresAt)) action.state = 'authorization_expired'
+      if (action.state === 'authorization_required' && Date.now() >= Date.parse(action.expiresAt)) action.state = action.canCancel ? 'authorization_expired' : 'recovery_required'
       if (action.state === 'applying' && Date.now() >= Date.parse(action.expiresAt)) action.state = 'recovery_required'
+      if (action.state === 'recovery_required') action.canRenew = true
       if (this.#scenario === 'source-late-success' && action.state === 'authorization_required' && Date.now() >= Date.parse(action.issuedAt) + 75_000) {
         action.status = action.state = 'succeeded'
         action.canCancel = false

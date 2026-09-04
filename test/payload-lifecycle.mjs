@@ -524,9 +524,20 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
       }
     }
 
-    // Portal
+    // Portal writes require `id`; reads also expose the `server_id` alias.
+    // Do not accept the response-only field as the outgoing identifier.
+    const portalWrite = (pathname === PORTALS && method === 'POST') ||
+      (pathname.startsWith(`${PORTALS}/`) && method === 'PUT');
+    if (portalWrite && record.body.servers?.some((mapping) =>
+      !v.is(v.pipe(v.string(), v.minLength(1)), mapping.id) || Object.hasOwn(mapping, 'server_id'))) {
+      return Response.json({ success: false, result: null, errors: [{ code: 7001 }] }, { status: 400 });
+    }
+    const portalBody = portalWrite ? { ...record.body } : null;
+    if (portalWrite && record.body.servers) {
+      portalBody.servers = record.body.servers.map((mapping) => ({ ...mapping, server_id: mapping.id }));
+    }
     if (pathname === PORTALS && method === 'POST') {
-      state.portal = { ...record.body };
+      state.portal = portalBody;
       return envelope(state.portal);
     }
     if (pathname.startsWith(`${PORTALS}/`)) {
@@ -534,7 +545,7 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
       if (method === 'GET') return state.portal?.id === id ? envelope(state.portal) : envelope(null, 404);
       if (method === 'PUT') {
         if (state.portal?.id !== id) return envelope(null, 404);
-        state.portal = { id, ...record.body };
+        state.portal = { id, ...portalBody };
         return envelope(state.portal);
       }
       if (method === 'DELETE') {

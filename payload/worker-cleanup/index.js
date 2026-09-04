@@ -833,7 +833,9 @@ async function providerPortalUpdate(control, body, token, providerFetch) {
     response = await providerFetch(new Request(url, {
       method: 'PUT',
       headers: { accept: 'application/json', authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: canonicalJson(body),
+      body: canonicalJson({ ...body,
+        servers: body.servers.map(({ server_id, ...mapping }) => ({ id: server_id, ...mapping })),
+      }),
       redirect: 'manual',
     }));
   } catch { return 'unknown'; }

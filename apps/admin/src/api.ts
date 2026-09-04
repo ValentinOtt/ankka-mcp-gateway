@@ -110,6 +110,7 @@ const sourceActionSummarySchema = v.strictObject({
   issuedAt: v.string(),
   state: sourceActionStateSchema,
   canCancel: v.boolean(),
+  canRenew: v.optional(v.boolean()),
 })
 const sourceActionsSchema = v.strictObject({
   schemaVersion: v.literal(1),
@@ -260,7 +261,7 @@ export interface GatewayAdminApi {
   getUpdate(): Promise<RuntimeUpdate>
   discoverSource(url: string): Promise<SourceDiscovery>
   saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources>
-  prepareSourceAction(revision: number, sourceId: string): Promise<PreparedAction>
+  prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<PreparedAction>
   getSourceActions(): Promise<SourceActions>
   getSourceAction(actionId: string): Promise<SourceAction>
   cancelSourceAction(actionId: string): Promise<SourceAction>
@@ -439,8 +440,9 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     })
   }
 
-  prepareSourceAction(revision: number, sourceId: string): Promise<PreparedAction> {
-    return this.#request('/api/source-actions', preparedActionSchema, {
+  prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<PreparedAction> {
+    const path = renewActionId === undefined ? '/api/source-actions' : `/api/source-actions/${encodeURIComponent(renewActionId)}/renew`
+    return this.#request(path, preparedActionSchema, {
       method: 'POST', body: JSON.stringify({ schemaVersion: 1, revision, sourceId }),
     })
   }

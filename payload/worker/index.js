@@ -2048,7 +2048,7 @@ async function createResource(state, kind, token) {
     };
     if (server) {
       body.servers = [{
-        server_id: server.id,
+        id: server.id,
         default_disabled: true,
         on_behalf: state.settings.sources[0].authentication.onBehalfOfUser,
         updated_tools: toolProjection(state.settings.sources[0].enabledTools),
@@ -2776,10 +2776,12 @@ function safeSourceAction(value) {
     'schemaVersion', 'actionId', 'sourceId', 'sourceRevision', 'actorEmail', 'issuedAt',
     'expiresAt', 'status', 'actionKeyHash', 'sourceHash', 'resources', 'pending', 'portalUpdate', 'failureCode',
     ...(Object.hasOwn(value ?? {}, 'initialPolicyVersion') ? ['initialPolicyVersion'] : []),
+    ...(Object.hasOwn(value ?? {}, 'renewedAt') ? ['renewedAt'] : []),
   ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) || !SOURCE_ID.test(value.sourceId) ||
       (Object.hasOwn(value, 'initialPolicyVersion') && value.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION) ||
       !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
       !normalizedEmail(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
+      (Object.hasOwn(value, 'renewedAt') && value.renewedAt !== value.issuedAt) ||
       !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
       value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
       !['authorization_required', 'applying', 'succeeded', 'failed', 'recovery_required'].includes(value.status) ||
@@ -2831,6 +2833,8 @@ function sourceActionHasWriteEvidence(action) {
 
 function sourceActionState(action, now) {
   if (action.status === 'succeeded') return 'succeeded';
+  if (action.status === 'authorization_required' && action.renewedAt === action.issuedAt &&
+      action.expiresAt > now) return 'authorization_required';
   if (action.status === 'recovery_required' ||
       (sourceActionHasWriteEvidence(action) && action.status !== 'applying') ||
       (action.status === 'applying' && action.expiresAt <= now)) return 'recovery_required';
@@ -2841,6 +2845,16 @@ function sourceActionState(action, now) {
 function sourceActionCanCancel(action, actorEmail, now) {
   return action.actorEmail === normalizedEmail(actorEmail) && now >= action.issuedAt &&
     action.status === 'authorization_required' && !sourceActionHasWriteEvidence(action);
+}
+
+function sourceActionCanRenew(action, actorEmail, now) {
+  // Wait out the previous execution window and rotate only the consent key.
+  // An unacknowledged hostname-less app creation has no authoritative locator:
+  // the zone listing cannot prove it absent, so it still needs manual review.
+  return action.actorEmail === normalizedEmail(actorEmail) && action.expiresAt <= now &&
+    action.initialPolicyVersion === SOURCE_INITIAL_POLICY_VERSION &&
+    sourceActionState(action, now) === 'recovery_required' &&
+    !(action.pending?.kind === 'source_access_application' && action.pending.provider === null);
 }
 
 function sourceActionBlocks(action) {
@@ -2894,6 +2908,7 @@ async function sourceActionSnapshot(storage, actorEmail, now) {
   return { schemaVersion: 1, actions: current.actions.map((action) => ({
     ...publicSourceAction(action), issuedAt: new Date(action.issuedAt).toISOString(),
     state: sourceActionState(action, now), canCancel: sourceActionCanCancel(action, actorEmail, now),
+    canRenew: sourceActionCanRenew(action, actorEmail, now),
   })), blockingAction };
 }
 
@@ -2966,6 +2981,30 @@ async function managedSourceHash(source) {
     onBehalfOfUser: source.onBehalfOfUser,
     enabledTools: source.enabledTools,
   });
+}
+
+async function renewSourceAction(storage, input, env) {
+  if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
+  const parsed = parseSourceActionPrepare(input);
+  const context = parsed && await storedSourceActionContext(storage, parsed.actionId);
+  const action = context?.action;
+  if (!parsed || !action || !sourceActionCanRenew(action, parsed.actorEmail, parsed.issuedAt)) {
+    return sourceActionConflict('recovery_required');
+  }
+  if (parsed.sourceId !== action.sourceId || parsed.sourceRevision !== action.sourceRevision ||
+      parsed.sourceRevision !== context.sources.revision || parsed.sourceHash !== action.sourceHash ||
+      !await actionDesiredState(context.control, context.sources, action)) {
+    return sourceActionConflict('draft_changed');
+  }
+  if (await otherLifecycleBlocksSource(storage, parsed.issuedAt, action.actionId) ||
+      await teamActionBlocksLifecycle(storage)) return sourceActionConflict('lifecycle_pending');
+  // Older runtimes cannot parse the renewed journal marker.
+  if (!await armSourceCompatibility(storage, env)) return actionRecovery('source_action_state_unavailable');
+  const renewed = await persistSourceAction(storage, {
+    ...action, status: 'authorization_required', actionKeyHash: parsed.actionKeyHash,
+    issuedAt: parsed.issuedAt, renewedAt: parsed.issuedAt, expiresAt: parsed.expiresAt,
+  });
+  return renewed ?? actionRecovery('source_action_state_unavailable');
 }
 
 async function storedSourceActionContext(storage, actionId) {
@@ -3364,7 +3403,11 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     if (!action) return actionRecovery('source_action_state_unavailable');
     if (!await armSourceCompatibility(storage, env)) return actionRecovery('source_action_state_unavailable');
     const updated = await providerCall(portalPath, parsed.claim.cloudflareAccessToken, {
-      method: 'PUT', body: canonicalJson(portalBody),
+      // Cloudflare writes use `id`; `server_id` is the read/receipt shape.
+      // Keep the recorded desired hash stable when renewing an older action.
+      method: 'PUT', body: canonicalJson({ ...portalBody,
+        servers: mappings.map(({ server_id, ...mapping }) => ({ id: server_id, ...mapping })),
+      }),
     });
     if (updated.status !== 'ok') {
       return failSourceAction(
@@ -4428,6 +4471,14 @@ export class AdminState {
         const action = await prepareSourceAction(this.state.storage, input);
         return action instanceof Response ? action : fixedJson(200, publicSourceAction(action));
       }
+      if (url.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`) && url.pathname.endsWith('/renew') &&
+          request.method === 'POST') {
+        const actionId = url.pathname.slice(INTERNAL_ACTIONS_PATH.length + 1, -'/renew'.length);
+        const input = await request.json().catch(() => null);
+        if (!ACTION_ID.test(actionId) || input?.actionId !== actionId) return sourceActionConflict();
+        const action = await renewSourceAction(this.state.storage, input, this.env);
+        return action instanceof Response ? action : fixedJson(200, publicSourceAction(action));
+      }
       if (url.pathname === `${INTERNAL_ACTIONS_PATH}/apply` && request.method === 'POST') {
         const raw = await readBoundedText(request.clone(), REQUEST_LIMIT_BYTES);
         let value;
@@ -5220,7 +5271,9 @@ async function handleSourceActions(request, env) {
   if (request.method !== 'POST') {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET, POST, DELETE' });
   }
-  if (url.pathname !== '/api/source-actions') {
+  const renewal = /^\/api\/source-actions\/(action_[A-Za-z0-9_-]{32})\/renew$/u.exec(url.pathname);
+  const renewActionId = renewal?.[1] ?? null;
+  if (url.pathname !== '/api/source-actions' && renewActionId === null) {
     return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
   }
   if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
@@ -5239,8 +5292,17 @@ async function handleSourceActions(request, env) {
     if (!(response instanceof Response) || response.status !== 200) {
       return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
     }
-    const conflict = sourceSnapshotConflict(await response.json());
-    if (conflict) return conflict;
+    const snapshot = await response.json();
+    if (renewActionId !== null) {
+      const action = snapshot.actions?.find((entry) => entry.actionId === renewActionId);
+      if (action?.sourceId !== input.sourceId || action.canRenew !== true ||
+          snapshot.blockingAction?.kind !== 'source' || snapshot.blockingAction.actionId !== renewActionId) {
+        return sourceActionConflict('recovery_required');
+      }
+    } else {
+      const conflict = sourceSnapshotConflict(snapshot);
+      if (conflict) return conflict;
+    }
   } catch { return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' }); }
   let sources;
   try {
@@ -5255,11 +5317,12 @@ async function handleSourceActions(request, env) {
   try { await verifyManagedSource(source); } catch (error) { return sourceErrorResponse(error); }
   const now = Date.now();
   const expiresAt = now + 10 * 60 * 1000;
-  const actionId = `action_${randomBase64Url(24)}`;
+  const actionId = renewActionId ?? `action_${randomBase64Url(24)}`;
   const actionKey = randomBase64Url(32);
   let prepared;
   try {
-    prepared = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_ACTIONS_PATH}`, {
+    const preparePath = `${INTERNAL_ACTIONS_PATH}${renewActionId === null ? '' : `/${actionId}/renew`}`;
+    prepared = await stub.fetch(new Request(`https://admin-state.invalid${preparePath}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: canonicalJson({
