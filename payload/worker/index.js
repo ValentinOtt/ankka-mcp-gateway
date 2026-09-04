@@ -1408,7 +1408,10 @@ async function stableResourceKey(prefix, installationId, logicalId) {
     .replace(/[^a-z0-9-]+/gu, '-')
     .replace(/^-+|-+$/gu, '');
   const hintLength = Math.max(0, 32 - prefix.length - 10);
-  if (hint && hintLength > 0) return `${prefix}-${hint.slice(0, hintLength)}-${digest.slice(0, 8)}`;
+  // A hint cut mid-label must not end in a hyphen: Cloudflare refuses ids
+  // with two hyphens in a row (7001, "not valid ID format").
+  const cut = hint.slice(0, hintLength).replace(/-+$/gu, '');
+  if (cut && hintLength > 0) return `${prefix}-${cut}-${digest.slice(0, 8)}`;
   return `${prefix}-${digest.slice(0, 32 - prefix.length - 1)}`;
 }
 

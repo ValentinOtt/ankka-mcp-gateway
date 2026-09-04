@@ -38,7 +38,7 @@ const INTERNAL_PLAN = `plan-${'7'.repeat(24)}`;
 // Golden evidence generated independently by the public provider-neutral
 // planner in ankka-mcp-gateway for this exact selection and target.
 const GOLDEN_INSTALLATION_ID = 'acg-7e82d1f0a97de350e59c86d7';
-const GOLDEN_DESIRED_HASH = 'sha256:1992d0899e947b390e23f0ea0265c18b785bbec1ff8e21bda4827d63358eb454';
+const GOLDEN_DESIRED_HASH = 'sha256:77c1ff437a8338225a22791c5d9c9fda062acd6f72c2b80a17f68c2f040c094c';
 const GOLDEN_CONFIGURATION_HASH = 'sha256:adef4aee1b0500faf61c3d169c3ed0a0554ba0848e703ee3fa727fcd12a782cc';
 
 const target: AuthorizedTarget = {
