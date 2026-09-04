@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Update the transitive `qs` dependency from 6.15.3 to 6.16.0 to resolve two
+  upstream parsing and denial-of-service advisories. Existing dependency ranges
+  and toolchain pins are unchanged.
+
 - Accept Cloudflare One-time PIN providers with the empty name returned by the
   dashboard, so adding email-code login does not block installation. Document
   the Portal login-method prerequisite for team members outside the Cloudflare
