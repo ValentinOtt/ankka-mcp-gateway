@@ -131,7 +131,10 @@ const startBodySchema = v.strictObject({
 const appliedSchema = v.strictObject({
   schemaVersion: v.literal(1),
   actionId: v.pipe(v.string(), v.regex(ACTION_ID)),
+  sourceId: v.pipe(v.string(), v.regex(/^source-[a-f0-9]{16}$/u)),
   status: v.literal('succeeded'),
+  expiresAt: v.pipe(v.string(), v.isoTimestamp()),
+  failureCode: v.null(),
 });
 
 const targetSchema = v.strictObject({

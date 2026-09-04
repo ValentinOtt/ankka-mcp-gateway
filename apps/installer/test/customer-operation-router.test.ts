@@ -40,6 +40,15 @@ const RELEASE = 'gateway-v0.1.34';
 const ARTIFACT_SHA256 = 'f'.repeat(64);
 const ACTION_EXPIRES_AT = NOW + 600_000;
 const SOURCE_SCOPES = 'zone-access.write mcp-portals.write';
+// The exact publicSourceAction projection returned by the installed runtime.
+const APPLIED_SOURCE_ACTION = {
+  schemaVersion: 1,
+  actionId: ACTION_ID,
+  sourceId: `source-${'e'.repeat(16)}`,
+  status: 'succeeded',
+  expiresAt: new Date(ACTION_EXPIRES_AT).toISOString(),
+  failureCode: null,
+};
 
 const baseClaim = {
   schemaVersion: 1,
@@ -139,6 +148,7 @@ function dependencies(input: {
   readonly action: CustomerOperationActionView | null;
   readonly applied: ApplyRecord[];
   readonly applyStatus?: number;
+  readonly applyResponse?: BoundaryValue;
   /** A provider step the apply names next to its error code. */
   readonly applyDetail?: string;
   readonly operational?: boolean;
@@ -179,7 +189,7 @@ function dependencies(input: {
     applySourceAction: async ({ body, signature }) => {
       input.applied.push({ body, signature });
       return input.applyStatus === undefined
-        ? json({ schemaVersion: 1, actionId: ACTION_ID, status: 'succeeded' })
+        ? json(input.applyResponse ?? APPLIED_SOURCE_ACTION)
         : Response.json(
           input.applyDetail === undefined
             ? { schemaVersion: 1, error: 'source_action_rejected' }
@@ -292,6 +302,30 @@ const applyClaimSchema = v.strictObject({
 });
 
 describe('gateway-local operation router', () => {
+  it.each([
+    { schemaVersion: 1, actionId: ACTION_ID, status: 'succeeded' },
+    { ...APPLIED_SOURCE_ACTION, actionId: `action_${'x'.repeat(32)}` },
+    { ...APPLIED_SOURCE_ACTION, sourceId: 'invalid' },
+    { ...APPLIED_SOURCE_ACTION, expiresAt: 'invalid' },
+    { ...APPLIED_SOURCE_ACTION, status: 'recovery_required' },
+    { ...APPLIED_SOURCE_ACTION, failureCode: 'source_action_recovery_required' },
+    { ...APPLIED_SOURCE_ACTION, unexpected: true },
+  ])('rejects an incomplete, mismatched, or unsuccessful apply receipt %#', async (applyResponse) => {
+    const attempts = attemptPort();
+    const harness = transport();
+    const target = router(dependencies({
+      port: attempts.port, harness, applied: [], applyResponse,
+      action: { status: 'authorization_required', expiresAt: ACTION_EXPIRES_AT },
+    }));
+    const { cookie, callback } = await authorize(target);
+    const response = await target.fetch(new Request(callback, { headers: { cookie } }));
+    const location = new URL(response.headers.get('location') ?? '');
+    expect(location.searchParams.get('sourceActionResult')).toBe('failed');
+    expect(location.searchParams.get('sourceActionReason')).toBe('apply_response_invalid');
+    expect(harness.revoked()).toBe(true);
+    expect(attempts.current()).toBeNull();
+  });
+
   it('turns a source handoff into one source-add consent, applies with the grant, and revokes it', async () => {
     const attempts = attemptPort();
     const harness = transport();
