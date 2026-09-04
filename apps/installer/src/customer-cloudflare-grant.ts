@@ -396,9 +396,11 @@ export type CustomerCloudflareGatewayOperation = 'source-add' | 'upgrade' | 'rol
 
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 
+// The AI-controls family answers with `success` and `result` only; the
+// classic v4 envelope adds `errors` and `messages`. Both are one read.
 const accountProbeEnvelopeSchema = v.looseObject({
   success: v.boolean(),
-  errors: v.array(boundaryValueSchema),
+  errors: v.optional(v.array(boundaryValueSchema), []),
 });
 
 /** One small read of the expected account that the operation's own scope covers. */
