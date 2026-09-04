@@ -1587,3 +1587,22 @@ deploying the production relay. Both are operator steps.
   no workers.dev toggle, nothing durable beyond an attempt record without
   secrets. Update and teardown still point at the retired page and are the
   next move.
+- 2026-09-04 (17:30–18:00), gateway-v0.1.34 with the gateway-local source
+  authorization went out (deploy.ankka.ai version 5484a0b4), and a ninth
+  hosted install (`managenine.zimtente.com`) reached its management page
+  without the result-page reload. Its first source apply now travels the
+  intended path: dashboard → the gateway's `/__ankka/operation` page →
+  Cloudflare consent for exactly two permissions → the gateway's callback;
+  the gateway then reported `failed` while the action stayed at
+  authorization_required, so the signed apply was refused before execution
+  and the redirect carried no reason yet. The same afternoon the update path
+  moved onto the gateway too: the payload hands runtime updates to the same
+  page, the entrypoint runs an `upgrade` consent, the new
+  `customer-runtime-update` module fetches the pinned release from the
+  control plane's new `/api/releases/<channel>/files/<path>` route, verifies
+  it with the install's update key, uploads assets and the new version with
+  inherited secrets after arming a sealed handover, and the new version's
+  alarm finishes the journal with a `finalize` command the payload now
+  accepts. Redirects back to the dashboard carry a bounded reason word, so
+  the next refused apply names itself. A token-mode "eight" install proved
+  useless for these flows (its object never became READY) and was removed.

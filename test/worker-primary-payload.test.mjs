@@ -1256,8 +1256,8 @@ async function exerciseSignedRuntimeUpdate(bindExpectedTarget) {
     const prepared = await preparedResponse.json();
     assert.equal(prepared.status, 'authorization_required');
     const handoff = new URL(prepared.handoffUrl);
-    assert.equal(handoff.origin, 'https://deploy.ankka.ai');
-    assert.equal(handoff.pathname, '/manage');
+    assert.equal(handoff.origin, 'https://manage.example.com');
+    assert.equal(handoff.pathname, '/__ankka/operation');
     assert.equal(handoff.search, '');
     const action = JSON.parse(Buffer.from(handoff.hash.slice(1), 'base64url').toString('utf8'));
     assert.deepEqual({
@@ -1448,6 +1448,39 @@ async function exerciseSignedRuntimeUpdate(bindExpectedTarget) {
     assert.equal(rollbackClaim.to.release, 'gateway-v0.1.0');
     assert.equal(rollbackClaim.to.artifactSha256, RELEASE_SHA256);
     assert.equal(rollbackClaim.to.versionId, oldVersionId);
+
+    // A gateway that replaced itself finishes the journal from the new version;
+    // the proof is the object's own release bindings, not a version id it can no longer learn.
+    const rollbackControl = (command) => {
+      const body = canonicalJson({
+        schemaVersion: 1, actionId: rollbackClaim.actionId, actionKey: rollbackClaim.actionKey,
+        operation: 'rollback', issuedAt: Date.now(), expiresAt: rollbackClaim.expiresAt, ...command,
+      });
+      const signature = `sha256=${createHmac('sha256', Buffer.from(rollbackClaim.actionKey, 'base64url')).update(body).digest('hex')}`;
+      return new Request('https://admin-state.invalid/runtime-updates/control', {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-ankka-runtime-action-signature': signature }, body,
+      });
+    };
+    const retainedStorage = env.ADMIN_STATE.objects.get('v1:management').storage;
+    const currentObject = new AdminState({ storage: retainedStorage }, env);
+    assert.equal((await currentObject.fetch(rollbackControl({ command: 'begin' }))).status, 200);
+    const notYet = await currentObject.fetch(rollbackControl({ command: 'finalize', fromVersionId: newVersionId }));
+    assert.equal(notYet.status, 409, 'finalize is refused while the object still runs the old release');
+    assert.deepEqual(await notYet.json(), { schemaVersion: 1, error: 'runtime_action_conflict' });
+    const rolledBackObject = new AdminState({ storage: retainedStorage }, {
+      ...env, ANKKA_GATEWAY_RELEASE: 'gateway-v0.1.0', ANKKA_GATEWAY_RELEASE_SHA256: RELEASE_SHA256,
+    });
+    const finalized = await rolledBackObject.fetch(rollbackControl({ command: 'finalize', fromVersionId: newVersionId }));
+    assert.equal(finalized.status, 200, await finalized.clone().text());
+    const finalizedAction = await finalized.json();
+    assert.equal(finalizedAction.status, 'succeeded');
+    assert.equal(finalizedAction.stage, 'health_verified');
+    const replay = await rolledBackObject.fetch(rollbackControl({ command: 'finalize', fromVersionId: newVersionId }));
+    assert.equal(replay.status, 409, 'a finished action cannot be finalized twice');
+    const rolledBack = await worker.fetch(new Request(
+      `https://manage.example.com/api/update-actions/${rollbackClaim.actionId}`, { headers: accessHeaders },
+    ), env);
+    assert.equal((await rolledBack.json()).status, 'succeeded');
 
     const writes = JSON.stringify(env.ADMIN_STATE.objects.get('v1:management').storage.writes);
     assert.equal(writes.includes(action.actionKey), false);

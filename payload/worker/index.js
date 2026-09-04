@@ -271,7 +271,7 @@ const API_ORIGIN = 'https://api.cloudflare.com';
 const BOOTSTRAP_PATH = '/__ankka/bootstrap';
 const SOURCE_ACTION_PATH = '/__ankka/source-action';
 // Later operations are authorized on the gateway itself; see the installer's operation router.
-const SOURCE_OPERATION_PATH = '/__ankka/operation';
+const OPERATION_PATH = '/__ankka/operation';
 const RUNTIME_ACTION_PATH = '/__ankka/runtime-action';
 const TEARDOWN_ACTION_PATH = '/__ankka/teardown-action';
 const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';
@@ -3532,6 +3532,17 @@ async function processRuntimeActionControl(request, env, storage, nowMs = Date.n
       ...current, status: 'succeeded', stage: 'health_verified', failureCode: null,
       fromVersionId: value.fromVersionId, toVersionId: value.toVersionId,
     }));
+  } else if (value.command === 'finalize' && exactKeys(value, [
+    'actionId', 'actionKey', 'command', 'expiresAt', 'fromVersionId', 'issuedAt', 'operation', 'schemaVersion',
+  ]) && value.schemaVersion === 1 && action.status === 'applying' &&
+      (value.fromVersionId === null || VERSION_ID.test(value.fromVersionId)) &&
+      environment.release === action.to.release && environment.releaseSha256 === action.to.artifactSha256) {
+    // The gateway finished its own update: this object now runs the target
+    // release, which is the proof; the new version id is not knowable here.
+    updated = await updateRuntimeAction(storage, environment, action.actionId, (current) => ({
+      ...current, status: 'succeeded', stage: 'health_verified', failureCode: null,
+      fromVersionId: value.fromVersionId, toVersionId: null,
+    }));
   } else if (value.command === 'fail' && exactKeys(value, [
     'actionId', 'actionKey', 'command', 'expiresAt', 'failureCode', 'issuedAt', 'operation',
     'recoveryRequired', 'schemaVersion',
@@ -5210,7 +5221,7 @@ async function handleSourceActions(request, env) {
     actionId,
     status: 'authorization_required',
     expiresAt: new Date(expiresAt).toISOString(),
-    handoffUrl: `${managementOrigin}${SOURCE_OPERATION_PATH}#${fragment}`,
+    handoffUrl: `${managementOrigin}${OPERATION_PATH}#${fragment}`,
   });
 }
 
@@ -5336,7 +5347,7 @@ async function handleRuntimeActions(request, env) {
   return fixedJson(200, {
     schemaVersion: 1, actionId, operation: input.operation,
     status: 'authorization_required', expiresAt: new Date(expiresAt).toISOString(),
-    handoffUrl: `${CONTROL_PLANE_ORIGIN}/manage#${fragment}`,
+    handoffUrl: `https://${environment.managementHostname}${OPERATION_PATH}#${fragment}`,
   });
 }
 

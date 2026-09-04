@@ -10,8 +10,18 @@ Notable public product and repository changes are recorded here.
   grant (Access applications and MCP portals only) through the public OAuth
   client and callback certified at install, applies the prepared action in
   place, and revokes the grant. The retired hosted `/manage` page is no
-  longer navigated to, so source installs work again on two-stage gateways;
-  runtime update and teardown handoffs still await the same move.
+  longer navigated to, so source installs work again on two-stage gateways.
+- Update the gateway from the gateway itself. A runtime update handoff opens
+  the same operation page, asks for a one-time `upgrade` grant (Workers
+  scripts only), downloads the pinned release from the control plane's new
+  `/api/releases/<channel>/files/<path>` route, verifies every file against
+  the signed manifest with the update key the install was made with, uploads
+  the new version with the existing secrets inherited, and lets the new
+  version's alarm finish the journal with a `finalize` command that proves
+  the target release by its own bindings. Rollback and teardown handoffs are
+  not yet served by this route.
+- Name why a gateway-local operation stopped: the dashboard return carries a
+  bounded reason word (grant, apply, or update stage) next to the result.
 - Retire the legacy hosted installer runtime, its Durable Object, journals,
   executors, management handoffs, and analytics sink. The two-stage runtime
   shipped in gateway-v0.1.21 is the only hosted mutation path.

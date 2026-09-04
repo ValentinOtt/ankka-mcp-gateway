@@ -257,14 +257,17 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     const url = new URL(window.location.href)
     const actionId = url.searchParams.get('sourceAction')
     const result = url.searchParams.get('sourceActionResult')
+    const rawReason = url.searchParams.get('sourceActionReason')
+    const reason = rawReason !== null && /^[a-z][a-z0-9_]{0,120}$/u.test(rawReason) ? rawReason : null
     const denied = result === 'denied'
     if (url.searchParams.has('sourceActionResult')) removeResultParameter('sourceActionResult')
+    if (url.searchParams.has('sourceActionReason')) removeResultParameter('sourceActionReason')
     if (denied && actionId && ACTION_ID.test(actionId)) {
       // The authenticated endpoint checks again that provisioning has not started.
       void cancelSourceApply(actionId).catch(() => {})
     }
     if (result === 'failed') {
-      setSourceNotice({ tone: 'neutral', message: 'Cloudflare approved the request, but your gateway could not complete the installation. Check the action status below before authorizing again.' })
+      setSourceNotice({ tone: 'neutral', message: `Cloudflare approved the request, but your gateway could not complete the installation${reason === null ? '' : ` (${reason})`}. Check the action status below before authorizing again.` })
     } else if (result === 'revocation_unconfirmed') {
       setSourceNotice({ tone: 'neutral', message: 'The source was installed, but the temporary Cloudflare permission could not be confirmed revoked. Review active OAuth grants in your Cloudflare profile.' })
     }

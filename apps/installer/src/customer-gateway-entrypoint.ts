@@ -31,13 +31,25 @@ import {
   CUSTOMER_OPERATION_ROOT_PATH,
 } from './customer-install-paths';
 import type { CustomerCloudflareOperation } from './cloudflare-operation-authority';
+import { canonicalJson } from './canonical-json';
 import {
   createCustomerOperationRouter,
   customerOperationAttemptSchema,
   customerOperationCookiePresent,
   type CustomerOperationAttempt,
   type CustomerOperationAttemptPort,
+  type CustomerOperationResult,
+  type CustomerOperationRuntimeUpdateInput,
 } from './customer-operation-router';
+import {
+  openOperationSecret,
+  operationSignature,
+  sealOperationSecret,
+} from './customer-operation-secrets';
+import {
+  runCustomerRuntimeUpdate,
+  type CustomerRuntimeControlCommand,
+} from './customer-runtime-update';
 import {
   CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
   convergeCustomerStage2,
@@ -82,6 +94,31 @@ const sourceActionViewSchema = v.looseObject({
   status: v.string(),
   expiresAt: v.string(),
 });
+
+const RUNTIME_HANDOVER_KEY = 'ankka-mcp-gateway/customer-runtime-handover/v1';
+/** How long the version that started an update waits for the new one before it reports failure. */
+const RUNTIME_HANDOVER_DEADLINE_MS = 5 * 60 * 1_000;
+const RUNTIME_HANDOVER_ALARM_DELAY_MS = 8_000;
+/**
+ * What the new version needs to finish an update's journal: the action, the
+ * target it must find itself running, and the action key sealed under the
+ * ownership wrap key it inherits. Written right before the upload.
+ */
+const runtimeHandoverSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  actionId: v.pipe(v.string(), v.regex(/^action_[A-Za-z0-9_-]{32}$/u)),
+  operation: v.picklist(['update', 'rollback']),
+  actionExpiresAt: v.pipe(v.number(), v.safeInteger()),
+  target: v.strictObject({
+    release: v.pipe(v.string(), v.regex(/^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)),
+    artifactSha256: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+  }),
+  fromVersionId: v.pipe(v.string(), v.regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u)),
+  sealedActionKey: v.pipe(v.string(), v.maxLength(4_096)),
+  armedAt: v.pipe(v.number(), v.safeInteger()),
+  deadline: v.pipe(v.number(), v.safeInteger()),
+});
+type RuntimeHandover = v.InferOutput<typeof runtimeHandoverSchema>;
 
 /** The one in-flight operation attempt, kept in the object's own storage without secrets. */
 class DurableCustomerOperationAttemptPort implements CustomerOperationAttemptPort {
@@ -357,6 +394,132 @@ export class AdminState extends RuntimeAdminState {
     }));
   }
 
+  /** Reads one prepared update through the payload's own internal route. */
+  private async readRuntimeAction(actionId: string) {
+    const response = await super.fetch(new Request(`https://admin-state.invalid/runtime-updates/${actionId}`));
+    if (response.status !== 200) return null;
+    const parsed = v.safeParse(sourceActionViewSchema, await response.json());
+    if (!parsed.success || parsed.output.actionId !== actionId) return null;
+    const expiresAt = Date.parse(parsed.output.expiresAt);
+    return Number.isSafeInteger(expiresAt) ? { status: parsed.output.status, expiresAt } : null;
+  }
+
+  /** One HMAC-signed control command to the payload's update journal, in process. */
+  private async signedRuntimeControl(input: {
+    readonly actionId: string;
+    readonly actionKey: string;
+    readonly operation: 'update' | 'rollback';
+    readonly actionExpiresAt: number;
+  }, command: CustomerRuntimeControlCommand | { readonly command: 'finalize'; readonly fromVersionId: string }): Promise<boolean> {
+    const body = canonicalJson({
+      schemaVersion: 1,
+      actionId: input.actionId,
+      actionKey: input.actionKey,
+      operation: input.operation,
+      issuedAt: Date.now(),
+      expiresAt: input.actionExpiresAt,
+      ...command,
+    });
+    const response = await super.fetch(new Request('https://admin-state.invalid/runtime-updates/control', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-ankka-runtime-action-signature': await operationSignature(input.actionKey, body),
+      },
+      body,
+    }));
+    await response.body?.cancel();
+    return response.status === 200;
+  }
+
+  /**
+   * The gateway updates itself with the customer's own grant. The upload
+   * replaces this Worker, so the handover record and an alarm are written
+   * first; the new version's alarm finishes the journal.
+   */
+  private async runRuntimeUpdate(
+    config: ParsedFinalEnv,
+    input: CustomerOperationRuntimeUpdateInput,
+  ): Promise<CustomerOperationResult> {
+    const control = (command: CustomerRuntimeControlCommand) => this.signedRuntimeControl(input, command);
+    try {
+      await runCustomerRuntimeUpdate({
+        accessToken: input.accessToken,
+        accountId: config.CLOUDFLARE_ACCOUNT_ID,
+        workerName: config.ANKKA_WORKER_NAME,
+        controlPlaneOrigin: input.controlPlaneOrigin,
+        channel: config.ANKKA_UPDATE_CHANNEL,
+        updateKeyId: config.ANKKA_UPDATE_KEY_ID,
+        updatePublicKey: config.ANKKA_UPDATE_PUBLIC_KEY,
+        target: input.target,
+        transport: (target, init) => fetch(target, init),
+        control,
+        armHandover: async ({ fromVersionId }) => {
+          const armedAt = Date.now();
+          const handover: RuntimeHandover = {
+            schemaVersion: 1,
+            actionId: input.actionId,
+            operation: input.operation,
+            actionExpiresAt: input.actionExpiresAt,
+            target: input.target,
+            fromVersionId,
+            sealedActionKey: await sealOperationSecret(config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY, input.actionKey),
+            armedAt,
+            deadline: armedAt + RUNTIME_HANDOVER_DEADLINE_MS,
+          };
+          await this.finalState.storage.put(RUNTIME_HANDOVER_KEY, handover);
+          await this.finalState.storage.setAlarm(armedAt + RUNTIME_HANDOVER_ALARM_DELAY_MS);
+        },
+      });
+      return 'applied';
+    } catch {
+      return 'failed';
+    }
+  }
+
+  /**
+   * Runs in whichever version owns the object when the alarm fires: the new
+   * one proves the update by its own release bindings and completes the
+   * journal; the old one keeps waiting until the deadline, then fails it.
+   */
+  private async finishRuntimeHandover(config: ParsedFinalEnv): Promise<void> {
+    const stored = await this.finalState.storage.get(RUNTIME_HANDOVER_KEY);
+    if (stored === undefined || stored === null) return;
+    const parsed = v.safeParse(runtimeHandoverSchema, stored);
+    if (!parsed.success) {
+      await this.finalState.storage.delete(RUNTIME_HANDOVER_KEY);
+      return;
+    }
+    const handover = parsed.output;
+    const now = Date.now();
+    const running = config.ANKKA_GATEWAY_RELEASE === handover.target.release &&
+      config.ANKKA_GATEWAY_RELEASE_SHA256 === handover.target.artifactSha256;
+    if (!running && now < handover.deadline) {
+      await this.finalState.storage.setAlarm(now + RUNTIME_HANDOVER_ALARM_DELAY_MS);
+      return;
+    }
+    let actionKey: string;
+    try {
+      actionKey = await openOperationSecret(config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY, handover.sealedActionKey);
+    } catch {
+      await this.finalState.storage.delete(RUNTIME_HANDOVER_KEY);
+      return;
+    }
+    const identity = {
+      actionId: handover.actionId,
+      actionKey,
+      operation: handover.operation,
+      actionExpiresAt: handover.actionExpiresAt,
+    };
+    try {
+      await this.signedRuntimeControl(identity, running
+        ? { command: 'finalize', fromVersionId: handover.fromVersionId }
+        : { command: 'fail', failureCode: 'runtime_update_unconfirmed', recoveryRequired: true });
+    } finally {
+      await this.finalState.storage.delete(RUNTIME_HANDOVER_KEY);
+    }
+  }
+
   /** Authorizes and applies a later operation with the public client the trust names. */
   private async operationRouter(config: ParsedFinalEnv, managementOrigin: string) {
     const ownership = await this.assertOperational(config);
@@ -376,6 +539,8 @@ export class AdminState extends RuntimeAdminState {
       transport: (target, init) => fetch(target, init),
       assertOperational: () => this.assertOperational(config).then(() => undefined),
       readSourceAction: (actionId) => this.readSourceAction(actionId),
+      readRuntimeAction: (actionId) => this.readRuntimeAction(actionId),
+      runRuntimeUpdate: (input) => this.runRuntimeUpdate(config, input),
       issueRelayTicket: (operation) => this.issueOperationRelayTicket(config, operation),
       beginRelay: (input) => beginCustomerBootstrapRelay({
         ...input,
@@ -393,6 +558,12 @@ export class AdminState extends RuntimeAdminState {
    */
   async alarm(): Promise<void> {
     await this.recoveryReady;
+    // An update this object started, or the update that put this version here.
+    try {
+      await this.finishRuntimeHandover(parsedEnv(this.finalEnv));
+    } catch {
+      // A refused journal write leaves the action for the dashboard to show; the record is gone.
+    }
     try {
       await finalizeCustomerBootstrapHandover(
         new CustomerBootstrapDurableStatePort(this.finalState.storage),

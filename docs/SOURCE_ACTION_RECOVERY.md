@@ -73,10 +73,12 @@ process, revokes the grant, and sends the browser back to
 `applied`, `denied` (consent refused; the page cancels the untouched action),
 `failed` (the gateway refused or could not finish the apply; read the action
 status), or `revocation_unconfirmed` (installed, but the temporary grant could
-not be confirmed revoked). No control-plane page, token, or callback is
-involved; Ankka's hosted installer never sees the grant. Runtime updates and
-teardowns still prepare hosted `/manage` handoffs and are not yet served by
-this route.
+not be confirmed revoked), with a bounded `sourceActionReason` word (a grant
+error, the apply route's error code, or an update stage) when the gateway can
+name what stopped it. No control-plane page, token, or callback is involved;
+Ankka's hosted installer never sees the grant. Runtime updates take the same
+route with an `upgrade` grant (see [Updates](UPDATES.md)); rollback and
+teardown handoffs are not yet served by it.
 
 ## Operational limits and release review
 
