@@ -61,6 +61,7 @@ const API = 'https://api.cloudflare.com';
 const SERVERS = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/servers`;
 const PORTALS = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals`;
 const APPS = `/client/v4/zones/${ZONE_ID}/access/apps`;
+const ACCOUNT_APPS = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
 const DNS = `/client/v4/zones/${ZONE_ID}/dns_records`;
 const canonicalPrimitiveSchema = v.union([v.null(), v.boolean(), v.string()]);
 const canonicalNumberSchema = v.pipe(v.number(), v.finite());
@@ -543,8 +544,17 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
       }
     }
 
-    // Access applications and their policies
-    if (pathname === APPS && method === 'GET') return envelope([...state.apps.values()]);
+    // Access applications and their policies. An MCP application has no
+    // domain and is stored with the account: the zone listing omits it, the
+    // account listing shows every application, and by-id reads work on both.
+    if (pathname === APPS && method === 'GET') {
+      return envelope([...state.apps.values()].filter((app) => app.type !== 'mcp'));
+    }
+    if (pathname === ACCOUNT_APPS && method === 'GET') return envelope([...state.apps.values()]);
+    if (pathname.startsWith(`${ACCOUNT_APPS}/`) && method === 'GET') {
+      const [id, policies] = pathname.slice(ACCOUNT_APPS.length + 1).split('/');
+      if (policies === undefined) return state.apps.has(id) ? envelope(state.apps.get(id)) : envelope(null, 404);
+    }
     if (pathname === APPS && method === 'POST') {
       const created = { id: appId(), ...record.body };
       if (stripOauth) delete created.oauth_configuration;
