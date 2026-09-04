@@ -75,7 +75,8 @@ export type CustomerWorkerSelfUpdateStage =
   | 'worker_read'
   | 'deployment_read'
   | 'version_read'
-  | 'script_upload';
+  | 'script_upload'
+  | 'secret_delete';
 
 export class CustomerWorkerSelfUpdateError extends Error {
   readonly canRetry = false;
@@ -336,14 +337,15 @@ export async function inspectCustomerWorkerFinalRuntime(
   });
 }
 
-function uploadMetadata(
-  input: CustomerWorkerSelfUpdateInput,
-  previousVersionId: string,
-): BoundaryObject {
+function uploadMetadata(input: CustomerWorkerSelfUpdateInput): BoundaryObject {
+  // The script upload API inherits only from the latest version (it refuses
+  // an exact version id with code 10057). The caller has just proven that the
+  // latest version is the verified bootstrap version, and the active version
+  // is read back and matched exactly after the upload.
   const inherited = INHERITED_BINDINGS.map((name) => Object.freeze({
     name,
     type: 'inherit' as const,
-    version_id: previousVersionId,
+    version_id: 'latest',
   }));
   const plain = Object.entries(input.bindings).map(([name, text]) => Object.freeze({
     name,
@@ -368,6 +370,36 @@ function uploadMetadata(
 }
 
 /**
+ * Secrets survive script uploads by design, so the bootstrap nonce is removed
+ * from the Worker explicitly; the readback afterwards refuses any version
+ * that still carries it. A nonce that is already gone is fine.
+ */
+async function deleteBootstrapNonceSecret(input: CustomerWorkerSelfUpdateInput): Promise<void> {
+  const url = accountUrl(
+    input.accountId,
+    `/workers/scripts/${encodeURIComponent(input.workerName)}/secrets/ANKKA_BOOTSTRAP_NONCE`,
+  );
+  try {
+    await withDeadline(async (signal) => {
+      const response = await input.transport(url, {
+        method: 'DELETE',
+        headers: { accept: 'application/json', authorization: `Bearer ${input.accessToken}` },
+        redirect: 'manual',
+        signal,
+      });
+      if (response.status === 404) {
+        await readBoundedText(response, 'internal_error', MAX_RESPONSE_BYTES);
+        return;
+      }
+      await responseValue(response, 'secret_delete', 'submitted');
+    }, 'internal_error');
+  } catch (error) {
+    if (error instanceof CustomerWorkerSelfUpdateError) throw error;
+    fail('provider_unknown', 'secret_delete', 'unknown');
+  }
+}
+
+/**
  * Publish the final runtime while inheriting only the exact customer-owned DO,
  * assets, and ownership-key secret from one verified active version.
  */
@@ -384,7 +416,7 @@ export async function publishCustomerWorkerFinalRuntime(input: CustomerWorkerSel
     fail('provider_mismatch', 'deployment_read', 'rejected');
   }
   const form = new FormData();
-  form.append('metadata', new Blob([canonicalJson(uploadMetadata(input, before.versionId))], {
+  form.append('metadata', new Blob([canonicalJson(uploadMetadata(input))], {
     type: 'application/json',
   }), 'metadata.json');
   const sourceBytes = new TextEncoder().encode(input.finalRuntimeSource);
@@ -412,6 +444,7 @@ export async function publishCustomerWorkerFinalRuntime(input: CustomerWorkerSel
     if (error instanceof CustomerWorkerSelfUpdateError) throw error;
     fail('provider_unknown', 'script_upload', 'unknown');
   }
+  await deleteBootstrapNonceSecret(input);
   const wait = input.wait ?? ((milliseconds: number) =>
     new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
   for (let attempt = 0; attempt < 8; attempt += 1) {

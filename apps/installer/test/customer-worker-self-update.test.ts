@@ -123,6 +123,12 @@ function providerFixture(options: ProviderFixtureOptions = {}) {
       expect(url.searchParams.get('include')).toBe('modules');
       return envelope(finalVersion(options.finalBindings ?? finalBindings()));
     }
+    if (url.pathname.endsWith(`/workers/scripts/${WORKER_NAME}/secrets/ANKKA_BOOTSTRAP_NONCE`) &&
+        request.method === 'DELETE') {
+      // Secrets survive uploads; the nonce must be removed explicitly.
+      if (!activeFinal) throw new Error('nonce deleted before the final upload');
+      return envelope(null);
+    }
     if (url.pathname.endsWith(`/workers/scripts/${WORKER_NAME}`) && request.method === 'PUT') {
       expect(url.searchParams.get('bindings_inherit')).toBe('strict');
       const body = init.body;
@@ -185,15 +191,24 @@ describe('customer Worker final self-update', () => {
     if (!Array.isArray(bindings)) throw new TypeError('metadata bindings');
     const inherited = bindings.filter((binding) => v.is(inheritedBindingSchema, binding));
     expect(inherited).toEqual([
-      { name: 'ADMIN_STATE', type: 'inherit', version_id: OLD_VERSION },
-      { name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY', type: 'inherit', version_id: OLD_VERSION },
-      { name: 'ASSETS', type: 'inherit', version_id: OLD_VERSION },
+      // The script upload API only inherits from the latest version; the
+      // previous version is proven equal to it right before the upload.
+      { name: 'ADMIN_STATE', type: 'inherit', version_id: 'latest' },
+      { name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY', type: 'inherit', version_id: 'latest' },
+      { name: 'ASSETS', type: 'inherit', version_id: 'latest' },
     ]);
     expect(JSON.stringify(metadata)).not.toContain('ANKKA_BOOTSTRAP_NONCE');
     expect(JSON.stringify(metadata)).not.toContain('secret_text');
-    expect(provider.calls).toContain(
+    const upload = provider.calls.indexOf(
       `PUT /client/v4/accounts/${ACCOUNT_ID}/workers/scripts/${WORKER_NAME}?bindings_inherit=strict`,
     );
+    const nonceDelete = provider.calls.indexOf(
+      `DELETE /client/v4/accounts/${ACCOUNT_ID}/workers/scripts/${WORKER_NAME}/secrets/ANKKA_BOOTSTRAP_NONCE`,
+    );
+    const finalRead = provider.calls.findIndex((call) => call.includes(`/versions/${FINAL_VERSION}`));
+    expect(upload).toBeGreaterThanOrEqual(0);
+    expect(nonceDelete).toBeGreaterThan(upload);
+    expect(finalRead).toBeGreaterThan(nonceDelete);
   });
 
   it('recovers by exact readback without publishing again', async () => {

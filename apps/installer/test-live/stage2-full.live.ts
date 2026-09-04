@@ -74,7 +74,13 @@ async function traced(request: Request): Promise<Response> {
   const started = performance.now();
   try {
     const response = await realFetch(request);
-    trace.push({ method: request.method, path: `${url.host}${url.pathname}${url.search}`, status: response.status, ms: Math.round(performance.now() - started) });
+    let status: number | string = response.status;
+    if (!response.ok && url.hostname === 'api.cloudflare.com') {
+      // The provider's error codes and messages, for the trace only.
+      const body = await response.clone().text().catch(() => '');
+      status = `${response.status} ${body.replace(/\s+/gu, ' ').slice(0, 400)}`;
+    }
+    trace.push({ method: request.method, path: `${url.host}${url.pathname}${url.search}`, status, ms: Math.round(performance.now() - started) });
     return response;
   } catch (error) {
     trace.push({ method: request.method, path: `${url.host}${url.pathname}`, status: `threw ${error instanceof Error ? error.name : 'unknown'}`, ms: Math.round(performance.now() - started) });
