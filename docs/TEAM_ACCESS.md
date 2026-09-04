@@ -12,6 +12,24 @@ This keeps the credential boundary simple:
 - source-provider credentials remain in your Cloudflare account; and
 - changing Team membership does not send a token, policy, or roster to Ankka.
 
+## Revocation qualification
+
+Removing an email from a source policy does not by itself prove that an
+already-connected client has lost access. In canary qualification, a member's
+existing Portal grant continued to execute direct and Code Mode calls more
+than five minutes after its source-policy removal was verified. Portal admission remained unchanged.
+
+Existing-grant invalidation and fresh-grant denial remain release gates. Do
+not describe a policy update as immediate revocation until calls using the
+previously authorized grant are denied. Record the observation window and
+verify the result with harmless reads.
+
+Cloudflare documents separate
+[session revocation controls](https://developers.cloudflare.com/cloudflare-one/access-controls/access-settings/session-management/#revoke-user-sessions)
+for an entire application or a user across applications. Their scope is broader
+than removing one person's source assignment; review the affected access
+before using them. Their effect on this Portal workflow is not yet qualified.
+
 ## Why V1 does not use an API token
 
 Cloudflare support confirmed that both account-owned (`cfat_...`) and user-owned
