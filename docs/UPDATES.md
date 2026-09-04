@@ -65,8 +65,9 @@ An update starts in the gateway dashboard and runs on the gateway itself:
    client and callback certified at install.
 2. The gateway confirms the grant reaches the installed account by reading
    the gateway Worker, reads its active Worker version and current bindings, then
-   fetches the pinned release descriptor and every manifest file from the
-   control plane's `/api/releases/<channel>/files/<path>` route and verifies
+   fetches the approved release descriptor from
+   `/api/releases/<channel>/by-id/<release>/<artifact-sha256>` and its manifest
+   files from that route's `/files/<path>` suffix, then verifies
    the signature and every digest with the update key it was installed with.
 3. It uploads the new management assets, records a handover (the action, the
    target, and the action key sealed under the ownership wrap key), arms its
@@ -92,11 +93,26 @@ proves the new release or reports recovery-required.
 
 ## Rollback
 
-A successful update retains the previous Cloudflare version. Rollback is a new
-operator-approved action with a fresh Cloudflare authorization. Through the
-gateway's own route it succeeds only while the control plane still pins the
-release being rolled back to; otherwise it stops with `release_unavailable`
-before any upload. Serving exact earlier releases is still open.
+A successful update retains the previous release reference and Cloudflare
+version. Rollback is a new operator-approved action with a fresh Cloudflare
+authorization. The gateway fetches the exact recorded release and artifact
+digest through its own operation route, even after the channel advances.
+The hosted release service reads the retained, immutable release from its
+bucket using its reviewed channel, origin, and signing key. The gateway then
+independently verifies the signature and every payload digest with its installed
+trust key before uploading the old code and assets.
+
+The retained release must still be available under that trust key. Missing,
+altered, mismatched, or untrusted release bytes stop the action before any
+upload; the current channel is never substituted. Retrieving a retained
+release does not depend on the promoted bundle loading successfully. The
+existing channel descriptor and file routes remain available to older gateways,
+which need a forward update before they gain this rollback behavior.
+
+Offline qualification covers a newer promoted release with an older signed
+rollback target, inherited secrets, and rejection before upload for unavailable
+or invalid historical bytes. A live update-and-rollback cycle remains a release
+qualification requirement.
 
 The only persisted rollback changes are Worker code and management assets. It
 does not roll back Durable Object data, sources, Access, DNS, Portal

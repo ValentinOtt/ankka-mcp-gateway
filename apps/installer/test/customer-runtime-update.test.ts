@@ -19,6 +19,8 @@ import {
   type ReleaseFileRecord,
 } from '../src/release-manifest';
 import { buildPublicUpdateChannel } from '../src/update-channel';
+import type { R2ReleaseReadBucket } from '../src/r2-release-provider';
+import { createTwoStageDeployRuntime, type TwoStageDeployEnv } from '../src/two-stage-runtime';
 
 const CONTROL_PLANE = 'https://deploy.ankka.ai';
 const ACCOUNT_ID = 'a'.repeat(32);
@@ -71,8 +73,8 @@ interface SignedRelease {
 }
 
 /** A complete release bundle signed with a key generated for this test. */
-async function signedRelease(): Promise<SignedRelease> {
-  const workerSource = `// ankka-control-plane-origin:${CONTROL_PLANE}\nexport class AdminState{};export default{fetch(){return new Response("${TO_RELEASE}")}};`;
+async function signedRelease(releaseId = TO_RELEASE, signingKey?: CryptoKeyPair): Promise<SignedRelease> {
+  const workerSource = `// ankka-control-plane-origin:${CONTROL_PLANE}\nexport class AdminState{};export default{fetch(){return new Response("${releaseId}")}};`;
   const admin = [
     await source('payload/admin/assets/admin-0badc0de.js', 'text/javascript; charset=utf-8', 'globalThis.__admin=35;'),
     await source('payload/admin/index.html', 'text/html; charset=utf-8', '<!doctype html><main>admin v35</main>'),
@@ -104,11 +106,11 @@ async function signedRelease(): Promise<SignedRelease> {
       workerRetirement: await component(workerRetirement),
     },
     oauthScopeIds: REQUIRED_OAUTH_SCOPES,
-    release: TO_RELEASE,
+    release: releaseId,
     schemaVersion: 1,
     sourceCommit: '0123456789abcdef0123456789abcdef01234567',
   });
-  const keyPair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+  const keyPair = signingKey ?? await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const publicKey = base64UrlEncode(new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey)));
   const serializedManifest = canonicalJson(manifest);
   const signature = base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
@@ -179,12 +181,17 @@ function envelope(result: BoundaryValue, status = 200): Response {
   return Response.json({ success: true, errors: [], messages: [], result }, { status });
 }
 
-function providerFake(release: SignedRelease): ProviderFake {
+function providerFake(release: SignedRelease, options: {
+  readonly currentRelease?: string;
+  readonly controlPlane?: (request: Request) => Promise<Response>;
+} = {}): ProviderFake {
   const requests: Recorded[] = [];
   const events: string[] = [];
   const tamper: ProviderFake['tamper'] = { file: null, descriptorRelease: null, uploadStatus: 200 };
   const channel = buildPublicUpdateChannel(release.bundle);
   const bindings = currentBindings(release.publicKey);
+  bindings.ANKKA_GATEWAY_RELEASE = options.currentRelease ?? FROM_RELEASE;
+  const releasePath = `/api/releases/canary/by-id/${release.bundle.manifest.release}/${release.bundle.manifest.artifact.treeSha256}`;
   const transport: CustomerCloudflareTransport = async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init);
     const url = new URL(request.url);
@@ -192,15 +199,16 @@ function providerFake(release: SignedRelease): ProviderFake {
     const form = request.headers.get('content-type')?.startsWith('multipart/form-data') ? await request.formData() : null;
     requests.push({ method, url: request.url, authorization: request.headers.get('authorization'), form });
     if (url.origin === CONTROL_PLANE && method === 'GET') {
-      if (url.pathname === '/api/releases/canary') {
+      if (options.controlPlane !== undefined) return options.controlPlane(request);
+      if (url.pathname === releasePath) {
         events.push('descriptor');
         const served = tamper.descriptorRelease === null
           ? channel
           : { ...channel, release: { ...channel.release, id: tamper.descriptorRelease } };
         return Response.json(served);
       }
-      const match = /^\/api\/releases\/canary\/files\/(.+)$/u.exec(url.pathname);
-      const path = match?.[1];
+      const prefix = `${releasePath}/files/`;
+      const path = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : undefined;
       const bytes = path === undefined ? undefined : release.files.get(path);
       if (bytes === undefined) return new Response('missing', { status: 404 });
       events.push(`file:${path}`);
@@ -294,8 +302,138 @@ const metadataSchema = v.looseObject({
   main_module: v.literal('index.js'),
 });
 
+async function historicalServer(retained: SignedRelease, promoted: SignedRelease) {
+  const objects = new Map<string, { bytes: Uint8Array; contentType: string }>();
+  const reads: string[] = [];
+  for (const release of [retained, promoted]) {
+    const prefix = `ankka-mcp-gateway/releases/canary/${release.bundle.manifest.release}/`;
+    objects.set(`${prefix}release-envelope.json`, {
+      bytes: encoder.encode(canonicalJson(release.bundle.envelope)), contentType: 'application/json; charset=utf-8',
+    });
+    for (const file of release.bundle.payload) {
+      objects.set(`${prefix}${file.path}`, { bytes: new Uint8Array(await file.bytes.arrayBuffer()), contentType: file.contentType });
+    }
+  }
+  const bucket: R2ReleaseReadBucket = {
+    get: async (key) => {
+      reads.push(key);
+      const stored = objects.get(key);
+      if (stored === undefined) return null;
+      return {
+        key, size: stored.bytes.byteLength, httpMetadata: { contentType: stored.contentType },
+        arrayBuffer: async () => new Uint8Array(stored.bytes).buffer,
+      };
+    },
+    list: async ({ prefix }) => ({
+      objects: [...objects].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, size: value.bytes.byteLength })),
+      truncated: false,
+    }),
+  };
+  const worker = createTwoStageDeployRuntime({
+    schemaVersion: 1, channel: 'canary', controlPlaneOrigin: CONTROL_PLANE,
+    release: promoted.bundle.manifest.release, artifactSha256: promoted.bundle.manifest.artifact.treeSha256,
+    keyId: KEY_ID, publicKey: promoted.publicKey,
+  });
+  // SAFETY: public release reads must need only the bucket, never session or OAuth bindings.
+  const env = { GATEWAY_RELEASE_BUCKET: bucket } as TwoStageDeployEnv;
+  return {
+    objects, reads,
+    fetch: (request: Request) => worker.fetch(request, env),
+    retainedPath: `/api/releases/canary/by-id/${retained.bundle.manifest.release}/${retained.bundle.manifest.artifact.treeSha256}`,
+  };
+}
+
 describe('gateway-local runtime update', () => {
-  it('verifies the pinned bundle against its own update key, hands over, then replaces itself with inherited secrets', async () => {
+  it('rolls back through the public server to the signed retained release after the channel advances', async () => {
+    const key = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    const retained = await signedRelease(TO_RELEASE, key);
+    const promoted = await signedRelease('gateway-v0.1.36', key);
+    const server = await historicalServer(retained, promoted);
+    const latest = await server.fetch(new Request(`${CONTROL_PLANE}/api/releases/canary`));
+    expect(await latest.json()).toMatchObject({ release: { id: 'gateway-v0.1.36' } });
+    const fake = providerFake(retained, { currentRelease: 'gateway-v0.1.36', controlPlane: server.fetch });
+    const commands: CustomerRuntimeControlCommand[] = [];
+    const handovers: string[] = [];
+    await expect(runCustomerRuntimeUpdate(input(fake, retained, commands, handovers)))
+      .resolves.toEqual({ status: 'uploaded', fromVersionId: OLD_VERSION });
+    expect(handovers).toEqual([OLD_VERSION]);
+    const publicRequests = fake.requests.filter((request) => new URL(request.url).origin === CONTROL_PLANE);
+    expect(publicRequests).toHaveLength(retained.files.size + 1);
+    expect(publicRequests.every((request) => request.authorization === null &&
+      new URL(request.url).pathname.startsWith(server.retainedPath))).toBe(true);
+    const uploaded = fake.requests.find((request) => request.method === 'PUT')?.form?.get('index.js');
+    if (!(uploaded instanceof Blob)) throw new Error('rollback upload missing');
+    expect(await uploaded.text()).toBe(retained.workerSource);
+    // The descriptor and all files reuse one verified immutable bundle.
+    const envelopeKey = `ankka-mcp-gateway/releases/canary/${TO_RELEASE}/release-envelope.json`;
+    expect(server.reads.filter((key) => key === envelopeKey)).toHaveLength(1);
+  });
+
+  it('loads a retained release even when the promoted bundle is unavailable', async () => {
+    const key = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    const retained = await signedRelease(TO_RELEASE, key);
+    const promoted = await signedRelease('gateway-v0.1.36', key);
+    const server = await historicalServer(retained, promoted);
+    server.objects.delete('ankka-mcp-gateway/releases/canary/gateway-v0.1.36/release-envelope.json');
+    const descriptor = await server.fetch(new Request(`${CONTROL_PLANE}${server.retainedPath}`));
+    expect(descriptor.status).toBe(200);
+    expect(descriptor.headers.get('set-cookie')).toBeNull();
+    expect(await descriptor.json()).toMatchObject({ release: { id: TO_RELEASE } });
+    expect((await server.fetch(new Request(`${CONTROL_PLANE}/api/releases/canary`))).status).toBe(503);
+  });
+
+  it('never substitutes the current channel for missing, mismatched, corrupt, or untrusted retained bytes', async () => {
+    for (const fault of ['missing', 'digest', 'corrupt', 'key'] as const) {
+      const key = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+      const retained = await signedRelease(TO_RELEASE, key);
+      const promoted = await signedRelease('gateway-v0.1.36', fault === 'key' ? undefined : key);
+      const server = await historicalServer(retained, promoted);
+      const prefix = `ankka-mcp-gateway/releases/canary/${TO_RELEASE}/`;
+      if (fault === 'missing') server.objects.delete(`${prefix}release-envelope.json`);
+      if (fault === 'corrupt') {
+        const file = server.objects.get(`${prefix}payload/worker/index.js`);
+        if (file === undefined || file.bytes[0] === undefined) throw new Error('fixture file missing');
+        file.bytes[0] = file.bytes[0] ^ 1;
+      }
+      const fake = providerFake(retained, { currentRelease: 'gateway-v0.1.36', controlPlane: server.fetch });
+      const commands: CustomerRuntimeControlCommand[] = [];
+      const handovers: string[] = [];
+      const base = input(fake, retained, commands, handovers);
+      await expect(runCustomerRuntimeUpdate({
+        ...base,
+        target: fault === 'digest' ? { release: TO_RELEASE, artifactSha256: `sha256:${'0'.repeat(64)}` } : base.target,
+      })).rejects.toMatchObject({ code: 'release_unavailable', stage: 'release_read' });
+      expect(handovers).toEqual([]);
+      expect(fake.events).not.toContain('asset-session');
+      expect(fake.events).not.toContain('script-upload');
+      expect(commands.at(-1)).toEqual({
+        command: 'fail', failureCode: 'runtime_release_read_release_unavailable', recoveryRequired: false,
+      });
+    }
+  });
+
+  it('limits public historical reads to the pinned channel and exact manifest files without caller-supplied trust', async () => {
+    const key = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    const retained = await signedRelease(TO_RELEASE, key);
+    const server = await historicalServer(retained, await signedRelease('gateway-v0.1.36', key));
+    for (const [path, method, status] of [
+      [server.retainedPath.replace('/canary/', '/stable/'), 'GET', 404],
+      [server.retainedPath, 'POST', 405],
+      [`${server.retainedPath}?keyId=other&publicKey=${retained.publicKey}`, 'GET', 404],
+      [`${server.retainedPath}/files/manifest.json`, 'GET', 404],
+      [`${server.retainedPath}/files/payload/worker/missing.js`, 'GET', 404],
+      [`${server.retainedPath}/files/payload/%2e%2e/%2e%2e/release-envelope.json`, 'GET', 404],
+    ] as const) {
+      const response = await server.fetch(new Request(`${CONTROL_PLANE}${path}`, { method }));
+      expect(response.status).toBe(status);
+      expect(response.headers.get('set-cookie')).toBeNull();
+    }
+    const file = await server.fetch(new Request(`${CONTROL_PLANE}${server.retainedPath}/files/payload/worker/index.js`));
+    expect(file.status).toBe(200);
+    expect(await file.text()).toBe(retained.workerSource);
+  });
+
+  it('verifies the exact bundle against its own update key, hands over, then replaces itself with inherited secrets', async () => {
     const release = await signedRelease();
     const fake = providerFake(release);
     const commands: CustomerRuntimeControlCommand[] = [];
@@ -347,7 +485,7 @@ describe('gateway-local runtime update', () => {
     for (const [prepare, code, stage, targetRelease] of [
       // A descriptor whose release contradicts its own signed manifest is not a release at all.
       [(fake: ProviderFake) => { fake.tamper.descriptorRelease = 'gateway-v0.1.36'; }, 'release_invalid', 'release_read', TO_RELEASE],
-      // The control plane pins another release than the one this action approved.
+      // The control plane has no exact bundle for the action's approved identity.
       [() => undefined, 'release_unavailable', 'release_read', 'gateway-v0.1.36'],
       [(fake: ProviderFake) => { fake.tamper.file = 'payload/worker/index.js'; }, 'release_invalid', 'release_read'],
       [(fake: ProviderFake) => { fake.tamper.file = 'payload/admin/index.html'; }, 'release_invalid', 'release_read'],

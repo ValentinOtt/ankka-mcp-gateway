@@ -34,7 +34,7 @@ import { parsePublicUpdateChannel } from './update-channel';
 
 /**
  * A gateway updating itself. The grant is the customer's own `upgrade`
- * consent; the bytes come from the control plane's pinned bundle and are
+ * consent; the bytes come from the control plane's exact signed bundle and are
  * verified against the signed manifest with the update key this runtime was
  * installed with before anything is uploaded. The upload replaces the very
  * Worker that runs this code, so the caller arms a handover first and the new
@@ -337,12 +337,13 @@ function manifestFiles(manifest: ReleaseManifest) {
   ];
 }
 
-/** Fetches the pinned bundle and proves it is the exact signed target before it can be uploaded. */
+/** Fetches the approved bundle independently of the mutable channel selection. */
 async function loadTargetBundle(input: CustomerRuntimeUpdateInput): Promise<VerifiedReleaseBundle> {
+  const releasePath = `/api/releases/${input.channel}/by-id/${input.target.release}/${input.target.artifactSha256.slice('sha256:'.length)}`;
   let channel: ReturnType<typeof parsePublicUpdateChannel>;
   try {
     channel = parsePublicUpdateChannel(JSON.parse(new TextDecoder().decode(
-      await controlPlaneBytes(input, `/api/releases/${input.channel}`, MAX_DESCRIPTOR_BYTES),
+      await controlPlaneBytes(input, releasePath, MAX_DESCRIPTOR_BYTES),
     )));
   } catch (error) {
     if (error instanceof CustomerRuntimeUpdateError) throw error;
@@ -359,13 +360,14 @@ async function loadTargetBundle(input: CustomerRuntimeUpdateInput): Promise<Veri
   } catch {
     fail('release_invalid', 'release_read');
   }
-  if (manifest.artifact.byteSize > MAX_BUNDLE_BYTES) fail('release_invalid', 'release_read');
+  if (manifest.controlPlaneOrigin !== input.controlPlaneOrigin ||
+      manifest.artifact.byteSize > MAX_BUNDLE_BYTES) fail('release_invalid', 'release_read');
   const files: ReleasePayloadFile[] = [];
   const blobs: VerifiedReleasePayloadBlob[] = [];
   for (const record of manifestFiles(manifest)) {
     if (!FILE_PATH.test(record.path)) fail('release_invalid', 'release_read');
     const bytes = await controlPlaneBytes(
-      input, `/api/releases/${input.channel}/files/${record.path}`, record.byteSize,
+      input, `${releasePath}/files/${record.path}`, record.byteSize,
     );
     if (bytes.byteLength !== record.byteSize) fail('release_invalid', 'release_read');
     files.push({ path: record.path, bytes });

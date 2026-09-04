@@ -4,6 +4,12 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Fetch an approved update or rollback release by its exact version and artifact
+  digest, so moving the release channel no longer makes rollback unavailable.
+  Serve retained signed releases from the existing bucket without a session or
+  grant; keep the reviewed channel, origin, and signing key fixed and preserve
+  runtime compatibility checks. Missing or invalid bytes stop before upload.
+
 - Add ChatGPT and Cursor web OAuth callback defaults to newly created Portals
   alongside Claude. ChatGPT's variable callback is limited to its documented
   connector OAuth path. Keep local callbacks, existing Portal settings, and
