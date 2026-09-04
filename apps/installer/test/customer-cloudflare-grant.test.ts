@@ -4,6 +4,7 @@ import {
   resolveAuthorizedCloudflareZone,
   resolveSingleAuthorizedCloudflareAccount,
   verifyCustomerCloudflareGrantAccount,
+  verifyCustomerCloudflareGrantAccountAccess,
 } from '../src/customer-cloudflare-grant';
 import type { BoundaryValue } from '../src/boundary';
 
@@ -430,5 +431,88 @@ describe('provider bodies are consumed inside the deadline', () => {
     });
     expect(grant.metadataValid).toBe(true);
     expect(grant.scopes).toHaveLength(INSTALL_SCOPES.length);
+  });
+});
+
+describe('verifyCustomerCloudflareGrantAccountAccess', () => {
+  const WORKER = 'ankka-gateway-example';
+
+  interface ProbeCall {
+    readonly url: string;
+    readonly init: RequestInit | undefined;
+  }
+  interface ProbeHarness {
+    readonly calls: ProbeCall[];
+    readonly transport: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  }
+
+  function probe(respond: () => Response): ProbeHarness {
+    const calls: ProbeCall[] = [];
+    return {
+      calls,
+      transport: async (input, init) => {
+        calls.push({ url: String(input), init });
+        return respond();
+      },
+    };
+  }
+
+  it('reads the expected account under the operation scope instead of listing accounts', async () => {
+    const source = probe(() => json({ success: true, errors: [], messages: [], result: [] }));
+    await verifyCustomerCloudflareGrantAccountAccess({
+      accessToken: ACCESS_TOKEN, expectedAccountId: ACCOUNT_ID, operation: 'source-add',
+      workerName: WORKER, transport: source.transport,
+    });
+    expect(source.calls.map((call) => call.url)).toEqual([
+      `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals`,
+    ]);
+    expect(source.calls[0]?.init?.method).toBe('GET');
+    expect(new Headers(source.calls[0]?.init?.headers).get('authorization')).toBe(`Bearer ${ACCESS_TOKEN}`);
+
+    const upgrade = probe(() => json({ success: true, errors: [], messages: [], result: { id: 'w' } }));
+    await verifyCustomerCloudflareGrantAccountAccess({
+      accessToken: ACCESS_TOKEN, expectedAccountId: ACCOUNT_ID, operation: 'upgrade',
+      workerName: WORKER, transport: upgrade.transport,
+    });
+    expect(upgrade.calls.map((call) => call.url)).toEqual([
+      `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/workers/workers/${WORKER}`,
+    ]);
+  });
+
+  it('names a refused read as another account and other failures as the provider', async () => {
+    const refused = probe(() => json({
+      success: false, errors: [{ code: 10000, message: 'Authentication error' }], messages: [], result: null,
+    }, 403));
+    await expect(verifyCustomerCloudflareGrantAccountAccess({
+      accessToken: ACCESS_TOKEN, expectedAccountId: ACCOUNT_ID, operation: 'source-add',
+      workerName: WORKER, transport: refused.transport,
+    })).rejects.toMatchObject({ code: 'account_mismatch', detail: 'http_403_code_10000' });
+
+    const outage = probe(() => json({ success: false, errors: [], messages: [], result: null }, 500));
+    await expect(verifyCustomerCloudflareGrantAccountAccess({
+      accessToken: ACCESS_TOKEN, expectedAccountId: ACCOUNT_ID, operation: 'upgrade',
+      workerName: WORKER, transport: outage.transport,
+    })).rejects.toMatchObject({ code: 'provider_unavailable', detail: 'http_500' });
+
+    const html = probe(() => new Response('<html>', { status: 200, headers: { 'content-type': 'text/html' } }));
+    await expect(verifyCustomerCloudflareGrantAccountAccess({
+      accessToken: ACCESS_TOKEN, expectedAccountId: ACCOUNT_ID, operation: 'rollback',
+      workerName: WORKER, transport: html.transport,
+    })).rejects.toMatchObject({ code: 'provider_unavailable', detail: 'not_json_http_200' });
+
+    const unsuccessful = probe(() => json({ success: false, errors: [{ code: 1234 }], messages: [], result: null }));
+    await expect(verifyCustomerCloudflareGrantAccountAccess({
+      accessToken: ACCESS_TOKEN, expectedAccountId: ACCOUNT_ID, operation: 'source-add',
+      workerName: WORKER, transport: unsuccessful.transport,
+    })).rejects.toMatchObject({ code: 'provider_unavailable', detail: 'success_false_code_1234' });
+  });
+
+  it('rejects a malformed worker name before any request', async () => {
+    const untouched = probe(() => json({ success: true, errors: [], messages: [], result: [] }));
+    await expect(verifyCustomerCloudflareGrantAccountAccess({
+      accessToken: ACCESS_TOKEN, expectedAccountId: ACCOUNT_ID, operation: 'upgrade',
+      workerName: 'Bad Name', transport: untouched.transport,
+    })).rejects.toMatchObject({ code: 'invalid' });
+    expect(untouched.calls).toHaveLength(0);
   });
 });

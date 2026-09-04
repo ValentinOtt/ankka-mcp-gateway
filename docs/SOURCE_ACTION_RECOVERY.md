@@ -66,8 +66,9 @@ Cloudflare consent for exactly the `source-add` scopes through the public
 OAuth client and callback that the ownership trust certified at install. The
 PKCE verifier and the action key travel only in one HttpOnly cookie.
 
-On the callback the gateway exchanges the code itself, checks the grant's
-account, submits the HMAC-signed apply claim to its own action route in
+On the callback the gateway exchanges the code itself, confirms the grant
+reaches the installed account by reading that account's MCP portals (an
+operation grant cannot list accounts), submits the HMAC-signed apply claim to its own action route in
 process, revokes the grant, and sends the browser back to
 `/sources?sourceAction=<id>&sourceActionResult=<result>`. The result is
 `applied`, `denied` (consent refused; the page cancels the untouched action),

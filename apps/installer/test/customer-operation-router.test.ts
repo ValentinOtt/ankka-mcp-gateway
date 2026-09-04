@@ -99,7 +99,7 @@ interface Harness {
   readonly revoked: () => boolean;
 }
 
-function transport(scope = SOURCE_SCOPES): Harness {
+function transport(scope = SOURCE_SCOPES, account: 'reachable' | 'refused' = 'reachable'): Harness {
   const calls: string[] = [];
   let revoked = false;
   return {
@@ -111,8 +111,13 @@ function transport(scope = SOURCE_SCOPES): Harness {
       if (url.endsWith('/oauth2/token')) {
         return json({ access_token: ACCESS_TOKEN, token_type: 'bearer', scope });
       }
-      if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
-        return json({ success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }] });
+      if (url.startsWith(`https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/`)) {
+        if (account === 'refused') {
+          return new Response(JSON.stringify({
+            success: false, errors: [{ code: 10000, message: 'Authentication error' }], messages: [], result: null,
+          }), { status: 403, headers: { 'content-type': 'application/json' } });
+        }
+        return json({ success: true, errors: [], messages: [], result: [] });
       }
       if (url.endsWith('/oauth2/revoke')) {
         revoked = true;
@@ -327,6 +332,10 @@ describe('gateway-local operation router', () => {
       cloudflareAccessToken: ACCESS_TOKEN,
     });
     await expect(verifySignature(record)).resolves.toBe(true);
+    expect(harness.calls).toContain(
+      `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals`,
+    );
+    expect(harness.calls.some((call) => call.includes('/client/v4/accounts?'))).toBe(false);
     expect(harness.revoked()).toBe(true);
     expect(attempts.current()).toBeNull();
     const persisted = attempts.writes.join('\n');
@@ -377,7 +386,29 @@ describe('gateway-local operation router', () => {
       operation: 'update',
       target: { release: 'gateway-v0.1.35', artifactSha256: `sha256:${'e'.repeat(64)}` },
     }]);
+    expect(upgradeTransport.calls).toContain(
+      `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/workers/workers/ankka-gateway`,
+    );
     expect(upgradeTransport.revoked()).toBe(true);
+    expect(attempts.current()).toBeNull();
+  });
+
+  it('fails without applying when the grant does not reach the installed account', async () => {
+    const attempts = attemptPort();
+    const harness = transport(SOURCE_SCOPES, 'refused');
+    const applied: ApplyRecord[] = [];
+    const target = router(dependencies({
+      port: attempts.port, harness, applied,
+      action: { status: 'authorization_required', expiresAt: ACTION_EXPIRES_AT },
+    }));
+    const { cookie, callback } = await authorize(target);
+    const result = await target.fetch(new Request(callback, { headers: { cookie } }));
+    expect(result.status).toBe(303);
+    const location = new URL(result.headers.get('location') ?? '');
+    expect(location.searchParams.get('sourceActionResult')).toBe('failed');
+    expect(location.searchParams.get('sourceActionReason')).toBe('grant_account_mismatch_http_403_code_10000');
+    expect(applied).toHaveLength(0);
+    expect(harness.revoked()).toBe(true);
     expect(attempts.current()).toBeNull();
   });
 
