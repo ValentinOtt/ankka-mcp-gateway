@@ -22,12 +22,12 @@ const COMPONENTS = Object.freeze({
 });
 const TREE_SHA256 = Object.freeze({
   installer: 'ece161a6849085ad5e06b3c8813b4ea92c54eaa1403942ee95b2ce286f4e7a1b',
-  worker: '164fa863461f3d449b7eb22408d5c4e629c8b47e95420c24782832dc0f68cf3f',
-  'worker-cleanup': '04e8730405917fac4bd53e6fdc81c00520d939ae798775ed2ca4ff38e60d30ad',
+  worker: '7ecf8489081a674ea8151ba700980c4a0a1f8b41c9937718400148bf86cd67fc',
+  'worker-cleanup': '4f8961537a3ce86d56e57b1d8f9a51e49896940481972d284abccc0e57c906ed',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
 const FROZEN_LIFECYCLE_SHA256 = Object.freeze({
-  'worker-cleanup/index.js': 'bf15c48c9db10119cc836d0591f5bd67701815700143d175d3e27008fdc90804',
+  'worker-cleanup/index.js': 'e1ac4345708272e71068e58db8d7ae50a5c0c70e55ba858e804956d420358abc',
   'worker-retirement/index.js': '506e91323d6f6c89398a15799bfcde6cb4d271a5d6bf28a4fbbd422331751bda',
 });
 const CONTENT_TYPES = Object.freeze({

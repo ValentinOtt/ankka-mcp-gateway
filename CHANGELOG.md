@@ -41,6 +41,11 @@ Notable public product and repository changes are recorded here.
   uploads the new version. The replaced version could not clear it afterwards,
   so every other operation on that gateway answered `operation_pending` for
   up to ten minutes after an update.
+- Create, find, and remove a source's Access application and its policy
+  through the account paths. The application lives with the account, and its
+  policy could not be created through the zone path, so the second real
+  source installation stopped after the MCP server and the application
+  existed. The portal application, a zone hostname, keeps its zone paths.
 - Retire the legacy hosted installer runtime, its Durable Object, journals,
   executors, management handoffs, and analytics sink. The two-stage runtime
   shipped in gateway-v0.1.21 is the only hosted mutation path.
