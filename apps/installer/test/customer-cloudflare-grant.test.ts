@@ -84,6 +84,71 @@ describe('customer-owned Cloudflare grant', () => {
     });
   });
 
+  it('lists what the grant can see when the filtered zone read finds nothing', async () => {
+    const requests: URL[] = [];
+    const activeZone = { id: ZONE_ID, name: 'example.com', status: 'active', account: { id: ACCOUNT_ID } };
+    const zone = await resolveAuthorizedCloudflareZone({
+      accessToken: ACCESS_TOKEN,
+      accountId: ACCOUNT_ID,
+      zoneName: 'example.com',
+      transport: async (input) => {
+        const url = new URL(String(input));
+        requests.push(url);
+        // The provider-side filter misses; the plain listing carries the zone
+        // beside a pending twin and a same-named zone of another account.
+        if (url.searchParams.has('name')) return json({ success: true, errors: [], messages: [], result: [] });
+        return json({
+          success: true,
+          errors: [],
+          messages: [],
+          result: [
+            { id: '3'.repeat(32), name: 'example.com', status: 'pending', account: { id: ACCOUNT_ID } },
+            { id: '4'.repeat(32), name: 'example.com', status: 'active', account: { id: '5'.repeat(32) } },
+            activeZone,
+          ],
+        });
+      },
+    });
+    expect(zone).toEqual({ id: ZONE_ID, name: 'example.com', status: 'active' });
+    expect(requests).toHaveLength(2);
+    expect(Object.fromEntries(requests[1]?.searchParams ?? [])).toEqual({ page: '1', per_page: '20' });
+    expect(requests[1]?.pathname).toBe('/client/v4/zones');
+  });
+
+  it('names how many zones the grant could see when none is the approved one', async () => {
+    const resolve = (listed: BoundaryValue[]) => resolveAuthorizedCloudflareZone({
+      accessToken: ACCESS_TOKEN,
+      accountId: ACCOUNT_ID,
+      zoneName: 'example.com',
+      transport: async (input) => json({
+        success: true,
+        errors: [],
+        messages: [],
+        result: new URL(String(input)).searchParams.has('name') ? [] : listed,
+      }),
+    });
+    await expect(resolve([])).rejects.toMatchObject({ code: 'zone_mismatch', detail: 'zones_0_visible_0' });
+    await expect(resolve([
+      { id: '3'.repeat(32), name: 'example.com', status: 'pending', account: { id: ACCOUNT_ID } },
+      { id: '4'.repeat(32), name: 'other.example', status: 'active', account: { id: ACCOUNT_ID } },
+    ])).rejects.toMatchObject({ code: 'zone_mismatch', detail: 'zones_0_visible_2' });
+  });
+
+  it('names which field disagreed when the filtered read returns a different zone', async () => {
+    const resolve = (zone: BoundaryValue) => resolveAuthorizedCloudflareZone({
+      accessToken: ACCESS_TOKEN,
+      accountId: ACCOUNT_ID,
+      zoneName: 'example.com',
+      transport: async () => json({ success: true, errors: [], messages: [], result: [zone] }),
+    });
+    await expect(resolve({ id: ZONE_ID, name: 'example.com', status: 'active', account: { id: '5'.repeat(32) } }))
+      .rejects.toMatchObject({ code: 'zone_mismatch', detail: 'account' });
+    await expect(resolve({ id: ZONE_ID, name: 'other.example', status: 'active', account: { id: ACCOUNT_ID } }))
+      .rejects.toMatchObject({ code: 'zone_mismatch', detail: 'name' });
+    await expect(resolve({ id: ZONE_ID, name: 'example.com', status: 'pending', account: { id: ACCOUNT_ID } }))
+      .rejects.toMatchObject({ code: 'zone_mismatch', detail: 'status' });
+  });
+
   it('uses public-client PKCE, verifies one exact account, revokes, and discards', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const transport = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {

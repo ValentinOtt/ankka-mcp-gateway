@@ -31,7 +31,8 @@ const zoneEnvelopeSchema = v.looseObject({
   result: v.array(v.looseObject({
     id: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
     name: v.string(),
-    status: v.literal('active'),
+    // Any status parses; only an active zone is ever matched or returned.
+    status: v.string(),
     account: v.looseObject({ id: v.pipe(v.string(), v.regex(ACCOUNT_ID)) }),
   })),
 });
@@ -372,32 +373,20 @@ export async function verifyCustomerCloudflareGrantAccount(input: {
   }
 }
 
-/** Resolve one exact active zone without adding identity or membership scopes. */
-export async function resolveAuthorizedCloudflareZone(input: {
+type AuthorizedZone = v.InferOutput<typeof zoneEnvelopeSchema>['result'][number];
+
+/** Bounds for the unfiltered listing that backs the filtered zone read. */
+const ZONE_LIST_PAGE_SIZE = 20;
+const ZONE_LIST_MAX_PAGES = 10;
+
+async function readZonePage(input: {
   readonly accessToken: string;
-  readonly accountId: string;
-  readonly zoneName: string;
   readonly transport: CustomerCloudflareTransport;
-}): Promise<Readonly<{ id: string; name: string; status: 'active' }>> {
-  if (!validBearerCredential(input.accessToken) || !ACCOUNT_ID.test(input.accountId)) invalid();
-  let expectedName: string;
-  try {
-    const url = new URL(`https://${input.zoneName}`);
-    if (url.hostname !== input.zoneName || url.pathname !== '/' || url.search !== '' || url.hash !== '' ||
-        url.username !== '' || url.password !== '' || url.port !== '') invalid();
-    expectedName = url.hostname;
-  } catch {
-    invalid();
-  }
-  const url = new URL('/client/v4/zones', CLOUDFLARE_API_ORIGIN);
-  url.searchParams.set('account.id', input.accountId);
-  url.searchParams.set('name', expectedName);
-  url.searchParams.set('status', 'active');
-  url.searchParams.set('page', '1');
-  url.searchParams.set('per_page', '2');
+  readonly url: URL;
+}): Promise<readonly AuthorizedZone[]> {
   let read: BoundedRead;
   try {
-    read = await fetchBoundedText(input.transport, url, {
+    read = await fetchBoundedText(input.transport, input.url, {
       method: 'GET',
       headers: { accept: 'application/json', authorization: `Bearer ${input.accessToken}` },
     }, 'oauth_exchange_failed', { maxBytes: MAX_PROVIDER_BYTES });
@@ -416,12 +405,71 @@ export async function resolveAuthorizedCloudflareZone(input: {
       parsed.output.messages.length !== 0) {
     throw new CustomerCloudflareGrantError('provider_unavailable', envelopeDetail(response, value, parsed));
   }
-  if (parsed.output.result.length > 1) {
-    throw new CustomerCloudflareGrantError('zone_ambiguous', `zones_${parsed.output.result.length}`);
+  return parsed.output.result;
+}
+
+/**
+ * Resolve one exact active zone without adding identity or membership scopes.
+ *
+ * The filtered read (name, account, status) is asked first. A grant that
+ * answers it with no zone is then listed in bounded pages and matched here,
+ * because provider-side filters and grant-scoped listings have not always
+ * agreed; the failure detail says how many zones the grant could see, so a
+ * grant with no zone access reads differently from a filter that missed.
+ */
+export async function resolveAuthorizedCloudflareZone(input: {
+  readonly accessToken: string;
+  readonly accountId: string;
+  readonly zoneName: string;
+  readonly transport: CustomerCloudflareTransport;
+}): Promise<Readonly<{ id: string; name: string; status: 'active' }>> {
+  if (!validBearerCredential(input.accessToken) || !ACCOUNT_ID.test(input.accountId)) invalid();
+  let expectedName: string;
+  try {
+    const url = new URL(`https://${input.zoneName}`);
+    if (url.hostname !== input.zoneName || url.pathname !== '/' || url.search !== '' || url.hash !== '' ||
+        url.username !== '' || url.password !== '' || url.port !== '') invalid();
+    expectedName = url.hostname;
+  } catch {
+    invalid();
   }
-  const zone = parsed.output.result[0];
-  if (zone === undefined || zone.account.id !== input.accountId || zone.name !== expectedName) {
-    throw new CustomerCloudflareGrantError('zone_mismatch');
+  const common = { accessToken: input.accessToken, transport: input.transport };
+  const filtered = new URL('/client/v4/zones', CLOUDFLARE_API_ORIGIN);
+  filtered.searchParams.set('account.id', input.accountId);
+  filtered.searchParams.set('name', expectedName);
+  filtered.searchParams.set('status', 'active');
+  filtered.searchParams.set('page', '1');
+  filtered.searchParams.set('per_page', '2');
+  const direct = await readZonePage({ ...common, url: filtered });
+  if (direct.length > 1) {
+    throw new CustomerCloudflareGrantError('zone_ambiguous', `zones_${direct.length}`);
   }
-  return Object.freeze({ id: zone.id, name: zone.name, status: 'active' });
+  const matches = (zone: AuthorizedZone): boolean =>
+    zone.account.id === input.accountId && zone.name === expectedName && zone.status === 'active';
+  const zone = direct[0];
+  if (zone !== undefined) {
+    if (!matches(zone)) {
+      throw new CustomerCloudflareGrantError('zone_mismatch', zone.account.id !== input.accountId ? 'account'
+        : zone.name !== expectedName ? 'name' : 'status');
+    }
+    return Object.freeze({ id: zone.id, name: zone.name, status: 'active' });
+  }
+  // The filter found nothing: list what the grant can see and match here.
+  const found: AuthorizedZone[] = [];
+  let visible = 0;
+  for (let page = 1; page <= ZONE_LIST_MAX_PAGES; page += 1) {
+    const listing = new URL('/client/v4/zones', CLOUDFLARE_API_ORIGIN);
+    listing.searchParams.set('page', String(page));
+    listing.searchParams.set('per_page', String(ZONE_LIST_PAGE_SIZE));
+    const zones = await readZonePage({ ...common, url: listing });
+    visible += zones.length;
+    found.push(...zones.filter(matches));
+    if (zones.length < ZONE_LIST_PAGE_SIZE) break;
+  }
+  if (found.length > 1) throw new CustomerCloudflareGrantError('zone_ambiguous', `zones_${found.length}`);
+  const listed = found[0];
+  if (listed === undefined) {
+    throw new CustomerCloudflareGrantError('zone_mismatch', `zones_0_visible_${Math.min(visible, 999)}`);
+  }
+  return Object.freeze({ id: listed.id, name: listed.name, status: 'active' });
 }
