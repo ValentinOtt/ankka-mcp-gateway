@@ -574,10 +574,19 @@ function providerUrl(resource, receipt) {
   if (resource.kind === 'portal') {
     return new URL(`/client/v4/accounts/${account}/access/ai-controls/mcp/portals/${id}`, API_ORIGIN);
   }
-  if (resource.kind === 'source_access_application' || resource.kind === 'portal_access_application') {
+  if (resource.kind === 'source_access_application') {
+    return new URL(`/client/v4/accounts/${account}/access/apps/${id}`, API_ORIGIN);
+  }
+  if (resource.kind === 'portal_access_application') {
     return new URL(`/client/v4/zones/${zone}/access/apps/${id}`, API_ORIGIN);
   }
-  if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
+  if (resource.kind === 'source_access_policy') {
+    return new URL(
+      `/client/v4/accounts/${account}/access/apps/${encodeURIComponent(resource.provider.parentId)}/policies/${id}`,
+      API_ORIGIN,
+    );
+  }
+  if (resource.kind === 'portal_access_policy') {
     return new URL(
       `/client/v4/zones/${zone}/access/apps/${encodeURIComponent(resource.provider.parentId)}/policies/${id}`,
       API_ORIGIN,

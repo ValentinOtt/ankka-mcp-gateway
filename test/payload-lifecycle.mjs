@@ -547,23 +547,22 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
     // Access applications and their policies. An MCP application has no
     // domain and is stored with the account: the zone listing omits it, the
     // account listing shows every application, and by-id reads work on both.
+    const appsPrefix = pathname === APPS || pathname.startsWith(`${APPS}/`)
+      ? APPS
+      : pathname === ACCOUNT_APPS || pathname.startsWith(`${ACCOUNT_APPS}/`) ? ACCOUNT_APPS : null;
     if (pathname === APPS && method === 'GET') {
       return envelope([...state.apps.values()].filter((app) => app.type !== 'mcp'));
     }
     if (pathname === ACCOUNT_APPS && method === 'GET') return envelope([...state.apps.values()]);
-    if (pathname.startsWith(`${ACCOUNT_APPS}/`) && method === 'GET') {
-      const [id, policies] = pathname.slice(ACCOUNT_APPS.length + 1).split('/');
-      if (policies === undefined) return state.apps.has(id) ? envelope(state.apps.get(id)) : envelope(null, 404);
-    }
-    if (pathname === APPS && method === 'POST') {
+    if (appsPrefix !== null && pathname === appsPrefix && method === 'POST') {
       const created = { id: appId(), ...record.body };
       if (stripOauth) delete created.oauth_configuration;
       state.apps.set(created.id, created);
       state.policies.set(created.id, []);
       return envelope(created);
     }
-    if (pathname.startsWith(`${APPS}/`)) {
-      const [id, policies, policyIdentifier] = pathname.slice(APPS.length + 1).split('/');
+    if (appsPrefix !== null && pathname.startsWith(`${appsPrefix}/`)) {
+      const [id, policies, policyIdentifier] = pathname.slice(appsPrefix.length + 1).split('/');
       if (policies === undefined) {
         if (method === 'GET') return state.apps.has(id) ? envelope(state.apps.get(id)) : envelope(null, 404);
         if (method === 'DELETE') {

@@ -1943,10 +1943,11 @@ async function discoverResource(state, kind, token) {
       : 'portal_access_application';
     const parent = locator(state, parentKind);
     if (!parent) return Object.freeze({ status: 'conflict', provider: null });
-    const response = await providerList(
-      `/zones/${zone}/access/apps/${encodeURIComponent(parent.id)}/policies`,
-      token,
-    );
+    // The source application lives with the account, so its policies do too.
+    const policies = kind === 'source_access_policy'
+      ? `/accounts/${account}/access/apps/${encodeURIComponent(parent.id)}/policies`
+      : `/zones/${zone}/access/apps/${encodeURIComponent(parent.id)}/policies`;
+    const response = await providerList(policies, token);
     if (response.status !== 'ok') return providerOutcome(response.status, response);
     if (kind === 'source_access_policy' && desired.desired.allow.identitiesRef === 'team.sourceMembers' &&
         (response.result.length > 1 || (response.result.length === 1 &&
@@ -1979,7 +1980,8 @@ async function createResource(state, kind, token) {
   if (kind === 'source_access_application') {
     const server = locator(state, 'mcp_server');
     if (!server) return Object.freeze({ status: 'conflict', provider: null });
-    path = `/zones/${zone}/access/apps`;
+    // An MCP application has no hostname; Cloudflare stores it with the account.
+    path = `/accounts/${account}/access/apps`;
     body = {
       name: marker(state.installationId, desired.key),
       type: 'mcp',
@@ -2048,7 +2050,9 @@ async function createResource(state, kind, token) {
       : 'portal_access_application';
     const parent = locator(state, parentKind);
     if (!parent) return Object.freeze({ status: 'conflict', provider: null });
-    path = `/zones/${zone}/access/apps/${encodeURIComponent(parent.id)}/policies`;
+    path = kind === 'source_access_policy'
+      ? `/accounts/${account}/access/apps/${encodeURIComponent(parent.id)}/policies`
+      : `/zones/${zone}/access/apps/${encodeURIComponent(parent.id)}/policies`;
     const name = `${kind === 'source_access_policy' ? state.settings.sources[0].label : state.settings.connect.name} users [${marker(state.installationId, desired.key)}]`;
     body = kind === 'source_access_policy' && desired.desired.allow.identitiesRef === 'team.sourceMembers'
       ? teamPolicy([], name)
@@ -3917,10 +3921,12 @@ function teardownProviderPath(resource, target) {
   if (resource.kind === 'portal') {
     return `/accounts/${account}/access/ai-controls/mcp/portals/${id}`;
   }
-  if (resource.kind === 'source_access_application' || resource.kind === 'portal_access_application') {
-    return `/zones/${zone}/access/apps/${id}`;
+  if (resource.kind === 'source_access_application') return `/accounts/${account}/access/apps/${id}`;
+  if (resource.kind === 'portal_access_application') return `/zones/${zone}/access/apps/${id}`;
+  if (resource.kind === 'source_access_policy') {
+    return `/accounts/${account}/access/apps/${encodeURIComponent(resource.provider.parentId)}/policies/${id}`;
   }
-  if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
+  if (resource.kind === 'portal_access_policy') {
     return `/zones/${zone}/access/apps/${encodeURIComponent(resource.provider.parentId)}/policies/${id}`;
   }
   return `/zones/${zone}/dns_records/${id}`;

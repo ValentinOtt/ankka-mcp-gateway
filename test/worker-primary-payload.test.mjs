@@ -2050,10 +2050,12 @@ test('management API preserves bounded discovery, draft capacity and shared oper
         return `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals/${resource.provider.id}`;
       }
       if (resource.kind.endsWith('_access_application')) {
-        return `/client/v4/zones/${ZONE_ID}/access/apps/${resource.provider.id}`;
+        const scope = resource.kind === 'source_access_application' ? `accounts/${ACCOUNT_ID}` : `zones/${ZONE_ID}`;
+        return `/client/v4/${scope}/access/apps/${resource.provider.id}`;
       }
       if (resource.kind.endsWith('_access_policy')) {
-        return `/client/v4/zones/${ZONE_ID}/access/apps/${resource.provider.parentId}/policies/${resource.provider.id}`;
+        const scope = resource.kind === 'source_access_policy' ? `accounts/${ACCOUNT_ID}` : `zones/${ZONE_ID}`;
+        return `/client/v4/${scope}/access/apps/${resource.provider.parentId}/policies/${resource.provider.id}`;
       }
       return `/client/v4/zones/${env.CLOUDFLARE_ZONE_ID}/dns_records/${resource.provider.id}`;
     };
