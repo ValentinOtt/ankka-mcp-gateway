@@ -10,6 +10,7 @@ import {
   startCustomerBootstrapOauth,
   type CustomerBootstrapState,
 } from '../src/customer-bootstrap-state';
+import { CustomerStage2ConvergerError } from '../src/customer-stage2-converger';
 
 const NOW = 1_900_000_000_000;
 const ACCOUNT_ID = 'a'.repeat(32);
@@ -160,6 +161,75 @@ describe('customer bootstrap callback failure injection', () => {
       failureCode: 'provider_recovery_required',
     });
     expect(revoked).toBe(true);
+  });
+
+  it('records the converger reason so a payload failure names itself in the status read', async () => {
+    const fixture = await callbackFixture();
+    let revoked = false;
+    const result = await executeCustomerBootstrapCallback({
+      ...fixture,
+      code: CODE,
+      accountId: ACCOUNT_ID,
+      publicClientId: CLIENT_ID,
+      now: NOW + 3,
+      transport: async (input) => {
+        const url = String(input);
+        if (url.endsWith('/oauth2/token')) return json({
+          access_token: ACCESS_TOKEN,
+          token_type: 'bearer',
+          scope: INSTALL_SCOPES.join(' '),
+        });
+        if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
+          return json({ success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }] });
+        }
+        if (url.endsWith('/oauth2/revoke')) {
+          revoked = true;
+          return json({ revoked: true });
+        }
+        throw new Error('unexpected request');
+      },
+      persist: async () => undefined,
+      converge: async () => {
+        throw new CustomerStage2ConvergerError(
+          'payload_recovery_required',
+          'payload_portal_create_auth_http_403_code_10000',
+        );
+      },
+    });
+    expect(result).toMatchObject({
+      status: 'INCOMPLETE',
+      failureCode: 'provider_recovery_required',
+      failureReason: 'payload_portal_create_auth_http_403_code_10000',
+    });
+    expect(revoked).toBe(true);
+
+    // A converger failure without a reason still names its code.
+    const bare = await executeCustomerBootstrapCallback({
+      ...(await callbackFixture()),
+      code: CODE,
+      accountId: ACCOUNT_ID,
+      publicClientId: CLIENT_ID,
+      now: NOW + 3,
+      transport: async (input) => {
+        const url = String(input);
+        if (url.endsWith('/oauth2/token')) return json({
+          access_token: ACCESS_TOKEN,
+          token_type: 'bearer',
+          scope: INSTALL_SCOPES.join(' '),
+        });
+        if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
+          return json({ success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }] });
+        }
+        if (url.endsWith('/oauth2/revoke')) return json({ revoked: true });
+        throw new Error('unexpected request');
+      },
+      persist: async () => undefined,
+      converge: async () => { throw new CustomerStage2ConvergerError('runtime_source_unavailable'); },
+    });
+    expect(bare).toMatchObject({
+      status: 'INCOMPLETE',
+      failureReason: 'converge_runtime_source_unavailable',
+    });
   });
 
   it('keeps the final recovery-capable runtime INCOMPLETE when revocation is unconfirmed', async () => {

@@ -739,6 +739,7 @@ test('bootstrap fails closed when the created Portal application does not expose
       schemaVersion: 1,
       error: 'bootstrap_requires_repair',
       retryable: false,
+      provider: { kind: 'portal_access_application', step: 'verify', status: 'conflict' },
     });
   });
   // The incompatible application is never mutated into shape; no later gateway
@@ -810,7 +811,10 @@ test('bootstrap fails closed when Cloudflare generates a source application for 
     const response = await worker.fetch(await bootstrapRequest(), env);
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), {
-      schemaVersion: 1, error: 'bootstrap_requires_repair', retryable: false,
+      schemaVersion: 1,
+      error: 'bootstrap_requires_repair',
+      retryable: false,
+      provider: { kind: 'source_access_application', step: 'discover', status: 'conflict' },
     });
   });
   assert.equal(cloudflare.posts().length, 1);

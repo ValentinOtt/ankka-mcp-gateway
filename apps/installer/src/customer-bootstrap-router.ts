@@ -443,7 +443,12 @@ export function createCustomerBootstrapRouter(
             converge: dependencies.converge,
           });
           return json(
-            { schemaVersion: 1, status: result.status, failureCode: result.failureCode },
+            {
+              schemaVersion: 1,
+              status: result.status,
+              failureCode: result.failureCode,
+              failureReason: result.failureReason ?? null,
+            },
             200,
             result.status === 'READY'
               ? [clearPkceCookie(), clearSessionCookie()]

@@ -11,6 +11,8 @@ import {
   type CustomerCloudflareTransport,
   type EphemeralCustomerCloudflareGrant,
 } from './customer-cloudflare-grant';
+import { CustomerStage2ConvergerError } from './customer-stage2-converger';
+import { CustomerBootstrapRequestError } from './customer-bootstrap-request';
 
 export interface CustomerBootstrapConvergenceResult {
   readonly verified: true;
@@ -26,8 +28,23 @@ export interface CustomerBootstrapConvergenceResult {
 export interface CustomerBootstrapCallbackResult {
   readonly status: 'READY' | 'INCOMPLETE';
   readonly state: CustomerBootstrapState;
+  readonly failureReason?: string | null;
   readonly failureCode: null | 'authorization_rejected' | 'grant_invalid' |
     'provider_recovery_required' | 'revocation_unconfirmed';
+}
+
+/**
+ * Names what stopped the callback without provider text: the converger's own
+ * reason (which carries the payload's provider status and code), a grant
+ * error's code and detail, or a request stage and outcome.
+ */
+function callbackFailureReason<Thrown>(error: Thrown): string | null {
+  if (error instanceof CustomerStage2ConvergerError) return error.reason ?? `converge_${error.code}`;
+  if (error instanceof CustomerCloudflareGrantError) {
+    return error.detail === null ? `grant_${error.code}` : `grant_${error.code}_${error.detail}`;
+  }
+  if (error instanceof CustomerBootstrapRequestError) return `payload_request_${error.stage}_${error.outcome}`;
+  return 'unexpected';
 }
 
 function convergenceComplete(result: CustomerBootstrapConvergenceResult): boolean {
@@ -74,6 +91,7 @@ export async function executeCustomerBootstrapCallback(input: {
 
   let grant: EphemeralCustomerCloudflareGrant | null = null;
   let failureCode: 'grant_invalid' | 'provider_recovery_required' | 'revocation_unconfirmed' | null = null;
+  let failureReason: string | null = null;
   let verified = false;
   try {
     grant = await exchangeCustomerCloudflareAuthorizationCode({
@@ -101,6 +119,7 @@ export async function executeCustomerBootstrapCallback(input: {
     ].includes(error.code)
       ? 'grant_invalid'
       : 'provider_recovery_required';
+    failureReason = callbackFailureReason(error);
   } finally {
     if (grant !== null) {
       try {
@@ -126,7 +145,13 @@ export async function executeCustomerBootstrapCallback(input: {
     current: callback.next,
     attemptId: callback.attemptId,
     failureCode: failureCode ?? 'provider_recovery_required',
+    failureReason,
   });
   await input.persist(callback.next, incomplete);
-  return Object.freeze({ status: 'INCOMPLETE', state: incomplete, failureCode: incomplete.failureCode });
+  return Object.freeze({
+    status: 'INCOMPLETE',
+    state: incomplete,
+    failureCode: incomplete.failureCode,
+    failureReason: incomplete.failureReason ?? null,
+  });
 }

@@ -1642,6 +1642,23 @@ function providerUrl(path) {
   return new URL(`/client/v4${path}`, API_ORIGIN);
 }
 
+/**
+ * The provider's first numeric error code from a bounded JSON body, or null.
+ * Numeric codes carry no secrets; the message text is never kept.
+ */
+async function providerErrorCode(response, signal) {
+  let envelope;
+  try { envelope = await readBoundedProviderJson(response, signal); } catch { return null; }
+  if (!isRecord(envelope) || !Array.isArray(envelope.errors)) return null;
+  const first = envelope.errors[0];
+  const code = isRecord(first) ? first.code : undefined;
+  return Number.isSafeInteger(code) && code >= 0 && code <= 999999 ? code : null;
+}
+
+function providerResult(status, result, httpStatus = null, providerCode = null) {
+  return Object.freeze({ status, result, httpStatus, providerCode });
+}
+
 async function providerCall(path, token, init = {}) {
   let response;
   try {
@@ -1656,39 +1673,46 @@ async function providerCall(path, token, init = {}) {
       redirect: 'manual',
     }));
   } catch {
-    return Object.freeze({ status: 'unknown', result: null });
+    return providerResult('unknown', null);
   }
   if (init.signal?.aborted || !(response instanceof Response) || response.redirected ||
       (response.status >= 300 && response.status < 400)) {
     if (response instanceof Response) await discardBody(response, init.signal);
-    return Object.freeze({ status: 'unknown', result: null });
+    return providerResult('unknown', null, response instanceof Response ? response.status : null);
   }
   if (response.status === 404) {
     await discardBody(response, init.signal);
-    return Object.freeze({ status: 'absent', result: null });
+    return providerResult('absent', null, 404);
   }
   if (response.status === 401 || response.status === 403) {
-    await discardBody(response, init.signal);
-    return Object.freeze({ status: 'auth', result: null });
+    return providerResult('auth', null, response.status, await providerErrorCode(response, init.signal));
   }
   if (response.status === 429 || response.status >= 500) {
-    await discardBody(response, init.signal);
-    return Object.freeze({ status: 'unknown', result: null });
+    return providerResult('unknown', null, response.status, await providerErrorCode(response, init.signal));
   }
   if (response.status === 204) {
     await discardBody(response, init.signal);
-    return Object.freeze({ status: 'ok', result: null });
+    return providerResult('ok', null, 204);
   }
   if (response.status !== 200 && response.status !== 201) {
-    await discardBody(response, init.signal);
-    return Object.freeze({ status: 'blocked', result: null });
+    return providerResult('blocked', null, response.status, await providerErrorCode(response, init.signal));
   }
   let envelope;
   try { envelope = await readBoundedProviderJson(response, init.signal); } catch { envelope = null; }
   if (!isRecord(envelope) || envelope.success !== true || !Object.hasOwn(envelope, 'result')) {
-    return Object.freeze({ status: 'unknown', result: null });
+    return providerResult('unknown', null, response.status);
   }
-  return Object.freeze({ status: 'ok', result: envelope.result });
+  return providerResult('ok', envelope.result, response.status);
+}
+
+/** A discover/create outcome that keeps the provider's status numbers without its text. */
+function providerOutcome(status, response) {
+  return Object.freeze({
+    status,
+    provider: null,
+    httpStatus: response?.httpStatus ?? null,
+    providerCode: response?.providerCode ?? null,
+  });
 }
 
 async function providerList(path, token, query = {}, signal) {
@@ -1863,7 +1887,7 @@ async function discoverResource(state, kind, token) {
     );
     return response.status === 'ok' && mcpMatches(response.result, desired)
       ? Object.freeze({ status: 'present', provider: Object.freeze({ id: desired.key }) })
-      : Object.freeze({ status: response.status === 'absent' ? 'absent' : response.status, provider: null });
+      : providerOutcome(response.status === 'absent' ? 'absent' : response.status, response);
   }
   if (kind === 'portal') {
     const server = locator(state, 'mcp_server');
@@ -1876,11 +1900,11 @@ async function discoverResource(state, kind, token) {
     );
     return response.status === 'ok' && portalMatches(response.result, desired, server?.id ?? null)
       ? Object.freeze({ status: 'present', provider: Object.freeze({ id: desired.key }) })
-      : Object.freeze({ status: response.status === 'absent' ? 'absent' : response.status, provider: null });
+      : providerOutcome(response.status === 'absent' ? 'absent' : response.status, response);
   }
   if (kind === 'source_access_application' || kind === 'portal_access_application') {
     const response = await providerList(`/zones/${zone}/access/apps`, token);
-    if (response.status !== 'ok') return Object.freeze({ status: response.status, provider: null });
+    if (response.status !== 'ok') return providerOutcome(response.status, response);
     const candidates = response.result.filter((value) => accessApplicationCandidate(value, kind, state));
     if (candidates.length === 0) return Object.freeze({ status: 'absent', provider: null });
     if (candidates.length > 1) return Object.freeze({ status: 'conflict', provider: null });
@@ -1891,7 +1915,7 @@ async function discoverResource(state, kind, token) {
       token,
     );
     if (read.status !== 'ok') {
-      return Object.freeze({ status: read.status === 'absent' ? 'unknown' : read.status, provider: null });
+      return providerOutcome(read.status === 'absent' ? 'unknown' : read.status, read);
     }
     if (!isRecord(read.result) || read.result.id !== candidates[0].id ||
         !accessApplicationIdentityMatches(read.result, kind, state)) {
@@ -1909,7 +1933,7 @@ async function discoverResource(state, kind, token) {
       `/zones/${zone}/access/apps/${encodeURIComponent(parent.id)}/policies`,
       token,
     );
-    if (response.status !== 'ok') return Object.freeze({ status: response.status, provider: null });
+    if (response.status !== 'ok') return providerOutcome(response.status, response);
     if (kind === 'source_access_policy' && desired.desired.allow.identitiesRef === 'team.sourceMembers' &&
         (response.result.length > 1 || (response.result.length === 1 &&
           !policyMatches(response.result[0], desired, state.settings)))) {
@@ -1924,7 +1948,7 @@ async function discoverResource(state, kind, token) {
     'name.exact': desired.desired.hostname,
     match: 'all',
   });
-  if (response.status !== 'ok') return Object.freeze({ status: response.status, provider: null });
+  if (response.status !== 'ok') return providerOutcome(response.status, response);
   const match = exactOne(response.result, (value) => dnsMatches(value, desired));
   return match
     ? Object.freeze({ status: 'present', provider: Object.freeze({ id: match.id }) })
@@ -2027,9 +2051,9 @@ async function createResource(state, kind, token) {
     };
   }
   const response = await providerCall(path, token, { method: 'POST', body: canonicalJson(body) });
-  if (response.status !== 'ok') return Object.freeze({ status: response.status, provider: null });
+  if (response.status !== 'ok') return providerOutcome(response.status, response);
   const id = resultId(response.result);
-  if (!id) return Object.freeze({ status: 'unknown', provider: null });
+  if (!id) return providerOutcome('unknown', response);
   const parent = kind === 'source_access_policy'
     ? locator(state, 'source_access_application')
     : kind === 'portal_access_policy'
@@ -2224,10 +2248,33 @@ async function save(storage, value) {
   await storage.put(STORAGE_KEY, value);
 }
 
-function providerFailure(status) {
-  if (status === 'auth') return recovery('bootstrap_requires_repair');
-  if (status === 'unknown') return recovery('bootstrap_recovery_required');
-  return recovery('bootstrap_requires_repair');
+/**
+ * A provider outcome that stopped the bootstrap, kept as numbers and fixed
+ * words only: the resource kind, the outcome class, the HTTP status and the
+ * provider's numeric error code. It is returned to the shell, which records
+ * it as the failure reason behind its status route. The payload itself never
+ * logs, by the public-payload purity gate.
+ */
+function providerFailureDetail(outcome, kind, step) {
+  const detail = {
+    kind: isText(kind) ? kind : 'unknown',
+    step,
+    status: isText(outcome.status) ? outcome.status : 'unknown',
+  };
+  if (Number.isSafeInteger(outcome.httpStatus)) detail.httpStatus = outcome.httpStatus;
+  if (Number.isSafeInteger(outcome.providerCode)) detail.code = outcome.providerCode;
+  return Object.freeze(detail);
+}
+
+function providerFailure(outcome, kind, step) {
+  const provider = providerFailureDetail(outcome, kind, step);
+  const reason = provider.status === 'unknown' ? 'bootstrap_recovery_required' : 'bootstrap_requires_repair';
+  return fixedJson(409, {
+    schemaVersion: 1,
+    error: reason,
+    retryable: reason === 'bootstrap_recovery_required',
+    provider,
+  });
 }
 
 export async function processBootstrap(request, env, storage) {
@@ -2281,7 +2328,7 @@ export async function processBootstrap(request, env, storage) {
           try { await save(storage, state); } catch { return recovery('bootstrap_recovery_required'); }
           continue;
         }
-        if (observed.status !== 'absent') return providerFailure(observed.status);
+        if (observed.status !== 'absent') return providerFailure(observed, kind, 'discover_pending');
         if (state.pending.requestId === claim.requestId) return recovery('bootstrap_recovery_required');
         state = { ...state, pending: null };
         try { await save(storage, state); } catch { return recovery('bootstrap_recovery_required'); }
@@ -2289,19 +2336,19 @@ export async function processBootstrap(request, env, storage) {
 
       const before = await discoverResource(state, kind, claim.cloudflareAccessToken);
       if (before.status === 'present') return recovery('bootstrap_requires_repair');
-      if (before.status !== 'absent') return providerFailure(before.status);
+      if (before.status !== 'absent') return providerFailure(before, kind, 'discover');
       state = {
         ...state,
         pending: { kind, key: desired.key, requestId: claim.requestId, phase: 'send_armed' },
       };
       try { await save(storage, state); } catch { return recovery('bootstrap_recovery_required'); }
       const created = await createResource(state, kind, claim.cloudflareAccessToken);
-      if (created.status !== 'submitted') return providerFailure(created.status);
+      if (created.status !== 'submitted') return providerFailure(created, kind, 'create');
       applyInvoked = true;
       state = { ...state, pending: { ...state.pending, phase: 'submitted' } };
       try { await save(storage, state); } catch { return recovery('bootstrap_recovery_required'); }
       const after = await discoverResource(state, kind, claim.cloudflareAccessToken);
-      if (after.status !== 'present') return providerFailure(after.status);
+      if (after.status !== 'present') return providerFailure(after, kind, 'verify');
       if (after.provider.id !== created.provider.id ||
           (created.provider.parentId ?? '') !== (after.provider.parentId ?? '')) {
         return recovery('bootstrap_requires_repair');
