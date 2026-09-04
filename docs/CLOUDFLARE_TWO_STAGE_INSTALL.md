@@ -456,12 +456,25 @@ to start or take over an installation.
 5. The Gateway atomically arms the attempt before exchange, exchanges directly
    with Cloudflare, rejects refresh tokens or a non-exact scope set, and checks
    that `/accounts` returns only the handoff account.
-6. The request-local grant runs the existing intent-journaled, receipt-owned
-   reconciler. It refuses foreign or ambiguous resources instead of adopting
-   or overwriting them.
-7. The Gateway verifies the full graph, publishes and activates a clean
+6. The grant stays in the Durable Object's memory, never in its storage, and
+   runs the existing intent-journaled, receipt-owned reconciler in passes:
+   the callback arms the attempt and answers with a page that follows the
+   status route, and each pass runs from a Durable Object alarm, which is its
+   own invocation with its own subrequest budget. The reconciler pauses after
+   fixed journal transitions (management policy verified, Gateway resources
+   submitted, custom domain verified) and proves each resource once per pass,
+   so no pass makes more than about 30 provider calls where a Workers Free
+   account allows 50 per invocation; one invocation needed 113. It refuses
+   foreign or ambiguous resources instead of adopting or overwriting them.
+   An object restart between passes loses the grant; the next pass then
+   settles `INCOMPLETE` with `grant_lost` rather than resuming from anything
+   durable, and an attempt older than fifteen minutes is revoked and settled
+   `INCOMPLETE` with `convergence_deadline` instead of running on.
+7. The last pass verifies the full graph, publishes and activates a clean
    recovery-capable final runtime, disables `workers.dev`, confirms the
    bootstrap surface is dead, revokes the grant, and only then marks `READY`.
+   The final runtime upload and everything after it stay in one pass so the
+   object never resumes on new code without its grant.
 
 `auth.ankka.ai` must disable request/query logging and traces for the callback,
 redact the complete URL, and return `Cache-Control: no-store` and

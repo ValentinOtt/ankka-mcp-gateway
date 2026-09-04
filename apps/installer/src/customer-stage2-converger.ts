@@ -170,6 +170,37 @@ export interface CustomerStage2ReadinessVerdict {
 
 const VERIFY_REASON = /^[a-z][a-z0-9_]{0,120}$/u;
 
+/**
+ * A journal transition after which a chunked run returns instead of going on.
+ * The next run resumes from the journal under the same attempt and lease.
+ */
+export interface CustomerStage2Checkpoint {
+  readonly action: CustomerStage2ActionName;
+  readonly phase: 'submitted' | 'verified';
+}
+
+/**
+ * Chunk boundaries that keep every run inside the Workers Free plan budget
+ * of 50 subrequests per invocation. Measured against the real provider: the
+ * bootstrap creates and the receipt re-verification are the two largest
+ * blocks, and the final runtime upload stays in the same run as everything
+ * that follows it so the object never resumes on new code without its grant.
+ */
+export const CUSTOMER_STAGE2_CHUNK_CHECKPOINTS: readonly CustomerStage2Checkpoint[] = Object.freeze([
+  Object.freeze({ action: 'management_admin_policy', phase: 'verified' } as const),
+  Object.freeze({ action: 'gateway_resources', phase: 'submitted' } as const),
+  Object.freeze({ action: 'management_custom_domain', phase: 'verified' } as const),
+]);
+
+/** The run stopped at a checkpoint; the journal holds the progress and the lease. */
+export interface CustomerStage2ConvergerPause {
+  readonly verified: false;
+  readonly paused: true;
+  readonly checkpoint: CustomerStage2Checkpoint;
+}
+
+export type CustomerStage2ConvergerResult = CustomerBootstrapConvergenceResult | CustomerStage2ConvergerPause;
+
 export interface CustomerStage2ConvergerInput {
   readonly accessToken: string;
   readonly attemptId: string;
@@ -182,6 +213,8 @@ export interface CustomerStage2ConvergerInput {
   readonly payload: CustomerStage2PayloadAdapter;
   readonly transport: CustomerCloudflareTransport;
   readonly now: () => number;
+  /** Absent: one run completes the install. Present: the run returns at the first checkpoint it crosses. */
+  readonly checkpoints?: readonly CustomerStage2Checkpoint[];
 }
 
 export type CustomerStage2ConvergerErrorCode =
@@ -215,10 +248,30 @@ interface Context {
   readonly identityProviderIds: readonly string[];
   readonly workersSubdomain: string;
   journal: CustomerStage2Journal;
+  /**
+   * Resources this run has already re-read from the provider, keyed by kind
+   * and locator. A run proves each resource once; a new run proves it again.
+   */
+  readonly proofs: Map<string, CustomerWorkerActiveRelease | true>;
 }
 
 function fail(code: CustomerStage2ConvergerErrorCode, reason: string | null = null): never {
   throw new CustomerStage2ConvergerError(code, reason);
+}
+
+/** Unwinds the step sequence at a checkpoint; never leaves the converger. */
+class CustomerStage2Pause {
+  constructor(readonly checkpoint: CustomerStage2Checkpoint) {}
+}
+
+function pauseAtCheckpoint(
+  context: Context,
+  action: CustomerStage2ActionName,
+  phase: CustomerStage2Checkpoint['phase'],
+): void {
+  const reached = (context.input.checkpoints ?? []).find((checkpoint) =>
+    checkpoint.action === action && checkpoint.phase === phase);
+  if (reached !== undefined) throw new CustomerStage2Pause(reached);
 }
 
 function exact<Left, Right>(left: Left, right: Right): boolean {
@@ -379,6 +432,7 @@ async function submitAction(
     name,
     locator,
   }));
+  pauseAtCheckpoint(context, name, 'submitted');
 }
 
 async function verifyAction(context: Context, name: CustomerStage2ActionName): Promise<void> {
@@ -388,6 +442,7 @@ async function verifyAction(context: Context, name: CustomerStage2ActionName): P
     now: clock(context.input, context.journal.updatedAt),
     name,
   }));
+  pauseAtCheckpoint(context, name, 'verified');
 }
 
 async function adoptOwnership(input: CustomerStage2ConvergerInput): Promise<Readonly<{
@@ -510,16 +565,129 @@ function finalBindings(
   });
 }
 
-async function convergeApplication(context: Context): Promise<ManagementAccessApplicationLocator> {
-  const name = 'management_access_application' as const;
-  const operation = {
+function providerCall(context: Context) {
+  return {
     accessToken: context.input.accessToken,
     transport: (request: Request) => context.input.transport(request),
+  };
+}
+
+function applicationOperation(context: Context) {
+  return {
+    ...providerCall(context),
     accountId: context.target.accountId,
     zoneId: context.target.zoneId,
     plan: context.plan,
     allowedIdentityProviderIds: context.identityProviderIds,
   };
+}
+
+function policyOperation(context: Context, application: ManagementAccessApplicationLocator) {
+  return {
+    ...providerCall(context),
+    accountId: context.target.accountId,
+    zoneId: context.target.zoneId,
+    applicationId: application.applicationId,
+    plan: context.plan,
+  };
+}
+
+function domainOperation(context: Context) {
+  return {
+    ...providerCall(context),
+    accountId: context.target.accountId,
+    zoneId: context.target.zoneId,
+    plan: context.plan,
+  };
+}
+
+function runtimeInspection(context: Context, application: ManagementAccessApplicationLocator) {
+  return {
+    accessToken: context.input.accessToken,
+    accountId: context.target.accountId,
+    workerName: context.journal.identity.workerName,
+    expectedWorkerId: context.journal.identity.workerId,
+    finalRuntimeSha256: context.journal.identity.finalRuntimeSha256,
+    bindings: finalBindings(context, application),
+    transport: context.input.transport,
+  };
+}
+
+function workersDevOperation(context: Context) {
+  return {
+    ...providerCall(context),
+    accountId: context.target.accountId,
+    plan: context.plan,
+  };
+}
+
+// Each proof re-reads the provider once per run. The post-submit read of a
+// step is always the first proof of its resource in that run; the trailing
+// re-checks and the terminal proof then cost nothing more, which is what
+// keeps a chunked run inside the per-invocation subrequest budget.
+async function proveApplication(
+  context: Context,
+  locator: ManagementAccessApplicationLocator,
+): Promise<void> {
+  const key = `application:${canonicalJson(locator)}`;
+  if (context.proofs.has(key)) return;
+  const operation = applicationOperation(context);
+  await verifyManagementAccessApplicationGet({ ...operation, ...locator });
+  await verifyManagementAccessApplicationList({ ...operation, ...locator });
+  context.proofs.set(key, true);
+}
+
+async function provePolicy(
+  context: Context,
+  application: ManagementAccessApplicationLocator,
+  locator: ManagementAdminPolicyLocator,
+): Promise<void> {
+  const key = `policy:${canonicalJson({ application, locator })}`;
+  if (context.proofs.has(key)) return;
+  const operation = policyOperation(context, application);
+  await verifyManagementAdminAllowPolicyGet({ ...operation, ...locator });
+  await verifyManagementAdminAllowPolicyList({ ...operation, ...locator });
+  context.proofs.set(key, true);
+}
+
+async function proveGatewayResources(context: Context): Promise<void> {
+  const key = 'gateway_resources';
+  if (context.proofs.has(key)) return;
+  await verifyGatewayResources(context);
+  context.proofs.set(key, true);
+}
+
+async function proveDomain(context: Context, locator: ManagementCustomDomainLocator): Promise<void> {
+  const key = `domain:${canonicalJson(locator)}`;
+  if (context.proofs.has(key)) return;
+  const operation = domainOperation(context);
+  await verifyManagementCustomDomainGet({ ...operation, ...locator });
+  await verifyManagementCustomDomainList({ ...operation, ...locator });
+  context.proofs.set(key, true);
+}
+
+async function proveFinalRuntime(
+  context: Context,
+  application: ManagementAccessApplicationLocator,
+): Promise<CustomerWorkerActiveRelease | null> {
+  const key = `runtime:${canonicalJson(application)}`;
+  const proven = context.proofs.get(key);
+  if (proven !== undefined && proven !== true) return proven;
+  const observed = await inspectCustomerWorkerFinalRuntime(runtimeInspection(context, application));
+  if (observed !== null) context.proofs.set(key, observed);
+  return observed;
+}
+
+async function proveWorkersDevDisabled(context: Context): Promise<void> {
+  const key = 'workers_dev_disabled';
+  if (context.proofs.has(key)) return;
+  await verifyWorkerBootstrapSubdomain({ ...workersDevOperation(context), expectedEnabled: false });
+  context.proofs.set(key, true);
+}
+
+async function convergeApplication(context: Context): Promise<ManagementAccessApplicationLocator> {
+  const name = 'management_access_application' as const;
+  const operation = applicationOperation(context);
   const intent = prepareManagementAccessApplicationIntent(operation);
   await prepareAction(context, name, jsonObject(intent));
   let action = customerStage2Action(context.journal, name);
@@ -540,15 +708,12 @@ async function convergeApplication(context: Context): Promise<ManagementAccessAp
     action = customerStage2Action(context.journal, name);
   }
   if (action?.phase === 'submitted') {
-    const locator = applicationLocator(action.locator);
-    await verifyManagementAccessApplicationGet({ ...operation, ...locator });
-    await verifyManagementAccessApplicationList({ ...operation, ...locator });
+    await proveApplication(context, applicationLocator(action.locator));
     await verifyAction(context, name);
     action = customerStage2Action(context.journal, name);
   }
   const locator = applicationLocator(action?.locator ?? null);
-  await verifyManagementAccessApplicationGet({ ...operation, ...locator });
-  await verifyManagementAccessApplicationList({ ...operation, ...locator });
+  await proveApplication(context, locator);
   return locator;
 }
 
@@ -557,14 +722,7 @@ async function convergePolicy(
   application: ManagementAccessApplicationLocator,
 ): Promise<ManagementAdminPolicyLocator> {
   const name = 'management_admin_policy' as const;
-  const operation = {
-    accessToken: context.input.accessToken,
-    transport: (request: Request) => context.input.transport(request),
-    accountId: context.target.accountId,
-    zoneId: context.target.zoneId,
-    applicationId: application.applicationId,
-    plan: context.plan,
-  };
+  const operation = policyOperation(context, application);
   const intent = prepareManagementAdminPolicyIntent(operation);
   await prepareAction(context, name, jsonObject(intent));
   let action = customerStage2Action(context.journal, name);
@@ -582,15 +740,12 @@ async function convergePolicy(
     action = customerStage2Action(context.journal, name);
   }
   if (action?.phase === 'submitted') {
-    const locator = policyLocator(action.locator);
-    await verifyManagementAdminAllowPolicyGet({ ...operation, ...locator });
-    await verifyManagementAdminAllowPolicyList({ ...operation, ...locator });
+    await provePolicy(context, application, policyLocator(action.locator));
     await verifyAction(context, name);
     action = customerStage2Action(context.journal, name);
   }
   const locator = policyLocator(action?.locator ?? null);
-  await verifyManagementAdminAllowPolicyGet({ ...operation, ...locator });
-  await verifyManagementAdminAllowPolicyList({ ...operation, ...locator });
+  await provePolicy(context, application, locator);
   return locator;
 }
 
@@ -669,7 +824,7 @@ async function convergeGatewayResources(context: Context): Promise<v.InferOutput
         locator.gatewayHostname !== context.plan.gatewayConfiguration.portalHostname) {
       fail('journal_mismatch');
     }
-    await verifyGatewayResources(context);
+    await proveGatewayResources(context);
     await verifyAction(context, name);
     action = customerStage2Action(context.journal, name);
   }
@@ -678,19 +833,13 @@ async function convergeGatewayResources(context: Context): Promise<v.InferOutput
       locator.configurationHash !== projection.expected.configurationHash ||
       locator.desiredHash !== projection.expected.desiredHash ||
       locator.installationId !== projection.expected.installationId) fail('journal_mismatch');
-  await verifyGatewayResources(context);
+  await proveGatewayResources(context);
   return locator;
 }
 
 async function convergeDomain(context: Context): Promise<ManagementCustomDomainLocator> {
   const name = 'management_custom_domain' as const;
-  const operation = {
-    accessToken: context.input.accessToken,
-    transport: (request: Request) => context.input.transport(request),
-    accountId: context.target.accountId,
-    zoneId: context.target.zoneId,
-    plan: context.plan,
-  };
+  const operation = domainOperation(context);
   const intent = prepareManagementCustomDomainIntent(operation);
   await prepareAction(context, name, jsonObject(intent));
   let action = customerStage2Action(context.journal, name);
@@ -708,15 +857,12 @@ async function convergeDomain(context: Context): Promise<ManagementCustomDomainL
     action = customerStage2Action(context.journal, name);
   }
   if (action?.phase === 'submitted') {
-    const locator = domainLocator(action.locator);
-    await verifyManagementCustomDomainGet({ ...operation, ...locator });
-    await verifyManagementCustomDomainList({ ...operation, ...locator });
+    await proveDomain(context, domainLocator(action.locator));
     await verifyAction(context, name);
     action = customerStage2Action(context.journal, name);
   }
   const locator = domainLocator(action?.locator ?? null);
-  await verifyManagementCustomDomainGet({ ...operation, ...locator });
-  await verifyManagementCustomDomainList({ ...operation, ...locator });
+  await proveDomain(context, locator);
   return locator;
 }
 
@@ -740,15 +886,7 @@ async function convergeFinalRuntime(
     await armAction(context, name);
     action = customerStage2Action(context.journal, name);
   }
-  const inspection = {
-    accessToken: context.input.accessToken,
-    accountId: context.target.accountId,
-    workerName: context.journal.identity.workerName,
-    expectedWorkerId: context.journal.identity.workerId,
-    finalRuntimeSha256: context.journal.identity.finalRuntimeSha256,
-    bindings,
-    transport: context.input.transport,
-  };
+  const inspection = runtimeInspection(context, application);
   if (action?.phase === 'send_armed') {
     const source = context.input.finalRuntimeSource;
     const locator = source === undefined
@@ -764,12 +902,12 @@ async function convergeFinalRuntime(
   }
   const persisted = workerReleaseLocator(action?.locator ?? null);
   if (action?.phase === 'submitted') {
-    const observed = await inspectCustomerWorkerFinalRuntime(inspection);
+    const observed = await proveFinalRuntime(context, application);
     if (observed === null || !exact(observed, persisted)) fail('provider_mismatch');
     await verifyAction(context, name);
     action = customerStage2Action(context.journal, name);
   }
-  const observed = await inspectCustomerWorkerFinalRuntime(inspection);
+  const observed = await proveFinalRuntime(context, application);
   if (observed === null || !exact(observed, workerReleaseLocator(action?.locator ?? null))) {
     fail('provider_mismatch');
   }
@@ -778,12 +916,7 @@ async function convergeFinalRuntime(
 
 async function convergeWorkersDev(context: Context): Promise<void> {
   const name = 'workers_dev_disable' as const;
-  const operation = {
-    accessToken: context.input.accessToken,
-    transport: (request: Request) => context.input.transport(request),
-    accountId: context.target.accountId,
-    plan: context.plan,
-  };
+  const operation = workersDevOperation(context);
   await prepareAction(context, name, jsonObject({
     schemaVersion: 1,
     kind: 'workers_dev_disable',
@@ -812,10 +945,10 @@ async function convergeWorkersDev(context: Context): Promise<void> {
     action = customerStage2Action(context.journal, name);
   }
   if (action?.phase === 'submitted') {
-    await verifyWorkerBootstrapSubdomain({ ...operation, expectedEnabled: false });
+    await proveWorkersDevDisabled(context);
     await verifyAction(context, name);
   }
-  await verifyWorkerBootstrapSubdomain({ ...operation, expectedEnabled: false });
+  await proveWorkersDevDisabled(context);
 }
 
 async function terminalProof(
@@ -824,57 +957,13 @@ async function terminalProof(
   policy: ManagementAdminPolicyLocator,
   domain: ManagementCustomDomainLocator,
 ): Promise<void> {
-  const call = {
-    accessToken: context.input.accessToken,
-    transport: (request: Request) => context.input.transport(request),
-  };
-  const applicationInput = {
-    ...call,
-    accountId: context.target.accountId,
-    zoneId: context.target.zoneId,
-    plan: context.plan,
-    allowedIdentityProviderIds: context.identityProviderIds,
-    ...application,
-  };
-  await verifyManagementAccessApplicationGet(applicationInput);
-  await verifyManagementAccessApplicationList(applicationInput);
-  const policyInput = {
-    ...call,
-    accountId: context.target.accountId,
-    zoneId: context.target.zoneId,
-    plan: context.plan,
-    applicationId: application.applicationId,
-    ...policy,
-  };
-  await verifyManagementAdminAllowPolicyGet(policyInput);
-  await verifyManagementAdminAllowPolicyList(policyInput);
-  await verifyGatewayResources(context);
-  const domainInput = {
-    ...call,
-    accountId: context.target.accountId,
-    zoneId: context.target.zoneId,
-    plan: context.plan,
-    ...domain,
-  };
-  await verifyManagementCustomDomainGet(domainInput);
-  await verifyManagementCustomDomainList(domainInput);
-  const bindings = finalBindings(context, application);
-  const release = await inspectCustomerWorkerFinalRuntime({
-    accessToken: context.input.accessToken,
-    accountId: context.target.accountId,
-    workerName: context.journal.identity.workerName,
-    expectedWorkerId: context.journal.identity.workerId,
-    finalRuntimeSha256: context.journal.identity.finalRuntimeSha256,
-    bindings,
-    transport: context.input.transport,
-  });
+  await proveApplication(context, application);
+  await provePolicy(context, application, policy);
+  await proveGatewayResources(context);
+  await proveDomain(context, domain);
+  const release = await proveFinalRuntime(context, application);
   if (release === null) fail('provider_mismatch');
-  await verifyWorkerBootstrapSubdomain({
-    ...call,
-    accountId: context.target.accountId,
-    plan: context.plan,
-    expectedEnabled: false,
-  });
+  await proveWorkersDevDisabled(context);
 }
 
 async function convergeTerminal(
@@ -949,7 +1038,7 @@ function identityMatches(left: CustomerStage2Identity, right: CustomerStage2Iden
  */
 export async function convergeCustomerStage2(
   input: CustomerStage2ConvergerInput,
-): Promise<CustomerBootstrapConvergenceResult> {
+): Promise<CustomerStage2ConvergerResult> {
   if (!ATTEMPT_ID.test(input.attemptId) || !v.is(callableSchema, input.now) ||
       !v.is(callableSchema, input.transport) || !v.is(callableSchema, input.payload.bootstrap) ||
       !v.is(callableSchema, input.payload.verifyReady)) fail('invalid');
@@ -1057,6 +1146,7 @@ export async function convergeCustomerStage2(
         identityProviderIds,
         workersSubdomain: workers.subdomain,
         journal,
+        proofs: new Map(),
       };
       const application = applicationLocator(
         customerStage2Action(journal, 'management_access_application')?.locator ?? null,
@@ -1089,6 +1179,7 @@ export async function convergeCustomerStage2(
     identityProviderIds,
     workersSubdomain: workers.subdomain,
     journal,
+    proofs: new Map(),
   };
   try {
     const application = await convergeApplication(context);
@@ -1100,6 +1191,10 @@ export async function convergeCustomerStage2(
     await convergeTerminal(context, application, policy, domain);
     return success();
   } catch (error) {
+    if (error instanceof CustomerStage2Pause) {
+      // The lease stays with this attempt: the next run continues it.
+      return Object.freeze({ verified: false, paused: true, checkpoint: error.checkpoint });
+    }
     const lease = context.journal.lease;
     if (context.journal.completedAt === null && lease?.attemptId === input.attemptId) {
       try {

@@ -2,7 +2,7 @@ import * as v from 'valibot';
 
 import {
   executeCustomerBootstrapCallback,
-  type CustomerBootstrapConvergenceResult,
+  type CustomerBootstrapConverge,
 } from './customer-bootstrap-callback';
 import {
   type CustomerBootstrapRelayStart,
@@ -61,10 +61,7 @@ export interface CustomerStage2RecoveryRouterDependencies {
     readonly gatewayCallback: string;
     readonly relayTicket: string;
   }) => Promise<CustomerBootstrapRelayStart>;
-  readonly converge: (
-    accessToken: string,
-    attemptId: string,
-  ) => Promise<CustomerBootstrapConvergenceResult>;
+  readonly converge: CustomerBootstrapConverge;
   readonly now?: () => number;
   readonly randomBytes?: BootstrapRandomBytes;
 }

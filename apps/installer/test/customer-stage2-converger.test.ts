@@ -20,10 +20,13 @@ import {
   type CustomerGatewayOwnershipStorage,
 } from '../src/customer-gateway-ownership-state';
 import {
+  CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
   convergeCustomerStage2,
   type CustomerStage2BootstrapBindings,
   type CustomerStage2ConvergerInput,
+  type CustomerStage2ConvergerResult,
 } from '../src/customer-stage2-converger';
+import type { CustomerCloudflareTransport } from '../src/customer-cloudflare-grant';
 import type { CustomerStage2JournalPort } from '../src/customer-stage2-durable-state';
 import {
   customerStage2Action,
@@ -683,6 +686,54 @@ describe('customer Stage 2 convergence', () => {
     })).resolves.toMatchObject({ verified: true, finalRuntime: 'active-recovery-capable' });
     expect(test.cloudflare.state.finalUploads).toBe(1);
     expect(test.payloadBootstrapCalls()).toBe(1);
+  });
+
+  it('pauses at each fixed checkpoint and finishes on resume without repeating a mutation', async () => {
+    const test = await fixture();
+    const attemptId = `attempt_${'h'.repeat(24)}`;
+    const counted = {
+      calls: 0,
+      transport: ((input, init) => {
+        counted.calls += 1;
+        return test.cloudflare.transport(input, init);
+      }) satisfies CustomerCloudflareTransport,
+    };
+    const passes: { result: CustomerStage2ConvergerResult; calls: number }[] = [];
+    for (let pass = 1; pass <= 8; pass += 1) {
+      counted.calls = 0;
+      const result = await convergeCustomerStage2({
+        ...test.baseInput,
+        attemptId,
+        transport: counted.transport,
+        checkpoints: CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
+      });
+      passes.push({ result, calls: counted.calls });
+      if (result.verified) break;
+    }
+    expect(passes.map((pass) => (pass.result.verified ? 'complete' : `${pass.result.checkpoint.action}:${pass.result.checkpoint.phase}`)))
+      .toEqual([
+        'management_admin_policy:verified',
+        'gateway_resources:submitted',
+        'management_custom_domain:verified',
+        'complete',
+      ]);
+    // The lease stays with the attempt across passes; the journal completes once.
+    expect(test.journal.value?.completedAt).not.toBeNull();
+    expect(test.cloudflare.state).toMatchObject({
+      appCreates: 1,
+      policyCreates: 1,
+      domainCreates: 1,
+      finalUploads: 1,
+      workersDevEnabled: false,
+      finalActive: true,
+    });
+    expect(test.payloadBootstrapCalls()).toBe(1);
+    // Each pass proves a resource at most once, so no pass approaches the
+    // 50-subrequest budget of a Workers Free invocation; the payload's own
+    // provider calls are counted by the live harness, not here.
+    for (const pass of passes) expect(pass.calls).toBeLessThanOrEqual(30);
+    const durableBytes = test.journal.serializedWrites.join('\n');
+    expect(durableBytes).not.toContain(ACCESS_TOKEN);
   });
 
   it('re-proves every terminal resource on a completed journal without mutating again', async () => {
