@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Recognize the runtime's complete source-installation receipt after a
+  successful apply. The return notice now agrees with the verified action
+  status instead of reporting `apply_response_invalid`; incomplete or
+  mismatched receipts remain rejected.
 - Add an experimental customer-owned bridge to Google's hosted BigQuery MCP.
   It exposes dataset-scoped table listing and metadata plus the exact constant
   query `SELECT 1 AS bridge_ok`. General SQL remains disabled pending cost
