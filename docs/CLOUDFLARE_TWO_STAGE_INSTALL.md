@@ -470,11 +470,18 @@ to start or take over an installation.
    settles `INCOMPLETE` with `grant_lost` rather than resuming from anything
    durable, and an attempt older than fifteen minutes is revoked and settled
    `INCOMPLETE` with `convergence_deadline` instead of running on.
-7. The last pass verifies the full graph, publishes and activates a clean
-   recovery-capable final runtime, disables `workers.dev`, confirms the
-   bootstrap surface is dead, revokes the grant, and only then marks `READY`.
-   The final runtime upload and everything after it stay in one pass so the
-   object never resumes on new code without its grant.
+7. The last pass disables `workers.dev`, records the terminal verification
+   of everything but the runtime, marks the attempt finalizing, arms an
+   alarm, and only then publishes the clean recovery-capable final runtime,
+   drops the bootstrap nonce and revokes the grant. Cloudflare restarts the
+   Durable Object on the new code as soon as the Worker has a new version
+   and refuses storage to the pass that uploaded it, so that pass writes
+   nothing after the upload: the journal keeps `final_runtime` armed, and
+   the final runtime's own alarm handler moves a finalizing attempt to
+   `READY`. The final runtime answering at all is the proof the shell could
+   not write. Where nothing restarts after the upload (recovery in the
+   final runtime, tests, the harness in Node) the journaled path is
+   unchanged and completes the journal once the final runtime is verified.
 
 `auth.ankka.ai` must disable request/query logging and traces for the callback,
 redact the complete URL, and return `Cache-Control: no-store` and
