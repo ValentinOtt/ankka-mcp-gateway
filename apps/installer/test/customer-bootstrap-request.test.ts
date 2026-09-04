@@ -563,9 +563,41 @@ describe('hosted customer bootstrap request', () => {
       schemaVersion: 1,
       status: 'recovery_required',
       reason: 'bootstrap_recovery_required',
+      detail: null,
       canRetry: false,
     });
     expect(transport).toHaveBeenCalledOnce();
+
+    // The payload may name the provider outcome that stopped it, as numbers
+    // and fixed words only; it becomes the shell's secret-free failure reason.
+    const detailed = vi.fn(async () => response({
+      schemaVersion: 1,
+      error: 'bootstrap_requires_repair',
+      retryable: false,
+      provider: { kind: 'portal', step: 'create', status: 'auth', httpStatus: 403, code: 10000 },
+    }, 409));
+    await expect(submitCustomerBootstrap(await input({ transport: detailed }))).resolves.toEqual({
+      schemaVersion: 1,
+      status: 'recovery_required',
+      reason: 'bootstrap_requires_repair',
+      detail: 'payload_portal_create_auth_http_403_code_10000',
+      canRetry: false,
+    });
+    const leaky = vi.fn(async () => response({
+      schemaVersion: 1,
+      error: 'bootstrap_requires_repair',
+      retryable: false,
+      provider: { kind: 'portal', step: 'create', status: `refused ${TOKEN}`, httpStatus: 403 },
+    }, 409));
+    // A provider detail that is not fixed words and numbers is not a recovery
+    // result at all; the shell keeps its generic rejection and leaks nothing.
+    await expect(submitCustomerBootstrap(await input({ transport: leaky })))
+      .rejects.toSatisfy((error: CustomerBootstrapRequestError) => {
+        expectError(error, 'bootstrap_rejected', 'response', 'rejected');
+        expect(JSON.stringify(error)).not.toContain(TOKEN);
+        expect(String(error)).not.toContain(TOKEN);
+        return true;
+      });
 
     const arbitrary = vi.fn(async () => response({
       schemaVersion: 1,

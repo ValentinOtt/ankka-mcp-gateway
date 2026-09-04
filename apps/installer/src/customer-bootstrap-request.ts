@@ -104,6 +104,13 @@ const releaseEvidenceInputSchema = v.strictObject({
   id: v.pipe(v.string(), v.regex(RELEASE)),
   artifactSha256: v.pipe(v.string(), v.regex(BARE_SHA256)),
 });
+const providerFailureDetailSchema = v.strictObject({
+  kind: v.pipe(v.string(), v.regex(/^[a-z_]{1,40}$/u)),
+  step: v.pipe(v.string(), v.regex(/^[a-z_]{1,32}$/u)),
+  status: v.pipe(v.string(), v.regex(/^[a-z_]{1,24}$/u)),
+  httpStatus: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(999))),
+  code: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(999_999))),
+});
 const recoveryResponseSchema = v.strictObject({
   schemaVersion: v.literal(1),
   error: v.picklist([
@@ -112,7 +119,17 @@ const recoveryResponseSchema = v.strictObject({
     'bootstrap_request_mismatch',
   ]),
   retryable: v.boolean(),
+  /** Secret-free numbers and fixed words naming the provider outcome that stopped the payload. */
+  provider: v.optional(providerFailureDetailSchema),
 });
+
+/** `payload_<kind>_<step>_<status>[_http_<n>][_code_<n>]`, from numbers and fixed words only. */
+function providerFailureReason(detail: v.InferOutput<typeof providerFailureDetailSchema>): string {
+  let reason = `payload_${detail.kind}_${detail.step}_${detail.status}`;
+  if (detail.httpStatus !== undefined) reason += `_http_${detail.httpStatus}`;
+  if (detail.code !== undefined) reason += `_code_${detail.code}`;
+  return reason.slice(0, 160);
+}
 const readyResponseSchema = v.strictObject({
   schemaVersion: v.literal(1),
   status: v.literal('ready'),
@@ -337,6 +354,8 @@ export interface CustomerBootstrapRecoveryResult {
   readonly schemaVersion: 1;
   readonly status: 'recovery_required';
   readonly reason: CustomerBootstrapRecoveryReason;
+  /** The payload's provider failure as a secret-free reason string, when it named one. */
+  readonly detail: string | null;
   readonly canRetry: false;
 }
 
@@ -1257,6 +1276,7 @@ function recoveryResult(
     schemaVersion: 1,
     status: 'recovery_required',
     reason: result.output.error,
+    detail: result.output.provider === undefined ? null : providerFailureReason(result.output.provider),
     canRetry: false,
   });
 }

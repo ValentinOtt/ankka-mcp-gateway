@@ -33,6 +33,8 @@ const bootstrapOauthAttemptSchema = v.strictObject({
   expiresAt: v.pipe(v.number(), v.safeInteger()),
 });
 
+const failureReasonSchema = v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,159}$/u));
+
 const customerBootstrapStateSchema = v.strictObject({
   schemaVersion: v.literal(1),
   revision: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
@@ -51,6 +53,8 @@ const customerBootstrapStateSchema = v.strictObject({
   ]),
   oauth: v.union([bootstrapOauthAttemptSchema, v.null()]),
   failureCode: v.union([bootstrapFailureCodeSchema, v.null()]),
+  /** Secret-free detail behind failureCode; absent in states stored before it existed. */
+  failureReason: v.optional(v.union([failureReasonSchema, v.null()]), null),
   readyAt: v.union([v.pipe(v.number(), v.safeInteger()), v.null()]),
 });
 
@@ -163,6 +167,7 @@ export function initialCustomerBootstrapState(input: {
     session: null,
     oauth: null,
     failureCode: null,
+    failureReason: null,
     readyAt: null,
   });
 }
@@ -197,6 +202,7 @@ export async function consumeCustomerBootstrapCapability(input: {
     session: { secretHash: await sha256(sessionSecret), expiresAt },
     oauth: null,
     failureCode: null,
+    failureReason: null,
   });
   return Object.freeze({ sessionSecret, expiresAt, state });
 }
@@ -267,6 +273,7 @@ export async function startCustomerBootstrapOauth(input: {
       status: 'INCOMPLETE',
       oauth: null,
       failureCode: 'provider_recovery_required',
+      failureReason: null,
     });
   }
   if (current.status !== 'INCOMPLETE' || current.oauth !== null) {
@@ -287,6 +294,7 @@ export async function startCustomerBootstrapOauth(input: {
       expiresAt,
     },
     failureCode: null,
+    failureReason: null,
   });
   return Object.freeze({
     attemptId,
@@ -325,6 +333,7 @@ export async function consumeCustomerBootstrapOauthCallback(input: {
     status: 'CONVERGING',
     oauth: { ...oauth, phase: 'exchanging' },
     failureCode: null,
+    failureReason: null,
   });
   return Object.freeze({ attemptId: oauth.attemptId, next });
 }
@@ -346,6 +355,7 @@ export function rejectCustomerBootstrapOauthStart(input: {
     revision: current.revision + 1,
     oauth: null,
     failureCode: 'authorization_rejected',
+    failureReason: null,
   });
 }
 
@@ -374,6 +384,7 @@ export async function rejectCustomerBootstrapOauthCallback(input: {
     revision: current.revision + 1,
     oauth: null,
     failureCode: 'authorization_rejected',
+    failureReason: null,
   });
 }
 
@@ -381,6 +392,7 @@ export function markCustomerBootstrapIncomplete(input: {
   readonly current: CustomerBootstrapState;
   readonly attemptId: string;
   readonly failureCode: CustomerBootstrapFailureCode;
+  readonly failureReason?: string | null;
 }): CustomerBootstrapState {
   const current = parseCustomerBootstrapState(input.current);
   if (!current || !ATTEMPT_ID.test(input.attemptId)) invalid();
@@ -394,6 +406,7 @@ export function markCustomerBootstrapIncomplete(input: {
     status: 'INCOMPLETE',
     oauth: null,
     failureCode: input.failureCode,
+    failureReason: v.is(failureReasonSchema, input.failureReason) ? input.failureReason : null,
   });
 }
 
@@ -418,6 +431,7 @@ export function markCustomerBootstrapReady(input: {
     session: null,
     oauth: null,
     failureCode: null,
+    failureReason: null,
     readyAt: input.now,
   });
 }

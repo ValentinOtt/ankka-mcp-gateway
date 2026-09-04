@@ -164,6 +164,10 @@ export class AdminState extends RuntimeAdminState {
         installId: config.ANKKA_INSTALL_ID,
         release: config.ANKKA_GATEWAY_RELEASE,
         ownershipPublicKey: ownership.publicKey,
+        // Secret-free: a fixed code plus numbers and fixed words naming the step.
+        failure: state?.failureCode
+          ? { code: state.failureCode, reason: state.failureReason ?? null }
+          : null,
       }), { status: 200, headers: secureHeaders('application/json; charset=utf-8') });
     }
     if (request.method === 'GET' && url.pathname === '/health' && url.search === '') {

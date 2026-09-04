@@ -191,7 +191,7 @@ describe('restricted customer bootstrap router', () => {
     if (callback === undefined) throw new Error('successful callback missing');
     expect(callback.status).toBe(200);
     expectSessionCleared(callback);
-    expect(await callback.json()).toEqual({ schemaVersion: 1, status: 'READY', failureCode: null });
+    expect(await callback.json()).toEqual({ schemaVersion: 1, status: 'READY', failureCode: null, failureReason: null });
     expect(callbacks.filter((response) => response.status === 200)).toHaveLength(1);
     expect(callbacks.some((response) => response.status === 404 || response.status === 409)).toBe(true);
     expect(convergedWith).toBe(ACCESS_TOKEN);
@@ -299,7 +299,7 @@ describe('restricted customer bootstrap router', () => {
     }));
     expectPkceCleared(callback);
     expect(await callback.json()).toEqual({
-      schemaVersion: 1, status: 'INCOMPLETE', failureCode: 'grant_invalid',
+      schemaVersion: 1, status: 'INCOMPLETE', failureCode: 'grant_invalid', failureReason: 'grant_account_ambiguous_accounts_2'
     });
     expect(stored).toMatchObject({ status: 'INCOMPLETE', failureCode: 'grant_invalid' });
     expect(revoked).toBe(true);

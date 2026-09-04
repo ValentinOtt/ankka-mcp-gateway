@@ -175,12 +175,17 @@ export type CustomerStage2ConvergerErrorCode =
   | 'runtime_source_unavailable'
   | 'provider_mismatch';
 
+const CONVERGER_REASON = /^[a-z][a-z0-9_]{0,159}$/u;
+
 export class CustomerStage2ConvergerError extends Error {
   readonly canRetry = false;
+  /** Secret-free detail naming the step or provider outcome behind the code. */
+  readonly reason: string | null;
 
-  constructor(readonly code: CustomerStage2ConvergerErrorCode) {
+  constructor(readonly code: CustomerStage2ConvergerErrorCode, reason: string | null = null) {
     super(code);
     this.name = 'CustomerStage2ConvergerError';
+    this.reason = reason !== null && CONVERGER_REASON.test(reason) ? reason : null;
   }
 }
 
@@ -194,8 +199,8 @@ interface Context {
   journal: CustomerStage2Journal;
 }
 
-function fail(code: CustomerStage2ConvergerErrorCode): never {
-  throw new CustomerStage2ConvergerError(code);
+function fail(code: CustomerStage2ConvergerErrorCode, reason: string | null = null): never {
+  throw new CustomerStage2ConvergerError(code, reason);
 }
 
 function exact<Left, Right>(left: Left, right: Right): boolean {
@@ -629,7 +634,7 @@ async function convergeGatewayResources(context: Context): Promise<v.InferOutput
       timeoutMs: 120_000,
       nowMs: clock(context.input, context.journal.updatedAt),
     });
-    if (result.status !== 'ready') fail('payload_recovery_required');
+    if (result.status !== 'ready') fail('payload_recovery_required', result.detail ?? result.reason);
     await submitAction(context, name, gatewayReadyLocator(result));
     action = customerStage2Action(context.journal, name);
   }
