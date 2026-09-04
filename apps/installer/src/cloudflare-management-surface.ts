@@ -859,12 +859,11 @@ export async function listAccessIdentityProviders(
     if (!result.success) fail('provider_mismatch', stage, 'rejected');
     const { id, name, type } = result.output;
     const readOnly = result.output.read_only ?? false;
-    // The account-default Cloudflare identity provider (type "cloudflare") is
-    // listed with an empty name (observed live 2026-08-23); every other type
-    // carries one. An empty name is therefore accepted for that type only.
+    // Cloudflare login and dashboard-created One-time PIN providers are
+    // listed with an empty name. Keep requiring a name for other types.
     if (
       seen.has(id) ||
-      (name.length === 0 && type !== 'cloudflare') ||
+      (name.length === 0 && type !== 'cloudflare' && type !== 'onetimepin') ||
       !IDENTITY_PROVIDER_TYPES.has(type) ||
       !v.is(v.boolean(), readOnly)
     ) fail(seen.has(id) ? 'provider_ambiguous' : 'provider_mismatch', stage, 'rejected');

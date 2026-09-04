@@ -28,7 +28,14 @@ client-side capability flag alone is not sufficient.
    resources and exact tool catalogue before attaching the source to the Portal.
 6. In Cloudflare, update the receipt-owned reusable Access policy to grant the
    installed source to the intended people. The gateway Team page is read-only
-   in V1; do not create a standing API token to enable it.
+   in V1; do not create a standing API token to enable it. Also admit them
+   through the Portal's Access policy and select a Portal login method they
+   can use. Cloudflare login restricted to account members rejects nonmembers
+   before email allow rules are evaluated. For those people, configure
+   [email-code login](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/one-time-pin/)
+   or your team's identity provider for the Portal. Review applications that
+   inherit all login methods before adding a provider; preserve management
+   applications' existing login restrictions.
 7. Verify an allowed read through the Portal, and verify that a person without
    the source assignment cannot invoke its tools directly or through Code Mode.
 
