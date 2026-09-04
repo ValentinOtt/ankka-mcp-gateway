@@ -552,6 +552,7 @@ describe('clean hosted two-stage runtime', () => {
     const authorizing = await currentPhase(h, browser);
     expect(authorizing.phase).toBe('authorizing');
     expect(authorizing.plan?.releaseId).toBe('gateway-v1.2.3');
+    expect((await mutate(h, browser, 'POST', '/api/session/new', {})).status).toBe(409);
 
     h.clock.now = NOW + 30_000;
     const provisioned = await callback(h, browser, `code=${AUTHORIZATION_CODE}&state=${state}`);
@@ -565,6 +566,7 @@ describe('clean hosted two-stage runtime', () => {
     ]);
     const afterCallback = await currentPhase(h, browser);
     expect(afterCallback.phase).toBe('provisioned');
+    expect((await mutate(h, browser, 'POST', '/api/session/new', {})).status).toBe(409);
     expect(afterCallback.provision?.bootstrapOrigin).toMatch(/^https:\/\/ankka-gateway-.*\.tenant\.workers\.dev\/$/u);
     h.customer.installId = afterCallback.provision?.installId ?? '';
     h.customer.release = afterCallback.plan?.releaseId ?? '';
@@ -604,6 +606,21 @@ describe('clean hosted two-stage runtime', () => {
       expect(stored).not.toContain(AUTHORIZATION_CODE);
     }
     expect((await read(h, browser, '/api/bootstrap/handoff')).status).toBe(400);
+    const previousBrowser = { ...browser };
+    const previousSession = await currentPhase(h, previousBrowser);
+    const events = [...h.events];
+    const restarted = await mutate(h, browser, 'POST', '/api/session/new', {});
+    expect(restarted.status).toBe(200);
+    const restartedBody = await parsed(restarted, sessionResponseSchema);
+    expect(restartedBody.session).toMatchObject({ phase: 'draft', plan: null, provision: null });
+    expect(browser.sessionCookie).not.toBe(previousBrowser.sessionCookie);
+    expect(browser.bootstrapCookie).toBeNull();
+    expect(restartedBody.csrfToken).not.toBe(previousBrowser.csrfToken);
+    expect(await currentPhase(h, previousBrowser)).toEqual(previousSession);
+    expect(h.events).toEqual(events);
+    expect((await mutate(h, browser, 'POST', '/api/bootstrap', {})).status).toBe(403);
+    browser.csrfToken = restartedBody.csrfToken;
+    expect((await mutate(h, browser, 'POST', '/api/bootstrap', {})).status).toBe(200);
   });
 
   it('records a denied approval and a failed exchange as failed attempts and lets the user start fresh', async () => {
@@ -682,6 +699,7 @@ describe('clean hosted two-stage runtime', () => {
       phase: 'cleanup_required', cleanup: { reason: 'handoff_rejected', completedAt: null },
     });
     expect((await mutate(h, browser, 'POST', '/api/bootstrap', {})).status).toBe(409);
+    expect((await mutate(h, browser, 'POST', '/api/session/new', {})).status).toBe(409);
 
     const cleanup = await mutate(h, browser, 'POST', '/api/cleanup', {});
     expect(cleanup.status).toBe(200);
@@ -710,6 +728,8 @@ describe('clean hosted two-stage runtime', () => {
     const badCsrf = await mutate(h, { ...browser, csrfToken: 'x'.repeat(43) }, 'PUT', '/api/selection', selectionInput);
     expect(badCsrf.status).toBe(403);
     expect(await parsed(badCsrf, errorSchema)).toEqual({ code: 'csrf_invalid' });
+    expect((await mutate(h, { ...browser, csrfToken: 'x'.repeat(43) }, 'POST', '/api/session/new', {})).status).toBe(403);
+    expect((await mutate(h, browser, 'POST', '/api/session/new', { target: 'arbitrary' })).status).toBe(400);
     const badBody = await mutate(h, browser, 'PUT', '/api/selection', { schemaVersion: 1, basics: {} });
     expect(badBody.status).toBe(400);
     const noSession = await h.worker.fetch(new Request(`${PUBLIC_ORIGIN}/api/plan`, {
@@ -726,6 +746,7 @@ describe('clean hosted two-stage runtime', () => {
       ['POST', '/api/discovery', 404],
       ['GET', '/api/selection', 405],
       ['POST', '/api/session', 405],
+      ['GET', '/api/session/new', 405],
       ['GET', '/api/session?x=1', 404],
       ['GET', '/api/oauth/handoff', 404],
       ['GET', '/', 200],

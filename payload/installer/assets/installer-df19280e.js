@@ -533,6 +533,18 @@ byId('connect-cloudflare').addEventListener('click', () => { void startApproval(
 byId('fresh-approval').addEventListener('click', () => { void startApproval('bootstrap'); });
 byId('restart-approval').addEventListener('click', () => { void startApproval('bootstrap'); });
 byId('begin-cleanup').addEventListener('click', () => { void startApproval('cleanup'); });
+byId('describe-again').addEventListener('click', async () => {
+  try {
+    await runAction('Starting a new deployment…', () => api('/api/session/new', { method: 'POST', body: {} }),
+      'A new deployment could not be started.');
+    state.authorizationUrl = null;
+    state.authorizationExpiresAt = null;
+    state.authorizationKind = null;
+    state.handoffUrl = null;
+    state.handoffFailed = false;
+    route('/');
+  } catch { /* Keep the current session visible when restarting is rejected. */ }
+});
 byId('finish-setup').addEventListener('click', () => {
   if (state.handoffUrl) window.location.assign(state.handoffUrl);
 });

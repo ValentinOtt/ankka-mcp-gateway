@@ -316,6 +316,29 @@ test('failed and handed-off sessions render a fresh-approval path and never expo
   assert.equal(handedOff.timers.size, 0, 'no handoff polling after the capability was released');
 });
 
+test('starting another deployment replaces the session before opening a fresh approval', async (t) => {
+  const b = await browser(t, {
+    pathname: '/result',
+    session: sessionFixture({ phase: 'handed_off', selection: SELECTION, plan: PLAN, provision: PROVISION }),
+    request: (url, init, retained) => {
+      if (url !== '/api/session/new') return undefined;
+      assert.equal(init.method, 'POST');
+      assert.equal(init.headers['x-csrf-token'], 'synthetic-csrf');
+      retained.response = { ...sessionFixture(), csrfToken: 'fresh-csrf' };
+      return Response.json(retained.response);
+    },
+  });
+  b.document.getElementById('describe-again').click();
+  await flush();
+  assert.equal(b.document.querySelector('[data-route="/"]').hidden, false);
+  assert.equal(b.retained.response.session.phase, 'draft');
+  b.document.getElementById('gateway-form').dispatchEvent(new b.document.defaultView.Event('submit', { cancelable: true }));
+  await flush();
+  const start = b.requests.find((request) => request.url === '/api/bootstrap');
+  assert.equal(start.headers['x-csrf-token'], 'fresh-csrf');
+  assert.deepEqual(b.navigations, [AUTHORIZATION_URL]);
+});
+
 test('registration failures abort cleanly, unsupported browsers register nothing, and errors never leak', async (t) => {
   const failing = await browser(t, { registrationFailure: { at: 2, async: true } });
   assert.equal(failing.tools.size, 0);

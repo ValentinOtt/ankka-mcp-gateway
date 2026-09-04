@@ -49,6 +49,11 @@ deployments use the configuration-free bootstrap path. Hosted session evidence
 expires after one hour; the Worker owns its setup draft. No MCP source-provider
 credentials enter either stage.
 
+After handoff, **Start a new deployment** creates a new hosted session with a
+new CSRF token and clears the old approval cookie. The previous session and its
+evidence expire normally. Restart requires the existing session's same-origin
+CSRF check and is refused while approval, handoff, or cleanup is pending.
+
 ## Validation and promotion
 
 Synthetic tests cover account filtering, pagination, absent versus denied
