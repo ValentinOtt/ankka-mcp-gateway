@@ -290,9 +290,10 @@ function immutablePayload(
 }
 
 /**
- * Private release-bucket consumer. The pin is constructor data compiled into a
- * reviewed entrypoint; no environment string can select a channel, key, or
- * release. This module is intentionally not imported by the default Worker.
+ * Private release-bucket consumer. Callers fix the trusted channel, origin,
+ * and key before selecting an exact release and digest. The hosted installer
+ * uses its compiled pin; historical reads use the same trust with immutable
+ * public coordinates. This module is not imported by the disabled Worker.
  */
 export class PinnedR2ReleaseBundleProvider implements R2ReleaseBundleProvider {
   readonly #pin: Readonly<PinnedR2Release>;

@@ -372,6 +372,23 @@ describe('offline two-release signed origin lifecycle', () => {
       expect(parseCanonicalReleaseManifest(descriptorB.verification.manifest).controlPlaneOrigin)
         .toBe(CONTROL_PLANE_ORIGIN);
       expect(descriptorBResponse.headers.get('set-cookie')).toBeNull();
+      const retainedAPath = `/api/releases/${CHANNEL}/by-id/${RELEASE_A}/${pinA.artifactSha256}`;
+      const retainedA = await workerB.fetch(new Request(`${CONTROL_PLANE_ORIGIN}${retainedAPath}`), reviewedEnv);
+      expect(retainedA.status).toBe(200);
+      expect(parsePublicUpdateChannel(await retainedA.json()).release.id).toBe(RELEASE_A);
+      expect(retainedA.headers.get('set-cookie')).toBeNull();
+      const retainedFile = await workerB.fetch(new Request(
+        `${CONTROL_PLANE_ORIGIN}${retainedAPath}/files/payload/worker/index.js`,
+      ), reviewedEnv);
+      expect(retainedFile.status).toBe(200);
+      expect(await retainedFile.text()).toBe(await bundleA.payload.find(
+        (file) => file.path === 'payload/worker/index.js',
+      ).bytes.text());
+      const mixedIdentity = await workerB.fetch(new Request(
+        `${CONTROL_PLANE_ORIGIN}/api/releases/${CHANNEL}/by-id/${RELEASE_A}/${pinB.artifactSha256}`,
+      ), reviewedEnv);
+      expect(mixedIdentity.status).toBe(503);
+      expect(await mixedIdentity.json()).toEqual({ code: 'release_invalid' });
       const otherChannel = await workerB.fetch(
         new Request(`${CONTROL_PLANE_ORIGIN}/api/releases/stable`), reviewedEnv,
       );

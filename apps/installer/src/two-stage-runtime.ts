@@ -28,7 +28,7 @@ import {
 } from './crypto';
 import { CUSTOMER_BOOTSTRAP_TTL_MS, type BootstrapRandomBytes } from './customer-bootstrap-state';
 import { DeployError, stableError, type DeployErrorCode } from './errors';
-import { parseExactReleaseBundleIdentity } from './exact-release-bundle';
+import { assertExactReleaseBundleIdentity, parseExactReleaseBundleIdentity } from './exact-release-bundle';
 import { buildHostedBootstrapAuthorizationUrl } from './hosted-bootstrap-grant';
 import {
   completeHostedStage1Handoff,
@@ -93,6 +93,8 @@ const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const RELEASE_DESCRIPTOR_ROUTES = Object.freeze(['/api/releases/canary', '/api/releases/stable'] as const);
 /** One exact manifest path of the pinned bundle; matched by equality, never resolved. */
 const RELEASE_FILE_ROUTE = /^\/api\/releases\/(canary|stable)\/files\/(payload\/[A-Za-z0-9][A-Za-z0-9._/-]{0,200})$/u;
+/** Public immutable coordinates; trust keys and the origin come only from the reviewed pin. */
+const EXACT_RELEASE_ROUTE = /^\/api\/releases\/(canary|stable)\/by-id\/(gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\/([a-f0-9]{64})(?:\/files\/(payload\/[A-Za-z0-9][A-Za-z0-9._/-]{0,200}))?$/u;
 
 /** The complete hosted route allowlist besides signed installer assets. */
 export const TWO_STAGE_API_ROUTES = Object.freeze([
@@ -431,6 +433,30 @@ export function createTwoStageDeployRuntime(
       await executeHostedStage1Cleanup(input);
     },
   });
+
+  // Retain at most one fully verified historical bundle, never a request's
+  // pending R2 promise. File reads can reuse its immutable, owned bytes.
+  let historicalBundle: VerifiedReleaseBundle | null = null;
+  let historicalLoadPending = false;
+  async function exactBundle(env: TwoStageDeployEnv, release: string, artifactSha256: string): Promise<VerifiedReleaseBundle> {
+    if (release === pin.release && artifactSha256 === pin.artifactSha256) {
+      return (await loadSnapshot(env)).bundle;
+    }
+    if (historicalBundle?.manifest.release === release &&
+        historicalBundle.manifest.artifact.treeSha256 === artifactSha256) return historicalBundle;
+    if (historicalLoadPending) throw new DeployError(503, 'release_unavailable');
+    historicalLoadPending = true;
+    historicalBundle = null;
+    try {
+      const identity = Object.freeze({ ...pin, release, artifactSha256 });
+      const bundle = await new PinnedR2ReleaseBundleProvider(identity).loadVerifiedReleaseBundle(releaseBucket(env));
+      assertExactReleaseBundleIdentity(bundle, identity);
+      historicalBundle = bundle;
+      return bundle;
+    } finally {
+      historicalLoadPending = false;
+    }
+  }
 
   function context(env: TwoStageDeployEnv): RuntimeContext {
     const config = v.safeParse(envSchema, env);
@@ -837,6 +863,24 @@ export function createTwoStageDeployRuntime(
       return buildSignedInstallerAssetResponse(snapshot.installerAssets, request);
     }
     if (path !== CALLBACK_PATH && url.search !== '') throw new DeployError(404, 'bad_request');
+    const exactRelease = EXACT_RELEASE_ROUTE.exec(path);
+    if (exactRelease !== null) {
+      if (request.method !== 'GET') throw new DeployError(405, 'bad_request');
+      const [, channelName = '', release = '', artifactSha256 = '', filePath] = exactRelease;
+      if (channelName !== pin.channel) throw new DeployError(404, 'release_unavailable');
+      const bundle = await exactBundle(env, release, artifactSha256);
+      if (filePath === undefined) return json(buildPublicUpdateChannel(bundle));
+      const file = bundle.payload.find((entry) => entry.path === filePath);
+      if (file === undefined) throw new DeployError(404, 'release_unavailable');
+      return new Response(file.bytes, {
+        headers: {
+          'cache-control': 'no-store',
+          'content-length': String(file.byteSize),
+          'content-type': file.contentType,
+          'x-content-type-options': 'nosniff',
+        },
+      });
+    }
     if (request.method === 'GET' && RELEASE_DESCRIPTOR_ROUTES.some((candidate) => candidate === path)) {
       // Served from the pinned bundle alone, before any binding besides the
       // bucket is read, so an installed Gateway can discover updates even
@@ -864,6 +908,9 @@ export function createTwoStageDeployRuntime(
           'x-content-type-options': 'nosniff',
         },
       });
+    }
+    if (path.startsWith('/api/releases/')) {
+      throw new DeployError(RELEASE_DESCRIPTOR_ROUTES.some((candidate) => candidate === path) ? 405 : 404, 'bad_request');
     }
     const runtime = context(env);
     switch (`${request.method} ${path}`) {
