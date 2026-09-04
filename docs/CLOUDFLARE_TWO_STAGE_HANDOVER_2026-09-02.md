@@ -1491,3 +1491,22 @@ deploying the production relay. Both are operator steps.
   runtime is verified. Measured against the real provider with the shell's
   hook, the passes cost 25, 21, 22 and 23 provider calls (91 in all; the handover comes after 19 calls of the last pass, and the API then shows workers.dev closed and the final runtime bindings active). Open: the
   recovery router in the final runtime still converges in one invocation.
+- 2026-09-04 (09:33), fifth real install, on gateway-v0.1.30, the first
+  that finished on its own: both consents, the progress page at once, the
+  passes behind alarms, workers.dev closed by the converger, then the final
+  runtime uploaded and the bootstrap nonce dropped two seconds later; the
+  page read the closed address as "setup finished" and the API shows the
+  final runtime bindings active, only the ownership wrap key left as a
+  secret, the custom domain attached, both Access applications with their
+  policies, the portal and its DNS record, and the management hostname
+  answering with the Access login. What the outside cannot read is the
+  READY word the final runtime's alarm writes behind Access; the harness
+  proves that path and an admin can confirm it on
+  `/__ankka/install/status` at the management hostname. One hosted defect
+  showed on the way: the result page's first handoff poll got a 503 while
+  the fresh shell's route was still propagating, and the page stopped
+  polling and reported an internal error; reloading the result page made it
+  poll again and hand off normally. The hosted page must treat a 503 from
+  the handoff route as "not yet". Open: that page fix (its source is not in
+  this repository), and the recovery router in the final runtime still
+  converging in one invocation.
