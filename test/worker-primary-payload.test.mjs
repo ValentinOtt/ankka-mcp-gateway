@@ -625,19 +625,31 @@ test('bootstrap validates the private golden claim, explicitly creates seven res
   assert.equal(env.ADMIN_STATE.objects.get('v1:management').storage.snapshot(), undefined);
 });
 
-test('provider verification accepts a legacy Portal without rewriting its callback settings', async () => {
-  const claimInput = await claim();
-  const { env, provider: cloudflare, storage } = await installReadyGateway({ claimInput });
-  const portalApp = [...cloudflare.state.apps.values()].find((app) => app.type === 'mcp_portal');
-  delete portalApp.oauth_configuration.dynamic_client_registration.allowed_uris;
-  const priorRequests = cloudflare.requests.length;
-  const receipt = storage.snapshot();
-  assert.equal(await withProviderFetch(cloudflare.fetch, () => (
-    verifyBootstrapReceiptProviderState(claimInput, env, storage)
-  )), true);
-  assert.deepEqual(storage.snapshot(), receipt);
-  assert.ok(cloudflare.requests.slice(priorRequests).every(({ method }) => method === 'GET'));
-  assert.equal(Object.hasOwn(portalApp.oauth_configuration.dynamic_client_registration, 'allowed_uris'), false);
+test('provider verification preserves existing Portal callback settings', async (t) => {
+  const cases = [
+    { name: 'legacy Portal without callbacks', callbacks: undefined },
+    { name: 'Claude-only Portal', callbacks: ['https://claude.ai/api/mcp/auth_callback'] },
+    { name: 'administrator custom client', callbacks: ['https://client.example.com/oauth/callback'] },
+  ];
+  for (const { name, callbacks } of cases) {
+    await t.test(name, async () => {
+      const claimInput = await claim();
+      const { env, provider: cloudflare, storage } = await installReadyGateway({ claimInput });
+      const portalApp = [...cloudflare.state.apps.values()].find((app) => app.type === 'mcp_portal');
+      const registration = portalApp.oauth_configuration.dynamic_client_registration;
+      if (callbacks) registration.allowed_uris = [...callbacks];
+      else delete registration.allowed_uris;
+      const priorRequests = cloudflare.requests.length;
+      const receipt = storage.snapshot();
+      assert.equal(await withProviderFetch(cloudflare.fetch, () => (
+        verifyBootstrapReceiptProviderState(claimInput, env, storage)
+      )), true);
+      assert.deepEqual(storage.snapshot(), receipt);
+      assert.ok(cloudflare.requests.slice(priorRequests).every(({ method }) => method === 'GET'));
+      assert.deepEqual(registration.allowed_uris, callbacks);
+      assert.equal(Object.hasOwn(registration, 'allowed_uris'), callbacks !== undefined);
+    });
+  }
 });
 
 test('bootstrap accepts a large canonical envelope above 51 users and cancels limit+1 bodies', async () => {

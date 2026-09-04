@@ -116,7 +116,12 @@ function exactPortalApp({
       enabled: true,
       dynamic_client_registration: {
         enabled: true,
-        allowed_uris: ['https://claude.ai/api/mcp/auth_callback'],
+        allowed_uris: [
+          'https://claude.ai/api/mcp/auth_callback',
+          'https://chatgpt.com/connector_platform_oauth_redirect',
+          'https://chatgpt.com/connector/oauth/*',
+          'https://www.cursor.com/agents/mcp/oauth/callback',
+        ],
         allow_any_on_localhost: true,
         allow_any_on_loopback: true,
       },
@@ -1161,6 +1166,9 @@ test('updates a receipt-owned base-only Portal app instead of replaying POST', a
   assert.equal(update.body.oauth_configuration.enabled, true);
   assert.deepEqual(update.body.oauth_configuration.dynamic_client_registration.allowed_uris, [
     'https://claude.ai/api/mcp/auth_callback',
+    'https://chatgpt.com/connector_platform_oauth_redirect',
+    'https://chatgpt.com/connector/oauth/*',
+    'https://www.cursor.com/agents/mcp/oauth/callback',
   ]);
 });
 

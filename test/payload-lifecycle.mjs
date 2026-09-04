@@ -51,7 +51,12 @@ export const MANAGED_OAUTH = Object.freeze({
   enabled: true,
   dynamic_client_registration: {
     enabled: true,
-    allowed_uris: ['https://claude.ai/api/mcp/auth_callback'],
+    allowed_uris: [
+      'https://claude.ai/api/mcp/auth_callback',
+      'https://chatgpt.com/connector_platform_oauth_redirect',
+      'https://chatgpt.com/connector/oauth/*',
+      'https://www.cursor.com/agents/mcp/oauth/callback',
+    ],
     allow_any_on_localhost: true,
     allow_any_on_loopback: true,
   },
