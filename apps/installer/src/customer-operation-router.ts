@@ -584,6 +584,11 @@ export function createCustomerOperationRouter(
         if (attempt.target === null || attempt.operation === 'source-add') {
           return { result: 'failed', reason: 'attempt_invalid' };
         }
+        // The update's upload replaces this Worker version, and the version
+        // that runs afterwards may refuse this one's storage writes. The
+        // attempt is spent already, so it is cleared here rather than left
+        // to block every other operation until it expires.
+        await dependencies.attempts.clear();
         const result = await dependencies.runRuntimeUpdate({
           accessToken,
           actionId: attempt.actionId,
