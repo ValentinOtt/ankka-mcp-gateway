@@ -21,3 +21,16 @@ Optional: `ANKKA_LIVE_PAYLOAD=<path>` runs a different payload module (for
 example an instrumented copy); `ANKKA_LIVE_KEEP=1` leaves the created
 resources in place. The token needs the zone's DNS edit permission besides
 Access, AI controls and Workers edit rights.
+
+`stage2-full.live.ts` runs the whole install path in token mode: hosted
+Stage 1 provisions the real shell Worker from a local publish directory
+(read the way the hosted runtime reads R2, signature and all), completes the
+handoff against it with the same readiness poll, then the Stage 2 converger
+runs in this process against the real provider with the shipped payload
+in-process, using an issuer key generated for the run. Only the two OAuth
+endpoints and the account list are answered locally, so the API token stands
+in for the grant. Needs `ANKKA_LIVE_PUBLISH_DIR` (the signer's publish
+directory) and `ANKKA_LIVE_PIN` (its pin.json) beside the variables above.
+Cleanup removes the payload's recorded resources, the management
+application, the custom domain, marker-tagged DNS records and the Worker.
+It does not cover the OAuth grant itself; that still needs a consent.
