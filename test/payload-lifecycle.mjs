@@ -21,7 +21,7 @@ export const SOURCE_URL = 'https://source.example.net/mcp';
 export const RELEASE = 'gateway-v0.1.0';
 export const RELEASE_SHA256 = `sha256:${'9'.repeat(64)}`;
 export const INSTALLATION_ID = 'acg-361551cea347ce8d598c04f7';
-export const DESIRED_HASH = 'sha256:51f2a522d9dc537459a36ac5d70af04c61556da0c9a3d2964b0b7b97f86de93b';
+export const DESIRED_HASH = 'sha256:5a3c7ce6eaa1717711e35a27616cdaaa68814b78c1f34e0c84917f45c6c3edd3';
 export const CONFIGURATION_HASH = 'sha256:adef4aee1b0500faf61c3d169c3ed0a0554ba0848e703ee3fa727fcd12a782cc';
 export const BOOTSTRAP_NONCE_BYTES = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 export const BOOTSTRAP_NONCE = Buffer.from(BOOTSTRAP_NONCE_BYTES).toString('base64url');
@@ -228,12 +228,13 @@ async function stableResourceKey(prefix, installationId, logicalId) {
   const digest = (await prefixedSha256({ installationId, prefix, logicalId })).slice('sha256:'.length);
   const hint = logicalId.toLowerCase().replace(/[^a-z0-9-]+/gu, '-').replace(/^-+|-+$/gu, '');
   const hintLength = Math.max(0, 32 - prefix.length - 10);
-  return hint && hintLength > 0
-    ? `${prefix}-${hint.slice(0, hintLength)}-${digest.slice(0, 8)}`
+  const cut = hint.slice(0, hintLength).replace(/-+$/gu, '');
+  return cut && hintLength > 0
+    ? `${prefix}-${cut}-${digest.slice(0, 8)}`
     : `${prefix}-${digest.slice(0, 32 - prefix.length - 1)}`;
 }
 
-async function derivedBootstrapClaim(
+export async function derivedBootstrapClaim(
   settings,
   requestId,
   cloudflareAccessToken,

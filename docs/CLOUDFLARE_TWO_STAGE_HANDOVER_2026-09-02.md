@@ -1529,3 +1529,21 @@ deploying the production relay. Both are operator steps.
   root test compares the shell's records with the route's, which is the
   check that would have caught this. Lesson: a route the shell replaces has
   to be replaced whole; its side effects were the contract.
+- 2026-09-04 (14:20), sixth real install, on gateway-v0.1.31 with the
+  management publication in place: Stage 1 handed off without a reload this
+  time, and the second pass stopped at the portal discovery with
+  `payload_portal_discover_blocked_http_400_code_7001`, which the progress
+  page showed at once. Cloudflare error 7001 is "not valid ID format": the
+  portal hostname `mcpsix.zimtente.com` truncates to a key hint that ends on
+  a label boundary, so the MCP portal id carried two hyphens in a row
+  (`portal-mcpsix-zimtente--<digest>`), which the portals API refuses while
+  a single hyphen answers 404 as expected. Every earlier hostname happened
+  to cut inside a label. PR #84 trims a trailing hyphen from the truncated
+  hint in the payload, the hosted derivation and the two fixture copies,
+  which are one contract; the pinned desired hashes moved with it (the
+  `portal-app` key for `mcp.example.com` had the same double hyphen without
+  consequence, since Access application keys never appear in a URL). An
+  installer test derives keys for boundary hostnames and a root test runs
+  the payload's bootstrap for one, comparing its keys with the hosted
+  derivation. Lesson: a provider identifier format is part of the contract
+  too; derive keys with the provider's grammar, not only the byte budget.

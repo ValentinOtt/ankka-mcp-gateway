@@ -12,8 +12,9 @@ async function resourceKey(prefix, installationId, logicalId) {
   const digest = (await prefixedSha256({ installationId, prefix, logicalId })).slice('sha256:'.length);
   const hint = logicalId.toLowerCase().replace(/[^a-z0-9-]+/gu, '-').replace(/^-+|-+$/gu, '');
   const hintLength = Math.max(0, 32 - prefix.length - 10);
-  return hint && hintLength > 0
-    ? `${prefix}-${hint.slice(0, hintLength)}-${digest.slice(0, 8)}`
+  const cut = hint.slice(0, hintLength).replace(/-+$/gu, '');
+  return cut && hintLength > 0
+    ? `${prefix}-${cut}-${digest.slice(0, 8)}`
     : `${prefix}-${digest.slice(0, 32 - prefix.length - 1)}`;
 }
 
