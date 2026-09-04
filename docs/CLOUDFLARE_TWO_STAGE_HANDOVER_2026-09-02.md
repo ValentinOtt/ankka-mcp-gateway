@@ -1360,3 +1360,40 @@ deploying the production relay. Both are operator steps.
   browser install run, then read `failure.reason` from the shell's status
   route and fix the cause. Also open: the lifecycle canary client reports a
   successful run as unknown.
+- 2026-09-04 (early morning), correction and continuation: the first
+  install on gateway-v0.1.23 failed the Stage 1 readiness read, and the cause
+  was PR #67 itself: the shell's status answer gained a `failure` field while
+  the hosted runtime parsed that answer with its own strict schema and
+  reported `readiness_schema_invalid` as an identity mismatch; both suites
+  were green because each side used a hand-written fixture. PR #69 moved the
+  schema into one module that the shell types its answer against and the
+  hosted runtime parses with. PR #70 split CI into parallel jobs on a cached
+  module tree (pull-request runs take about two minutes) and the reviewed
+  canary is now generated from the rebased branch head while the merge
+  trails, so testing no longer waits for a merge. The next run got through
+  both authorizations and failed with `payload_request_response_rejected`:
+  the converger does not post over the network, the shell entrypoint runs
+  the payload's bootstrap in-process and had handed it the shell's own
+  Stage 1 bindings, which carry no zone id, zone name or Zero Trust flag, so
+  the payload's strict environment parser refused before reading the
+  request; this path had never passed. PR #71 completes that environment for
+  both in-process calls and adds a contract test that drives the converger's
+  real request into the shipped payload module (gateway-v0.1.24). The next
+  run failed at the grant's zone check: the filtered zone read under the
+  Stage 2 token answered without the approved zone while the same query
+  under an API token returns it; PR #72 falls back to listing the grant's
+  zones and matching name, account and status locally, with a detail naming
+  the disagreeing field or the visible zone count (gateway-v0.1.25). The
+  next run resolved the zone, the payload created the portal, its Access
+  application and policy and the DNS record under the OAuth token, and the
+  converger's immediate receipt re-verification returned false as a bare
+  boolean; it had no test. A root test now proves the verification accepts
+  the receipt the bootstrap just wrote against the fake provider, PR #73
+  makes it return a fixed-word reason that the converger reports as
+  `verify_<resource>_<status>`, retries a refused token revocation before
+  reporting it unconfirmed, and adds a token-mode live harness under
+  `apps/installer/test-live/` that runs the converger's bootstrap request
+  into the shipped payload against a test account with an API token, no
+  browser and no consent (gateway-v0.1.26, pinned as version `93fa6a7d`).
+  Lesson for every shell, hosted and payload boundary: one shared schema
+  and one test that runs the real counterpart, never two fixtures.
