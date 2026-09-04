@@ -77,3 +77,37 @@ test('the verification names the resource and status it disagrees on, with fixed
     verifyBootstrapReceiptProviderStateWithReason(later, {}, storage, Date.now())),
   { verified: false, reason: 'environment_invalid' });
 });
+
+test('the verification reads an unsettled provider answer again before naming it, with its status', async () => {
+  let appListFailures = 0;
+  const provider = cloudflareProvider({
+    onRequest: ({ request }) => {
+      const url = new URL(request.url);
+      if (request.method === 'GET' && url.pathname.endsWith('/access/apps') && appListFailures > 0) {
+        appListFailures -= 1;
+        return Response.json({ success: false, errors: [{ code: 10000, message: 'unsettled' }], messages: [], result: null }, {
+          status: 500, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return undefined;
+    },
+  });
+  // Portal-only, so the first application discovery is the portal's.
+  const claimInput = await portalOnlyClaim();
+  const { env, storage } = await installReadyGateway({
+    provider,
+    claimInput,
+    environmentBindings: { ANKKA_INSTALL_ID: claimInput.expected.installationId },
+  });
+  const later = { ...await portalOnlyClaim('B'.repeat(22)), cloudflareAccessToken: BOOTSTRAP_GRANT };
+  // One unsettled answer is read past.
+  appListFailures = 1;
+  assert.deepEqual(await withProviderFetch(provider.fetch, () =>
+    verifyBootstrapReceiptProviderStateWithReason(later, env, storage, Date.now())),
+  { verified: true, reason: null });
+  // A provider that never settles is named with the last HTTP status and code.
+  appListFailures = 99;
+  assert.deepEqual(await withProviderFetch(provider.fetch, () =>
+    verifyBootstrapReceiptProviderStateWithReason(later, env, storage, Date.now())),
+  { verified: false, reason: 'portal_access_application_unknown_http_500_code_10000' });
+});

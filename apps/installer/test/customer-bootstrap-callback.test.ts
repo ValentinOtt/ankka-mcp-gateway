@@ -261,7 +261,7 @@ describe('customer bootstrap callback failure injection', () => {
       },
     });
     expect(converged).toBe(true);
-    expect(result).toMatchObject({ status: 'INCOMPLETE', failureCode: 'revocation_unconfirmed' });
+    expect(result).toMatchObject({ status: 'INCOMPLETE', failureCode: 'revocation_unconfirmed', failureReason: 'revoke_http_503' });
   });
 
   it('arms CONVERGING before a failed token exchange and requires fresh authorization', async () => {

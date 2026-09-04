@@ -33,6 +33,11 @@ export interface CustomerBootstrapCallbackResult {
     'provider_recovery_required' | 'revocation_unconfirmed';
 }
 
+function revocationFailureReason(error: Error): string {
+  if (error instanceof CustomerCloudflareGrantError && error.detail !== null) return `revoke_${error.detail}`;
+  return 'revoke_unknown';
+}
+
 /**
  * Names what stopped the callback without provider text: the converger's own
  * reason (which carries the payload's provider status and code), a grant
@@ -124,8 +129,13 @@ export async function executeCustomerBootstrapCallback(input: {
     if (grant !== null) {
       try {
         await grant.revoke({ clientId: input.publicClientId, transport: input.transport });
-      } catch {
+      } catch (error) {
         failureCode = 'revocation_unconfirmed';
+        // The converger's reason stays; an otherwise finished install names
+        // the refused revocation instead (its HTTP status, or transport).
+        if (failureReason === null) {
+          failureReason = revocationFailureReason(error instanceof Error ? error : new Error('revoke_failed'));
+        }
       } finally {
         grant.discard();
       }
