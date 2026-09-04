@@ -1882,7 +1882,7 @@ function dnsMatches(value, desired) {
     );
 }
 
-async function discoverResource(state, kind, token) {
+async function discoverResource(state, kind, token, hint = null) {
   const desired = resource(state, kind);
   if (!desired) return Object.freeze({ status: 'conflict', provider: null });
   const account = encodeURIComponent(state.target.accountId);
@@ -1910,32 +1910,43 @@ async function discoverResource(state, kind, token) {
       : providerOutcome(response.status === 'absent' ? 'absent' : response.status, response);
   }
   if (kind === 'source_access_application' || kind === 'portal_access_application') {
-    // An MCP application has no domain and is stored with the account: the
-    // zone listing never shows it, so the source application is looked up in
-    // the account listing. The portal application, a zone hostname, keeps
-    // the zone listing.
-    const applications = kind === 'source_access_application'
-      ? `/accounts/${account}/access/apps`
-      : `/zones/${zone}/access/apps`;
-    const response = await providerList(applications, token);
-    if (response.status !== 'ok') return providerOutcome(response.status, response);
-    const candidates = response.result.filter((value) => accessApplicationCandidate(value, kind, state));
+    // The zone paths are the ones the grant covers. An MCP application has
+    // no hostname and is stored with the account, where the zone listing
+    // never shows it, so a known source application is read by id; only a
+    // baseline without one falls back to listings, the account listing
+    // included when the grant can read it. The portal application, a zone
+    // hostname, keeps the listing that proves it is the only one.
+    const known = kind === 'source_access_application' ? hint ?? locator(state, kind) : null;
+    // A known application that is gone is absent; a listed one that vanishes
+    // before its read is an unsettled answer, named with its status.
+    const readApplication = async (id, listed) => {
+      const read = await providerCall(`/zones/${zone}/access/apps/${encodeURIComponent(id)}`, token);
+      if (read.status === 'absent') {
+        return listed ? providerOutcome('unknown', read) : Object.freeze({ status: 'absent', provider: null });
+      }
+      if (read.status !== 'ok') return providerOutcome(read.status, read);
+      return isRecord(read.result) && read.result.id === id &&
+        accessApplicationIdentityMatches(read.result, kind, state)
+        ? Object.freeze({ status: 'present', provider: Object.freeze({ id: read.result.id }) })
+        : Object.freeze({ status: 'conflict', provider: null });
+    };
+    if (known) return readApplication(known.id, false);
+    const listed = await providerList(`/zones/${zone}/access/apps`, token);
+    if (listed.status !== 'ok') return providerOutcome(listed.status, listed);
+    let candidates = listed.result.filter((value) => accessApplicationCandidate(value, kind, state));
+    if (kind === 'source_access_application' && candidates.length === 0) {
+      const accountListed = await providerList(`/accounts/${account}/access/apps`, token);
+      if (accountListed.status === 'ok') {
+        candidates = accountListed.result.filter((value) => accessApplicationCandidate(value, kind, state));
+      } else if (accountListed.status !== 'blocked' && accountListed.status !== 'auth') {
+        return providerOutcome(accountListed.status, accountListed);
+      }
+    }
     if (candidates.length === 0) return Object.freeze({ status: 'absent', provider: null });
     if (candidates.length > 1) return Object.freeze({ status: 'conflict', provider: null });
     // The exact application shape, including Managed OAuth, is proven on the
     // single-application read; the list is only used to bound the candidate set.
-    const read = await providerCall(
-      `${applications}/${encodeURIComponent(candidates[0].id)}`,
-      token,
-    );
-    if (read.status !== 'ok') {
-      return providerOutcome(read.status === 'absent' ? 'unknown' : read.status, read);
-    }
-    if (!isRecord(read.result) || read.result.id !== candidates[0].id ||
-        !accessApplicationIdentityMatches(read.result, kind, state)) {
-      return Object.freeze({ status: 'conflict', provider: null });
-    }
-    return Object.freeze({ status: 'present', provider: Object.freeze({ id: read.result.id }) });
+    return readApplication(candidates[0].id, true);
   }
   if (kind === 'source_access_policy' || kind === 'portal_access_policy') {
     const parentKind = kind === 'source_access_policy'
@@ -1943,10 +1954,8 @@ async function discoverResource(state, kind, token) {
       : 'portal_access_application';
     const parent = locator(state, parentKind);
     if (!parent) return Object.freeze({ status: 'conflict', provider: null });
-    // The source application lives with the account, so its policies do too.
-    const policies = kind === 'source_access_policy'
-      ? `/accounts/${account}/access/apps/${encodeURIComponent(parent.id)}/policies`
-      : `/zones/${zone}/access/apps/${encodeURIComponent(parent.id)}/policies`;
+    // Policies stay a listing: a competing policy on the application must be seen.
+    const policies = `/zones/${zone}/access/apps/${encodeURIComponent(parent.id)}/policies`;
     const response = await providerList(policies, token);
     if (response.status !== 'ok') return providerOutcome(response.status, response);
     if (kind === 'source_access_policy' && desired.desired.allow.identitiesRef === 'team.sourceMembers' &&
@@ -1980,8 +1989,9 @@ async function createResource(state, kind, token) {
   if (kind === 'source_access_application') {
     const server = locator(state, 'mcp_server');
     if (!server) return Object.freeze({ status: 'conflict', provider: null });
-    // An MCP application has no hostname; Cloudflare stores it with the account.
-    path = `/accounts/${account}/access/apps`;
+    // Cloudflare stores this hostname-less application with the account, but
+    // the zone path is the one the grant covers and it accepts the creation.
+    path = `/zones/${zone}/access/apps`;
     body = {
       name: marker(state.installationId, desired.key),
       type: 'mcp',
@@ -2050,9 +2060,7 @@ async function createResource(state, kind, token) {
       : 'portal_access_application';
     const parent = locator(state, parentKind);
     if (!parent) return Object.freeze({ status: 'conflict', provider: null });
-    path = kind === 'source_access_policy'
-      ? `/accounts/${account}/access/apps/${encodeURIComponent(parent.id)}/policies`
-      : `/zones/${zone}/access/apps/${encodeURIComponent(parent.id)}/policies`;
+    path = `/zones/${zone}/access/apps/${encodeURIComponent(parent.id)}/policies`;
     const name = `${kind === 'source_access_policy' ? state.settings.sources[0].label : state.settings.connect.name} users [${marker(state.installationId, desired.key)}]`;
     body = kind === 'source_access_policy' && desired.desired.allow.identitiesRef === 'team.sourceMembers'
       ? teamPolicy([], name)
@@ -3033,21 +3041,32 @@ async function actionDesiredState(control, sources, action) {
   });
 }
 
-function actionRecovery(code = 'source_action_recovery_required') {
-  return fixedJson(409, { schemaVersion: 1, error: code, retryable: true });
+function actionRecovery(code = 'source_action_recovery_required', detail = null) {
+  return fixedJson(409, detail === null
+    ? { schemaVersion: 1, error: code, retryable: true }
+    : { schemaVersion: 1, error: code, retryable: true, detail });
+}
+
+// Names the provider step that stopped an action with only the HTTP status
+// and Cloudflare's numeric code: never provider text or identifiers.
+function providerDetail(kind, step, outcome) {
+  const status = outcome?.httpStatus;
+  const code = outcome?.providerCode;
+  return `${kind}_${step}_${outcome?.status ?? 'unknown'}` +
+    `${Number.isInteger(status) ? `_http_${status}` : ''}${Number.isInteger(code) ? `_code_${code}` : ''}`;
 }
 
 function sourceAdditionPaused() {
   return fixedJson(409, { schemaVersion: 1, error: 'source_addition_paused', retryable: false });
 }
 
-async function failSourceAction(storage, action, code, terminal = false) {
+async function failSourceAction(storage, action, code, terminal = false, detail = null) {
   const updated = await persistSourceAction(storage, {
     ...action,
     status: terminal ? 'failed' : 'recovery_required',
     failureCode: code,
   });
-  return updated ? actionRecovery(code) : actionRecovery('source_action_state_unavailable');
+  return updated ? actionRecovery(code, detail) : actionRecovery('source_action_state_unavailable');
 }
 
 function sourceActionClaim(value, environment, action, nowMs) {
@@ -3233,20 +3252,26 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     const desired = resource(state, kind);
     if (!desired) return failSourceAction(storage, action, 'source_action_invalid');
     if (action.resources.length > index) {
-      const observed = await discoverResource(state, kind, parsed.claim.cloudflareAccessToken);
+      const observed = await discoverResource(
+        state, kind, parsed.claim.cloudflareAccessToken, action.resources[index].provider,
+      );
       if (observed.status !== 'present' || !sameProvider(observed.provider, action.resources[index].provider)) {
-        return failSourceAction(storage, action, 'source_resource_drift');
+        return failSourceAction(storage, action, 'source_resource_drift', false, providerDetail(kind, 'retained', observed));
       }
       continue;
     }
     if (action.pending) {
-      const observed = await discoverResource(state, kind, parsed.claim.cloudflareAccessToken);
+      const observed = await discoverResource(
+        state, kind, parsed.claim.cloudflareAccessToken, action.pending.provider,
+      );
       if (observed.status === 'absent') {
         action = await persistSourceAction(storage, { ...action, pending: null });
         if (!action) return actionRecovery('source_action_state_unavailable');
       } else if (observed.status !== 'present' ||
           (action.pending.provider && !sameProvider(observed.provider, action.pending.provider))) {
-        return failSourceAction(storage, action, 'source_action_recovery_required');
+        return failSourceAction(
+          storage, action, 'source_action_recovery_required', false, providerDetail(kind, 'resume', observed),
+        );
       } else {
         action = await persistSourceAction(storage, {
           ...action,
@@ -3263,6 +3288,7 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
       action,
       baseline.status === 'auth' ? 'source_action_authorization_failed' : 'source_resource_collision',
       baseline.status === 'auth',
+      providerDetail(kind, 'baseline', baseline),
     );
     if (Date.now() >= action.expiresAt) return failSourceAction(storage, action, 'source_action_recovery_required');
     action = await persistSourceAction(storage, {
@@ -3272,15 +3298,23 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     if (!action) return actionRecovery('source_action_state_unavailable');
     if (!await armSourceCompatibility(storage, env)) return actionRecovery('source_action_state_unavailable');
     const created = await createResource(state, kind, parsed.claim.cloudflareAccessToken);
-    if (created.status !== 'submitted') return failSourceAction(storage, action, 'source_action_recovery_required');
+    if (created.status !== 'submitted') {
+      return failSourceAction(
+        storage, action, 'source_action_recovery_required', false, providerDetail(kind, 'create', created),
+      );
+    }
     action = await persistSourceAction(storage, {
       ...action,
       pending: { kind, phase: 'submitted', provider: created.provider },
     });
     if (!action) return actionRecovery('source_action_state_unavailable');
-    const after = await discoverResource({ ...desiredState, resources: action.resources }, kind, parsed.claim.cloudflareAccessToken);
+    const after = await discoverResource(
+      { ...desiredState, resources: action.resources }, kind, parsed.claim.cloudflareAccessToken, created.provider,
+    );
     if (after.status !== 'present' || !sameProvider(after.provider, created.provider)) {
-      return failSourceAction(storage, action, 'source_action_recovery_required');
+      return failSourceAction(
+        storage, action, 'source_action_recovery_required', false, providerDetail(kind, 'verify', after),
+      );
     }
     action = await persistSourceAction(storage, {
       ...action,
@@ -3306,7 +3340,7 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   const portalPath = `/accounts/${encodeURIComponent(refreshed.control.accountId)}/access/ai-controls/mcp/portals/${encodeURIComponent(refreshed.control.portal.id)}`;
   let live = await providerCall(portalPath, parsed.claim.cloudflareAccessToken);
   if (live.status !== 'ok' || !portalStaticMatches(live.result, refreshed.control)) {
-    return failSourceAction(storage, action, 'portal_drift');
+    return failSourceAction(storage, action, 'portal_drift', false, providerDetail('portal', 'read', live));
   }
   if (!portalExact(live.result, refreshed.control, mappings)) {
     if (action.portalUpdate && action.portalUpdate.desiredHash !== desiredHash) {
@@ -3332,7 +3366,11 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     const updated = await providerCall(portalPath, parsed.claim.cloudflareAccessToken, {
       method: 'PUT', body: canonicalJson(portalBody),
     });
-    if (updated.status !== 'ok') return failSourceAction(storage, action, 'source_action_recovery_required');
+    if (updated.status !== 'ok') {
+      return failSourceAction(
+        storage, action, 'source_action_recovery_required', false, providerDetail('portal', 'update', updated),
+      );
+    }
     action = await persistSourceAction(storage, {
       ...action,
       portalUpdate: { phase: 'submitted', desiredHash },
@@ -3340,7 +3378,9 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     if (!action) return actionRecovery('source_action_state_unavailable');
     live = await providerCall(portalPath, parsed.claim.cloudflareAccessToken);
     if (live.status !== 'ok' || !portalExact(live.result, refreshed.control, mappings)) {
-      return failSourceAction(storage, action, 'source_action_recovery_required');
+      return failSourceAction(
+        storage, action, 'source_action_recovery_required', false, providerDetail('portal', 'verify', live),
+      );
     }
   } else if (action.portalUpdate?.desiredHash !== desiredHash && action.portalUpdate !== null) {
     return failSourceAction(storage, action, 'source_action_drift');
@@ -3921,12 +3961,10 @@ function teardownProviderPath(resource, target) {
   if (resource.kind === 'portal') {
     return `/accounts/${account}/access/ai-controls/mcp/portals/${id}`;
   }
-  if (resource.kind === 'source_access_application') return `/accounts/${account}/access/apps/${id}`;
-  if (resource.kind === 'portal_access_application') return `/zones/${zone}/access/apps/${id}`;
-  if (resource.kind === 'source_access_policy') {
-    return `/accounts/${account}/access/apps/${encodeURIComponent(resource.provider.parentId)}/policies/${id}`;
+  if (resource.kind === 'source_access_application' || resource.kind === 'portal_access_application') {
+    return `/zones/${zone}/access/apps/${id}`;
   }
-  if (resource.kind === 'portal_access_policy') {
+  if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
     return `/zones/${zone}/access/apps/${encodeURIComponent(resource.provider.parentId)}/policies/${id}`;
   }
   return `/zones/${zone}/dns_records/${id}`;

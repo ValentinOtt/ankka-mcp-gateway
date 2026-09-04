@@ -32,20 +32,24 @@ Notable public product and repository changes are recorded here.
   action is in flight, the recorded current release becomes the rollback
   reference and the running release is current, so the next update no longer
   stops with `runtime_action_conflict`.
-- Find a source's Access application in the account listing. Cloudflare
+- Read a source's Access application back by id after creating it. Cloudflare
   stores an MCP-type application (no hostname of its own) with the account,
   and the zone listing never shows it, so the gateway created the application
   and then failed to see it, leaving the first real source installation in
-  recovery-required after its MCP server and application existed.
+  recovery-required after its MCP server and application existed. A baseline
+  without a known id still consults the listings, the account listing
+  included where the grant can read it; the writes stay on the zone paths
+  the grant covers, and the portal application and both policies keep their
+  listings so a competing policy is still seen.
 - Clear a gateway-local operation's attempt record before a runtime update
   uploads the new version. The replaced version could not clear it afterwards,
   so every other operation on that gateway answered `operation_pending` for
   up to ten minutes after an update.
-- Create, find, and remove a source's Access application and its policy
-  through the account paths. The application lives with the account, and its
-  policy could not be created through the zone path, so the second real
-  source installation stopped after the MCP server and the application
-  existed. The portal application, a zone hostname, keeps its zone paths.
+- Name the provider step that stopped a source installation. The apply
+  route's rejection now carries the resource kind, the step, the outcome, the
+  HTTP status and Cloudflare's numeric code (never provider text), and the
+  dashboard's return reason repeats it, so a stalled installation says which
+  call failed instead of only "recovery required".
 - Retire the legacy hosted installer runtime, its Durable Object, journals,
   executors, management handoffs, and analytics sink. The two-stage runtime
   shipped in gateway-v0.1.21 is the only hosted mutation path.

@@ -86,12 +86,9 @@ function resourcePath(resource) {
   const zone = `/client/v4/zones/${resource.target.zoneId}`;
   if (resource.kind === 'mcp_server') return `${account}/access/ai-controls/mcp/servers/${resource.provider.id}`;
   if (resource.kind === 'portal') return `${account}/access/ai-controls/mcp/portals/${resource.provider.id}`;
-  if (resource.kind.endsWith('_application')) {
-    return `${resource.kind === 'source_access_application' ? account : zone}/access/apps/${resource.provider.id}`;
-  }
+  if (resource.kind.endsWith('_application')) return `${zone}/access/apps/${resource.provider.id}`;
   if (resource.kind.endsWith('_policy')) {
-    const scope = resource.kind === 'source_access_policy' ? account : zone;
-    return `${scope}/access/apps/${resource.provider.parentId}/policies/${resource.provider.id}`;
+    return `${zone}/access/apps/${resource.provider.parentId}/policies/${resource.provider.id}`;
   }
   return `/client/v4/zones/${resource.target.zoneId}/dns_records/${resource.provider.id}`;
 }

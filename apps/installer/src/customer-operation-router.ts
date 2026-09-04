@@ -360,7 +360,11 @@ interface OperationOutcome {
   readonly reason: CustomerOperationReason | null;
 }
 
-const rejectionSchema = v.looseObject({ error: v.pipe(v.string(), v.regex(REASON)) });
+const rejectionSchema = v.looseObject({
+  error: v.pipe(v.string(), v.regex(REASON)),
+  /** The provider step that stopped an apply: kind, step, status, HTTP status and numeric code only. */
+  detail: v.optional(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,100}$/u))),
+});
 
 async function appliedOutcome(response: Response, actionId: string): Promise<OperationOutcome> {
   const declared = response.headers.get('content-length');
@@ -385,7 +389,9 @@ async function appliedOutcome(response: Response, actionId: string): Promise<Ope
     const rejection = v.safeParse(rejectionSchema, body);
     return {
       result: 'failed',
-      reason: rejection.success ? `apply_${rejection.output.error}` : `apply_http_${response.status}`,
+      reason: rejection.success
+        ? `apply_${rejection.output.error}${rejection.output.detail === undefined ? '' : `_${rejection.output.detail}`}`.slice(0, 121)
+        : `apply_http_${response.status}`,
     };
   }
   const parsed = v.safeParse(appliedSchema, body);
