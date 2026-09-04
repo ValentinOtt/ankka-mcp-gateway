@@ -63,7 +63,8 @@ An update starts in the gateway dashboard and runs on the gateway itself:
    own `/__ankka/operation` page, which asks Cloudflare for a one-time
    `upgrade` grant (Workers scripts write only) through the public OAuth
    client and callback certified at install.
-2. The gateway reads its active Worker version and current bindings, then
+2. The gateway confirms the grant reaches the installed account by reading
+   the gateway Worker, reads its active Worker version and current bindings, then
    fetches the pinned release descriptor and every manifest file from the
    control plane's `/api/releases/<channel>/files/<path>` route and verifies
    the signature and every digest with the update key it was installed with.

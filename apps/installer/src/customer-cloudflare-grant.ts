@@ -391,6 +391,85 @@ export async function verifyCustomerCloudflareGrantAccount(input: {
   }
 }
 
+/** Operations whose grant the gateway binds to the account it was installed in. */
+export type CustomerCloudflareGatewayOperation = 'source-add' | 'upgrade' | 'rollback';
+
+const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+
+const accountProbeEnvelopeSchema = v.looseObject({
+  success: v.boolean(),
+  errors: v.array(boundaryValueSchema),
+});
+
+/** One small read of the expected account that the operation's own scope covers. */
+function accountProbePath(operation: CustomerCloudflareGatewayOperation, workerName: string): string {
+  if (operation === 'source-add') return '/access/ai-controls/mcp/portals';
+  return `/workers/workers/${encodeURIComponent(workerName)}`;
+}
+
+function accountProbeDetail(
+  response: Response,
+  value: BoundaryValue,
+  parsed: v.SafeParseResult<typeof accountProbeEnvelopeSchema>,
+): string {
+  const code = firstProviderErrorCode(value);
+  const suffix = code === null ? '' : `_code_${code}`;
+  if (!response.ok) return `${httpStatusDetail(response)}${suffix}`;
+  if (!parsed.success) return `envelope_invalid${suffix}`;
+  if (!parsed.output.success) return `success_false${suffix}`;
+  if (parsed.output.errors.length !== 0) return `errors_present${suffix}`;
+  return 'envelope_rejected';
+}
+
+/**
+ * Binds a gateway operation's grant to the installed account. The accounts
+ * listing shows only accounts the grant can read, and an operation grant
+ * carries no account-level read scope, so this reads one small resource of
+ * the expected account under the operation's own scope: the MCP portals for
+ * a source grant, the gateway Worker for a Workers grant. A refused read
+ * means the consent authorized another account; any other failure names the
+ * provider problem without its text.
+ */
+export async function verifyCustomerCloudflareGrantAccountAccess(input: {
+  readonly accessToken: string;
+  readonly expectedAccountId: string;
+  readonly operation: CustomerCloudflareGatewayOperation;
+  readonly workerName: string;
+  readonly transport: CustomerCloudflareTransport;
+}): Promise<void> {
+  if (!validBearerCredential(input.accessToken) || !ACCOUNT_ID.test(input.expectedAccountId) ||
+      !WORKER_NAME.test(input.workerName)) {
+    invalid();
+  }
+  const url = new URL(
+    `/client/v4/accounts/${input.expectedAccountId}${accountProbePath(input.operation, input.workerName)}`,
+    CLOUDFLARE_API_ORIGIN,
+  );
+  let read: BoundedRead;
+  try {
+    read = await fetchBoundedText(input.transport, url, {
+      method: 'GET',
+      headers: { accept: 'application/json', authorization: `Bearer ${input.accessToken}` },
+    }, 'oauth_exchange_failed', { maxBytes: MAX_PROVIDER_BYTES });
+  } catch (error) {
+    throw new CustomerCloudflareGrantError('provider_unavailable', deadlineDetail(error));
+  }
+  const { response } = read;
+  let value: BoundaryValue;
+  try {
+    value = parseProviderJson(read.text);
+  } catch {
+    throw new CustomerCloudflareGrantError('provider_unavailable', `not_json_${httpStatusDetail(response)}`);
+  }
+  const parsed = v.safeParse(accountProbeEnvelopeSchema, value);
+  if (response.status === 401 || response.status === 403 || response.status === 404) {
+    throw new CustomerCloudflareGrantError('account_mismatch', accountProbeDetail(response, value, parsed));
+  }
+  if (!response.ok || !parsed.success || !parsed.output.success || parsed.output.errors.length !== 0) {
+    throw new CustomerCloudflareGrantError('provider_unavailable', accountProbeDetail(response, value, parsed));
+  }
+}
+
 type AuthorizedZone = v.InferOutput<typeof zoneEnvelopeSchema>['result'][number];
 
 /** Bounds for the unfiltered listing that backs the filtered zone read. */

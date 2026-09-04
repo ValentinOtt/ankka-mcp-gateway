@@ -16,7 +16,7 @@ import {
 import {
   CustomerCloudflareGrantError,
   exchangeCustomerCloudflareAuthorizationCode,
-  verifyCustomerCloudflareGrantAccount,
+  verifyCustomerCloudflareGrantAccountAccess,
   type CustomerCloudflareTransport,
   type EphemeralCustomerCloudflareGrant,
 } from './customer-cloudflare-grant';
@@ -573,9 +573,11 @@ export function createCustomerOperationRouter(
       });
       grant.assertUsable();
       outcome = await grant.withAccessToken(async (accessToken): Promise<OperationOutcome> => {
-        await verifyCustomerCloudflareGrantAccount({
+        await verifyCustomerCloudflareGrantAccountAccess({
           accessToken,
           expectedAccountId: config.accountId,
+          operation: attempt.operation,
+          workerName: config.workerName,
           transport: dependencies.transport,
         });
         if (attempt.kind === 'source') return applySource(attempt, cookie.actionKey, accessToken, callbackAt);

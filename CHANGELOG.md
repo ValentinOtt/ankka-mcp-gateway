@@ -22,6 +22,11 @@ Notable public product and repository changes are recorded here.
   not yet served by this route.
 - Name why a gateway-local operation stopped: the dashboard return carries a
   bounded reason word (grant, apply, or update stage) next to the result.
+- Bind an operation grant to the installed account by reading one of that
+  account's resources under the grant's own scope (the MCP portals for a
+  source grant, the gateway Worker for an update) instead of listing
+  accounts, which an operation grant cannot see. The first gateway-local
+  source authorization had stopped with `grant_account_ambiguous_accounts_0`.
 - Retire the legacy hosted installer runtime, its Durable Object, journals,
   executors, management handoffs, and analytics sink. The two-stage runtime
   shipped in gateway-v0.1.21 is the only hosted mutation path.
