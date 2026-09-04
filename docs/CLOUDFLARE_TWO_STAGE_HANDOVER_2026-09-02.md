@@ -1444,3 +1444,28 @@ deploying the production relay. Both are operator steps.
   (gateway-v0.1.28, version `26dbaf1d`). The full token-mode harness passes
   against v0.1.28. Open: why the OAuth-token discovery is unsettled where
   the API-token harness never is, and the refused revocation.
+- 2026-09-04 (morning), root cause of the unsettled discovery and the
+  refused revocation, both at once: the customer shell ran the whole Stage 2
+  convergence inside the OAuth callback invocation, and a Workers Free
+  account allows 50 subrequests per invocation. The token-mode harness
+  counted the convergence at 110 provider calls, plus the exchange, the
+  account check and the revocation; call 51 falls inside the receipt
+  re-verification, exactly where both real runs stopped, and the runtime
+  throws `Too many subrequests` there, which the payload can only report as
+  an unsettled answer and the grant as a refused revocation. Two throwaway
+  probe Workers on the test account confirmed the budget (50, then the
+  throw), that every Durable Object request and every alarm invocation has
+  its own budget, and that object memory survives back-to-back alarms. The
+  API-token harness never saw it because Node has no such budget. PR #80
+  splits the convergence into passes: the converger takes fixed checkpoints
+  and pauses after the journal transition they name, proving each resource
+  once per pass; the callback arms the attempt, exchanges, checks the
+  account and hands the grant to a driver that keeps it in object memory and
+  re-arms an alarm after every paused pass; the browser lands on a page that
+  follows the status route. Measured against the real provider, the passes
+  cost 25, 21, 22 and 28 provider calls (96 in all; the single run cost 110). The final runtime upload and
+  everything after it share one pass so the object never resumes on new code
+  without its grant; a lost grant settles `INCOMPLETE` with `grant_lost`.
+  Lesson: the customer's plan limits are part of the contract; a harness in
+  Node proves the provider calls, not the platform they run on. Open: the
+  recovery router in the final runtime still converges in one invocation.

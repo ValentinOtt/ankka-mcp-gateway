@@ -31,6 +31,11 @@ in-process, using an issuer key generated for the run. Only the two OAuth
 endpoints and the account list are answered locally, so the API token stands
 in for the grant. Needs `ANKKA_LIVE_PUBLISH_DIR` (the signer's publish
 directory) and `ANKKA_LIVE_PIN` (its pin.json) beside the variables above.
-Cleanup removes the payload's recorded resources, the management
-application, the custom domain, marker-tagged DNS records and the Worker.
-It does not cover the OAuth grant itself; that still needs a consent.
+The converger runs with the shell's checkpoints, one pass per call the way
+the shell runs one pass per Durable Object alarm, and the harness prints and
+bounds the provider calls of every pass: a Workers Free account allows 50
+subrequests per invocation, and this is the only place the payload's own
+provider calls are counted. Cleanup removes the payload's recorded
+resources, the management application, the custom domain, marker-tagged
+DNS records and the Worker. It does not cover the OAuth grant itself; that
+still needs a consent.
