@@ -1,8 +1,8 @@
 import * as v from 'valibot';
 
 import {
-  executeCustomerBootstrapCallback,
-  type CustomerBootstrapConverge,
+  beginCustomerBootstrapCallback,
+  type CustomerBootstrapCallbackFailureCode,
 } from './customer-bootstrap-callback';
 import {
   type CustomerBootstrapRelayStart,
@@ -19,7 +19,10 @@ import {
   type BootstrapRandomBytes,
   type CustomerBootstrapState,
 } from './customer-bootstrap-state';
-import type { CustomerCloudflareTransport } from './customer-cloudflare-grant';
+import type {
+  CustomerCloudflareTransport,
+  EphemeralCustomerCloudflareGrant,
+} from './customer-cloudflare-grant';
 import {
   CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH,
   CUSTOMER_INSTALL_OAUTH_START_PATH,
@@ -61,9 +64,28 @@ export interface CustomerStage2RecoveryRouterDependencies {
     readonly gatewayCallback: string;
     readonly relayTicket: string;
   }) => Promise<CustomerBootstrapRelayStart>;
-  readonly converge: CustomerBootstrapConverge;
+  /**
+   * Takes the exchanged, account-checked grant into memory and arranges the
+   * converger passes, one alarm each, the way the bootstrap shell does; the
+   * final runtime lives under the same per-invocation budget.
+   */
+  readonly startConvergence: (input: {
+    readonly attemptId: string;
+    readonly grant: EphemeralCustomerCloudflareGrant;
+  }) => Promise<void>;
+  /** Renders the callback outcome for a browser; JSON when absent. */
+  readonly callbackResponse?: (
+    outcome: CustomerStage2RecoveryOutcome,
+    cookies: readonly string[],
+  ) => Response;
   readonly now?: () => number;
   readonly randomBytes?: BootstrapRandomBytes;
+}
+
+export interface CustomerStage2RecoveryOutcome {
+  readonly status: 'READY' | 'INCOMPLETE' | 'CONVERGING';
+  readonly failureCode: CustomerBootstrapCallbackFailureCode | null;
+  readonly failureReason: string | null;
 }
 
 function headers(): Headers {
@@ -307,7 +329,7 @@ export function createCustomerStage2RecoveryRouter(
               clearCookie(PKCE_COOKIE), clearCookie(SESSION_COOKIE),
             ]);
           }
-          const result = await executeCustomerBootstrapCallback({
+          const begun = await beginCustomerBootstrapCallback({
             current,
             sessionSecret,
             attemptId: pkce.attemptId,
@@ -319,13 +341,29 @@ export function createCustomerStage2RecoveryRouter(
             now: callbackAt,
             transport: dependencies.transport,
             persist,
-            converge: dependencies.converge,
           });
-          return json({
-            schemaVersion: 1,
-            status: result.status,
-            failureCode: result.failureCode,
-          }, 200, [clearCookie(PKCE_COOKIE), clearCookie(SESSION_COOKIE)]);
+          let outcome: CustomerStage2RecoveryOutcome;
+          if (begun.status === 'CONVERGING') {
+            await dependencies.startConvergence({ attemptId: begun.attemptId, grant: begun.grant });
+            // The host may have run every pass inline; report the durable state.
+            const stored = await dependencies.state.read();
+            const settled = (stored === undefined || stored === null ? null : parseCustomerBootstrapState(stored))
+              ?? begun.state;
+            outcome = {
+              status: settled.status,
+              failureCode: settled.failureCode,
+              failureReason: settled.failureReason ?? null,
+            };
+          } else {
+            outcome = {
+              status: begun.status,
+              failureCode: begun.failureCode,
+              failureReason: begun.failureReason,
+            };
+          }
+          const cookies = [clearCookie(PKCE_COOKIE), clearCookie(SESSION_COOKIE)];
+          return dependencies.callbackResponse?.(outcome, cookies) ??
+            json({ schemaVersion: 1, status: outcome.status, failureCode: outcome.failureCode }, 200, cookies);
         }
         return notFound();
       } catch (error) {

@@ -20,6 +20,12 @@ import {
 import { createCustomerStage2RecoveryRouter } from '../src/customer-stage2-recovery-router';
 import { responseJson } from './boundary';
 
+import type { CustomerBootstrapConverge } from '../src/customer-bootstrap-callback';
+import { CustomerBootstrapConvergenceDriver } from '../src/customer-bootstrap-convergence-driver';
+import type { CustomerBootstrapStatePort } from '../src/customer-bootstrap-router';
+import type { CustomerCloudflareTransport } from '../src/customer-cloudflare-grant';
+import type { CustomerStage2RecoveryRouterDependencies } from '../src/customer-stage2-recovery-router';
+
 const NOW = 1_800_000_000_000;
 const ORIGIN = 'https://manage.example.com';
 const ACCOUNT_ID = 'a'.repeat(32);
@@ -70,6 +76,26 @@ async function consumedState(): Promise<CustomerBootstrapState> {
   })).state;
 }
 
+/** Runs every converger pass inline, the way a host without a per-invocation budget would. */
+function inlineConvergence(
+  state: CustomerBootstrapStatePort,
+  transport: CustomerCloudflareTransport,
+  converge: CustomerBootstrapConverge,
+  now: () => number,
+): CustomerStage2RecoveryRouterDependencies['startConvergence'] {
+  const driver = new CustomerBootstrapConvergenceDriver({
+    state,
+    transport,
+    publicClientId: CLIENT_ID,
+    converge,
+    now,
+    schedule: async () => {
+      await driver.continue();
+    },
+  });
+  return (input) => driver.start(input);
+}
+
 describe('final-runtime Stage 2 recovery router', () => {
   it('uses fresh customer-key authority, fresh PKCE, direct exchange, and revocation', async () => {
     let stored = await consumedState();
@@ -77,6 +103,31 @@ describe('final-runtime Stage 2 recovery router', () => {
     let ticketRequests = 0;
     let revoked = false;
     let convergedWith: string | null = null;
+    const statePort: CustomerBootstrapStatePort = {
+      read: async () => stored,
+      compareAndSet: async (revision, state) => {
+        if (stored.revision !== revision) return false;
+        stored = state;
+        persisted.push(JSON.stringify(state));
+        return true;
+      },
+    };
+    const transport: CustomerCloudflareTransport = async (input) => {
+      const url = String(input);
+      if (url.endsWith('/oauth2/token')) return json({
+        access_token: ACCESS_TOKEN,
+        token_type: 'bearer',
+        scope: INSTALL_SCOPES.join(' '),
+      });
+      if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
+        return json({ success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }] });
+      }
+      if (url.endsWith('/oauth2/revoke')) {
+        revoked = true;
+        return json({ revoked: true });
+      }
+      throw new Error('unexpected request');
+    };
     const router = createCustomerStage2RecoveryRouter({
       accountId: ACCOUNT_ID,
       installId: INSTALL_ID,
@@ -84,15 +135,7 @@ describe('final-runtime Stage 2 recovery router', () => {
       managementOrigin: ORIGIN,
     }, {
       now: () => NOW + 2,
-      state: {
-        read: async () => stored,
-        compareAndSet: async (revision, state) => {
-          if (stored.revision !== revision) return false;
-          stored = state;
-          persisted.push(JSON.stringify(state));
-          return true;
-        },
-      },
+      state: statePort,
       assertRecoverable: async () => undefined,
       issueRelayTicket: async () => {
         ticketRequests += 1;
@@ -109,26 +152,11 @@ describe('final-runtime Stage 2 recovery router', () => {
           nonce: base64UrlEncode(new Uint8Array(32).fill(8)),
           now: NOW + 2,
         }),
-      transport: async (input) => {
-        const url = String(input);
-        if (url.endsWith('/oauth2/token')) return json({
-          access_token: ACCESS_TOKEN,
-          token_type: 'bearer',
-          scope: INSTALL_SCOPES.join(' '),
-        });
-        if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
-          return json({ success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }] });
-        }
-        if (url.endsWith('/oauth2/revoke')) {
-          revoked = true;
-          return json({ revoked: true });
-        }
-        throw new Error('unexpected request');
-      },
-      converge: async (accessToken) => {
+      transport,
+      startConvergence: inlineConvergence(statePort, transport, async (accessToken) => {
         convergedWith = accessToken;
         return COMPLETE_CONVERGENCE;
-      },
+      }, () => NOW + 2),
     });
 
     const start = await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_OAUTH_START_PATH}`, {
@@ -198,6 +226,15 @@ describe('final-runtime Stage 2 recovery router', () => {
     });
     let stored = oauth.next;
     let ticketRequests = 0;
+    const statePort: CustomerBootstrapStatePort = {
+      read: async () => stored,
+      compareAndSet: async (revision, state) => {
+        if (stored.revision !== revision) return false;
+        stored = state;
+        return true;
+      },
+    };
+    const transport: CustomerCloudflareTransport = async () => { throw new Error('must not exchange'); };
     const router = createCustomerStage2RecoveryRouter({
       accountId: ACCOUNT_ID,
       installId: INSTALL_ID,
@@ -205,22 +242,15 @@ describe('final-runtime Stage 2 recovery router', () => {
       managementOrigin: ORIGIN,
     }, {
       now: () => NOW + 3,
-      state: {
-        read: async () => stored,
-        compareAndSet: async (revision, state) => {
-          if (stored.revision !== revision) return false;
-          stored = state;
-          return true;
-        },
-      },
+      state: statePort,
       assertRecoverable: async () => undefined,
       issueRelayTicket: async () => {
         ticketRequests += 1;
         throw new Error('must not request');
       },
       beginRelay: async () => { throw new Error('must not relay'); },
-      transport: async () => { throw new Error('must not exchange'); },
-      converge: async () => COMPLETE_CONVERGENCE,
+      transport,
+      startConvergence: inlineConvergence(statePort, transport, async () => COMPLETE_CONVERGENCE, () => NOW + 3),
     });
     const response = await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_OAUTH_START_PATH}`, {
       method: 'POST',
@@ -230,6 +260,7 @@ describe('final-runtime Stage 2 recovery router', () => {
     expect(response.status).toBe(409);
     expect(ticketRequests).toBe(0);
 
+    const blockedPort: CustomerBootstrapStatePort = { read: async () => stored, compareAndSet: async () => false };
     const blocked = createCustomerStage2RecoveryRouter({
       accountId: ACCOUNT_ID,
       installId: INSTALL_ID,
@@ -237,15 +268,15 @@ describe('final-runtime Stage 2 recovery router', () => {
       managementOrigin: ORIGIN,
     }, {
       now: () => NOW + 3,
-      state: { read: async () => stored, compareAndSet: async () => false },
+      state: blockedPort,
       assertRecoverable: async () => { throw new Error('ownership mismatch'); },
       issueRelayTicket: async () => {
         ticketRequests += 1;
         return { relayTicket: RELAY_TICKET, expiresAt: NOW + 120_000 };
       },
       beginRelay: async () => { throw new Error('must not relay'); },
-      transport: async () => { throw new Error('must not exchange'); },
-      converge: async () => COMPLETE_CONVERGENCE,
+      transport,
+      startConvergence: inlineConvergence(blockedPort, transport, async () => COMPLETE_CONVERGENCE, () => NOW + 3),
     });
     const denied = await blocked.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_OAUTH_START_PATH}`, {
       method: 'POST',

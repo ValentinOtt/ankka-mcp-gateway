@@ -2,7 +2,9 @@ import * as v from 'valibot';
 
 // @ts-expect-error The payload is validated as a release input, not a TS package.
 import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceiptProviderStateWithReason } from '../../../payload/worker/index.js';
+import { CustomerBootstrapConvergenceDriver } from './customer-bootstrap-convergence-driver';
 import { finalizeCustomerBootstrapHandover } from './customer-bootstrap-handover';
+import { customerInstallProgressPage } from './customer-install-progress-page';
 import {
   customerInstallationObjectName,
   handleCustomerInstallationObjectRequest,
@@ -27,7 +29,11 @@ import {
   CUSTOMER_INSTALL_ROOT_PATH,
   CUSTOMER_INSTALL_STATUS_PATH,
 } from './customer-install-paths';
-import { convergeCustomerStage2 } from './customer-stage2-converger';
+import {
+  CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
+  convergeCustomerStage2,
+  type CustomerStage2ConvergerResult,
+} from './customer-stage2-converger';
 import {
   CustomerStage2DurableStatePort,
   initializeCustomerStage2Sql,
@@ -162,6 +168,8 @@ function exactRecoveryJournal(journal: CustomerStage2Journal, config: ParsedFina
 
 export class AdminState extends RuntimeAdminState {
   private readonly recoveryReady: Promise<void>;
+  /** Grant and pass count of a running recovery attempt, in memory only. */
+  private recovery: CustomerBootstrapConvergenceDriver | null = null;
 
   constructor(
     private readonly finalState: FinalDurableObjectState,
@@ -172,6 +180,61 @@ export class AdminState extends RuntimeAdminState {
       initializeCustomerBootstrapSql(finalState.storage);
       initializeCustomerStage2Sql(finalState.storage);
       await readCustomerGatewayOwnershipState(finalState.storage);
+    });
+  }
+
+  /** One driver per object, bound to the public client the ownership trust names. */
+  private async recoveryDriver(): Promise<CustomerBootstrapConvergenceDriver | null> {
+    if (this.recovery !== null) return this.recovery;
+    const ownership = await readCustomerGatewayOwnershipState(this.finalState.storage);
+    if (ownership.trust === null) return null;
+    this.recovery = new CustomerBootstrapConvergenceDriver({
+      state: new CustomerBootstrapDurableStatePort(this.finalState.storage),
+      transport: (target, init) => fetch(target, init),
+      publicClientId: ownership.trust.publicClientId,
+      converge: (accessToken, attemptId, handover) => this.converge(accessToken, attemptId, handover),
+      now: Date.now,
+      // Every alarm is its own invocation with its own subrequest budget.
+      schedule: (delayMs) => this.finalState.storage.setAlarm(Date.now() + delayMs),
+    });
+    return this.recovery;
+  }
+
+  /** The recovery converger: no runtime source to upload, so it never hands over. */
+  private async converge(
+    accessToken: string,
+    attemptId: string,
+    handover: (() => Promise<void>) | undefined,
+  ): Promise<CustomerStage2ConvergerResult> {
+    const config = parsedEnv(this.finalEnv);
+    return convergeCustomerStage2({
+      accessToken,
+      attemptId,
+      handover,
+      storage: this.finalState.storage,
+      journal: new CustomerStage2DurableStatePort(this.finalState.storage),
+      runtime: {
+        updateChannel: config.ANKKA_UPDATE_CHANNEL,
+        updateKeyId: config.ANKKA_UPDATE_KEY_ID,
+        updatePublicKey: config.ANKKA_UPDATE_PUBLIC_KEY,
+      },
+      payload: {
+        bootstrap: async () => notFound(),
+        verifyReady: async ({ accessToken: token, plan, target }) => {
+          const claim = await prepareCustomerBootstrapClaimFromPlan({
+            plan,
+            target,
+            nowMs: Date.now(),
+          });
+          return verifyReceiptInInstallationObject(this.installationObject(), {
+            claim: { ...claim, cloudflareAccessToken: token },
+            target,
+          });
+        },
+      },
+      transport: (target, init) => fetch(target, init),
+      now: Date.now,
+      checkpoints: CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
     });
   }
 
@@ -221,6 +284,13 @@ export class AdminState extends RuntimeAdminState {
       );
     } catch {
       // A conflicting write means another pass already settled the attempt.
+    }
+    // A recovery attempt runs its passes here too, one alarm each.
+    try {
+      const driver = await this.recoveryDriver();
+      if (driver !== null) await driver.continue();
+    } catch {
+      // The driver settles what it can; a thrown port leaves the next look to the deadline.
     }
   }
 
@@ -276,7 +346,6 @@ export class AdminState extends RuntimeAdminState {
       if (ownership.trust === null) return unavailable();
       const publicClientId = ownership.trust.publicClientId;
       const state = new CustomerBootstrapDurableStatePort(this.finalState.storage);
-      const journal = new CustomerStage2DurableStatePort(this.finalState.storage);
       const router = createCustomerStage2RecoveryRouter({
         accountId: config.CLOUDFLARE_ACCOUNT_ID,
         installId: config.ANKKA_INSTALL_ID,
@@ -292,34 +361,13 @@ export class AdminState extends RuntimeAdminState {
           transport: (target, init) => fetch(target, init),
         }),
         transport: (target, init) => fetch(target, init),
-        converge: (accessToken, attemptId) => convergeCustomerStage2({
-          accessToken,
-          attemptId,
-          handover: undefined,
-          storage: this.finalState.storage,
-          journal,
-          runtime: {
-            updateChannel: config.ANKKA_UPDATE_CHANNEL,
-            updateKeyId: config.ANKKA_UPDATE_KEY_ID,
-            updatePublicKey: config.ANKKA_UPDATE_PUBLIC_KEY,
-          },
-          payload: {
-            bootstrap: async () => notFound(),
-            verifyReady: async ({ accessToken: token, plan, target }) => {
-              const claim = await prepareCustomerBootstrapClaimFromPlan({
-                plan,
-                target,
-                nowMs: Date.now(),
-              });
-              return verifyReceiptInInstallationObject(this.installationObject(), {
-                claim: { ...claim, cloudflareAccessToken: token },
-                target,
-              });
-            },
-          },
-          transport: (target, init) => fetch(target, init),
-          now: Date.now,
-        }),
+        startConvergence: async (input) => {
+          const driver = await this.recoveryDriver();
+          if (driver === null) throw new Error('recovery_unavailable');
+          await driver.start(input);
+        },
+        callbackResponse: (outcome, cookies) =>
+          customerInstallProgressPage(config.ANKKA_MANAGEMENT_HOSTNAME, outcome, cookies),
       });
       return router.fetch(request);
     } catch {

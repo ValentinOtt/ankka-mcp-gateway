@@ -1559,3 +1559,16 @@ deploying the production relay. Both are operator steps.
   closes the activation sequence's install path on a second account; what
   remains open is the hosted result page's first-poll 503 and the recovery
   router still converging in one invocation.
+- 2026-09-04 (15:40), the two leftovers: the hosted result page stopped on
+  a not-ready handoff poll because the runtime's `not_ready` body carried no
+  `code`, and the page only keeps polling on `bootstrap_not_ready`; every
+  other body it reads as an internal error. The body now says its code
+  (PR #86), so a fresh shell's route propagation is waited out instead of
+  reported. The final runtime's recovery flow ran the converger inside the
+  callback invocation, under the same Workers Free budget the shell had; it
+  now hands the grant to the same driver and runs its passes from the
+  object's alarm, answering the recovery callback with the progress page
+  on the management origin. The recovery router's tests run the driver
+  inline. The test account keeps the afternoon-seven install, the canary
+  dashboard and the manual test portal; every other install residue since
+  August is removed.

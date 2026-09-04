@@ -765,8 +765,12 @@ export function createTwoStageDeployRuntime(
     } catch (error) {
       const stable = stableError(error);
       if (stable.code === 'bootstrap_not_ready') {
+        // The installer page keeps polling only on a body whose `code` says
+        // so; without it the page read every not-ready poll as an internal
+        // error and stopped, which every fresh shell's route propagation hit.
         return json({
           schemaVersion: 1,
+          code: 'bootstrap_not_ready',
           status: 'not_ready',
           retryAfterMs: HANDOFF_RETRY_MS,
           expiresAt: provision.capabilityExpiresAt,
