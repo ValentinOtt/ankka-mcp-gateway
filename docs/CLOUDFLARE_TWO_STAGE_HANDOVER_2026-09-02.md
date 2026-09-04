@@ -1656,3 +1656,18 @@ deploying the production relay. Both are operator steps.
   actions in recovery-required, with an MCP server and an Access application
   each retained in Cloudflare; a reviewed recovery path for retained writes
   is still unbuilt, so the next source proof runs on a fresh install.
+- 2026-09-04 (21:30–23:15), the eleventh install answered the account-path
+  question: with the source application created through the account path it
+  was never created at all, while the zone-path creation had produced the
+  account-stored application on the installs before. The `source-add` grant
+  is zone-scoped. The gateway therefore creates and removes the source
+  application through the zone paths again and reads it back by id from the
+  creation response, consulting listings only for a baseline without a known
+  id; the portal application and both policies keep their listings, which the
+  receipt verification and the competing-policy guard rely on (PR #100). An
+  apply that stops now names the provider step, outcome, HTTP status and
+  numeric code in the dashboard's reason word. gateway-v0.1.43 went out
+  (deploy.ankka.ai version 62ebf80f) and the tenth and eleventh installs took
+  it through their dashboards, the third and fourth updates of the day. The
+  hosted installer keeps a handed-off session for an hour and offers no
+  reset, so a fresh install for the next source proof waits for that expiry.
