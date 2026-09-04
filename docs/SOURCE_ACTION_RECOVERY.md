@@ -17,6 +17,9 @@ of a later source installation.
 | Authorization expired before work began | The retained journal proves execution did not start. Its initiating administrator can cancel, then start a fresh authorization from the saved draft. |
 | Authorization closed | The attempt has ended without retained write evidence. Review the saved draft before a new authorization. |
 | Recovery required | The journal is retained. After the previous approval expires, its initiating administrator can renew consent when the gateway can safely reconcile the recorded resources. Otherwise review ownership in Cloudflare. |
+| Connect your source | Authenticate the recorded server in Cloudflare. Keep Require user auth off, then renew consent after its status becomes Ready. |
+| Sync source tools | Sync capabilities in Cloudflare and resolve any connection error before renewing consent. |
+| Review source tools | The synced catalogue lacks a selected tool. Restore the reviewed tools upstream before resuming; the saved selection is never broadened. |
 
 The page checks a blocking action every five seconds for at most 60 automatic
 checks. It then leaves the status and **Check status** control visible. A manual
@@ -33,6 +36,11 @@ display state and actor-specific `canCancel` and `canRenew`. Older responses may
 omit `canRenew`, which clients treat as unavailable. The pointer identifies a source,
 runtime, teardown or Team action without exposing the initiating identity,
 Cloudflare resource identifiers, authorization URL, action key or grant.
+An intentional connection pause also includes an optional `connectionUrl` to
+the recorded server's configuration page on `dash.cloudflare.com`. This link
+contains the installed account and server identifiers, but no OAuth state,
+credential, or permission to administer the server. Cloudflare authenticates
+the operator independently. Clients validate the exact dashboard URL shape.
 Collection reads are available during execution; mutations remain serialized.
 The existing by-ID GET and DELETE response shapes remain unchanged.
 
@@ -66,6 +74,16 @@ action ID, source hash, resource receipts, pending write and Portal desired hash
 It issues a new action key and ten-minute approval window; the old key cannot
 be used again. Only the key hash and a renewal timestamp are saved. The runtime
 compatibility floor advances before saving the renewed journal.
+
+An intentional connection pause can renew immediately: all three source
+receipts must be retained, with no pending resource or Portal write. The
+executor first verifies the Portal baseline, then reads the server's
+authentication status and synced catalogue. It pauses before Portal attachment
+if authentication is required, synchronization is incomplete, or an exact
+selected tool is missing. These fixed failure codes use the existing retained
+`recovery_required` journal status; only their displayed guidance differs.
+Unknown outcomes and other recovery failures still wait for approval expiry.
+Renewal does not authenticate the upstream or retain its credentials.
 
 The browser completes a fresh `source-add` consent through the same gateway
 operation page. The executor verifies every retained resource, reconciles a

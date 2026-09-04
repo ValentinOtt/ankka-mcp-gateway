@@ -15,11 +15,17 @@ client-side capability flag alone is not sufficient.
    and MCP portals, creates the exact source resources with it, and revokes
    it. It is not an upstream credential and is not retained for Team
    management.
-4. The new source starts with a single deny-Everyone Access policy. Installing
+4. The new source starts with a single deny-Everyone Access policy. Creating
    it grants nobody access, including administrators and existing team members.
+   If Cloudflare has not synced its tools, installation pauses before attaching
+   the source to the Portal and shows the next connection step.
 5. Connect the upstream once through Cloudflare's operator authentication flow.
    Keep Require user auth off. Source credentials stay in your Cloudflare
    account; do not paste them into Ankka or the gateway dashboard.
+   For upstreams with a redirect allowlist, configure the exact callback shown
+   by Cloudflare in the upstream's OAuth settings. Once the server is Ready,
+   return to Sources and renew consent. The gateway verifies the retained
+   resources and exact tool catalogue before attaching the source to the Portal.
 6. In Cloudflare, update the receipt-owned reusable Access policy to grant the
    installed source to the intended people. The gateway Team page is read-only
    in V1; do not create a standing API token to enable it.
@@ -63,6 +69,9 @@ is a separate follow-up.
   fixed administrator roles are preserved.
 - A new source has exactly one deny-Everyone policy before Portal attachment;
   extra policies, unexpected selectors, or changed Portal mappings fail closed.
+- Missing operator authentication, incomplete synchronization, or a missing
+  selected tool pauses before Portal attachment. Fresh consent can resume the
+  same receipts without recreating resources or granting access.
 - A first Team read cannot grant a new source implicitly. A later explicit
   source grant uses the ordinary complete-roster revision check.
 - Old source actions cannot enter the new execution path; pending and uncertain

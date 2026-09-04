@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Pause source installation before Portal attachment when Cloudflare still
+  needs operator authentication, tool synchronization, or a missing selected
+  tool. The dashboard links to the recorded server and explains the next step.
+  A completed connection check permits immediate fresh-consent renewal with
+  the same receipts; uncertain writes still wait for the old approval to expire.
 - Send identical `id` and `server_id` values in portal server mappings to
   accommodate Cloudflare's differing guide and API schema. Retained receipt
   hashes remain unchanged. Provider failures can name a field from a fixed
