@@ -12,9 +12,12 @@ The selected follow-up is an experimental
 [bridge to Google's hosted MCP](../apps/read-only-connectors/BIGQUERY_MCP_EXPERIMENT.md)
 running in your Cloudflare account. Direct client connectivity through that
 bridge, Ankka source provisioning, and shared Portal access with a controlled
-second identity are proven. Selective source revocation, useful query cost
-controls, and real-client qualification remain open; see the bridge's current
-evidence and support gates. The direct-endpoint block below remains enforced.
+second identity are proven. Portal-wide session revocation is qualified;
+selective disconnection is not promised. Claude Desktop has passed sign-in,
+tool discovery, metadata reads, continued operation beyond the initial token
+lifetime, and reconnection. Useful query cost controls and client qualification
+of that query path still gate support; see the bridge's current evidence and support
+gates. The direct-endpoint block below remains enforced.
 The bridge uses a service-account secret in your Cloudflare account and
 currently restricts SQL to a constant connectivity query.
 

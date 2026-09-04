@@ -206,6 +206,16 @@ Google-classified `SELECT` dry run within the configured budget, then sends
 qualification. Choosing it is an explicit deployment choice; the
 `bigquery-mcp` provider never falls back to REST or silently changes SQL behavior.
 
+A local-runtime test against real Google on 2026-09-04 exercised that REST
+alternative with a single-table event-count aggregate. A one-byte budget
+rejected the query after dry run with no execution request. With a 100 MiB
+ceiling, the estimate passed and one execution returned a nonempty aggregate
+of at most five rows; reported billing stayed within the ceiling. Execution
+carried the configured `maximumBytesBilled` value. Three dry-run requests and
+one execution were observed. Access was simulated locally for this test; it
+does not qualify a deployed REST Worker, its Portal integration, or denied
+dataset IAM. No private identifiers or query results are retained here.
+
 ## Repeat public capability discovery
 
 From `apps/read-only-connectors`, run:
@@ -232,8 +242,16 @@ The current Claude Desktop custom-connector flow reached the Portal, signed
 in the admitted member by email code, and returned the constant query result
 through the Portal's Code Mode tools. The recorded tool response contained
 `bridge_ok = 1`, `jobComplete: true`, and zero bytes processed and billed.
-This is real-client connectivity evidence; useful analytics, refresh, and
-reconnection must still pass their separate checks.
+Code Mode discovery returned exactly the three reviewed tools; a one-table
+listing and a table-schema read also passed in this client. A fresh constant
+query succeeded without another sign-in more than 15 minutes after initial
+authorization, beyond the configured access-token lifetime. This proves
+continued client operation; the client's internal refresh-token exchange was
+not inspected. Explicit disconnect and reconnect also passed: Claude showed
+the disconnected state, completed consent for the same single source using
+the existing Access session, and returned a new successful constant-query
+result after the desktop handoff. Useful analytics must still pass on the
+chosen deployment path.
 
 For this tested setup:
 
@@ -271,9 +289,10 @@ query proves those clients or changes an older Portal automatically.
    Cloudflare evaluates the Portal grant and source selection; the bridge
    receives the shared operator identity, so it cannot selectively reject a
    removed Portal member. Do not promise selective or immediate disconnection.
-3. Complete a real client's OAuth sign-in, tool discovery, table read, bounded
-   aggregate, token refresh beyond the initial 15-minute access-token lifetime,
-   and reconnection. A controlled client or Code Mode probe is separate evidence.
+3. Qualify useful queries in a real client on the chosen deployment path,
+   including a bounded aggregate, operation beyond the initial access-token
+   lifetime, and reconnection. Claude's completed bridge checks above cover
+   constant SQL and metadata; the local REST aggregate is separate evidence.
 4. Then integrate the chosen deployment path into setup and the supported
    catalogue. The manual bridge Worker is still separately deployed, updated,
    and supplied with its secret directly in your Cloudflare account.

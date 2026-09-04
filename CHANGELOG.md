@@ -12,8 +12,10 @@ Notable public product and repository changes are recorded here.
 
 - Add an opt-in, credential-free BigQuery MCP capability probe with bounded
   discovery and fixed diagnostics. Record the hosted query-cost limitation and
-  distinguish fresh authorization, refreshed grants, and Portal-wide revocation
-  in the connector qualification evidence. General hosted SQL stays disabled.
+  distinguish fresh authorization, refreshed grants, and Portal-wide revocation.
+  Record Claude Desktop connectivity, session lifetime, and reconnection checks,
+  plus a separate real-Google REST query-budget test. General hosted SQL stays
+  disabled.
 
 - Add ChatGPT and Cursor web OAuth callback defaults to newly created Portals
   alongside Claude. ChatGPT's variable callback is limited to its documented

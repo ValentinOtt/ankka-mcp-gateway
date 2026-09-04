@@ -246,7 +246,13 @@ project/property migration rather than assuming identifiers or location are
 permanent. See the [GA4 export schema](https://support.google.com/analytics/answer/7029846?hl=en)
 and [export schedule](https://support.google.com/analytics/answer/9358801?hl=en#schedule).
 
-For the first real-account canary, verify dataset/table metadata through this
+An initial local-runtime test against real Google passed a bounded aggregate,
+an over-budget dry-run rejection without execution, and execution with a
+100 MiB ceiling. See the [qualification evidence](BIGQUERY_MCP_EXPERIMENT.md#cost-limitation)
+for its precise scope. Access was simulated locally; deployed REST and Portal
+qualification remain open.
+
+For the deployed real-account canary, verify dataset/table metadata through this
 Worker, then request a dry run of a narrowly date-filtered aggregate. Execute
 only if the estimate fits the configured budget; a SQL `LIMIT` does not limit
 bytes scanned. Confirm the exact five-tool list and denied unconfigured
