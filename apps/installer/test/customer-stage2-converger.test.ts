@@ -549,11 +549,14 @@ async function fixture(fault: CustomerStage2ActionName | null = null) {
     },
     finalRuntimeSource: FINAL_SOURCE,
     payload: {
-      bootstrap: async (request) => {
+      bootstrap: async (request, context) => {
         payloadBootstrapCalls += 1;
         expect(request.url).toBe(
           `https://${workerName}.${WORKERS_SUBDOMAIN}.workers.dev/__ankka/bootstrap`,
         );
+        // The host completes the payload's environment from these.
+        expect(context.target).toEqual({ accountId: ACCOUNT_ID, zoneId: ZONE_ID, zoneName: selection.basics.zoneName });
+        expect(context.plan.planId).toBe(plan.planId);
         const response = Response.json(ready);
         Object.defineProperty(response, 'url', { configurable: true, value: request.url });
         return response;
