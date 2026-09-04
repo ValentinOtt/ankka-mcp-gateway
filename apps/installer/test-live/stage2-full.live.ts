@@ -180,7 +180,11 @@ const recordedStateSchema = v.looseObject({
 const listSchema = v.looseObject({ result: v.array(v.looseObject({ id: v.string(), name: v.optional(v.string()), hostname: v.optional(v.string()), comment: v.optional(v.nullable(v.string())) })) });
 
 const cleanup: { label: string; path: string }[] = [];
+// The two objects the shell keeps: the installation object holds the
+// payload's receipt, the management object the published status, control
+// and sources the management API serves.
 const payloadStorage = new MemoryStorage();
+const managementStorage = new MemoryStorage();
 let plan: StaticDeployPlan | null = null;
 
 function printTrace(): void {
@@ -381,7 +385,27 @@ describe('token-mode Stage 1 + Stage 2 against the test account', () => {
         bootstrap: { nonce: secrets.bootstrapNonce, expectedBindings },
         finalRuntimeSource,
         payload: {
-          bootstrap: (request, { target }) => payload.processBootstrap(request, customerPayloadEnvironment(shellEnvironment, target), payloadStorage),
+          bootstrap: async (request, { target, bindings }) => {
+            const environment = customerPayloadEnvironment(shellEnvironment, target);
+            const claimText = await request.clone().text();
+            const response = await payload.processBootstrap(request, environment, payloadStorage);
+            if (response.status !== 200) return response;
+            // What the shell publishes into its management object after a
+            // ready bootstrap, under the final runtime's bindings.
+            const managementEnvironment = customerPayloadEnvironment({ ...shellEnvironment, ...bindings }, target);
+            const managementObject = new payload.AdminState({ storage: managementStorage }, managementEnvironment);
+            const published = await payload.publishBootstrapCompletion(
+              JSON.parse(claimText), JSON.parse(await response.clone().text()), managementEnvironment, Date.now(),
+              (internal: Request) => managementObject.fetch(internal),
+            );
+            console.log(`management publication: ${String(published)}`);
+            if (published !== true) {
+              return new Response(JSON.stringify({ schemaVersion: 1, error: 'management_publication_failed', retryable: false }), {
+                status: 409, headers: { 'content-type': 'application/json; charset=utf-8' },
+              });
+            }
+            return response;
+          },
           verifyReady: async ({ accessToken, plan: renewed, target }) => {
             const claim = await prepareCustomerBootstrapClaimFromPlan({ plan: renewed, target, nowMs: Date.now() });
             return payload.verifyBootstrapReceiptProviderStateWithReason(
@@ -424,5 +448,13 @@ describe('token-mode Stage 1 + Stage 2 against the test account', () => {
     console.log('final runtime bindings:', names.join(' '));
     expect(names).toContain('CF_ACCESS_AUD');
     expect(names).not.toContain('ANKKA_BOOTSTRAP_NONCE');
+    // The management API reads these three from the management object; the
+    // fifth real install answered "unavailable" because none was published.
+    const managementObject = new payload.AdminState({ storage: managementStorage }, shellEnvironment);
+    for (const path of ['/status', '/sources', '/management-control']) {
+      const response = await managementObject.fetch(new Request(`https://admin-state.invalid${path}`));
+      console.log(`management object ${path}: http ${response.status}`);
+      expect(response.status).toBe(200);
+    }
   });
 });

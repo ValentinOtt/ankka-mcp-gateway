@@ -3,6 +3,11 @@ import * as v from 'valibot';
 // @ts-expect-error The payload is validated as a release input, not a TS package.
 import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceiptProviderStateWithReason } from '../../../payload/worker/index.js';
 import { finalizeCustomerBootstrapHandover } from './customer-bootstrap-handover';
+import {
+  customerInstallationObjectName,
+  handleCustomerInstallationObjectRequest,
+  verifyReceiptInInstallationObject,
+} from './customer-installation-object';
 import { beginCustomerBootstrapRelay } from './customer-bootstrap-relay-client';
 import {
   CustomerBootstrapDurableStatePort,
@@ -219,11 +224,25 @@ export class AdminState extends RuntimeAdminState {
     }
   }
 
+  private installationObject(): DurableObjectStub {
+    const namespace = this.finalEnv.ADMIN_STATE;
+    return namespace.get(namespace.idFromName(customerInstallationObjectName(parsedEnv(this.finalEnv).ANKKA_INSTALL_ID)));
+  }
+
   async fetch(request: Request): Promise<Response> {
     await this.recoveryReady;
     const config = parsedEnv(this.finalEnv);
     const url = new URL(request.url);
     const managementOrigin = `https://${config.ANKKA_MANAGEMENT_HOSTNAME}`;
+    // The receipt verification runs in the installation object, where the
+    // bootstrap wrote the receipt; internal only, the entry never forwards it.
+    const installation = await handleCustomerInstallationObjectRequest(request, {
+      bootstrapEnv: this.finalEnv,
+      storage: this.finalState.storage,
+      payload: { processBootstrap: async () => notFound(), verifyReceipt: verifyBootstrapReceiptProviderStateWithReason },
+      now: Date.now,
+    });
+    if (installation !== null) return installation;
     if (url.origin !== managementOrigin || !url.pathname.startsWith(CUSTOMER_INSTALL_ROOT_PATH)) {
       return super.fetch(request);
     }
@@ -292,10 +311,10 @@ export class AdminState extends RuntimeAdminState {
                 target,
                 nowMs: Date.now(),
               });
-              return verifyBootstrapReceiptProviderStateWithReason({
-                ...claim,
-                cloudflareAccessToken: token,
-              }, this.finalEnv, this.finalState.storage, Date.now());
+              return verifyReceiptInInstallationObject(this.installationObject(), {
+                claim: { ...claim, cloudflareAccessToken: token },
+                target,
+              });
             },
           },
           transport: (target, init) => fetch(target, init),
