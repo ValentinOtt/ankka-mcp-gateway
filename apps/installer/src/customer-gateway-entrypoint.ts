@@ -257,9 +257,14 @@ export class AdminState extends RuntimeAdminState {
   ) {
     super(finalState, finalEnv);
     this.recoveryReady = finalState.blockConcurrencyWhile(async () => {
+      const config = parsedEnv(finalEnv);
       initializeCustomerBootstrapSql(finalState.storage);
       initializeCustomerStage2Sql(finalState.storage);
-      await readCustomerGatewayOwnershipState(finalState.storage);
+      // Bootstrap keeps only the receipt in the installation object. The
+      // ownership key belongs to the separate management object.
+      if (finalState.id.name !== customerInstallationObjectName(config.ANKKA_INSTALL_ID)) {
+        await readCustomerGatewayOwnershipState(finalState.storage);
+      }
     });
   }
 

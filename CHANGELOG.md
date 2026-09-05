@@ -8,6 +8,10 @@ Notable public product and repository changes are recorded here.
   signed gateway packages that embed the BigQuery bridge. Signature, digest,
   per-file, and generated-module checks remain enforced.
 
+- Read the installation receipt from its separate Durable Object when preparing
+  automated teardown. Keep the ownership key requirement on the management
+  object and reject missing or invalid receipts before removal.
+
 - Wait for the browser to reach a new workers.dev address securely before
   releasing the one-time setup handoff. The installer retries temporary TLS
   and connection failures on its progress page, verifies the expected Worker,
