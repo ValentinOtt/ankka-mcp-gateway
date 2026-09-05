@@ -5,7 +5,9 @@ gateway name, domain, or administrator email. The first Cloudflare approval
 requests exactly `workers-scripts.write zone.read` and selects one account.
 
 The hosted callback lists active zones using the exact account filter. It
-rejects an empty, incomplete, or inconsistent list before deploying the Worker.
+rejects an incomplete or inconsistent list before deploying the Worker.
+An empty list is allowed: the first approval can create the setup Worker and
+register its account workers.dev subdomain without a custom domain.
 Discovery is bounded to 100 domains so the signed handoff fits its size limits.
 It reads the account Workers subdomain and reuses it. Explicit missing-subdomain
 responses permit registration of a generated `ankka-<random>` label, followed
@@ -27,8 +29,15 @@ authenticates the browser to that Worker. The permit and configuration draft
 contain no Cloudflare grant and may be stored in its Durable Object. The setup
 session and permit expire with the original ten-minute capability.
 
-The Worker serves the gateway form, domain dropdown, and review page. Each
-review signs the selected configuration and permit digest with its existing
+The Worker serves the gateway form, domain dropdown, and review page. When no
+active domain was discovered, it instead explains the custom-domain requirement,
+shows example management and MCP addresses, and links to Cloudflare's dashboard
+and domain setup guide. Final configuration and certification still require a
+domain from the signed list. Domain choices are a snapshot from the first
+approval: after adding and activating a domain, start a new deployment to
+discover it with a fresh grant. No grant is retained to refresh that list.
+
+Each review signs the selected configuration and permit digest with its existing
 ownership key. `POST /api/bootstrap/configure` on the fixed hosted issuer checks
 the permit, Worker signature, release, expiry, and allowed zone. It returns the
 final plan, a handoff for the same physical Worker and namespace, and a
@@ -69,8 +78,12 @@ expiry, browser-session/origin checks, and final installation from the initial
 Worker identity.
 
 Before promotion, verify the registered confidential client accepts the exact
-combined first-stage scopes and qualifies a complete real two-approval install.
-Exercise both an account with a Workers subdomain and a fresh account without
-one, and verify cleanup leaves the shared account subdomain intact. Existing
-live evidence for `workers-scripts.write` alone is insufficient. Source changes
-do not alter activation pins, OAuth registrations, or live deployments.
+combined first-stage scopes through real browser approvals. A fresh account
+with no Workers subdomain or active domain must complete registration, Worker
+deployment, grant revocation, and handoff to the domain guide. An account with
+an active domain must complete the two-approval installation, including reuse
+of its Workers subdomain and final domain configuration. Verify cleanup leaves
+the shared account subdomain intact. An isolated API-token registration test or
+live evidence for `workers-scripts.write` alone cannot replace the fresh-account
+OAuth check. Source changes do not alter activation pins, OAuth registrations,
+or live deployments.

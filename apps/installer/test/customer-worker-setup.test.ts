@@ -2,8 +2,9 @@ import { buildBootstrapDeployPlan } from '../src/bootstrap-plan';
 import { issueCloudflareBootstrapOwnershipHandoff } from '../src/cloudflare-bootstrap-ownership-handoff';
 import { verifyCloudflareGatewayOwnershipCertificate } from '../src/cloudflare-gateway-ownership-proof';
 import { base64UrlEncode } from '../src/crypto';
-import { acceptCustomerGatewayOwnershipHandoff, initializeCustomerGatewayOwnershipState, type CustomerGatewayOwnershipStorage } from '../src/customer-gateway-ownership-state';
+import { acceptCustomerGatewayOwnershipHandoff, initializeCustomerGatewayOwnershipState, openCustomerGatewayOwnershipPrivateKey, type CustomerGatewayOwnershipStorage } from '../src/customer-gateway-ownership-state';
 import { createCustomerWorkerSetup } from '../src/customer-worker-setup';
+import type { SetupZone } from '../src/hosted-account-setup';
 import { parseDeploySelection, verifyStaticDeployPlanIntegrity } from '../src/schema';
 import { certifyWorkerSetup, issueWorkerSetupPermit, setupConfigurationRequestSchema, signWorkerSetupConfiguration, verifyWorkerSetupPermit } from '../src/worker-setup-permit';
 import * as v from 'valibot';
@@ -18,7 +19,7 @@ class MemoryStorage implements CustomerGatewayOwnershipStorage {
   async put<Value>(key: string, value: Value): Promise<void> { this.values.set(key, structuredClone(value)); }
 }
 
-async function fixture() {
+async function fixture(availableZones: readonly SetupZone[] = [{ id: 'e'.repeat(32), name: 'example.com' }]) {
   const issuer = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const issuerPublicKey = base64UrlEncode(new Uint8Array(await crypto.subtle.exportKey('raw', issuer.publicKey)));
   const bootstrapPlan = await buildBootstrapDeployPlan(manifest, NOW + 600_000, 'd'.repeat(32));
@@ -39,7 +40,7 @@ async function fixture() {
     plan: { id: config.planId, hash: config.planHash }, release: { id: manifest.release, artifactSha256: manifest.artifact.treeSha256 },
   }, issuer.privateKey);
   const permit = await issueWorkerSetupPermit({
-    bootstrapPlan, serializedHandoff, availableZones: [{ id: 'e'.repeat(32), name: 'example.com' }],
+    bootstrapPlan, serializedHandoff, availableZones,
     ownershipPublicKey: ownership.publicKey, bootstrapCallback: config.bootstrapCallback,
     publicClientId: CLIENT_ID, issuerKeyId: config.issuerKeyId,
   }, issuer.privateKey);
@@ -60,6 +61,18 @@ async function fixture() {
 }
 
 describe('configuration in the customer Worker', () => {
+  it('accepts a setup permit without domains but cannot configure or certify a gateway', async () => {
+    const f = await fixture([]);
+    await f.setup.accept(f.permit);
+    expect(await f.setup.read()).toMatchObject({ availableZones: [], selection: null, plan: null });
+    await expect(f.setup.configure(f.selection)).rejects.toMatchObject({ reason: 'active_zone_required' });
+    expect(f.calls).toHaveLength(0);
+    expect(await f.setup.configured()).toBeNull();
+    const key = await openCustomerGatewayOwnershipPrivateKey({ storage: f.storage, wrappingKey: ENCRYPTION_KEY });
+    const request = await signWorkerSetupConfiguration(f.permit, f.selection, key);
+    await expect(f.certify(request)).rejects.toMatchObject({ reason: 'worker_setup_invalid' });
+  });
+
   it('reviews and edits details while preserving the deployed Worker, then binds the exact callback', async () => {
     const f = await fixture();
     await f.setup.accept(f.permit);

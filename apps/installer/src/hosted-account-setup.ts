@@ -66,7 +66,6 @@ export async function discoverHostedAccountZones(call: Call): Promise<readonly S
       throw new DeployError(502, 'oauth_exchange_failed', 'zone_discovery_mismatch');
     }
     if (pages === undefined ? parsed.output.length < 50 : page >= pages) {
-      if (zones.length === 0) throw new DeployError(409, 'bad_request', 'active_zone_required');
       return Object.freeze(zones.sort((a, b) => a.name.localeCompare(b.name)));
     }
   }

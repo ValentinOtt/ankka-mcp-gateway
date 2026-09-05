@@ -20,9 +20,13 @@ describe('account setup discovery', () => {
     expect(result).toEqual([{ id: zone.id, name: zone.name }]);
   });
 
+  it('allows an empty account to reach the Worker setup page', async () => {
+    await expect(discoverHostedAccountZones({ accountId, accessToken: 'synthetic', transport: async () => ok([]) })).resolves.toEqual([]);
+  });
+
   it.each([
-    { zones: [] }, { zones: [{ ...zone, account: { id: 'c'.repeat(32) } }] }, { zones: [{ ...zone, status: 'pending' }] }, { zones: [zone, zone] },
-  ])('rejects an empty, foreign, inactive, or duplicate domain list', async ({ zones }) => {
+    { zones: [{ ...zone, account: { id: 'c'.repeat(32) } }] }, { zones: [{ ...zone, status: 'pending' }] }, { zones: [zone, zone] },
+  ])('rejects a foreign, inactive, or duplicate domain list', async ({ zones }) => {
     await expect(discoverHostedAccountZones({ accountId, accessToken: 'synthetic', transport: async () => ok(zones) })).rejects.toThrow();
   });
 

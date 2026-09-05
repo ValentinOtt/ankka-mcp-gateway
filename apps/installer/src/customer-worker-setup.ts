@@ -76,6 +76,7 @@ export function createCustomerWorkerSetup(input: {
       const permit = await verified(state.permit);
       const ownership = await readCustomerGatewayOwnershipState(storage);
       if (ownership.serializedHandoff !== null) invalid();
+      if (permit.availableZones.length === 0) throw new DeployError(409, 'bad_request', 'active_zone_required');
       const selection = parseDeploySelection(value);
       if (selection.firstSource !== null || !permit.availableZones.some((zone) => zone.name === selection.basics.zoneName)) invalid();
       const key = await openCustomerGatewayOwnershipPrivateKey({ storage, wrappingKey: config.wrappingKey });

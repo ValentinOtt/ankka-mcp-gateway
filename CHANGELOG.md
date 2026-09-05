@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Allow the first Cloudflare approval to deploy gateway setup without a custom
+  domain. Accounts with no active domains see a guide on their setup Worker,
+  with example addresses and links to Cloudflare. Final gateway configuration
+  still requires an active domain from the approved account.
+
 - Support the Google-hosted BigQuery MCP bridge as a manually deployed,
   self-hosted source. Explicit `allowQueries: true` enables bounded read-only
   SQL with Google IAM controlling data access; existing deployments keep the

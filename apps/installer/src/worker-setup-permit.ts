@@ -87,7 +87,7 @@ export async function verifyWorkerSetupPermit(permit: string, publicKey: string,
       callback.protocol !== 'https:' || callback.username || callback.password || callback.port || callback.search || callback.hash ||
       callback.pathname !== CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH ||
       !callback.hostname.startsWith(`${plan.workerName}.`) || !callback.hostname.endsWith('.workers.dev') ||
-      parsed.availableZones.length === 0 || new Set(parsed.availableZones.map((zone) => zone.id)).size !== parsed.availableZones.length) invalid();
+      new Set(parsed.availableZones.map((zone) => zone.id)).size !== parsed.availableZones.length) invalid();
   return { ...parsed, bootstrapPlan: plan, handoff: statement };
 }
 
