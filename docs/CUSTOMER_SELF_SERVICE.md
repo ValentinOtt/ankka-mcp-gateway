@@ -289,8 +289,12 @@ management resources and Worker. Completed ordinary MCP sources are included
 only when their retained ownership and current provider state can be verified.
 Older prepared removal links retain their original restrictions.
 
-Automatic removal remains blocked after [BigQuery bridge provisioning](ADD_BIGQUERY.md#interrupted-setup)
-or while uncertain source, runtime, or legacy Team actions remain unresolved.
+Compatible releases also remove [managed BigQuery bridges](ADD_BIGQUERY.md#remove-the-gateway-and-its-bridges):
+the bridge domain is detached, its Worker and stored Google key copy are deleted,
+and its Access protection is removed last. Known partial setup and interrupted
+deletion resume with fresh consent and verified saved progress. Unknown creates,
+changed or shared resources, and unresolved runtime or legacy Team actions still
+block automatic removal. Manually deployed bridges remain separately managed.
 The original ownership receipt is preserved. Merely discovering a source,
 saving its draft, or reviewing an action does not set the compatibility floor.
 Review these limits before authorizing source installation.

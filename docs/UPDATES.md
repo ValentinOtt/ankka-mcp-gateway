@@ -131,9 +131,11 @@ real installed release instead of refusing with a conflict.
 Customer-local Team writes and default-deny source creation can establish a
 minimum compatible runtime before their first provider mutation. An older
 runtime cannot be restored below that recorded floor. The current receipt-owned
-removal path can include completed ordinary MCP sources, while older removal
-links retain their original restrictions. BigQuery bridge provisioning and
-unresolved actions still block automatic removal; see
+removal path can include completed ordinary MCP sources and, in compatible
+releases, managed BigQuery bridges. Known partial BigQuery setup and interrupted
+deletion can resume with fresh consent. Unknown creates and unresolved actions
+outside that supported recovery path still block removal; older removal links
+retain their original restrictions. See
 [removal limits](CUSTOMER_SELF_SERVICE.md#removing-a-gateway). A merely prepared
 source action or saved draft does not set the compatibility floor. The optional Team-management secret also blocks rollback
 when present on the current or target version. See [Team access](TEAM_ACCESS.md)

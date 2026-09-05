@@ -187,10 +187,11 @@ guarantee does not claim that those providers process no metadata.
 - Read-only tool policy depends on both gateway configuration and upstream
   enforcement.
 - Worker rollback does not roll back Durable Object data.
-- Automatic teardown is unavailable after BigQuery bridge provisioning or
-  while uncertain source, runtime, or legacy Team actions remain unresolved.
-  Completed ordinary MCP sources have a receipt-owned removal path; older
-  removal links retain their original restrictions. Revoking a retired preview
-  token does not reconcile a pending policy write.
+- Receipt-owned removal includes completed ordinary MCP sources and managed
+  BigQuery bridges in compatible releases. Known partial BigQuery setup and
+  interrupted deletion can resume with fresh consent. Unknown creates, changed
+  or shared resources, and unresolved runtime or legacy Team actions remain
+  blocked. Older removal links retain their original restrictions. Revoking a
+  retired preview token does not reconcile a pending policy write.
 - Provider APIs can return ambiguous outcomes; the system stops for recovery
   instead of claiming success.

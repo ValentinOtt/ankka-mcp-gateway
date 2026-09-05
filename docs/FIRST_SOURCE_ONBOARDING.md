@@ -65,9 +65,11 @@ Do not erase its journal or replay its authorization URL.
 The compatibility safeguard blocks older-runtime rollback before the first
 new-source provider write may start. Reading, discovering, saving a draft, and
 reviewing an action must not set that floor. Current receipt-owned removal can
-include completed ordinary MCP sources without rewriting the original receipt;
-older removal links retain their original restrictions. BigQuery provisioning
-and unresolved actions still block automatic removal. See
+include completed ordinary MCP sources without rewriting the original receipt.
+Compatible releases also remove managed BigQuery bridges and support known
+partial setup or interrupted deletion with fresh consent. Unknown creates and
+unresolved actions outside that recovery path remain blocked; older removal
+links retain their original restrictions. See
 [removal limits](CUSTOMER_SELF_SERVICE.md#removing-a-gateway). Implementation and
 local tests do not replace live lifecycle qualification on the release.
 
