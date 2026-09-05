@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Raise the bounded local release publisher from 6 MB to 10 MB to accommodate
+  signed gateway packages that embed the BigQuery bridge. Signature, digest,
+  per-file, and generated-module checks remain enforced.
+
 - Wait for the browser to reach a new workers.dev address securely before
   releasing the one-time setup handoff. The installer retries temporary TLS
   and connection failures on its progress page, verifies the expected Worker,
