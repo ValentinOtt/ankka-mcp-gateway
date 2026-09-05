@@ -85,6 +85,14 @@ custom domain, including proving Worker absence for an application-only setup.
 The gateway first verifies the full graph and refuses changed resources or a
 bridge referenced by another MCP source.
 
+Removal runs in bounded steps so multiple sources fit the
+[Workers Free request limits](https://developers.cloudflare.com/workers/platform/limits/#subrequests).
+The callback keeps its temporary grant only in memory and sends each signed
+step to the same gateway. Saved progress contains no grant. Each fresh approval
+rechecks the complete graph against its current receipts and configuration;
+expired approval, an uncertain response, repeated progress, or an inventory
+outside the bounded scan stops removal and withholds the final gateway handoff.
+
 After removing the Portal and its owned sources, the gateway detaches each
 bridge domain, deletes the Worker containing its Google key, and then removes
 the bridge's Access application. Access stays in place until the Worker and

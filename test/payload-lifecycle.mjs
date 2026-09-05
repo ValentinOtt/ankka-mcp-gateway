@@ -499,8 +499,14 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
   const hooks = { onRequest };
   let appCount = 0;
   let policyCount = 0;
-  const appId = () => String.fromCharCode('a'.charCodeAt(0) + appCount++).repeat(32);
-  const policyId = () => String.fromCharCode('m'.charCodeAt(0) + policyCount++).repeat(32);
+  const appId = () => {
+    const index = appCount++;
+    return index < 26 ? String.fromCharCode('a'.charCodeAt(0) + index).repeat(32) : `app${index.toString(16).padStart(29, '0')}`;
+  };
+  const policyId = () => {
+    const index = policyCount++;
+    return index < 14 ? String.fromCharCode('m'.charCodeAt(0) + index).repeat(32) : `policy${index.toString(16).padStart(26, '0')}`;
+  };
   const readJson = async (request) => JSON.parse(await request.text());
 
   const providerFetch = async (request) => {

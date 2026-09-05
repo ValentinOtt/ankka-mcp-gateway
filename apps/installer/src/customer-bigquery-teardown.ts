@@ -7,6 +7,7 @@ import type { BigQueryDeploymentContext } from './customer-bigquery-deployment';
 
 const PREFIX = 'ankka-mcp-gateway/bigquery-source/v1/';
 const JOURNAL = 'ankka-mcp-gateway/bigquery-teardown/v1';
+const PROGRESS = 'ankka-mcp-gateway/bigquery-teardown-progress/v1';
 const id = v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,128}$/u));
 const hash = v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u));
 const requestId = v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{22}$/u));
@@ -22,6 +23,11 @@ const journalSchema = v.strictObject({ schemaVersion: v.literal(1), recordsHash:
   pending: v.nullable(v.strictObject({ index: v.pipe(v.number(), v.safeInteger(), v.minValue(0)), requestId })),
 });
 type Journal = v.InferOutput<typeof journalSchema>;
+const progressSchema = v.strictObject({ recordsHash: hash, requestId,
+  phase: v.picklist(['preflight', 'remove', 'verify', 'complete']),
+  checked: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+});
+type Progress = v.InferOutput<typeof progressSchema>;
 type Kind = 'worker_custom_domain' | 'worker' | 'access_application';
 interface Resource { readonly record: BigQueryRecord; readonly kind: Kind; readonly path: string }
 interface Grant { readonly accessToken: string; readonly expiresAt: number; readonly requestId: string }
@@ -220,28 +226,56 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
         records.some((record) => (domain.service === record.workerName || domain.hostname === record.hostname) &&
           (domain.id !== record.domainId || domain.service !== record.workerName || domain.hostname !== record.hostname || domain.zone_id !== context.zoneId)))) fail();
     }
-    async function preflight(grant: Grant, ownedServerIds: readonly string[]) {
-      const journal = await readJournal();
-      await unshared(grant, ownedServerIds);
-      for (const record of records) {
-        // An application-only receipt proves that no Worker create was armed.
-        // Still refuse a later, unreceipted Worker at that planned name before
-        // removing its protection; this read never adopts or deletes it.
-        if (record.application !== null && record.workerVersion === null &&
-            await api(`/workers/scripts/${record.workerName}/settings`, grant, 'GET', true) !== null) fail();
-      }
+    async function progress(grant: Grant): Promise<Progress> {
+      active(grant);
+      const raw = await port.storage.get(PROGRESS);
+      if (raw === undefined) return { recordsHash, requestId: grant.requestId, phase: 'preflight', checked: 0 };
+      const saved = v.parse(progressSchema, raw);
+      if (saved.recordsHash !== recordsHash || saved.checked > records.length) fail();
+      // A fresh consent proves the complete graph again, retaining only the
+      // journaled deletion prefix and its one ambiguous boundary.
+      return saved.requestId === grant.requestId ? saved :
+        { recordsHash, requestId: grant.requestId, phase: 'preflight', checked: 0 };
+    }
+    async function saveProgress(next: Progress, journal: Journal) {
+      await port.storage.put(PROGRESS, v.parse(progressSchema, next));
+      return { complete: next.phase === 'complete', progress: `sha256:${await bigQueryHex(canonicalJson({ next, journal }))}`,
+        recordsHash, removedResourceCount: resources.length };
+    }
+    async function checkRecord(record: BigQueryRecord, journal: Journal, grant: Grant) {
+      // An application-only receipt proves that no Worker create was armed.
+      // Refuse a later unreceipted Worker without adopting or deleting it.
+      if (record.application !== null && record.workerVersion === null &&
+          await api(`/workers/scripts/${record.workerName}/settings`, grant, 'GET', true) !== null) fail();
       for (let index = 0; index < resources.length; index++) {
         const resource = resources[index];
-        if (!resource) fail();
+        if (!resource || resource.record.sourceId !== record.sourceId) continue;
         const present = await read(resource, grant);
         if (index < journal.removed ? present : (!present && journal.pending?.index !== index)) fail();
       }
-      return journal;
+    }
+    async function preflight(grant: Grant, ownedServerIds: readonly string[]) {
+      const journal = await readJournal();
+      const current = await progress(grant);
+      if (current.phase !== 'preflight') return { complete: true, progress: recordsHash };
+      // At most 20 catalogue pages plus five resource reads in one pass.
+      // The caller gives every pass its own Durable Object invocation.
+      await unshared(grant, ownedServerIds);
+      const record = records[current.checked];
+      if (!record) fail();
+      await checkRecord(record, journal, grant);
+      const checked = current.checked + 1;
+      const complete = checked === records.length;
+      const result = await saveProgress({ ...current, checked, phase: complete ? 'remove' : 'preflight' }, journal);
+      return { complete, progress: result.progress };
     }
     async function remove(grant: Grant, ownedServerIds: readonly string[]) {
-      let journal = await preflight(grant, ownedServerIds);
+      let journal = await readJournal();
+      const current = await progress(grant);
+      if (current.phase === 'preflight') fail();
       const save = async (next: Journal) => { await port.storage.put(JOURNAL, v.parse(journalSchema, next)); journal = next; };
-      while (journal.removed < resources.length) {
+      if (current.phase === 'complete') return saveProgress(current, journal);
+      if (current.phase === 'remove' && journal.removed < resources.length) {
         const resource = resources[journal.removed];
         if (!resource) fail();
         // Recheck references immediately before each removal, including a
@@ -251,7 +285,7 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
         if (!present) {
           if (journal.pending?.index !== journal.removed) fail();
           await save({ ...journal, removed: journal.removed + 1, pending: null });
-          continue;
+          return saveProgress(current, journal);
         }
         if (journal.pending?.requestId === grant.requestId) fail();
         // Removing protection requires a fresh proof that its Worker/key and
@@ -265,11 +299,17 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
         await api(resource.path, grant, 'DELETE');
         if (await read(resource, grant)) fail();
         await save({ ...journal, removed: journal.removed + 1, pending: null });
+        return saveProgress(current, journal);
       }
-      // Completion is a live absence proof. The caller cannot sign root
-      // removal until this returns, including on repeated completed attempts.
-      await preflight(grant, ownedServerIds);
-      return { recordsHash, removedResourceCount: resources.length };
+      // Completion requires every bridge's live absence. Verification itself
+      // is bounded to one record per invocation, including after fresh consent.
+      const checked = current.phase === 'remove' ? 0 : current.checked;
+      const record = records[checked];
+      if (!record) fail();
+      await unshared(grant, ownedServerIds);
+      await checkRecord(record, journal, grant);
+      return saveProgress({ ...current, checked: checked + 1,
+        phase: checked + 1 === records.length ? 'complete' : 'verify' }, journal);
     }
     // Even an application-only receipt requires the Workers family to prove
     // that the planned Worker is absent. A name without a version receipt
@@ -278,5 +318,5 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
     if (resources.length > 0) receiptResourceKinds.add('worker');
     return { actionIds, recordsHash, receiptResourceKinds: [...receiptResourceKinds], preflight, remove };
   }
-  return { describe };
+  return { describe, bounded: true };
 }

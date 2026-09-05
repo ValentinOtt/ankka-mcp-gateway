@@ -8,16 +8,18 @@ const GRANT = 'synthetic-uninstall-grant-never-store';
 export const grant = { accessToken: GRANT, expiresAt: 20_000, requestId: 'x'.repeat(22) };
 export const JOURNAL = 'ankka-mcp-gateway/bigquery-teardown/v1';
 
-export async function fixture({ partial = false, lostDelete = -1, applied = true, fixtureContext = context, journalStorage } = {}) {
+export async function fixture({ partial = false, lostDelete = -1, applied = true, fixtureContext = context, journalStorage, index = 0 } = {}) {
   const context = fixtureContext;
-  const configuration = { queryProjectId: 'query-project', allowedDatasets: [{ projectId: 'data-project', datasetId: 'reporting' }] };
+  const suffix = index === 0 ? '' : `-${index}`;
+  const applicationId = `bridge-app${suffix}`, domainId = `bridge-domain${suffix}`, versionId = `bridge-version${suffix}`;
+  const configuration = { queryProjectId: 'query-project', allowedDatasets: [{ projectId: 'data-project', datasetId: index === 0 ? 'reporting' : `reporting_${index}` }] };
   const names = await bigQuerySourceNames(context.installationId, context.zoneName, configuration);
   const source = { id: names.sourceId, label: 'BigQuery', url: names.url, authMode: 'oauth', onBehalfOfUser: true,
     enabledTools: [...BIGQUERY_SETUP_TOOLS] };
-  const record = { schemaVersion: 1, sourceId: source.id, actionId: `action_${'d'.repeat(32)}`, configuration,
+  const record = { schemaVersion: 1, sourceId: source.id, actionId: `action_${index.toString(16).padStart(32, 'd')}`, configuration,
     workerName: names.workerName, hostname: names.hostname, operatorEmail: 'admin@example.com',
-    sourceHash: `sha256:${await bigQueryHex(canonicalJson(source))}`, application: { id: 'bridge-app', audience: 'f'.repeat(64) },
-    workerVersion: partial ? null : 'bridge-version', domainId: partial ? null : 'bridge-domain', pending: null, ready: !partial };
+    sourceHash: `sha256:${await bigQueryHex(canonicalJson(source))}`, application: { id: applicationId, audience: 'f'.repeat(64) },
+    workerVersion: partial ? null : versionId, domainId: partial ? null : domainId, pending: null, ready: !partial };
   const action = { actionId: record.actionId, sourceId: source.id, sourceHash: record.sourceHash,
     actorEmail: record.operatorEmail, bigquerySetupStarted: true };
   const snapshot = { actions: [action], sources: { sources: [{ ...source, status: partial ? 'draft' : 'installed' }] } };
@@ -31,7 +33,7 @@ export async function fixture({ partial = false, lostDelete = -1, applied = true
   };
   const digest = await bigQueryHex(canonicalJson({ installationId: context.installationId, prefix: 'mcp', logicalId: source.id }));
   const serverId = `mcp-${source.id.slice(0, 19).replace(/-+$/u, '')}-${digest.slice(0, 8)}`;
-  const app = { id: 'bridge-app', aud: 'f'.repeat(64), name: `acg:v1:${context.installationId}:bigquery-${source.id}`,
+  const app = { id: applicationId, aud: 'f'.repeat(64), name: `acg:v1:${context.installationId}:bigquery-${source.id}`,
     domain: names.hostname, type: 'self_hosted', oauth_configuration: { enabled: true,
       dynamic_client_registration: { enabled: true, allow_any_on_localhost: false, allow_any_on_loopback: false,
         allowed_uris: [`https://dash.cloudflare.com/${context.accountId}/one/access-controls/ai-controls/mcp-server/oauth-callback/${serverId}`] },
@@ -41,10 +43,10 @@ export async function fixture({ partial = false, lostDelete = -1, applied = true
     PUBLIC_ORIGIN: `https://${names.hostname}`, ACCESS_TEAM_DOMAIN: new URL(context.accessIssuer).hostname, ACCESS_AUD: 'f'.repeat(64) };
   const settings = { logpush: false, observability: { enabled: false }, tags: ['ankka-mcp-gateway', context.installationId, source.id, `bigquery:${'9'.repeat(64)}`],
     bindings: [...Object.entries(variables).map(([name, text]) => ({ name, text, type: 'plain_text' })), { name: 'PROVIDER_TOKEN', type: 'secret_text' }] };
-  const domain = { id: 'bridge-domain', hostname: names.hostname, service: names.workerName, zone_id: context.zoneId, environment: 'production' };
+  const domain = { id: domainId, hostname: names.hostname, service: names.workerName, zone_id: context.zoneId, environment: 'production' };
   const provider = { app, settings: partial ? null : settings, domain: partial ? null : domain,
-    deployments: { deployments: [{ versions: [{ version_id: 'bridge-version', percentage: 100 }] }] },
-    subdomain: { enabled: false, previews_enabled: false }, servers: [{ id: serverId, hostname: names.url }], extraDomains: [], serverPages: null };
+    deployments: { deployments: [{ versions: [{ version_id: versionId, percentage: 100 }] }] },
+    subdomain: { enabled: false, previews_enabled: false }, servers: [{ id: serverId, hostname: names.url }], extraDomains: [], serverPages: null, cataloguePages: 1 };
   const requests = [];
   const deletions = [];
   let deletionCount = 0;
@@ -57,8 +59,8 @@ export async function fixture({ partial = false, lostDelete = -1, applied = true
     const path = url.pathname.slice(`/client/v4/accounts/${context.accountId}`.length);
     const method = init.method;
     requests.push({ path, method });
-    const property = path === '/workers/domains/bridge-domain' ? 'domain' :
-      path === `/workers/scripts/${names.workerName}` ? 'settings' : path === '/access/apps/bridge-app' ? 'app' : null;
+    const property = path === `/workers/domains/${domainId}` ? 'domain' :
+      path === `/workers/scripts/${names.workerName}` ? 'settings' : path === `/access/apps/${applicationId}` ? 'app' : null;
     if (method === 'DELETE') {
       expect(property).not.toBeNull();
       const journal = journalStorage ? await journalStorage.get(JOURNAL) : values.get(JOURNAL);
@@ -79,6 +81,15 @@ export async function fixture({ partial = false, lostDelete = -1, applied = true
     else if (path === `/workers/scripts/${names.workerName}/subdomain`) result = provider.subdomain;
     else if (property) result = provider[property];
     else throw new Error('unexpected synthetic destination');
+    if (provider.cataloguePages > 1 && ['/workers/domains', '/access/ai-controls/mcp/servers'].includes(path)) {
+      const page = Number(url.searchParams.get('page'));
+      const items = page === provider.cataloguePages ? result : Array.from({ length: 100 }, (_, index) => {
+        const id = `foreign-${page}-${index}`;
+        return path === '/workers/domains' ? { id, hostname: `${id}.example.net`, service: id, zone_id: context.zoneId } :
+          { id, hostname: `https://${id}.example.net/mcp` };
+      });
+      return Response.json({ success: true, result: items, result_info: { page, total_pages: provider.cataloguePages } });
+    }
     if (path === '/access/ai-controls/mcp/servers' && provider.serverPages !== null) {
       const page = Number(url.searchParams.get('page'));
       return Response.json({ success: true, result: provider.serverPages[page - 1], result_info: { page, total_pages: provider.serverPages.length } });
@@ -86,6 +97,29 @@ export async function fixture({ partial = false, lostDelete = -1, applied = true
     return result === null ? new Response(null, { status: 404 }) : Response.json({ success: true, result });
   };
   const manager = createBigQueryTeardown(context, { storage, fetch, now: () => clock });
-  return { storage, fetch, describe: () => manager.describe(snapshot), snapshot, record, key, values, provider, requests, writes, deletions, serverId,
+  const invocationCounts = [];
+  const step = async (run) => {
+    const before = requests.length;
+    try { return await run(); } finally {
+      invocationCounts.push(requests.length - before);
+      expect(requests.length - before).toBeLessThanOrEqual(40);
+    }
+  };
+  const describe = async () => {
+    const plan = await manager.describe(snapshot);
+    return { ...plan, async remove(grant, owned) {
+      for (let pass = 0; pass < 256; pass++) {
+        if ((await step(() => plan.preflight(grant, owned))).complete) break;
+        if (pass === 255) throw new Error('preflight did not complete');
+      }
+      for (let pass = 0; pass < 256; pass++) {
+        const result = await step(() => plan.remove(grant, owned));
+        if (result.complete) return result;
+      }
+      throw new Error('removal did not complete');
+    } };
+  };
+  return { storage, fetch, describe, rawDescribe: () => manager.describe(snapshot), context, invocationCounts,
+    snapshot, record, key, values, provider, requests, writes, deletions, serverId,
     expire: () => { clock = 30_000; } };
 }

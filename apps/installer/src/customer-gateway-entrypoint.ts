@@ -39,6 +39,7 @@ import { randomBase64Url } from './crypto';
 import { verifyStaticDeployPlanIntegrity } from './schema';
 import { createGatewayTeardownHandoff } from './gateway-teardown-handoff';
 import { DurableCustomerTeardownAttemptPort } from './customer-teardown-attempt';
+import { customerTeardownCommand } from './customer-teardown-command';
 import { createCustomerTeardownRouter, customerTeardownCookiePresent, CUSTOMER_TEARDOWN_PATH } from './customer-teardown-router';
 import {
   createCustomerOperationRouter,
@@ -557,9 +558,10 @@ export class AdminState extends RuntimeAdminState {
       attempts: new DurableCustomerTeardownAttemptPort(this.finalState.storage),
       transport: (target, init) => fetch(target, init),
       assertOperational: () => this.assertOperational(config).then(() => undefined),
-      command: (command, body, signature) => super.fetch(new Request(`https://admin-state.invalid/teardown-actions/${command}-current`, {
-        method: 'POST', headers: { 'content-type': 'application/json', 'x-ankka-teardown-action-signature': signature }, body,
-      })),
+      // The callback is outside the payload's mutation queue. Re-enter the
+      // same object through its namespace so each signed pass receives a fresh
+      // invocation budget. The grant lives only in the active callback.
+      command: customerTeardownCommand(this.finalEnv.ADMIN_STATE),
       issueRelayTicket: (kinds) => this.issueOperationRelayTicket(config, 'uninstall', kinds),
       signHandoff: async (completion, priorGrantRevocationUnconfirmed) => {
         const journal = await new CustomerStage2DurableStatePort(this.finalState.storage).read();

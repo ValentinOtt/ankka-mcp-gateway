@@ -4280,6 +4280,126 @@ function rootRemovalCompletion(root, removedResourceCount, resumed, resourcesHas
   return Object.freeze(result);
 }
 
+// Progress belongs to one callback request and one exact dependency graph.
+// A new consent rechecks the full graph; it retains only deletion receipts.
+const ROOT_TEARDOWN_PROGRESS_KEY = 'ankka-mcp-gateway/root-teardown-progress/v1';
+
+async function processBoundedRootTeardown(storage, root, teardown, authority, resourcesHash, input) {
+  const resources = authority.resources;
+  const raw = await storage.get(ROOT_TEARDOWN_PROGRESS_KEY);
+  if (raw !== undefined && (!exactKeys(raw, ['requestId', 'resourcesHash', 'phase', 'checked', 'portalIds', 'portalIndex']) ||
+      !REQUEST_ID.test(raw.requestId) || raw.resourcesHash !== resourcesHash ||
+      !['sharing_preflight', 'preflight', 'remove', 'sharing_delete', 'delete', 'verify', 'complete'].includes(raw.phase) ||
+      !Number.isSafeInteger(raw.checked) || raw.checked < 0 || raw.checked > resources.length ||
+      !Number.isSafeInteger(raw.portalIndex) || raw.portalIndex < 0 ||
+      !(raw.portalIds === null || (Array.isArray(raw.portalIds) && raw.portalIds.length <= MAX_PROVIDER_PAGES * PROVIDER_PAGE_SIZE &&
+        raw.portalIds.every((id) => safeProviderId(id)) && new Set(raw.portalIds).size === raw.portalIds.length)) ||
+      raw.portalIndex > (raw.portalIds?.length ?? 0))) return null;
+  let progress = raw?.requestId === input.requestId ? raw : {
+    requestId: input.requestId, resourcesHash, phase: 'sharing_preflight', checked: 0, portalIds: null, portalIndex: 0,
+  };
+  const active = () => Date.now() < input.expiresAt;
+  const pause = async () => {
+    await storage.put(ROOT_TEARDOWN_PROGRESS_KEY, progress);
+    return Object.freeze({ schemaVersion: 1, status: 'removing', installationId: root.installationId,
+      progress: await sha256({ progress, teardown }) });
+  };
+  const saveTeardown = async (next) => {
+    teardown = next;
+    root = { ...root, teardown };
+    await storage.put(STORAGE_KEY, root);
+  };
+  if (!active()) return null;
+  if (progress.phase === 'complete') {
+    return teardown.status === 'removed' ? rootRemovalCompletion(root, resources.length, true, resourcesHash, true) : null;
+  }
+  if (['sharing_preflight', 'sharing_delete'].includes(progress.phase)) {
+    const serverIds = new Set(resources.filter((resource) => resource.kind === 'mcp_server').map((resource) => resource.provider.id));
+    const path = `/accounts/${encodeURIComponent(root.receipt.target.accountId)}/access/ai-controls/mcp/portals`;
+    if (serverIds.size > 0 && progress.portalIds === null) {
+      // A bounded catalogue read (at most 20 requests) is a separate pass
+      // from the detail reads. Never assume the list includes server mappings.
+      const listed = await providerList(path, input.cloudflareAccessToken);
+      if (listed.status !== 'ok' || listed.result.some((portal) => !safeProviderId(portal?.id))) return null;
+      const ids = listed.result.map((portal) => portal.id);
+      if (new Set(ids).size !== ids.length) return null;
+      progress = { ...progress, portalIds: ids.filter((id) => id !== authority.control.portal.id), portalIndex: 0 };
+      return pause();
+    }
+    const ids = progress.portalIds ?? [];
+    const end = Math.min(progress.portalIndex + 20, ids.length);
+    for (let index = progress.portalIndex; index < end; index++) {
+      if (!active()) return null;
+      const read = await providerCall(`${path}/${encodeURIComponent(ids[index])}`, input.cloudflareAccessToken);
+      if (read.status !== 'ok' || !isRecord(read.result) || read.result.id !== ids[index]) return null;
+      const mappings = Object.hasOwn(read.result, 'servers') ? read.result.servers : [];
+      if (!Array.isArray(mappings) || mappings.some((mapping) => !isRecord(mapping) ||
+        !safeProviderId(mapping.server_id ?? mapping.id) ||
+        (mapping.server_id !== undefined && mapping.id !== undefined && mapping.server_id !== mapping.id) ||
+        serverIds.has(mapping.server_id ?? mapping.id))) return null;
+    }
+    progress = end === ids.length ? { ...progress, phase: progress.phase === 'sharing_preflight' ? 'preflight' : 'delete',
+      portalIds: null, portalIndex: 0 } : { ...progress, portalIndex: end };
+    return pause();
+  }
+  if (progress.phase === 'preflight' || progress.phase === 'verify') {
+    const resource = resources[progress.checked];
+    if (!resource) return null;
+    const observed = await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, true);
+    if (observed === 'present' && !await teardownApplicationChildrenMatch(root, resource, authority, input.cloudflareAccessToken)) return null;
+    if (progress.checked < teardown.removedKeys.length) {
+      if (observed !== 'absent') return null;
+    } else if (progress.checked === teardown.removedKeys.length && teardown.pending !== null) {
+      if (!['absent', 'present'].includes(observed)) return null;
+    } else if (observed !== 'present' && !(observed === 'absent' && authority.pendingResources.has(teardownResourceKey(resource)))) return null;
+    const checked = progress.checked + 1;
+    if (checked < resources.length) { progress = { ...progress, checked }; return pause(); }
+    if (teardown.removedKeys.length === resources.length) {
+      teardown = { ...teardown, status: 'removed', pending: null, removedAt: Date.now() };
+      root = { ...root, status: 'removed', teardown };
+      await storage.put(STORAGE_KEY, root);
+      progress = { ...progress, phase: 'complete', checked };
+      await storage.put(ROOT_TEARDOWN_PROGRESS_KEY, progress);
+      return rootRemovalCompletion(root, resources.length, true, resourcesHash, true);
+    }
+    progress = { ...progress, phase: 'remove', checked: 0 };
+    return pause();
+  }
+  if (teardown.removedKeys.length === resources.length) {
+    progress = { ...progress, phase: 'verify', checked: 0 };
+    return pause();
+  }
+  const resource = resources[teardown.removedKeys.length];
+  if (progress.phase === 'remove' && resource.kind === 'mcp_server') {
+    progress = { ...progress, phase: 'sharing_delete', portalIds: null, portalIndex: 0 };
+    return pause();
+  }
+  const key = teardownResourceKey(resource);
+  const observed = await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, true);
+  if (observed === 'absent') {
+    await saveTeardown({ ...teardown, pending: null, removedKeys: [...teardown.removedKeys, key] });
+    progress = { ...progress, phase: 'remove' };
+    return pause();
+  }
+  if (observed !== 'present' || !await teardownApplicationChildrenMatch(root, resource, authority, input.cloudflareAccessToken)) return null;
+  if (teardown.pending?.requestId === input.requestId && teardown.pending.phase !== 'not_applied') return null;
+  // The resource and any Access children have just been re-read. Arm before
+  // the single DELETE; an unknown response stops the callback and needs consent.
+  await saveTeardown({ ...teardown, pending: { key, requestId: input.requestId, phase: 'send_armed' } });
+  if (!active()) return null;
+  const deleted = await teardownResourceDelete(root, resource, input.cloudflareAccessToken);
+  if (deleted === 'auth' || deleted === 'blocked') {
+    await saveTeardown({ ...teardown, pending: { ...teardown.pending, phase: 'not_applied' } });
+    return null;
+  }
+  if (deleted === 'unknown') return null;
+  await saveTeardown({ ...teardown, pending: { ...teardown.pending, phase: 'submitted' } });
+  if (await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, true) !== 'absent') return null;
+  await saveTeardown({ ...teardown, pending: null, removedKeys: [...teardown.removedKeys, key] });
+  progress = { ...progress, phase: 'remove' };
+  return pause();
+}
+
 async function processRootTeardownApply(storage, environment, input, nowMs = Date.now(), currentPolicies = false, managed = null) {
   if (!isRecord(input) || !exactKeys(input, [
     'schemaVersion', 'actionId', 'installationId', 'requestId', 'control', 'sources',
@@ -4320,6 +4440,9 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
     root = { ...root, status: 'tearing_down', teardown };
     await storage.put(STORAGE_KEY, root);
   } else if (!teardown) return null;
+  if (currentPolicies && managed?.bounded === true) {
+    return processBoundedRootTeardown(storage, root, teardown, authority, resourcesHash, input);
+  }
   if (currentPolicies && !await teardownServersUnshared(root, authority, input.cloudflareAccessToken)) return null;
   // Prove the complete graph before the first provider mutation. A resource
   // outside the already removed prefix may be absent only at the one journaled
@@ -4570,7 +4693,12 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
       ...(source.pending?.kind === 'mcp_server' ? [source.pending] : [])])]
     .filter((resource) => resource.kind === 'mcp_server').map((resource) => resource.provider.id);
   const bridgeGrant = { accessToken: value.cloudflareAccessToken, expiresAt: value.expiresAt, requestId: value.requestId };
-  try { await currentState?.bridges?.preflight(bridgeGrant, ownedServerIds); } catch { return null; }
+  const paused = async (phase, progress) => Object.freeze({ schemaVersion: 1, actionId: action.actionId,
+    status: 'removing', installationId: action.installationId, progress: await sha256({ phase, progress }) });
+  try {
+    const preflight = await currentState?.bridges?.preflight(bridgeGrant, ownedServerIds);
+    if (preflight && !preflight.complete) return paused('bridge_preflight', preflight.progress);
+  } catch { return null; }
   if (currentPolicies && action.status === 'authorization_required') {
     // Receipt proof and consent navigation are read-only. Arm the persistent
     // lifecycle lock only when an actual apply is about to reach the root.
@@ -4595,6 +4723,10 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
     }));
     removed = response instanceof Response && response.status === 200 ? await response.json() : null;
   } catch { removed = null; }
+  if (currentPolicies && managed?.bounded === true && removed?.schemaVersion === 1 &&
+      removed.status === 'removing' && removed.installationId === action.installationId && HASH.test(removed.progress)) {
+    return paused('dependencies', removed.progress);
+  }
   if (!isRecord(removed) || removed.schemaVersion !== 1 || removed.status !== 'removed' ||
       removed.installationId !== action.installationId || !Number.isSafeInteger(removed.removedResourceCount) ||
       (currentPolicies && (!HASH.test(removed.readyReceiptChecksum) || !HASH.test(removed.dependencyResourcesHash)))) {
@@ -4603,6 +4735,7 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
   if (currentState?.bridges !== null && currentState?.bridges !== undefined) {
     try {
       const bridges = await currentState.bridges.remove(bridgeGrant, ownedServerIds);
+      if (!bridges.complete) return paused('bridges', bridges.progress);
       removed = { ...removed, removedResourceCount: removed.removedResourceCount + bridges.removedResourceCount,
         dependencyResourcesHash: await sha256({ schemaVersion: 1, dependencies: removed.dependencyResourcesHash, bridges: bridges.recordsHash }) };
     } catch { return null; }

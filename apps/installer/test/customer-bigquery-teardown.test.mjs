@@ -2,6 +2,29 @@ import { fixture, grant, JOURNAL } from './bigquery-teardown-fixture.mjs';
 const GRANT = grant.accessToken;
 
 describe('receipt-bound BigQuery bridge removal', () => {
+  it('fits both maximum catalogue scans and resource rechecks in each pass', async () => {
+    const test = await fixture(); test.provider.cataloguePages = 10;
+    await (await test.describe()).remove(grant, [test.serverId]);
+    expect(test.requests.length).toBeGreaterThan(50);
+    expect(Math.max(...test.invocationCounts)).toBeLessThanOrEqual(26);
+    expect(test.deletions).toEqual(['domain', 'settings', 'app']);
+  });
+  it('bounds a catalogue that never reaches a verified final page without deleting', async () => {
+    const test = await fixture(); test.provider.cataloguePages = 11;
+    await expect((await test.describe()).remove(grant, [test.serverId])).rejects.toThrow();
+    expect(test.requests.length).toBeLessThanOrEqual(10); expect(test.deletions).toEqual([]);
+  });
+  it('cannot reuse verification after source identity or receipt changes between passes', async () => {
+    const test = await fixture();
+    expect((await (await test.rawDescribe()).preflight(grant, [test.serverId])).complete).toBe(true);
+    test.snapshot.sources.sources[0].label = 'Changed';
+    await expect(test.rawDescribe()).rejects.toThrow();
+    expect(test.deletions).toEqual([]);
+    test.snapshot.sources.sources[0].label = 'BigQuery';
+    test.values.set(test.key, { ...test.record, workerVersion: 'changed-version' });
+    await expect((await test.describe()).remove(grant, [test.serverId])).rejects.toThrow();
+    expect(test.deletions).toEqual([]);
+  });
   it('keeps Access until the domain and secret-bearing Worker are absent, and proves completion again', async () => {
     const test = await fixture();
     const plan = await test.describe();
