@@ -114,6 +114,24 @@ describe('configuration in the customer Worker', () => {
     await expect(verifyWorkerSetupPermit(f.permit, f.config.issuerPublicKey, f.config.expiresAt)).rejects.toThrow();
   });
 
+  it('can reread the signed review after approval expiry but never past the original permit window', async () => {
+    const f = await fixture();
+    await f.setup.accept(f.permit);
+    const reviewed = await f.setup.configure(f.selection);
+    let clock = NOW + 300_001;
+    const returning = createCustomerWorkerSetup({
+      storage: f.storage, config: f.config, now: () => clock,
+      transport: async () => { throw new Error('reading review must not call the provider or issuer'); },
+    });
+    expect(await returning.read()).toEqual(reviewed);
+    clock = f.config.expiresAt - 1;
+    expect(await returning.read()).toEqual(reviewed);
+    clock = f.config.expiresAt;
+    await expect(returning.read()).rejects.toThrow();
+    expect(await returning.configured()).toEqual(await f.setup.configured());
+    expect(f.calls).toHaveLength(1);
+  });
+
   it('requires proof from the exact deployed Worker, even with a valid permit', async () => {
     const f = await fixture();
     const other = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);

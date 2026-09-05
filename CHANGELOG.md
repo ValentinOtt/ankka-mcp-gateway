@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Reopen the saved setup review after a final approval expires before token
+  exchange. Request fresh consent within the original setup window, keep
+  configuration edits locked, and preserve active or potentially applied work.
+  Explain that full setup expiry may leave an unfinished gateway in Cloudflare.
+
 - Verify large Worker modules during installation and updates without overflowing
   the base64 validator stack. Keep canonical encoding, byte bounds, and exact
   content hashes; allow self-update readback to fit the accepted source size.
