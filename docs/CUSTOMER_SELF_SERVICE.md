@@ -273,12 +273,14 @@ not undo saved permissions, new ownership receipts, or Access policies.
 
 ## Removing a gateway
 
-The original successful installer session can prepare a same-session removal
-plan until the deadline shown by the installer. The initial session lasts 30
-minutes; interrupted-operation recovery may be retained for at most 24
-additional hours. An operator returning to an existing gateway starts with fresh, read-only
-existing-gateway detection and then opens a receipt-bound handoff from the
-gateway dashboard.
+Open **Settings** in your gateway and review its removal plan. After the
+gateway verifies and removes its receipt-owned connected resources, a signed
+handoff opens the hosted final-removal page. Download its recovery receipt
+before continuing. This removal job is separate from the original installer
+session; the final-removal browser cookie lasts 24 hours. If that browser
+session is lost, importing the accepted recovery receipt can reopen the
+existing removal job. Every new deletion attempt still requires fresh
+Cloudflare approval and verified ownership.
 
 Review the exact removal plan before authorizing deletion. The current
 dashboard flow uses two separate Cloudflare approvals: the gateway first removes
