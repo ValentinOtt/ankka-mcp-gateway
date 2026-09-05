@@ -279,8 +279,8 @@ handoff opens the hosted final-removal page. Download its recovery receipt
 before continuing. This removal job is separate from the original installer
 session; the final-removal browser cookie lasts 24 hours. If that browser
 session is lost, importing the accepted recovery receipt can reopen the
-existing removal job. Every new deletion attempt still requires fresh
-Cloudflare approval and verified ownership.
+existing removal job. Reopening a receipt does not authorize deletion; you
+must approve a new Cloudflare grant to continue.
 
 Review the exact removal plan before authorizing deletion. The current
 dashboard flow uses two separate Cloudflare approvals: the gateway first removes

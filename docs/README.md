@@ -22,8 +22,10 @@ installed release; a document or fixture is not a compatibility certification.
 - [Self-service deployment](CUSTOMER_SELF_SERVICE.md): prerequisites, exact
   Cloudflare permissions, plan review, source setup, and removal.
 - [First-source onboarding qualification](FIRST_SOURCE_ONBOARDING.md): the
-  default-deny candidate, separate operator connection and Team grant, and live
-  acceptance required before enabling the workflow.
+  default-deny workflow, separate operator connection and Team grant, and live
+  acceptance required for the installed release.
+- [Add BigQuery](ADD_BIGQUERY.md): Google prerequisites, gateway-hosted bridge
+  setup, source connection, and interrupted-setup limits.
 - [Team access](TEAM_ACCESS.md): V1 Cloudflare-managed membership, legacy
   recovery, future editor options, and session-propagation limits.
 - [Updates and rollback](UPDATES.md): operator-approved changes and the
