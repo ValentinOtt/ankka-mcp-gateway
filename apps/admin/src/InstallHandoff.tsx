@@ -29,6 +29,11 @@ export function InstallHandoff({ children }: PropsWithChildren) {
       window.clearTimeout(timer)
       controller?.abort()
     }
+    const leave = () => {
+      stop()
+      // A page restored from the back/forward cache must not show a stopped spinner.
+      setState('unavailable')
+    }
     const check = async () => {
       controller = new AbortController()
       const timeout = window.setTimeout(() => controller?.abort(), REQUEST_TIMEOUT_MS)
@@ -65,9 +70,9 @@ export function InstallHandoff({ children }: PropsWithChildren) {
       if (Date.now() >= deadline) setState('unavailable')
       else timer = window.setTimeout(() => { void check() }, CHECK_INTERVAL_MS)
     }
-    window.addEventListener('pagehide', stop)
+    window.addEventListener('pagehide', leave)
     void check()
-    return () => { stop(); window.removeEventListener('pagehide', stop) }
+    return () => { stop(); window.removeEventListener('pagehide', leave) }
   }, [state])
 
   if (state === 'ready') return children

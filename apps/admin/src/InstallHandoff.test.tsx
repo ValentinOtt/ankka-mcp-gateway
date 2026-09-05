@@ -122,4 +122,16 @@ describe('management install handoff', () => {
     await act(() => vi.advanceTimersByTimeAsync(60_000))
     expect(request).toHaveBeenCalledTimes(2)
   })
+
+  it('leaves a usable check-again state when a suspended page is restored', async () => {
+    const request = vi.fn().mockImplementation(async () => statusResponse('CONVERGING'))
+    vi.stubGlobal('fetch', request)
+    render(<InstallHandoff>{dashboard}</InstallHandoff>)
+    await act(async () => {})
+    act(() => { window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })) })
+    act(() => { window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })) })
+    expect(screen.getByRole('button', { name: 'Check again' })).toBeVisible()
+    await act(() => vi.advanceTimersByTimeAsync(60_000))
+    expect(request).toHaveBeenCalledTimes(1)
+  })
 })
