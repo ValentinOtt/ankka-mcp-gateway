@@ -20,8 +20,8 @@ function scriptLiteral<Value>(value: Value): string {
  * Where the second Cloudflare approval lands. The passes run behind alarms,
  * so the page follows the status route until the attempt settles; the
  * temporary workers.dev address can close before the final runtime upload.
- * Losing that address is not proof of readiness, so the page asks the
- * administrator to check the management page without claiming success.
+ * Losing that address is not proof of readiness. The fixed management page
+ * continues checking same-origin status behind Access before opening the dashboard.
  */
 export function customerInstallProgressPage(
   managementHostname: string,
@@ -43,7 +43,62 @@ export function customerInstallProgressPage(
     status: outcome.status,
     failure: outcome.failureCode === null ? null : { code: outcome.failureCode, reason: outcome.failureReason },
   });
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Install Ankka Gateway</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}code{font:.9375em ui-monospace,monospace}a{color:#1d4ed8}</style><h1 id="title">Finishing your Ankka Gateway</h1><p id="message">Cloudflare approved the install. Setting up the Gateway takes a few minutes; this page updates itself.</p><p id="detail"></p><script nonce="${nonce}">(()=>{const management=${scriptLiteral(`https://${managementHostname}/`)};const title=document.querySelector('#title');const message=document.querySelector('#message');const detail=document.querySelector('#detail');let misses=0;let sawConverging=false;const show=(state)=>{if(state.status==='READY'){title.textContent='Your Ankka Gateway is ready';message.textContent='';const link=document.createElement('a');link.href=management;link.textContent='Open your management page';message.append(link);detail.textContent='';return true}if(state.status==='INCOMPLETE'){title.textContent='Setup did not complete';message.textContent='The Gateway stopped before it was ready. Return to deploy.ankka.ai to remove this install and try again.';const failure=state.failure;detail.textContent=failure?'Reason: '+failure.code+(failure.reason?' / '+failure.reason:''):'';return true}sawConverging=true;return false};const closed=()=>{title.textContent='Check your gateway';message.textContent='This temporary setup address is no longer reachable. Open your management page to check whether setup completed. If your gateway is not ready, return to deploy.ankka.ai to review the installation.';const link=document.createElement('a');link.href=management;link.textContent=management;detail.textContent='';detail.append(link)};const poll=async()=>{try{const response=await fetch(${scriptLiteral(CUSTOMER_INSTALL_STATUS_PATH)},{credentials:'omit',cache:'no-store'});if(!response.ok)throw new Error();misses=0;if(show(await response.json()))return}catch{misses+=1;if(sawConverging&&misses>=3){closed();return}}setTimeout(poll,3000)};if(!show(${initial}))setTimeout(poll,3000)})();</script></html>`, {
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Install Ankka Gateway</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}code{font:.9375em ui-monospace,monospace}a{color:#1d4ed8}</style><h1 id="title">Finishing your Ankka Gateway</h1><p id="message">Cloudflare approved the install. Setting up the Gateway takes a few minutes; this page updates itself.</p><p id="detail"></p><script nonce="${nonce}">
+(()=>{
+  const management=${scriptLiteral(`https://${managementHostname}/?setup=finishing`)};
+  const title=document.querySelector('#title');
+  const message=document.querySelector('#message');
+  const detail=document.querySelector('#detail');
+  let misses=0;
+  let active=true;
+  let timer;
+  let controller;
+  const stop=()=>{active=false;clearTimeout(timer);if(controller)controller.abort()};
+  addEventListener('pagehide',stop);
+  const openManagement=()=>{
+    if(!active)return;
+    stop();
+    title.textContent='Opening your management page';
+    message.textContent='Your management page will check that setup finished before opening your dashboard. Cloudflare may ask you to sign in.';
+    const link=document.createElement('a');
+    link.href=management;
+    link.textContent='Open your management page';
+    detail.textContent='';
+    detail.append(link);
+    location.replace(management);
+  };
+  const show=(state)=>{
+    if(state.status==='READY'){openManagement();return true}
+    if(state.status==='INCOMPLETE'){
+      title.textContent='Setup did not complete';
+      message.textContent='The Gateway stopped before it was ready. Return to deploy.ankka.ai to remove this install and try again.';
+      const failure=state.failure;
+      detail.textContent=failure?'Reason: '+failure.code+(failure.reason?' / '+failure.reason:''):'';
+      return true;
+    }
+    if(state.status!=='CONVERGING')throw new Error();
+    return false;
+  };
+  const poll=async()=>{
+    controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),5000);
+    try{
+      const response=await fetch(${scriptLiteral(CUSTOMER_INSTALL_STATUS_PATH)},{credentials:'same-origin',cache:'no-store',redirect:'manual',signal:controller.signal});
+      if(!response.ok)throw new Error();
+      const state=await response.json();
+      if(!active)return;
+      if(show(state))return;
+      misses=0;
+    }catch{
+      if(!active)return;
+      misses+=1;
+      if(misses>=3){openManagement();return}
+    }finally{clearTimeout(timeout)}
+    if(active)timer=setTimeout(poll,3000);
+  };
+  if(!show(${initial}))timer=setTimeout(poll,3000);
+})();
+</script></html>`, {
     status: 200,
     headers,
   });
