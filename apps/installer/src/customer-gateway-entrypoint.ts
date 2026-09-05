@@ -1,6 +1,7 @@
 import * as v from 'valibot';
 import { createBigQuerySetup } from './customer-bigquery-setup';
 import { bigQuerySetupAvailable } from './customer-bigquery-deployment';
+import { createBigQueryTeardown } from './customer-bigquery-teardown';
 
 // @ts-expect-error The payload is validated as a release input, not a TS package.
 import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceiptProviderStateWithReason, prepareCurrentGatewayTeardown, gatewayControlPlaneOrigin, verifyAccess } from '../../../payload/worker/index.js';
@@ -255,7 +256,12 @@ export class AdminState extends RuntimeAdminState {
     private readonly finalState: FinalDurableObjectState,
     private readonly finalEnv: FinalGatewayEnv,
   ) {
-    super(finalState, finalEnv);
+    const config = parsedEnv(finalEnv);
+    super(finalState, finalEnv, createBigQueryTeardown({
+      accountId: config.CLOUDFLARE_ACCOUNT_ID, zoneId: config.CLOUDFLARE_ZONE_ID,
+      zoneName: config.CLOUDFLARE_ZONE_NAME, installationId: config.ANKKA_INSTALL_ID,
+      accessIssuer: new URL(config.CF_ACCESS_ISSUER).origin,
+    }, { storage: finalState.storage, fetch: (target, init) => fetch(target, init) }));
     this.recoveryReady = finalState.blockConcurrencyWhile(async () => {
       const config = parsedEnv(finalEnv);
       initializeCustomerBootstrapSql(finalState.storage);
