@@ -280,15 +280,22 @@ additional hours. An operator returning to an existing gateway starts with fresh
 existing-gateway detection and then opens a receipt-bound handoff from the
 gateway dashboard.
 
-Both paths show the exact teardown plan and require a new Cloudflare
-authorization before any deletion.
+Review the exact removal plan before authorizing deletion. The current
+dashboard flow uses two separate Cloudflare approvals: the gateway first removes
+its receipt-owned connected resources, then the hosted cleanup flow removes its
+management resources and Worker. Completed ordinary MCP sources are included
+only when their retained ownership and current provider state can be verified.
+Older prepared removal links retain their original restrictions.
 
-Automatic teardown is unavailable after a Team policy write or new-profile
-source creation may have occurred, including for older prepared removal links.
-The original ownership receipt is preserved; a later compatible release is
-required to support this lifecycle state. Merely discovering a source, saving
-its draft, or reviewing an action does not set the restriction. Review this
-limitation before authorizing source installation.
+Automatic removal remains blocked after [BigQuery bridge provisioning](ADD_BIGQUERY.md#interrupted-setup)
+or while uncertain source, runtime, or legacy Team actions remain unresolved.
+The original ownership receipt is preserved. Merely discovering a source,
+saving its draft, or reviewing an action does not set the compatibility floor.
+Review these limits before authorizing source installation.
+
+The current removal path is implemented; successful live removal on the exact
+release remains a release-qualification requirement. Local tests and the
+presence of a removal button do not establish that qualification.
 
 Deletion authority comes from the checksum-valid receipt stored by the
 gateway, not from a hostname, resource name, or provider identifier.

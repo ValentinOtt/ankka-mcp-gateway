@@ -187,8 +187,10 @@ guarantee does not claim that those providers process no metadata.
 - Read-only tool policy depends on both gateway configuration and upstream
   enforcement.
 - Worker rollback does not roll back Durable Object data.
-- Automatic teardown is unavailable after a potentially applied Team policy
-  write or new-profile source creation. Revoking a retired preview token or
-  restoring the original roster does not clear the recorded restriction.
+- Automatic teardown is unavailable after BigQuery bridge provisioning or
+  while uncertain source, runtime, or legacy Team actions remain unresolved.
+  Completed ordinary MCP sources have a receipt-owned removal path; older
+  removal links retain their original restrictions. Revoking a retired preview
+  token does not reconcile a pending policy write.
 - Provider APIs can return ambiguous outcomes; the system stops for recovery
   instead of claiming success.
