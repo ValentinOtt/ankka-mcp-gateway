@@ -19,6 +19,9 @@ Notable public product and repository changes are recorded here.
   source cleanup to separate signed invocations with durable progress so
   multiple sources fit Workers Free request limits without storing the grant.
 
+- Document stable-channel availability, the hosted installer’s stable release
+  pin, evaluation-only canary publication, and best-effort support.
+
 - Raise the bounded local release publisher from 6 MB to 10 MB to accommodate
   signed gateway packages that embed the BigQuery bridge. Signature, digest,
   per-file, and generated-module checks remain enforced.

@@ -6,14 +6,15 @@ Ankka MCP Gateway is designed to install into and operate from your Cloudflare
 account. Your MCP Portal, management Worker, Access policies, logs, source
 configuration, and upstream credentials remain under your control.
 
-> **Availability:** canary preview. Signed [canary releases](https://github.com/ankka-ai/ankka-mcp-gateway/releases)
-> are available, with a hosted evaluation flow at [deploy.ankka.ai](https://deploy.ankka.ai).
-> Review the exact release before authorizing changes to your account; this is
-> not a stable, production-supported release. If the installer reports that
-> deployment is unavailable, do not bypass its activation checks.
+> **Availability:** stable and canary releases. [deploy.ankka.ai](https://deploy.ankka.ai)
+> serves the stable release; signed [canary releases](https://github.com/ankka-ai/ankka-mcp-gateway/releases)
+> are published for evaluation. Support is [best-effort](../SUPPORT.md), with no
+> availability or response-time commitment. Review the exact release before
+> authorizing changes to your account. If the installer reports that deployment
+> is unavailable, do not bypass its activation checks.
 
 The source installer's disabled default activation is separate from the reviewed
-canary build. Public source does not include live deployment authority or
+hosted build. Public source does not include live deployment authority or
 signing keys. The [local UI preview](../README.md#run-locally) uses synthetic
 data and cannot deploy a gateway.
 
@@ -272,22 +273,35 @@ not undo saved permissions, new ownership receipts, or Access policies.
 
 ## Removing a gateway
 
-The original successful installer session can prepare a same-session removal
-plan until the deadline shown by the installer. The initial session lasts 30
-minutes; interrupted-operation recovery may be retained for at most 24
-additional hours. An operator returning to an existing gateway starts with fresh, read-only
-existing-gateway detection and then opens a receipt-bound handoff from the
-gateway dashboard.
+Open **Settings** in your gateway and review its removal plan. After the
+gateway verifies and removes its receipt-owned connected resources, a signed
+handoff opens the hosted final-removal page. Download its recovery receipt
+before continuing. This removal job is separate from the original installer
+session; the final-removal browser cookie lasts 24 hours. If that browser
+session is lost, importing the accepted recovery receipt can reopen the
+existing removal job. Reopening a receipt does not authorize deletion; you
+must approve a new Cloudflare grant to continue.
 
-Both paths show the exact teardown plan and require a new Cloudflare
-authorization before any deletion.
+Review the exact removal plan before authorizing deletion. The current
+dashboard flow uses two separate Cloudflare approvals: the gateway first removes
+its receipt-owned connected resources, then the hosted cleanup flow removes its
+management resources and Worker. Completed ordinary MCP sources are included
+only when their retained ownership and current provider state can be verified.
+Older prepared removal links retain their original restrictions.
 
-Automatic teardown is unavailable after a Team policy write or new-profile
-source creation may have occurred, including for older prepared removal links.
-The original ownership receipt is preserved; a later compatible release is
-required to support this lifecycle state. Merely discovering a source, saving
-its draft, or reviewing an action does not set the restriction. Review this
-limitation before authorizing source installation.
+Compatible releases also remove [managed BigQuery bridges](ADD_BIGQUERY.md#remove-the-gateway-and-its-bridges):
+the bridge domain is detached, its Worker and stored Google key copy are deleted,
+and its Access protection is removed last. Known partial setup and interrupted
+deletion resume with fresh consent and verified saved progress. Unknown creates,
+changed or shared resources, and unresolved runtime or legacy Team actions still
+block automatic removal. Manually deployed bridges remain separately managed.
+The original ownership receipt is preserved. Merely discovering a source,
+saving its draft, or reviewing an action does not set the compatibility floor.
+Review these limits before authorizing source installation.
+
+The current removal path is implemented; successful live removal on the exact
+release remains a release-qualification requirement. Local tests and the
+presence of a removal button do not establish that qualification.
 
 Deletion authority comes from the checksum-valid receipt stored by the
 gateway, not from a hostname, resource name, or provider identifier.

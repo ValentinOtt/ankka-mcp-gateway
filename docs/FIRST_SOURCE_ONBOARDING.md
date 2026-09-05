@@ -1,9 +1,9 @@
 # Default-deny source onboarding: release qualification
 
-Status: candidate design and acceptance checklist, not a deployment claim.
-The published native-permissions preview pauses source installation. Restoring
-the workflow requires the implementation and live checks below; changing a
-client-side capability flag alone is not sufficient.
+This is the default-deny onboarding contract and acceptance checklist. Review
+the installed signed release and its qualification evidence before relying on
+the workflow. A client-side capability flag or main-branch implementation alone
+is not proof that the provider flow is qualified.
 
 ## Intended workflow
 
@@ -62,13 +62,16 @@ because the runtime was upgraded. An old action with a pending or potentially
 applied provider write must remain retained and blocked for reviewed recovery.
 Do not erase its journal or replay its authorization URL.
 
-The proposed conservative lifecycle safeguard disables automatic teardown and
-blocks older-runtime rollback before the first new-source provider write may
-start. Reading, discovering, saving a draft, and reviewing an action must not
-set that restriction. This is a material release limitation requiring explicit
-review before activation, not an assertion that resources were deleted or that
-a failed installation rolled back. A later compatible teardown implementation
-is a separate follow-up.
+The compatibility safeguard blocks older-runtime rollback before the first
+new-source provider write may start. Reading, discovering, saving a draft, and
+reviewing an action must not set that floor. Current receipt-owned removal can
+include completed ordinary MCP sources without rewriting the original receipt.
+Compatible releases also remove managed BigQuery bridges and support known
+partial setup or interrupted deletion with fresh consent. Unknown creates and
+unresolved actions outside that recovery path remain blocked; older removal
+links retain their original restrictions. See
+[removal limits](CUSTOMER_SELF_SERVICE.md#removing-a-gateway). Implementation and
+local tests do not replace live lifecycle qualification on the release.
 
 ## Required local regression coverage
 
@@ -79,8 +82,8 @@ is a separate follow-up.
 - Missing operator authentication, incomplete synchronization, or a missing
   selected tool pauses before Portal attachment. Fresh consent can resume the
   same receipts without recreating resources or granting access.
-- A first Team read cannot grant a new source implicitly. A later explicit
-  source grant uses the ordinary complete-roster revision check.
+- A first Team read cannot grant a new source implicitly. V1 Team changes
+  happen in Cloudflare; the gateway rejects Team writes and remains read-only.
 - Old source actions cannot enter the new execution path; pending and uncertain
   provider writes retain their recovery evidence.
 - Failed or uncertain creation never claims rollback or broadens cleanup

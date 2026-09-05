@@ -122,9 +122,13 @@ status), or `revocation_unconfirmed` (installed, but the temporary grant could
 not be confirmed revoked), with a bounded `sourceActionReason` word (a grant
 error, the apply route's error code, or an update stage) when the gateway can
 name what stopped it. No control-plane page, token, or callback is involved;
-Ankka's hosted installer never sees the grant. Runtime updates take the same
-route with an `upgrade` grant (see [Updates](UPDATES.md)); rollback and
-teardown handoffs are not yet served by it.
+Ankka's hosted installer never sees the grant. Runtime updates and rollbacks
+use the same route with their respective `upgrade` and `rollback` operations;
+both request Workers Scripts Write. Rollback selects the exact retained release
+(see [Updates](UPDATES.md)). Gateway removal starts at
+`/__ankka/operation/teardown` and uses two separate approvals: receipt-owned
+dependencies first, then the management resources and Worker. See
+[removal limits](CUSTOMER_SELF_SERVICE.md#removing-a-gateway).
 
 ## Operational limits and release review
 

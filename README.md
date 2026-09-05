@@ -5,10 +5,10 @@ teams that want one endpoint for approved, read-only tools. The gateway,
 access policies, logs, and upstream credentials stay in your team's
 Cloudflare account, not at Ankka.
 
-> **Status:** canary preview. Signed [canary releases](https://github.com/ankka-ai/ankka-mcp-gateway/releases)
-> are available. This repository contains the gateway runtime and hosted-installer
-> source; live deployment authority and credentials remain outside the public
-> repository.
+> **Status:** stable and canary releases. The [hosted installer](https://deploy.ankka.ai)
+> serves the stable release; signed [canary releases](https://github.com/ankka-ai/ankka-mcp-gateway/releases)
+> are published for evaluation. Support is [best-effort](SUPPORT.md). Live
+> deployment authority and credentials remain outside the public repository.
 
 [Try the local preview](#run-locally) ·
 [What Ankka adds](#what-ankka-adds-to-cloudflare-mcp-portals) ·
