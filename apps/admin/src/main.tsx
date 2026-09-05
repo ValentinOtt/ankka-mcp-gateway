@@ -3,6 +3,7 @@ import { RouterProvider } from '@tanstack/react-router'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { GatewayProvider } from './GatewayContext'
+import { InstallHandoff } from './InstallHandoff'
 import { createPreviewGatewayAdminApi } from './preview-api'
 import { router } from './router'
 import { WebMcpTools } from './WebMcpTools'
@@ -25,7 +26,7 @@ createRoot(root).render(
   <StrictMode>
     <TooltipProvider>
       <Toasty>
-        {gateway}
+        <InstallHandoff>{gateway}</InstallHandoff>
       </Toasty>
     </TooltipProvider>
   </StrictMode>,
