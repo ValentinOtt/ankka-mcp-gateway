@@ -133,7 +133,8 @@ async function releaseBundle(): Promise<VerifiedReleaseBundle> {
   });
 }
 
-function oauthTransport(events: string[]) {
+function oauthTransport(events: string[], freshAccount = false) {
+  let subdomain: string | null = freshAccount ? null : 'tenant';
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = new Request(input, init);
     const url = new URL(request.url);
@@ -156,12 +157,22 @@ function oauthTransport(events: string[]) {
     }
     if (url.pathname === '/client/v4/zones') {
       events.push('zone-discovery');
-      return Response.json({ success: true, errors: [], result: [{ id: '1'.repeat(32), name: 'example.com', status: 'active', account: { id: ACCOUNT_ID } }] });
+      return Response.json({ success: true, errors: [], result: freshAccount ? [] : [{ id: '1'.repeat(32), name: 'example.com', status: 'active', account: { id: ACCOUNT_ID } }] });
     }
     if (url.pathname.endsWith('/workers/subdomain')) {
+      if (request.method === 'PUT') {
+        expect(freshAccount).toBe(true);
+        const body = v.parse(v.object({ subdomain: v.string() }), await request.json());
+        expect(body.subdomain).toMatch(/^ankka-[a-f0-9]{32}$/u);
+        subdomain = body.subdomain;
+        events.push('subdomain-create');
+        return Response.json({ success: true, errors: [], result: { subdomain } });
+      }
       expect(request.method).toBe('GET');
       events.push('subdomain-read');
-      return Response.json({ success: true, errors: [], result: { subdomain: 'tenant' } });
+      return subdomain === null
+        ? Response.json({ success: false, errors: [{ code: 10007 }], result: null }, { status: 404 })
+        : Response.json({ success: true, errors: [], result: { subdomain } });
     }
     if (url.pathname === '/oauth2/revoke') {
       events.push('revoke');
@@ -221,7 +232,7 @@ function provider(events: string[]): HostedStage1Provider {
   });
 }
 
-async function setup(workerSetup = false) {
+async function setup(workerSetup = false, freshAccount = false) {
   const bundle = await releaseBundle();
   const selection = parseDeploySelection({
     schemaVersion: 1,
@@ -247,7 +258,7 @@ async function setup(workerSetup = false) {
     code: `code_${'h'.repeat(32)}`,
     verifier: 'i'.repeat(43),
     oauth: { clientId: HOSTED_CLIENT_ID, clientSecret: HOSTED_CLIENT_SECRET },
-    transport: oauthTransport(events),
+    transport: oauthTransport(events, freshAccount),
     bundle,
     plan,
     secrets,
@@ -294,12 +305,13 @@ function streamedHealth(value: BoundaryValue, signal: AbortSignal | null | undef
 }
 
 describe('hosted Stage 1 coordinator', () => {
-  it.each([false, true])('revokes before token-free readiness and releases the capability only in the customer fragment (Worker setup: %s)', async (workerSetup) => {
-    const fixture = await setup(workerSetup);
+  it.each([[false, false], [true, false], [true, true]])('revokes before token-free readiness and releases the capability only in the customer fragment (Worker setup: %s, fresh account: %s)', async (workerSetup, freshAccount) => {
+    const fixture = await setup(workerSetup, freshAccount);
     expect(fixture.events).toEqual([
       'token-exchange',
       'account-read',
       ...(workerSetup ? ['zone-discovery'] : []),
+      ...(freshAccount ? ['subdomain-read', 'subdomain-read', 'subdomain-create'] : []),
       'subdomain-read',
       'worker-deploy',
       'subdomain-enable',
@@ -349,7 +361,7 @@ describe('hosted Stage 1 coordinator', () => {
       const payload = v.parse(v.strictObject({ bootstrapId: v.string(), secret: v.string(), setupPermit: v.string() }),
         JSON.parse(new TextDecoder().decode(base64UrlDecode(url.hash.slice(1)))));
       const permit = await verifyWorkerSetupPermit(payload.setupPermit, fixture.publicKey, NOW + 3);
-      expect(permit.availableZones).toEqual([{ id: '1'.repeat(32), name: 'example.com' }]);
+      expect(permit.availableZones).toEqual(freshAccount ? [] : [{ id: '1'.repeat(32), name: 'example.com' }]);
       expect(permit.bootstrapPlan.planId).toBe(fixture.plan.planId);
       expect(payload.secret).toBe(fixture.secrets.capability.secret);
       expect(payload.setupPermit).not.toContain(ACCESS_TOKEN);
