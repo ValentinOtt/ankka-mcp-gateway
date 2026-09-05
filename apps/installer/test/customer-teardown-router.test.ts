@@ -8,6 +8,7 @@ import { operationSignature } from '../src/customer-operation-secrets';
 import { parseCustomerTeardownAttempt, type CustomerTeardownAttempt, type CustomerTeardownAttemptPort } from '../src/customer-teardown-attempt';
 import { createCustomerTeardownRouter, CUSTOMER_TEARDOWN_PATH, CUSTOMER_TEARDOWN_START_PATH, type CustomerTeardownDependencies } from '../src/customer-teardown-router';
 import { boundaryObjectSchema } from '../src/boundary';
+import { parseCustomerTeardownFailure, type CustomerTeardownFailure } from '../src/customer-teardown-failure';
 
 const NOW = 1_800_000_000_000, ORIGIN = 'https://manage.example.com', HOSTED = 'https://deploy.example.com';
 const KEY = base64UrlEncode(new Uint8Array(32).fill(5));
@@ -23,7 +24,9 @@ const claim = { schemaVersion: 3, actionType: 'gateway_teardown', actionId: `act
 const completion = { schemaVersion: 1, actionId: claim.actionId, installationId: config.installId, status: 'gateway_removed',
   removedResourceCount: 7, readyReceiptChecksum: `sha256:${'e'.repeat(64)}`, dependencyResourcesHash: `sha256:${'f'.repeat(64)}` };
 type Options = { scope?: string; accountRefused?: boolean; refresh?: boolean; revokeFails?: boolean; applyFails?: boolean; wrongCompletion?: boolean; relayFails?: boolean;
-  passes?: number; noProgress?: boolean; expireAfterPass?: boolean; lostPass?: boolean };
+  passes?: number; noProgress?: boolean; expireAfterPass?: boolean; lostPass?: boolean; settleFails?: boolean; handoffFails?: boolean;
+  applyFailure?: { phase: string; resourceKind: string; category: string; detail?: string }; oversizedApplyResponse?: boolean;
+  beforeHandoff?: () => Promise<void> };
 function fixture(options: Options = {}) {
   let at = NOW, stored: CustomerTeardownAttempt | null = null, state = '', cookie = '', signatures = 0;
   const events: string[] = [], durableWrites: string[] = [], revoked: string[] = [], warnings: boolean[] = [];
@@ -67,11 +70,14 @@ function fixture(options: Options = {}) {
       const input = v.parse(boundaryObjectSchema, JSON.parse(body));
       expect(input.actionId).toBe(claim.actionId); expect(input.installationId).toBe(config.installId); events.push(kind);
       if (kind === 'prove') return Response.json({ schemaVersion: 1, actionId: claim.actionId, status: 'authorized', receiptResourceKinds: KINDS, authority: {} });
-      if (kind === 'settle') return Response.json({});
+      if (kind === 'settle') return Response.json({}, { status: options.settleFails ? 409 : 200 });
       expect(input.cloudflareAccessToken).toBe(ACCESS_TOKEN); expect(stored?.phase).toBe('exchanging');
       requestIds.push(v.parse(v.string(), input.requestId));
-      if (options.applyFails) return Response.json({}, { status: 409 });
-      if (options.lostPass) throw new Error('synthetic lost pass response');
+      if (options.applyFails) return options.oversizedApplyResponse ? new Response('x'.repeat(8193), { status: 409 }) :
+        Response.json(options.applyFailure === undefined ? {} : {
+          schemaVersion: 1, error: 'teardown_action_recovery_required', failure: options.applyFailure,
+        }, { status: 409 });
+      if (options.lostPass) throw new Error(`synthetic lost pass response ${ACCESS_TOKEN}`);
       if (requestIds.length <= (options.passes ?? 0)) {
         if (options.expireAfterPass) at += 600_001;
         return Response.json({ schemaVersion: 1, actionId: claim.actionId, installationId: config.installId, status: 'removing',
@@ -80,6 +86,8 @@ function fixture(options: Options = {}) {
       return Response.json(options.wrongCompletion ? { ...completion, installationId: `acg-${'0'.repeat(24)}` } : completion);
     },
     signHandoff: async (result, prior) => {
+      await options.beforeHandoff?.();
+      if (options.handoffFails) throw new Error(`synthetic refused handoff ${ACCESS_TOKEN}`);
       expect(result).toEqual(completion); expect(events.at(-2)).toBe('revoke'); expect(events.at(-1)).toBe('settle');
       signatures++; warnings.push(prior); events.push('sign'); return 'synthetic_signed_handoff';
     },
@@ -98,6 +106,61 @@ function fixture(options: Options = {}) {
 }
 
 describe('gateway-local teardown authorization', () => {
+  it('does not overwrite fresh consent when the prior settled callback fails to hand off', async () => {
+    const f = fixture({ handoffFails: true });
+    f.options.beforeHandoff = async () => {
+      delete f.options.beforeHandoff;
+      expect((await f.start()).status).toBe(200);
+    };
+    await f.start(); const priorAttemptId = f.current()?.attemptId;
+    const response = await f.callback();
+    expect(response.headers.get('location')).toContain('result=recovery_required');
+    expect(f.current()?.phase).toBe('authorizing');
+    expect(f.current()?.attemptId).not.toBe(priorAttemptId);
+    expect(f.current()?.failure).toBeUndefined();
+    f.options.handoffFails = false;
+    await f.callback(); expect(f.signatures()).toBe(1);
+  });
+  it('retains and displays only a validated resource failure, then clears it with fresh consent', async () => {
+    const failure: CustomerTeardownFailure = { phase: 'root_remove', resourceKind: 'portal', category: 'ownership_mismatch' };
+    const f = fixture({ applyFails: true, applyFailure: failure });
+    await f.start(); const response = await f.callback();
+    expect(response.headers.get('location')).toBe(`${ORIGIN}${CUSTOMER_TEARDOWN_PATH}?result=recovery_required`);
+    expect(f.current()?.failure).toEqual(failure);
+    const page = await f.router.fetch(new Request(`${ORIGIN}${CUSTOMER_TEARDOWN_PATH}?result=recovery_required`));
+    expect(await page.text()).toContain('root_remove / portal / ownership_mismatch');
+    expect(f.events.at(-2)).toBe('revoke'); expect(f.events.at(-1)).toBe('settle');
+    f.options.applyFails = false; await f.start();
+    expect(f.current()?.failure).toBeUndefined();
+    await f.callback(); expect(f.signatures()).toBe(1);
+  });
+  for (const applyFailure of [
+    { phase: ACCESS_TOKEN, resourceKind: 'portal', category: 'ownership_mismatch' },
+    { phase: 'root_remove', resourceKind: config.accountId, category: 'ownership_mismatch' },
+    { phase: 'root_remove', resourceKind: 'portal', category: ACCESS_TOKEN },
+    { phase: 'root_remove', resourceKind: 'portal', category: 'ownership_mismatch', detail: ACCESS_TOKEN },
+  ]) it('rejects unbounded or extra failure fields without storing provider content', async () => {
+    expect(parseCustomerTeardownFailure(applyFailure)).toBeNull();
+    const f = fixture({ applyFails: true, applyFailure }); await f.start(); await f.callback();
+    expect(f.current()?.failure).toEqual({ phase: 'apply', resourceKind: 'dependency_graph', category: 'response_invalid' });
+    expect(f.durableWrites.join('')).not.toContain(ACCESS_TOKEN);
+  });
+  for (const [options, failure] of [
+    [{ scope: `${SCOPES} workers-scripts.write` }, { phase: 'authorization', resourceKind: 'none', category: 'authorization_failed' }],
+    [{ accountRefused: true }, { phase: 'account_check', resourceKind: 'dependency_graph', category: 'provider_auth' }],
+    [{ lostPass: true }, { phase: 'apply', resourceKind: 'dependency_graph', category: 'operation_interrupted' }],
+    [{ applyFails: true, oversizedApplyResponse: true }, { phase: 'apply', resourceKind: 'dependency_graph', category: 'response_invalid' }],
+    [{ wrongCompletion: true }, { phase: 'apply', resourceKind: 'dependency_graph', category: 'response_invalid' }],
+    [{ revokeFails: true }, { phase: 'revocation', resourceKind: 'none', category: 'revocation_unconfirmed' }],
+    [{ settleFails: true }, { phase: 'settlement', resourceKind: 'none', category: 'settlement_failed' }],
+    [{ handoffFails: true }, { phase: 'handoff', resourceKind: 'none', category: 'handoff_failed' }],
+  ] as const) it(`retains a fixed callback diagnostic for ${failure.phase}`, async () => {
+    const f = fixture(options); await f.start(); const response = await f.callback();
+    expect(response.headers.get('location')).toContain('result=recovery_required');
+    expect(f.current()?.failure).toEqual(failure);
+    expect(f.signatures()).toBe(0); expect(f.revoked).toContain(ACCESS_TOKEN);
+    expect(f.durableWrites.join('')).not.toContain(ACCESS_TOKEN);
+  });
   it('uses bounded signed commands with one request ID, then revokes before handoff', async () => {
     const f = fixture({ passes: 160 });
     await f.start(); await f.callback();
@@ -110,6 +173,8 @@ describe('gateway-local teardown authorization', () => {
       const f = fixture(options); await f.start(); const response = await f.callback();
       expect(response.headers.get('location')).toContain('result=recovery_required');
       expect(f.signatures()).toBe(0); expect(f.revoked).toEqual([ACCESS_TOKEN]);
+      expect(f.current()?.failure).toEqual({ phase: 'apply', resourceKind: 'dependency_graph',
+        category: options.noProgress ? 'no_progress' : options.expireAfterPass ? 'expired' : options.passes === 1000 ? 'pass_limit' : 'operation_interrupted' });
       expect(f.requestIds.length).toBe(options.noProgress ? 2 : options.passes === 1000 ? 768 : 1);
       const prior = f.requestIds[0];
       f.options.passes = 0; f.options.expireAfterPass = false; f.options.lostPass = false;
@@ -162,6 +227,7 @@ describe('gateway-local teardown authorization', () => {
     await f.start(); const request = f.callbackRequest(), url = new URL(request.url); url.searchParams.delete('code'); url.searchParams.set('error', 'authorization_rejected');
     expect((await f.router.fetch(new Request(url, { headers: request.headers }))).status).toBe(303);
     expect(f.events).not.toContain('exchange'); expect(f.current()?.phase).toBe('settled');
+    expect(f.current()?.failure).toEqual({ phase: 'authorization', resourceKind: 'none', category: 'authorization_denied' });
     await f.start(); f.later(); expect((await f.callback()).status).toBe(409); expect(f.events).not.toContain('exchange');
   });
   it('settles a refused relay so a fresh consent can start immediately', async () => {

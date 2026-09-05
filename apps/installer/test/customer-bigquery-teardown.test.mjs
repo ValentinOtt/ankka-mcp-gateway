@@ -1,4 +1,5 @@
 import { fixture, grant, JOURNAL } from './bigquery-teardown-fixture.mjs';
+import { createBigQueryTeardown } from '../src/customer-bigquery-teardown';
 const GRANT = grant.accessToken;
 
 describe('receipt-bound BigQuery bridge removal', () => {
@@ -45,11 +46,16 @@ describe('receipt-bound BigQuery bridge removal', () => {
   for (const applied of [true, false]) for (const lostDelete of [0, 1, 2]) {
     it(`recovers a ${applied ? 'completed' : 'unapplied'} ambiguous DELETE at step ${lostDelete + 1} with a new request`, async () => {
       const test = await fixture({ applied, lostDelete });
-      await expect((await test.describe()).remove(grant, [test.serverId])).rejects.toThrow('lost response');
+      await expect((await test.describe()).remove(grant, [test.serverId])).rejects.toMatchObject({
+        message: 'teardown_recovery_required', failure: { phase: 'bridge_remove',
+          resourceKind: ['worker_custom_domain', 'worker', 'access_application'][lostDelete], category: 'provider_unavailable' },
+      });
       expect(test.values.get(JOURNAL).pending).not.toBeNull();
       if (!applied) {
         const count = test.requests.length;
-        await expect((await test.describe()).remove(grant, [test.serverId])).rejects.toThrow('unverified');
+        await expect((await test.describe()).remove(grant, [test.serverId])).rejects.toMatchObject({
+          failure: { phase: 'bridge_remove', resourceKind: ['worker_custom_domain', 'worker', 'access_application'][lostDelete], category: 'operation_interrupted' },
+        });
         expect(test.requests.slice(count).every((request) => request.method === 'GET')).toBe(true);
       }
       expect(await (await test.describe()).remove({ ...grant, requestId: 'z'.repeat(22) }, [test.serverId])).toMatchObject({ removedResourceCount: 3 });
@@ -87,13 +93,17 @@ describe('receipt-bound BigQuery bridge removal', () => {
   it('checks later catalogue pages before deleting a bridge', async () => {
     const test = await fixture();
     test.provider.serverPages = [test.provider.servers, [{ id: 'foreign', hostname: test.snapshot.sources.sources[0].url }]];
-    await expect((await test.describe()).remove(grant, [test.serverId])).rejects.toThrow('unverified');
+    await expect((await test.describe()).remove(grant, [test.serverId])).rejects.toMatchObject({
+      failure: { phase: 'bridge_preflight', resourceKind: 'mcp_server', category: 'ownership_mismatch' },
+    });
     expect(test.deletions).toEqual([]);
   });
   it('keeps an application-only receipt protected if an unreceipted Worker now exists', async () => {
     const test = await fixture({ partial: true });
     test.provider.settings = { unexpected: true };
-    await expect((await test.describe()).remove(grant, [test.serverId])).rejects.toThrow('unverified');
+    await expect((await test.describe()).remove(grant, [test.serverId])).rejects.toMatchObject({
+      failure: { phase: 'bridge_preflight', resourceKind: 'worker', category: 'ownership_mismatch' },
+    });
     expect(test.deletions).toEqual([]);
   });
   it('cleans a started action with no resource writes without any Workers permission', async () => {
@@ -116,7 +126,9 @@ describe('receipt-bound BigQuery bridge removal', () => {
   it('refuses changed receipt authority and expired grants', async () => {
     const test = await fixture();
     test.expire();
-    await expect((await test.describe()).remove(grant, [test.serverId])).rejects.toThrow('unverified');
+    await expect((await test.describe()).remove(grant, [test.serverId])).rejects.toMatchObject({
+      failure: { phase: 'bridge_preflight', resourceKind: 'dependency_graph', category: 'expired' },
+    });
     expect(test.requests).toEqual([]);
     test.snapshot.sources.sources[0].label = 'Changed';
     await expect(test.describe()).rejects.toThrow('unverified');
@@ -126,6 +138,25 @@ describe('receipt-bound BigQuery bridge removal', () => {
     const settings = structuredClone(test.provider.settings);
     await (await test.describe()).remove(grant, [test.serverId]);
     test.provider.settings = settings;
-    await expect((await test.describe()).remove({ ...grant, requestId: 'z'.repeat(22) }, [test.serverId])).rejects.toThrow('unverified');
+    await expect((await test.describe()).remove({ ...grant, requestId: 'z'.repeat(22) }, [test.serverId])).rejects.toMatchObject({
+      failure: { phase: 'bridge_preflight', resourceKind: 'worker', category: 'ownership_mismatch' },
+    });
   });
+  for (const [status, category] of [[401, 'provider_auth'], [403, 'provider_auth'], [409, 'provider_rejected'],
+    [429, 'provider_unavailable'], [503, 'provider_unavailable'], [200, 'response_invalid']]) {
+    it(`reports a fixed bridge preflight category for HTTP ${status} without provider content`, async () => {
+      const test = await fixture();
+      const manager = createBigQueryTeardown(test.context, { storage: test.storage, now: () => 10_000,
+        fetch: async (input, init) => new URL(input).pathname.endsWith('/settings')
+          ? Response.json({ success: false, detail: `${GRANT} ${test.record.workerName}`, errors: [{ message: GRANT }] }, { status })
+          : test.fetch(input, init),
+      });
+      const plan = await manager.describe(test.snapshot);
+      const error = await plan.preflight(grant, [test.serverId]).catch((error) => error);
+      expect(error.failure).toEqual({ phase: 'bridge_preflight', resourceKind: 'worker', category });
+      expect(JSON.stringify(error)).not.toContain(GRANT);
+      expect(JSON.stringify(error)).not.toContain(test.record.workerName);
+      expect(test.deletions).toEqual([]); expect(test.writes).toEqual([]);
+    });
+  }
 });
