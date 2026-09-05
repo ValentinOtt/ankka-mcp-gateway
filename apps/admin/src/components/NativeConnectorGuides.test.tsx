@@ -29,6 +29,9 @@ describe('provider setup guidance', () => {
     await user.selectOptions(picker, 'bigquery')
     expect(screen.getByLabelText('BigQuery setup guide')).toHaveTextContent('Manual setup needed')
     expect(screen.getByLabelText('BigQuery setup guide')).toHaveTextContent('unsupported shared manual-OAuth')
+    expect(screen.getByLabelText('Self-hosted BigQuery setup')).toHaveTextContent('Your Google key goes directly to the bridge Worker')
+    expect(screen.getByRole('link', { name: 'Set up the BigQuery bridge' })).toHaveAttribute('href',
+      'https://github.com/ankka-ai/ankka-mcp-gateway/blob/main/apps/read-only-connectors/BIGQUERY_MCP_EXPERIMENT.md')
     expect(screen.queryByText('Ankka reviewed')).not.toBeInTheDocument()
     await user.selectOptions(picker, 'ahrefs')
     expect(screen.getByLabelText('Ahrefs setup guide')).toHaveTextContent('Provider permission required')

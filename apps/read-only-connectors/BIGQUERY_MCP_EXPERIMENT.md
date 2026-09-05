@@ -1,17 +1,43 @@
-# Google hosted BigQuery MCP bridge experiment
+# Google-hosted BigQuery MCP bridge
 
-This experimental bridge is included in the `gateway-v0.1.46` canary. It is
-not yet a supported catalog source or a workflow qualified for stable release.
+The bridge is supported as a manually deployed, self-hosted source with the
+limits documented here. You manage its Worker, Access application, and Google
+identity in your own accounts, then connect it through the gateway's custom
+source flow. Automatic bridge provisioning and updates are not provided by the
+hosted installer or Source Catalog. The original constant-query experiment
+shipped in the `gateway-v0.1.46` canary; useful queries require this implementation
+and explicit enablement. This document's published path is retained.
 Run the existing connector Worker with `CONNECTOR_PROVIDER=bigquery-mcp` to
-send approved tool calls to Google's fixed `https://bigquery.googleapis.com/mcp`
+send approved read tool calls to Google's fixed `https://bigquery.googleapis.com/mcp`
 endpoint. Google implements the BigQuery tools; this adapter only authenticates,
 restricts requests, and unwraps bounded text tool results.
 
 ## Qualification status
 
-The bridge passed `npm run check:fast`, including 31 bridge checks across
-both supported client protocol versions. Its integration passed the
-repository's full CI release gate.
+The bridge passed `npm run check:fast`, including 65 bridge checks across
+both supported client protocol versions. The repository's full CI release gate
+is required before merge.
+
+Useful-query qualification on 2026-09-05 passed with a dedicated read-only
+Google identity and the deployed bridge:
+
+- a dry run and one completed, five-row aggregate over an allowed table;
+- an actual read of a verified existing excluded table rejected by Google IAM;
+- no effective table-write permissions and Google's read-only tool rejecting
+  harmless temporary DDL;
+- exactly three tools retained after the deployed source was synchronized;
+- the same aggregate through Claude Desktop beyond the initial 15-minute token
+  lifetime, then a fresh execution after explicit disconnect and reconnect; and
+- unauthenticated bridge requests still rejected with HTTP 401.
+
+The dedicated identity's unnecessary query-project-wide Data Viewer grant was
+removed; the intended dataset grant and query job permission remained. The
+negative read was checked against an existing table and its actual permission
+error, not inferred from a generic tool failure. The live probe below repeats
+the runtime checks, while private client and deployment receipts record the
+end-to-end evidence. This qualifies the documented small-result workflow;
+other clients, long-running jobs, and automatic Worker lifecycle management
+are not claimed by this evidence.
 
 Live qualification passed on a separate Worker in the test Cloudflare account:
 
@@ -50,10 +76,11 @@ names. A fresh public discovery probe on 2026-09-04 again found only
 `projectId`, `query`, `dryRun`, and `labels` among the reviewed SQL fields.
 Unlike the current documentation, its SQL input does not yet include
 `timeoutMs` or `jobTimeoutMs`; sending those fields produced an invalid-argument
-tool error. The prototype now sends only the required project and constant
-query. It also lacks `maximumBytesBilled`, `maxResults`, and `location`.
-General SQL remains deliberately disabled; query cost controls remain necessary
-before production qualification.
+tool error. The bridge sends only the required project and query, plus optional
+`dryRun`. Discovery also lacks `maximumBytesBilled`, `maxResults`, and `location`.
+The bridge can now enable useful SQL explicitly with `allowQueries: true`.
+A per-query byte ceiling is not a support requirement; query spending remains
+under your Google account. See [query costs](#cost-limitation).
 
 The Worker belongs in your Cloudflare account. Cloudflare Access with Managed
 OAuth protects its exact hostname; the Worker verifies the signed Access JWT.
@@ -66,6 +93,7 @@ Synthetic configuration:
 ```json
 {
   "queryProjectId": "synthetic-query-project",
+  "allowQueries": false,
   "allowedDatasets": [
     { "projectId": "synthetic-data-project", "datasetId": "sample_dataset" }
   ]
@@ -74,10 +102,25 @@ Synthetic configuration:
 
 The exact tools exposed are `list_table_ids`, `get_table_info`, and
 `execute_sql_readonly`. The first two only accept configured project/dataset
-pairs. The SQL tool accepts exactly `SELECT 1 AS bridge_ok` in the configured
-query project. This deliberately tests authentication without scanning tables.
-No data writes, arbitrary SQL, extra methods, URLs, incoming authorization
-headers, redirects, automatic pagination, or retries are forwarded.
+pairs. The SQL tool accepts exactly `SELECT 1 AS bridge_ok` by default, preserving
+existing installations. Set `allowQueries: true` after preparing the dedicated
+identity's read-only IAM to enable GoogleSQL in the configured query project.
+Queries are limited to 8 KiB UTF-8; `dryRun: true` requests an estimate without
+execution. No write-capable tool, extra method, URL, incoming authorization
+header, redirect, automatic pagination, or retry is forwarded.
+
+Google's `execute_sql_readonly` enforces read-only statements. The
+`allowedDatasets` list bounds metadata calls; it does not parse or restrict
+SQL references. The service account's effective Google IAM must restrict SQL
+to the intended datasets, with no write privileges, external connection use,
+or unrelated routine access. A `SELECT` can invoke a remote function when its
+identity has permission, so a tool name or SQL prefix is not that boundary.
+See the [identity requirements](../../docs/BIGQUERY_GOOGLE_AUTH.md#read-only-identity-and-exact-tools).
+
+The bridge returns only completed query results without provider errors.
+Incomplete jobs fail with a fixed diagnostic; it does not poll or cancel them.
+The bounded HTTP deadline limits waiting, not Google's execution or billing.
+Inspect Google job history before retrying a failed query.
 
 ## Deploy in your Cloudflare account
 
@@ -172,7 +215,7 @@ Enable the BigQuery API and ensure organization policies permit this MCP service
    Managed OAuth. Do not replace the existing reader or gateway deployment.
 4. List one page of tables, read one table's schema, and run the constant query
    through the gateway. Only then claim end-to-end compatibility.
-5. Rotate the temporary test credential directly in the customer account.
+5. Verify key rotation directly in your Google and Cloudflare accounts.
 
 The live probe simulates Access locally and calls Google for real; passing it
 does not prove Cloudflare deployment, Managed OAuth, or portal authentication.
@@ -185,26 +228,21 @@ from this workspace.
 ## Cost limitation
 
 Google's hosted SQL MCP input currently has no `maximumBytesBilled` setting.
-The documented job timeout is not a scan budget and was absent from the live
-schema during this test. The current REST reader enforces the byte
-budget; this experiment must not silently replace it for arbitrary queries.
-Before expanding beyond the constant query, decide how the deployment will
-enforce acceptable query costs and dataset-scoped read-only IAM.
-[Custom daily quotas](https://docs.cloud.google.com/bigquery/docs/custom-quotas)
-are useful additional safeguards, but Google documents that they are
-approximate and can be exceeded. They are not a per-query byte ceiling.
+That is a documented cost-control limitation, not a release gate. Queries are
+charged to your configured Google query project. Enable useful queries only
+with costs appropriate for your workload and your team's access.
 
-A separate dry run cannot close this gap: the actual query is a later request,
-and the hosted tool has no execution-time byte ceiling to enforce its estimate.
-A row limit and a shorter HTTP timeout do not bound bytes scanned either.
-Do not expand the hosted bridge's literal query allowlist on that basis.
+For on-demand billing, optional [custom daily quotas](https://docs.cloud.google.com/bigquery/docs/custom-quotas)
+provide an additional safeguard. They are approximate and may be exceeded;
+they are not a strict spending cap. Review other workloads before changing a
+shared project's quotas. A separate query project can make ownership clearer.
+A row limit, dry-run estimate, or shorter HTTP timeout is not an execution-time
+byte ceiling. The bridge makes no such guarantee and never retries automatically.
 
-The existing `CONNECTOR_PROVIDER=bigquery` REST reader is the available
-implementation for useful queries with a per-query ceiling: it requires a
-Google-classified `SELECT` dry run within the configured budget, then sends
-`maximumBytesBilled` on execution. It needs its own real-data, IAM, and client
-qualification. Choosing it is an explicit deployment choice; the
-`bigquery-mcp` provider never falls back to REST or silently changes SQL behavior.
+If you specifically need a per-query byte ceiling, the separate
+`CONNECTOR_PROVIDER=bigquery` REST reader supplies `maximumBytesBilled` at
+execution. That remains an explicit alternative deployment, with its own
+qualification; the hosted `bigquery-mcp` path never falls back to REST.
 
 A local-runtime test against real Google on 2026-09-04 exercised that REST
 alternative with a single-table event-count aggregate. A one-byte budget
@@ -250,8 +288,17 @@ continued client operation; the client's internal refresh-token exchange was
 not inspected. Explicit disconnect and reconnect also passed: Claude showed
 the disconnected state, completed consent for the same single source using
 the existing Access session, and returned a new successful constant-query
-result after the desktop handoff. Useful analytics must still pass on the
-chosen deployment path.
+result after the desktop handoff.
+
+On 2026-09-05, the explicitly enabled hosted path passed a dry run and a
+five-row event-count aggregate in this same client. The response reported a
+completed job and the expected two-column schema. This new execution used an
+existing connection more than 15 minutes after authorization. Explicit
+disconnect, consent for the same single source, and reconnect then returned
+another new completed aggregate. The observed executions reported zero bytes
+processed and billed; these results demonstrate query compatibility, not a
+fresh scan or a billing ceiling. The client's internal token exchange was not
+inspected.
 
 For this tested setup:
 
@@ -270,32 +317,80 @@ For this tested setup:
 4. Use the Portal tools in a new conversation. With Code Mode enabled, seeing
    Portal wrapper tools in Claude's settings is expected. Inspect the tools
    returned by Code Mode separately and verify the exact three-tool allowlist.
-   Approve the reviewed discovery and constant query calls individually.
+   Approve the reviewed discovery and query calls individually.
 
 New-Portal callback defaults are already implemented in the gateway source.
 The latest checked canary, `gateway-v0.1.48`, predates PR #114's additional
 ChatGPT and Cursor defaults. Neither a source-code default nor Claude's passing
 query proves those clients or changes an older Portal automatically.
 
-## Remaining support gates
+## Enable and qualify useful queries
 
-1. Decide whether useful analytics uses the explicitly configured REST reader
-   or waits for a hosted execution-time byte ceiling. Prove a bounded aggregate
-   against an allowed dataset and denial for an excluded dataset using the
-   actual dedicated identity. Preserve dataset-scoped read-only IAM and the
-   exact Portal tool allowlist.
-2. Include the qualified Portal-wide revocation procedure in setup and operator
-   documentation, including its impact on everyone connected to that Portal.
-   Cloudflare evaluates the Portal grant and source selection; the bridge
-   receives the shared operator identity, so it cannot selectively reject a
-   removed Portal member. Do not promise selective or immediate disconnection.
-3. Qualify useful queries in a real client on the chosen deployment path,
-   including a bounded aggregate, operation beyond the initial access-token
-   lifetime, and reconnection. Claude's completed bridge checks above cover
-   constant SQL and metadata; the local REST aggregate is separate evidence.
-4. Then integrate the chosen deployment path into setup and the supported
-   catalogue. The manual bridge Worker is still separately deployed, updated,
-   and supplied with its secret directly in your Cloudflare account.
+1. Give the dedicated Google identity read access only to the intended datasets
+   and Job User on the query project. Remove inherited or project-wide data
+   grants that widen this scope. Keep the exact three-tool Portal allowlist.
+2. Set `allowQueries: true` in your private bridge configuration, then dry-run
+   and deploy the reviewed Worker. Keep its existing secret and Access boundary.
+3. Run a small aggregate over one completed date with `dryRun: true`, review
+   the estimate, then execute it. Confirm denial for a known existing excluded
+   dataset and confirm the identity cannot write. Use a disposable synthetic
+   target or a harmless temporary-DDL rejection probe; never attempt a mutation
+   of production data to test permissions.
+4. Repeat the aggregate through your real client, including operation beyond
+   its initial token lifetime and reconnection. Keep provider data and receipts
+   private. The opt-in test below exercises the local runtime against real
+   Google; it does not replace deployment and Portal checks.
+
+```sh
+ANKKA_BIGQUERY_QUERIES_LIVE=1 \
+ANKKA_BIGQUERY_BRIDGE_KEY_FILE=/absolute/private/service-account.json \
+ANKKA_BIGQUERY_QUERIES_CONFIG_FILE=/absolute/private/query-probe.json \
+npx vitest run --config vitest.live.config.ts \
+  test-live/bigquery-mcp-queries.live.ts --silent=false --reporter=verbose
+```
+
+Run from this workspace. The private probe file contains `queryProjectId`,
+`allowedDatasets`, `probeQuery` (one read-only aggregate returning 1–20 rows),
+and `deniedQuery` (a read against a verified existing excluded table). The test
+performs one dry run, an excluded-read attempt, a temporary-DDL rejection
+check, and one aggregate execution. It prints fixed outcomes, never SQL,
+identifiers, results, or tokens.
+An excluded-query error alone is not proof of IAM denial: verify the fixture's
+existence and the actual permission-denied reason separately.
+
+## Operate the self-hosted bridge
+
+Keep a private inventory of the Worker, route, Access application, Google
+identity, and deployed Worker version. The gateway manages the source's Portal
+connection; the bridge Worker and its Google secret have their own lifecycle.
+
+For an update, retain the previous Worker version and private configuration,
+review the source change, run the pinned toolchain's checks and Wrangler dry
+run, then deploy that exact version with the same configuration and secret.
+Synchronize the recorded source in Cloudflare so the Portal receives the
+current tool schemas; verify that only the three reviewed tools remain enabled.
+Verify a real Portal query and unauthenticated denial. If qualification fails,
+roll back the recorded Worker version with the same private configuration:
+
+```sh
+npx wrangler rollback <previous-version-id> --config /absolute/private/bridge/wrangler.jsonc
+```
+
+Verify the restored settings, synchronize the source, and repeat the constant
+query. Keep the private deployment configuration aligned with that version.
+Gateway updates do not silently enable `allowQueries` or update this separately
+deployed Worker.
+
+Use the [key rotation procedure](#rotate-the-google-key) for the Google secret.
+For a removed team member, use the [qualified Portal-wide session revocation](../../docs/TEAM_ACCESS.md#qualified-procedure-for-existing-portal-sessions)
+procedure, which disconnects everyone connected to that Portal. Source policy
+removal alone does not immediately invalidate an existing Portal grant.
+
+For removal, detach the source through the gateway's normal source workflow,
+verify it is absent from Portal discovery, revoke any remaining direct bridge
+sessions, then remove the recorded bridge resources. Disable a Google key only
+after checking every Worker using it. Do not delete a shared identity, Access
+application, route, or Google dataset as incidental cleanup.
 
 ## Evidence
 
@@ -306,5 +401,5 @@ query proves those clients or changes an older Portal automatically.
 - [Read-only SQL input](https://docs.cloud.google.com/bigquery/docs/reference/mcp/tools_list/execute_sql_readonly)
 - [Cloudflare Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/)
 
-Reviewed 2026-09-04. All added implementation is original; no upstream source
+Reviewed 2026-09-05. All added implementation is original; no upstream source
 or API descriptions are vendored. Existing dependency pins are unchanged.

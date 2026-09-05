@@ -2,7 +2,7 @@ import { beforeAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { exportJWK, exportPKCS8, generateKeyPair, jwtVerify, SignJWT } from 'jose';
 import { CLIENT_CAPABILITIES_META_KEY, PROTOCOL_VERSION_META_KEY } from '@modelcontextprotocol/server';
 import { handleRequest } from '../src/index';
-import { createBigQueryMcpConnector, BIGQUERY_MCP_PROBE_QUERY } from '../src/providers/bigquery-mcp';
+import { createBigQueryMcpConnector, BIGQUERY_MCP_PROBE_QUERY, BIGQUERY_MCP_QUERY_BYTES } from '../src/providers/bigquery-mcp';
 import { GOOGLE_TOKEN_ENDPOINT, GOOGLE_PROVIDER_SCOPES } from '../src/google-auth';
 import type { ConnectorJson, ReadRequestPlan } from '../src/request';
 
@@ -29,8 +29,9 @@ beforeAll(async () => {
     client_email: 'bridge-reader@synthetic-query-project.iam.gserviceaccount.com', token_uri: GOOGLE_TOKEN_ENDPOINT });
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-function environment(): Env {
-  return { CONNECTOR_PROVIDER: 'bigquery-mcp', CONNECTOR_CONFIG_JSON: config,
+function environment(allowQueries = false): Env {
+  return { CONNECTOR_PROVIDER: 'bigquery-mcp', CONNECTOR_CONFIG_JSON: allowQueries
+    ? JSON.stringify({ ...JSON.parse(config), allowQueries: true }) : config,
     PUBLIC_ORIGIN: 'https://bridge.example.com', ACCESS_TEAM_DOMAIN: 'bridge-test.cloudflareaccess.com',
     ACCESS_AUD: audience, PROVIDER_TOKEN: secret };
 }
@@ -49,18 +50,66 @@ function request(version: string, method: string, params: Record<string, Connect
 }
 const tableArgs = { projectId: 'synthetic-data-project', datasetId: 'sample_dataset', pageSize: 10 };
 const queryArgs = { projectId: 'synthetic-query-project', query: BIGQUERY_MCP_PROBE_QUERY };
-function outbound(reply: () => Response = () => Response.json({ jsonrpc: '2.0', id: 1,
-  result: { content: [{ type: 'text', text: 'synthetic Google result' }] } })) {
+type QueryArguments = { projectId: string; query: string; dryRun?: boolean };
+function outbound(reply?: () => Response) {
   vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('Unexpected network'); }));
-  return vi.fn<typeof globalThis.fetch>(async (input) => {
+  return vi.fn<typeof globalThis.fetch>(async (input, init) => {
     if (String(input) === keysUrl) return new Response(jwks, { headers: { 'Content-Type': 'application/json' } });
     if (String(input) === GOOGLE_TOKEN_ENDPOINT) return Response.json({
       access_token: mintedToken, token_type: 'Bearer', expires_in: 3600, scope: GOOGLE_PROVIDER_SCOPES.bigquery });
-    if (String(input) === googleUrl) return reply();
+    if (String(input) === googleUrl) {
+      if (reply !== undefined) return reply();
+      const query = JSON.parse(String(init?.body)).params.name === 'execute_sql_readonly';
+      const text = query ? JSON.stringify({ jobComplete: true, rows: [{ value: 'synthetic Google result' }] }) : 'synthetic Google result';
+      return Response.json({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text }] } });
+    }
     throw new Error('Unexpected destination');
   });
 }
 describe.each(['2025-06-18', '2026-07-28'])('hosted BigQuery bridge, MCP %s', (version) => {
+  it.each([false, true])('keeps the exact tool catalogue with query enablement %s', async (allowQueries) => {
+    const response = await handleRequest(request(version, 'tools/list', {}), environment(allowQueries), outbound());
+    const text = await response.text();
+    const payload = response.headers.get('content-type')?.startsWith('text/event-stream')
+      ? text.split(/\r?\n/u).find((line) => line.startsWith('data:'))?.slice(5).trim() ?? '' : text;
+    const tools = JSON.parse(payload).result.tools;
+    expect(tools.map((tool: { name: string }) => tool.name).sort())
+      .toEqual(['execute_sql_readonly', 'get_table_info', 'list_table_ids']);
+    const sql = tools.find((tool: { name: string }) => tool.name === 'execute_sql_readonly');
+    expect(sql.inputSchema.properties.query.const).toBe(allowQueries ? undefined : BIGQUERY_MCP_PROBE_QUERY);
+  });
+
+  it.each([undefined, true, false])('forwards an enabled read query with dryRun %s to only the reviewed tool', async (dryRun) => {
+    const args: QueryArguments = { ...queryArgs,
+      query: 'SELECT event_name, COUNT(*) FROM sample_dataset.events GROUP BY event_name LIMIT 5' };
+    if (dryRun !== undefined) args.dryRun = dryRun;
+    const fetcher = outbound();
+    const response = await handleRequest(request(version, 'tools/call', { name: 'execute_sql_readonly', arguments: args }), environment(true), fetcher);
+    expect(await response.text()).toContain('synthetic Google result');
+    expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([keysUrl, GOOGLE_TOKEN_ENDPOINT, googleUrl]);
+    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))).toEqual({
+      jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'execute_sql_readonly', arguments: args },
+    });
+  });
+
+  it.each([
+    { ...queryArgs, query: ' ' },
+    { ...queryArgs, query: 'x'.repeat(BIGQUERY_MCP_QUERY_BYTES + 1) },
+    { ...queryArgs, query: 'é'.repeat(BIGQUERY_MCP_QUERY_BYTES / 2 + 1) },
+    { ...queryArgs, query: 'SELECT 1\u0000' },
+    { ...queryArgs, dryRun: 'true' },
+    { ...queryArgs, projectId: 'unapproved-project' },
+    { ...queryArgs, maximumBytesBilled: '100' },
+    { ...queryArgs, timeoutMs: 1000 },
+    { ...queryArgs, location: 'EU' },
+    { ...queryArgs, url: 'https://attacker.example.com' },
+  ])('rejects invalid enabled-query arguments before Google authentication', async (args) => {
+    const fetcher = outbound();
+    const response = await handleRequest(request(version, 'tools/call', { name: 'execute_sql_readonly', arguments: args }), environment(true), fetcher);
+    expect(await response.text()).not.toContain('synthetic Google result');
+    expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([keysUrl]);
+  });
+
   it('lists only reviewed tools without contacting Google', async () => {
     const fetcher = outbound();
     const response = await handleRequest(request(version, 'tools/list', {}), environment(), fetcher);
@@ -150,4 +199,35 @@ it('keeps the outbound gate exact even without the MCP SDK', () => {
   expect(connector.allowRequest({ ...good, path: '/other' })).toBe(false);
   expect(connector.allowRequest({ ...good, query: { url: 'https://attacker.example.com' } })).toBe(false);
   expect(connector.allowRequest({ ...good, body: { jsonrpc: '2.0', id: 1, method: 'tools/list' } })).toBe(false);
+});
+
+it('enforces explicit query enablement at the outbound gate independently of the SDK', () => {
+  const enabled = createBigQueryMcpConnector(environment(true).CONNECTOR_CONFIG_JSON, secret);
+  const disabled = createBigQueryMcpConnector(config, secret);
+  const plan: ReadRequestPlan = { method: 'POST', path: '/mcp', body: {
+    jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'execute_sql_readonly', arguments: { ...queryArgs, query: 'SELECT COUNT(*) FROM sample_dataset.events' } },
+  } };
+  expect(enabled.allowRequest(plan)).toBe(true);
+  expect(disabled.allowRequest(plan)).toBe(false);
+  expect(enabled.allowRequest({ ...plan, body: { jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'execute_sql', arguments: queryArgs } } })).toBe(false);
+  expect(() => createBigQueryMcpConnector(JSON.stringify({ ...JSON.parse(config), allowQueries: 'true' }), secret))
+    .toThrow('CONNECTOR_CONFIGURATION_INVALID');
+});
+
+it.each([
+  { jobComplete: false, jobId: 'synthetic-private-job' },
+  { rows: [] },
+  { jobComplete: true, errors: [{ message: 'synthetic-private-error' }] },
+])('rejects incomplete or failed SQL results without polling, retrying, or echoing errors', async (result) => {
+  const fetcher = outbound(() => Response.json({ jsonrpc: '2.0', id: 1,
+    result: { content: [{ type: 'text', text: JSON.stringify(result) }] } }));
+  const response = await handleRequest(request('2025-06-18', 'tools/call', {
+    name: 'execute_sql_readonly', arguments: queryArgs,
+  }), environment(true), fetcher);
+  const body = await response.text();
+  expect(body).toContain('CONNECTOR_READ_FAILED');
+  expect(body).not.toContain('synthetic-private');
+  expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([keysUrl, GOOGLE_TOKEN_ENDPOINT, googleUrl]);
 });

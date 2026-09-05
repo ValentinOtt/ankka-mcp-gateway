@@ -4,6 +4,14 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Support the Google-hosted BigQuery MCP bridge as a manually deployed,
+  self-hosted source. Explicit `allowQueries: true` enables bounded read-only
+  SQL with Google IAM controlling data access; existing deployments keep the
+  constant connectivity probe. Query-byte ceilings are optional. Qualify useful
+  aggregates, excluded-table denial, read-only enforcement, and Claude Desktop
+  session continuity and reconnection. Link the setup guide from the dashboard
+  and document bridge updates, rotation, and removal.
+
 - Fetch an approved update or rollback release by its exact version and artifact
   digest, so moving the release channel no longer makes rollback unavailable.
   Serve retained signed releases from the existing bucket without a session or
@@ -14,8 +22,8 @@ Notable public product and repository changes are recorded here.
   discovery and fixed diagnostics. Record the hosted query-cost limitation and
   distinguish fresh authorization, refreshed grants, and Portal-wide revocation.
   Record Claude Desktop connectivity, session lifetime, and reconnection checks,
-  plus a separate real-Google REST query-budget test. General hosted SQL stays
-  disabled.
+  plus a separate real-Google REST query-budget test. That initial qualification
+  kept general hosted SQL disabled.
 
 - Add ChatGPT and Cursor web OAuth callback defaults to newly created Portals
   alongside Claude. ChatGPT's variable callback is limited to its documented
@@ -39,11 +47,11 @@ Notable public product and repository changes are recorded here.
   successful apply. The return notice now agrees with the verified action
   status instead of reporting `apply_response_invalid`; incomplete or
   mismatched receipts remain rejected.
-- Add an experimental customer-owned bridge to Google's hosted BigQuery MCP.
+- Add an initial experimental self-hosted bridge to Google's hosted BigQuery MCP.
   It exposes dataset-scoped table listing and metadata plus the exact constant
-  query `SELECT 1 AS bridge_ok`. General SQL remains disabled pending cost
-  controls; the existing budget-capped REST reader is unchanged. The setup guide
-  covers direct secret configuration, the operator callback, and Portal checks.
+  query `SELECT 1 AS bridge_ok`. General SQL was initially disabled pending
+  qualification; the existing budget-capped REST reader is unchanged. The setup
+  guide covers direct secret configuration, the operator callback, and Portal checks.
 - Pause source installation before Portal attachment when Cloudflare still
   needs operator authentication, tool synchronization, or a missing selected
   tool. The dashboard links to the recorded server and explains the next step.
