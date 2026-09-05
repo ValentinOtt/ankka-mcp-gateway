@@ -4,6 +4,9 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Show the saved, bounded failure reference when hosted setup stops. Do not
+  claim that a failed provisioning attempt left no Cloudflare resources.
+
 - Raise the bounded local release publisher from 6 MB to 10 MB to accommodate
   signed gateway packages that embed the BigQuery bridge. Signature, digest,
   per-file, and generated-module checks remain enforced.
