@@ -1,7 +1,7 @@
 # Security model
 
 This document describes the intended security boundary of Ankka MCP Gateway.
-The project is a canary preview and is not a substitute for reviewing Cloudflare,
+A stable release is not a substitute for reviewing Cloudflare,
 each upstream MCP server, and the exact signed release before deployment.
 
 ## Trust boundaries
@@ -175,12 +175,13 @@ guarantee does not claim that those providers process no metadata.
 
 ## Known limitations
 
-- Signed canary releases are available; there is no stable,
-  production-supported release yet. Review the exact
+- Signed stable and canary releases are available with [best-effort support](../SUPPORT.md).
+  The hosted installer serves the stable release; canary releases are published
+  for evaluation. Review the exact
   [release](https://github.com/ankka-ai/ankka-mcp-gateway/releases), not only
   the current main-branch source.
 - The default installer activation in the public source is disabled. A
-  reviewed canary entrypoint uses an exact signed release pin and separately
+  reviewed hosted entrypoint uses an exact signed release pin and separately
   reviewed deployment configuration. Public source and the local UI preview
   do not confer live deployment or removal authority.
 - Read-only tool policy depends on both gateway configuration and upstream

@@ -50,12 +50,12 @@ test('documentation entry points have resolving relative files and Markdown anch
   }
 });
 
-test('entry-point docs distinguish canary availability from disabled source activation', () => {
+test('entry-point docs distinguish release channels from disabled source activation', () => {
   const deployment = read('docs/CUSTOMER_SELF_SERVICE.md');
   const security = read('docs/SECURITY_MODEL.md');
-  assert.match(deployment, /Availability:\*\* canary preview/);
+  assert.match(deployment, /Availability:\*\* stable and canary releases/);
   assert.match(deployment, /source installer's disabled default activation is separate/);
-  assert.match(security, /reviewed canary entrypoint uses an exact signed release pin/);
+  assert.match(security, /reviewed hosted entrypoint uses an exact signed release pin/);
   for (const document of [deployment, security]) {
     assert.doesNotMatch(document, /first\s+signed public release is prepared|self-service deployment is not yet open/);
   }

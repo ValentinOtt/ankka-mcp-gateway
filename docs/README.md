@@ -1,7 +1,8 @@
 # Ankka MCP Gateway documentation
 
-Start with the task you want to complete. Ankka MCP Gateway is a canary preview:
-check the [release notes](https://github.com/ankka-ai/ankka-mcp-gateway/releases)
+Start with the task you want to complete. Ankka MCP Gateway ships stable and
+canary releases. The hosted installer serves the stable release; canary releases
+are published for evaluation. Check the [release notes](https://github.com/ankka-ai/ankka-mcp-gateway/releases)
 for the version you intend to use. Main-branch source can be ahead of an
 installed release; a document or fixture is not a compatibility certification.
 
