@@ -1,4 +1,5 @@
 import * as v from 'valibot';
+import { customerTeardownFailureSchema } from './customer-teardown-failure';
 
 const token = v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{43}$/u));
 const time = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
@@ -15,6 +16,7 @@ const schema = v.strictObject({
   receiptResourceKinds: customerTeardownKindsSchema,
   phase: v.picklist(['authorizing', 'exchanging', 'settled']),
   priorGrantRevocationUnconfirmed: v.boolean(),
+  failure: v.optional(customerTeardownFailureSchema),
 });
 export type CustomerTeardownAttempt = v.InferOutput<typeof schema>;
 export function parseCustomerTeardownAttempt<Input>(input: Input): CustomerTeardownAttempt {

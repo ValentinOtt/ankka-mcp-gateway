@@ -4,10 +4,11 @@ import { canonicalJson } from './canonical-json';
 import { base64UrlDecode, base64UrlEncode, constantTimeEqual, openCustomerTeardownCookie, pkceChallenge, randomBase64Url, sealCustomerTeardownCookie, sha256 } from './crypto';
 import { validCustomerBootstrapRelayAuthorization } from './customer-bootstrap-router';
 import { beginCustomerBootstrapRelay } from './customer-bootstrap-relay-client';
-import { exchangeCustomerCloudflareAuthorizationCode, verifyCustomerCloudflareGrantAccountAccess, type CustomerCloudflareTransport, type EphemeralCustomerCloudflareGrant } from './customer-cloudflare-grant';
+import { CustomerCloudflareGrantError, exchangeCustomerCloudflareAuthorizationCode, verifyCustomerCloudflareGrantAccountAccess, type CustomerCloudflareTransport, type EphemeralCustomerCloudflareGrant } from './customer-cloudflare-grant';
 import { CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH } from './customer-install-paths';
 import { operationSignature } from './customer-operation-secrets';
 import { customerTeardownKindsSchema, type CustomerTeardownAttempt, type CustomerTeardownAttemptPort } from './customer-teardown-attempt';
+import { CustomerTeardownFailureError, customerTeardownFailureSchema, type CustomerTeardownFailure } from './customer-teardown-failure';
 import type { ReceiptOwnedCloudflareResourceKind } from './cloudflare-operation-authority';
 import { readBoundedText } from './http';
 
@@ -42,6 +43,8 @@ const progressSchema = v.strictObject({ schemaVersion: v.literal(1), actionId, s
   installationId: v.pipe(v.string(), v.regex(/^acg-[a-f0-9]{24}$/u)),
   progress: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
 });
+const failureResponseSchema = v.strictObject({ schemaVersion: v.literal(1),
+  error: v.literal('teardown_action_recovery_required'), failure: customerTeardownFailureSchema });
 // Below the callback's 1,000 internal-subrequest allowance, including proof,
 // settlement and ownership reads. Each command has its own external budget.
 const MAX_REMOVAL_PASSES = 768;
@@ -80,11 +83,11 @@ function redirect(location: string): Response {
   const responseHeaders = headers(); responseHeaders.set('location', location); responseHeaders.set('set-cookie', clearCookie());
   return new Response(null, { status: 303, headers: responseHeaders });
 }
-function page(failed: boolean): Response {
+function page(failed: boolean, failure?: CustomerTeardownFailure): Response {
   const nonce = crypto.randomUUID().replaceAll('-', '');
   const responseHeaders = headers('text/html; charset=utf-8');
   responseHeaders.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Remove your Ankka Gateway</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}button{font:inherit;padding:.75rem 1rem}a{color:inherit}</style><h1>Remove your Ankka Gateway</h1><p>This removes your gateway's Portal, registered MCP servers, and their access policies and DNS record. Managed BigQuery bridges and their stored Google key copies are removed too. Your team will lose its gateway connections. Your upstream services and their data stay in their own accounts.</p><p>Two temporary Cloudflare approvals are required. The first removes the gateway's connected resources. The second removes its management page, stored configuration, and Worker. Each phase checks the saved installation receipts before deleting resources.</p><p id="message">${failed ? 'Removal needs fresh authorization. Return to Settings and review removal again. Saved progress will be checked before it continues.' : 'You can cancel before granting access. Once removal begins, deleted resources cannot be restored by cancelling.'}</p><button id="authorize"${failed ? ' hidden' : ''}>Authorize removal in Cloudflare</button><p><a href="/settings">Back to Settings</a></p><script nonce="${nonce}">(()=>{const handoff=location.hash.slice(1);history.replaceState(null,'',location.pathname);const button=document.querySelector('#authorize');const message=document.querySelector('#message');button.addEventListener('click',async()=>{button.disabled=true;try{if(!/^[A-Za-z0-9_-]{40,8192}$/.test(handoff))throw new Error();const response=await fetch('${CUSTOMER_TEARDOWN_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({schemaVersion:1,handoff}),credentials:'same-origin',cache:'no-store'});const result=await response.json();if(!response.ok||typeof result.authorizationUrl!=='string')throw new Error();location.replace(result.authorizationUrl)}catch{message.textContent='Removal could not start. Return to Settings and review removal again.';button.hidden=true}})})();</script></html>`, { headers: responseHeaders });
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Remove your Ankka Gateway</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}button{font:inherit;padding:.75rem 1rem}a{color:inherit}</style><h1>Remove your Ankka Gateway</h1><p>This removes your gateway's Portal, registered MCP servers, and their access policies and DNS record. Managed BigQuery bridges and their stored Google key copies are removed too. Your team will lose its gateway connections. Your upstream services and their data stay in their own accounts.</p><p>Two temporary Cloudflare approvals are required. The first removes the gateway's connected resources. The second removes its management page, stored configuration, and Worker. Each phase checks the saved installation receipts before deleting resources.</p><p id="message">${failed ? 'Removal needs fresh authorization. Return to Settings and review removal again. Saved progress will be checked before it continues.' : 'You can cancel before granting access. Once removal begins, deleted resources cannot be restored by cancelling.'}</p>${failure === undefined ? '' : `<p>Removal detail: <code>${failure.phase} / ${failure.resourceKind} / ${failure.category}</code></p>`}<button id="authorize"${failed ? ' hidden' : ''}>Authorize removal in Cloudflare</button><p><a href="/settings">Back to Settings</a></p><script nonce="${nonce}">(()=>{const handoff=location.hash.slice(1);history.replaceState(null,'',location.pathname);const button=document.querySelector('#authorize');const message=document.querySelector('#message');button.addEventListener('click',async()=>{button.disabled=true;try{if(!/^[A-Za-z0-9_-]{40,8192}$/.test(handoff))throw new Error();const response=await fetch('${CUSTOMER_TEARDOWN_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({schemaVersion:1,handoff}),credentials:'same-origin',cache:'no-store'});const result=await response.json();if(!response.ok||typeof result.authorizationUrl!=='string')throw new Error();location.replace(result.authorizationUrl)}catch{message.textContent='Removal could not start. Return to Settings and review removal again.';button.hidden=true}})})();</script></html>`, { headers: responseHeaders });
 }
 
 /** The gateway removes dependencies; only signed, verified completion can authorize the hosted root phase. */
@@ -101,11 +104,19 @@ export function createCustomerTeardownRouter(config: CustomerTeardownConfig, dep
       issuedAt: now(), expiresAt: identity.actionExpiresAt, ...extra });
     return dependencies.command(kind, body, await operationSignature(key, body));
   }
-  async function settle(attempt: CustomerTeardownAttempt, key: string, unconfirmed: boolean): Promise<void> {
-    if (!await dependencies.attempts.compareAndSet(attempt.revision, { ...attempt, revision: attempt.revision + 1,
-      phase: 'settled', priorGrantRevocationUnconfirmed: attempt.priorGrantRevocationUnconfirmed || unconfirmed })) throw new Error('teardown_attempt_conflict');
+  async function settle(attempt: CustomerTeardownAttempt, key: string, unconfirmed: boolean, failure?: CustomerTeardownFailure): Promise<void> {
+    const settled: CustomerTeardownAttempt = { ...attempt, revision: attempt.revision + 1,
+      phase: 'settled', priorGrantRevocationUnconfirmed: attempt.priorGrantRevocationUnconfirmed || unconfirmed };
+    if (failure !== undefined) settled.failure = failure;
+    if (!await dependencies.attempts.compareAndSet(attempt.revision, settled)) throw new Error('teardown_attempt_conflict');
     const response = await command('settle', attempt, key); await response.body?.cancel();
     if (response.status !== 200) throw new Error('teardown_settlement_failed');
+  }
+  async function retainFailure(identity: CustomerTeardownAttempt, failure: CustomerTeardownFailure): Promise<void> {
+    const attempt = await dependencies.attempts.read();
+    if (attempt !== null && attempt.attemptId === identity.attemptId && attempt.actionId === identity.actionId &&
+        attempt.phase === 'settled') await dependencies.attempts.compareAndSet(attempt.revision,
+      { ...attempt, revision: attempt.revision + 1, failure });
   }
   async function start(request: Request): Promise<Response> {
     if (request.headers.get('origin') !== config.managementOrigin ||
@@ -161,45 +172,76 @@ export function createCustomerTeardownRouter(config: CustomerTeardownConfig, dep
         !constantTimeEqual(await sha256(state), attempt.stateHash) ||
         !constantTimeEqual(await sha256(cookie.verifier), attempt.verifierHash) || url.searchParams.size !== 2 ||
         (!denied && (url.searchParams.has('error') || !/^[A-Za-z0-9._~-]{8,4096}$/u.test(code)))) return json(400, { error: 'teardown_callback_rejected' }, clearCookie());
-    if (denied) { await settle(attempt, cookie.actionKey, false); return redirect(`${config.managementOrigin}${CUSTOMER_TEARDOWN_PATH}?result=recovery_required`); }
+    if (denied) {
+      await settle(attempt, cookie.actionKey, false, { phase: 'authorization', resourceKind: 'none', category: 'authorization_denied' });
+      return redirect(`${config.managementOrigin}${CUSTOMER_TEARDOWN_PATH}?result=recovery_required`);
+    }
     const exchanging: CustomerTeardownAttempt = { ...attempt, revision: attempt.revision + 1, phase: 'exchanging' };
     if (!await dependencies.attempts.compareAndSet(attempt.revision, exchanging)) return json(409, { error: 'teardown_callback_rejected' }, clearCookie());
     let grant: EphemeralCustomerCloudflareGrant | null = null;
     let completion: CustomerTeardownCompletion | null = null; let revoked = false;
+    let failure: CustomerTeardownFailure | undefined;
+    let fallback: CustomerTeardownFailure = { phase: 'authorization', resourceKind: 'none', category: 'authorization_failed' };
     try {
       grant = await exchangeCustomerCloudflareAuthorizationCode({ clientId: config.publicClientId, code, verifier: cookie.verifier,
         operation: 'uninstall', receiptResourceKinds: attempt.receiptResourceKinds, transport: dependencies.transport });
       grant.assertUsable();
       completion = await grant.withAccessToken(async (accessToken) => {
+        fallback = { phase: 'account_check', resourceKind: 'dependency_graph', category: 'provider_unavailable' };
         await verifyCustomerCloudflareGrantAccountAccess({ accessToken, expectedAccountId: config.accountId,
           operation: 'uninstall', workerName: config.workerName, transport: dependencies.transport });
+        fallback = { phase: 'apply', resourceKind: 'dependency_graph', category: 'operation_interrupted' };
         const requestId = randomBase64Url(16);
         const seen = new Set<string>();
         for (let pass = 0; pass < MAX_REMOVAL_PASSES; pass++) {
           grant?.assertUsable();
-          if (now() >= attempt.expiresAt) throw new Error('teardown_expired');
+          if (now() >= attempt.expiresAt) throw new CustomerTeardownFailureError({ ...fallback, category: 'expired' });
           const response = await command('apply', attempt, cookie.actionKey, { requestId, cloudflareAccessToken: accessToken });
-          if (response.status !== 200) { await response.body?.cancel(); throw new Error('teardown_apply_failed'); }
-          const result = v.parse(v.union([completionSchema, progressSchema]), JSON.parse(await readBoundedText(response, 'bad_request', 8192)));
-          if (result.actionId !== attempt.actionId || result.installationId !== config.installId) throw new Error('teardown_apply_invalid');
+          let result;
+          try {
+            const raw: unknown = JSON.parse(await readBoundedText(response, 'bad_request', 8192));
+            if (response.status !== 200) {
+              const diagnostic = v.safeParse(failureResponseSchema, raw);
+              throw new CustomerTeardownFailureError(diagnostic.success ? diagnostic.output.failure : { ...fallback, category: 'response_invalid' });
+            }
+            result = v.parse(v.union([completionSchema, progressSchema]), raw);
+          } catch (error) {
+            if (error instanceof CustomerTeardownFailureError) throw error;
+            throw new CustomerTeardownFailureError({ ...fallback, category: 'response_invalid' });
+          }
+          if (result.actionId !== attempt.actionId || result.installationId !== config.installId) throw new CustomerTeardownFailureError({ ...fallback, category: 'response_invalid' });
           if (result.status === 'gateway_removed') return result;
-          if (seen.has(result.progress)) throw new Error('teardown_no_progress');
+          if (seen.has(result.progress)) throw new CustomerTeardownFailureError({ ...fallback, category: 'no_progress' });
           seen.add(result.progress);
         }
-        throw new Error('teardown_pass_limit');
+        throw new CustomerTeardownFailureError({ ...fallback, category: 'pass_limit' });
       });
-    } catch { /* A durable pending boundary is resumed only with a fresh grant. */ }
+    } catch (error) {
+      // The exception itself may contain transport or provider data. Retain
+      // only a locally constructed error's strict, fixed diagnostic fields.
+      failure = error instanceof CustomerTeardownFailureError ? error.failure :
+        error instanceof CustomerCloudflareGrantError && error.code === 'account_mismatch'
+          ? { ...fallback, category: 'provider_auth' } : fallback;
+    }
     finally {
       if (grant !== null) {
         try { await grant.revoke({ clientId: config.publicClientId, transport: dependencies.transport }); revoked = true; }
-        catch { /* Keep the warning across every subsequent attempt. */ }
+        catch { failure ??= { phase: 'revocation', resourceKind: 'none', category: 'revocation_unconfirmed' }; }
         finally { grant.discard(); }
       }
     }
-    await settle(exchanging, cookie.actionKey, !revoked);
+    try { await settle(exchanging, cookie.actionKey, !revoked, failure); }
+    catch {
+      await retainFailure(exchanging, failure ?? { phase: 'settlement', resourceKind: 'none', category: 'settlement_failed' });
+      return redirect(`${config.managementOrigin}${CUSTOMER_TEARDOWN_PATH}?result=recovery_required`);
+    }
     if (completion !== null && revoked) {
-      const handoff = await dependencies.signHandoff(completion, exchanging.priorGrantRevocationUnconfirmed);
-      return redirect(`${config.controlPlaneOrigin}/teardown#${base64UrlEncode(new TextEncoder().encode(handoff))}`);
+      try {
+        const handoff = await dependencies.signHandoff(completion, exchanging.priorGrantRevocationUnconfirmed);
+        return redirect(`${config.controlPlaneOrigin}/teardown#${base64UrlEncode(new TextEncoder().encode(handoff))}`);
+      } catch {
+        await retainFailure(exchanging, { phase: 'handoff', resourceKind: 'none', category: 'handoff_failed' });
+      }
     }
     return redirect(`${config.managementOrigin}${CUSTOMER_TEARDOWN_PATH}?result=recovery_required`);
   }
@@ -209,7 +251,10 @@ export function createCustomerTeardownRouter(config: CustomerTeardownConfig, dep
     try {
       await dependencies.assertOperational();
       if (request.method === 'GET' && url.pathname === CUSTOMER_TEARDOWN_PATH &&
-          (url.search === '' || url.search === '?result=recovery_required')) return page(url.search !== '');
+          (url.search === '' || url.search === '?result=recovery_required')) {
+        const failed = url.search !== '';
+        return page(failed, failed ? (await dependencies.attempts.read())?.failure : undefined);
+      }
       if (request.method === 'POST' && url.pathname === CUSTOMER_TEARDOWN_START_PATH && url.search === '') return await start(request);
       if (request.method === 'GET' && url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH) return await callback(request, url);
       return json(404, { error: 'not_found' });

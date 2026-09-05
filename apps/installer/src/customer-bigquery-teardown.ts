@@ -4,6 +4,7 @@ import { canonicalJson } from './canonical-json';
 import { BIGQUERY_SETUP_TOOLS, bigQueryHex, bigQueryRecordSchema, bigQuerySourceNames,
   readBigQueryText, type BigQueryRecord } from './customer-bigquery-contract';
 import { bigQueryCloudflareUrl, type BigQueryDeploymentContext } from './customer-bigquery-deployment';
+import { CustomerTeardownFailureError, type CustomerTeardownFailure } from './customer-teardown-failure';
 
 const PREFIX = 'ankka-mcp-gateway/bigquery-source/v1/';
 const JOURNAL = 'ankka-mcp-gateway/bigquery-teardown/v1';
@@ -103,6 +104,18 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
       if (record.application !== null) resources.push({ record, kind: 'access_application', path: `/access/apps/${record.application.id}` });
     }
     const recordsHash = `sha256:${await bigQueryHex(canonicalJson({ installationId: context.installationId, records }))}`;
+    let failureContext: CustomerTeardownFailure = { phase: 'bridge_preflight', resourceKind: 'dependency_graph', category: 'state_invalid' };
+    const failure = (category: CustomerTeardownFailure['category']) => new CustomerTeardownFailureError({ ...failureContext, category });
+    async function diagnosed<Result>(phase: CustomerTeardownFailure['phase'], operation: () => Promise<Result>): Promise<Result> {
+      failureContext = { phase, resourceKind: 'dependency_graph', category: 'state_invalid' };
+      try { return await operation(); }
+      catch (error) {
+        throw error instanceof CustomerTeardownFailureError ? error : new CustomerTeardownFailureError(failureContext);
+      }
+    }
+    function checking(resourceKind: CustomerTeardownFailure['resourceKind']) {
+      failureContext = { ...failureContext, resourceKind, category: 'ownership_mismatch' };
+    }
     async function readJournal(): Promise<Journal> {
       const raw = await port.storage.get(JOURNAL);
       if (raw === undefined) return { schemaVersion: 1, recordsHash, removed: 0, pending: null };
@@ -112,21 +125,31 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
       return journal;
     }
     function active(grant: Grant) {
-      if (grant.expiresAt <= now() || !v.is(requestId, grant.requestId)) fail();
+      if (grant.expiresAt <= now()) throw failure('expired');
+      if (!v.is(requestId, grant.requestId)) fail();
     }
     async function apiResponse(path: string, grant: Grant, method = 'GET', allowAbsent = false) {
       active(grant);
-      const response = await port.fetch(bigQueryCloudflareUrl(context, path), {
-        method, redirect: 'manual', signal: AbortSignal.timeout(15_000),
-        headers: { Authorization: `Bearer ${grant.accessToken}`, Accept: 'application/json' },
-      });
+      let response: Response;
+      try {
+        response = await port.fetch(bigQueryCloudflareUrl(context, path), {
+          method, redirect: 'manual', signal: AbortSignal.timeout(15_000),
+          headers: { Authorization: `Bearer ${grant.accessToken}`, Accept: 'application/json' },
+        });
+      } catch { throw failure('provider_unavailable'); }
       if (allowAbsent && response.status === 404) { await response.body?.cancel(); return null; }
-      if (!response.ok) { await response.body?.cancel(); fail(); }
-      return v.parse(v.object({ success: v.literal(true), result: v.optional(boundaryValueSchema),
-        result_info: v.optional(v.object({ page: v.optional(v.number()), total_pages: v.optional(v.number()),
-          per_page: v.optional(v.number()), total_count: v.optional(v.number()) })),
-      }),
-        JSON.parse(await readBigQueryText(response.body, 512 * 1024)));
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw failure([401, 403].includes(response.status) ? 'provider_auth' :
+          response.status === 429 || response.status >= 500 ? 'provider_unavailable' : 'provider_rejected');
+      }
+      try {
+        return v.parse(v.object({ success: v.literal(true), result: v.optional(boundaryValueSchema),
+          result_info: v.optional(v.object({ page: v.optional(v.number()), total_pages: v.optional(v.number()),
+            per_page: v.optional(v.number()), total_count: v.optional(v.number()) })),
+        }),
+          JSON.parse(await readBigQueryText(response.body, 512 * 1024)));
+      } catch { throw failure('response_invalid'); }
     }
     async function api(path: string, grant: Grant, method = 'GET', allowAbsent = false) {
       const response = await apiResponse(path, grant, method, allowAbsent);
@@ -153,6 +176,7 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
       fail();
     }
     async function application(record: BigQueryRecord, grant: Grant) {
+      checking('access_application');
       if (record.application === null) fail();
       const raw = await api(`/access/apps/${record.application.id}`, grant, 'GET', true);
       if (raw === null) return false;
@@ -177,6 +201,7 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
       return true;
     }
     async function worker(record: BigQueryRecord, grant: Grant) {
+      checking('worker');
       const path = `/workers/scripts/${record.workerName}`;
       const raw = await api(`${path}/settings`, grant, 'GET', true);
       if (raw === null) return false;
@@ -200,6 +225,7 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
       return true;
     }
     async function read(resource: Resource, grant: Grant): Promise<boolean> {
+      checking(resource.kind);
       if (resource.kind === 'worker') return worker(resource.record, grant);
       if (resource.kind === 'access_application') return application(resource.record, grant);
       const raw = await api(resource.path, grant, 'GET', true);
@@ -214,6 +240,7 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
       // The MCP catalogue is account-wide. An unowned server may refer to an
       // owned bridge even if it is attached to a different or no Portal.
       const seen = new Set<string>();
+      checking('mcp_server');
       const servers = v.parse(v.array(v.object({ id, hostname: v.string() })), await list('/access/ai-controls/mcp/servers', grant));
       for (const server of servers) {
         if (seen.has(server.id)) fail();
@@ -221,6 +248,7 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
         const hostname = new URL(server.hostname).hostname;
         if (records.some((record) => record.hostname === hostname) && !ownedServerIds.includes(server.id)) fail();
       }
+      checking('worker_custom_domain');
       const domains = v.parse(v.array(domainSchema), await list('/workers/domains', grant));
       if (new Set(domains.map((domain) => domain.id)).size !== domains.length || domains.some((domain) =>
         records.some((record) => (domain.service === record.workerName || domain.hostname === record.hostname) &&
@@ -246,13 +274,17 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
       // An application-only receipt proves that no Worker create was armed.
       // Refuse a later unreceipted Worker without adopting or deleting it.
       if (record.application !== null && record.workerVersion === null &&
-          await api(`/workers/scripts/${record.workerName}/settings`, grant, 'GET', true) !== null) fail();
+          await workerAbsent(record, grant) === false) fail();
       for (let index = 0; index < resources.length; index++) {
         const resource = resources[index];
         if (!resource || resource.record.sourceId !== record.sourceId) continue;
         const present = await read(resource, grant);
         if (index < journal.removed ? present : (!present && journal.pending?.index !== index)) fail();
       }
+    }
+    async function workerAbsent(record: BigQueryRecord, grant: Grant) {
+      checking('worker');
+      return await api(`/workers/scripts/${record.workerName}/settings`, grant, 'GET', true) === null;
     }
     async function preflight(grant: Grant, ownedServerIds: readonly string[]) {
       const journal = await readJournal();
@@ -287,23 +319,25 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
           await save({ ...journal, removed: journal.removed + 1, pending: null });
           return saveProgress(current, journal);
         }
-        if (journal.pending?.requestId === grant.requestId) fail();
+        if (journal.pending?.requestId === grant.requestId) throw failure('operation_interrupted');
         // Removing protection requires a fresh proof that its Worker/key and
         // domain are absent, not just an earlier journal entry.
         if (resource.kind === 'access_application') {
-          if (await api(`/workers/scripts/${resource.record.workerName}/settings`, grant, 'GET', true) !== null) fail();
+          if (!await workerAbsent(resource.record, grant)) throw failure('absence_unconfirmed');
           const domain = resources.find((entry) => entry.record.sourceId === resource.record.sourceId && entry.kind === 'worker_custom_domain');
-          if (domain && await read(domain, grant)) fail();
+          if (domain && await read(domain, grant)) throw failure('absence_unconfirmed');
         } else if (!await application(resource.record, grant)) fail();
+        checking(resource.kind);
         await save({ ...journal, pending: { index: journal.removed, requestId: grant.requestId } });
         await api(resource.path, grant, 'DELETE');
-        if (await read(resource, grant)) fail();
+        if (await read(resource, grant)) throw failure('absence_unconfirmed');
         await save({ ...journal, removed: journal.removed + 1, pending: null });
         return saveProgress(current, journal);
       }
       // Completion requires every bridge's live absence. Verification itself
       // is bounded to one record per invocation, including after fresh consent.
       const checked = current.phase === 'remove' ? 0 : current.checked;
+      failureContext = { ...failureContext, phase: 'bridge_verify' };
       const record = records[checked];
       if (!record) fail();
       await unshared(grant, ownedServerIds);
@@ -316,7 +350,9 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
     // never authorizes deleting a Worker.
     const receiptResourceKinds = new Set(resources.map((resource) => resource.kind));
     if (resources.length > 0) receiptResourceKinds.add('worker');
-    return { actionIds, recordsHash, receiptResourceKinds: [...receiptResourceKinds], preflight, remove };
+    return { actionIds, recordsHash, receiptResourceKinds: [...receiptResourceKinds],
+      preflight: (grant: Grant, ownedServerIds: readonly string[]) => diagnosed('bridge_preflight', () => preflight(grant, ownedServerIds)),
+      remove: (grant: Grant, ownedServerIds: readonly string[]) => diagnosed('bridge_remove', () => remove(grant, ownedServerIds)) };
   }
   return { describe, bounded: true };
 }
