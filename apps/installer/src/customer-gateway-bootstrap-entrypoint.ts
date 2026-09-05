@@ -300,10 +300,12 @@ export class AdminState extends RuntimeAdminState {
           ? { code: state.failureCode, reason: state.failureReason ?? null }
           : null,
       };
-      return new Response(JSON.stringify(body), {
-        status: 200,
-        headers: secureHeaders('application/json; charset=utf-8'),
-      });
+      const headers = secureHeaders('application/json; charset=utf-8');
+      // Only the installer may read this public status from a browser. This
+      // route accepts no credentials and never exposes the setup capability.
+      headers.set('access-control-allow-origin', config.ANKKA_INSTALLER_ORIGIN);
+      headers.set('vary', 'Origin');
+      return new Response(JSON.stringify(body), { status: 200, headers });
     }
     if (request.method === 'GET' && url.pathname === '/health' && url.search === '') {
       const ownership = await readCustomerGatewayOwnershipState(this.bootstrapState.storage);

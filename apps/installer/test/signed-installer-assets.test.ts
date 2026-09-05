@@ -208,7 +208,8 @@ describe('signed installer SPA asset boundary', () => {
     expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.get('content-security-policy')).toContain("default-src 'none'");
-    expect(response.headers.get('content-security-policy')).toContain("connect-src 'self'");
+    expect(response.headers.get('content-security-policy')?.split('; ').find((rule) => rule.startsWith('connect-src')))
+      .toBe("connect-src 'self' https://*.workers.dev/__ankka/install/status");
     expect(response.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
     expect(response.headers.get('permissions-policy')).toContain('tools=(self)');
     expect(response.headers.get('referrer-policy')).toBe('no-referrer');

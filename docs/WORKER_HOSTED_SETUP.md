@@ -22,6 +22,21 @@ It does not predict the final domain or derive Worker identity from a display
 name. The initial grant is revoked before token-free Worker readiness checks
 and browser handoff.
 
+Before requesting the one-time handoff, the installer page checks the exact
+Worker's public `/__ankka/install/status` route from the browser. A successful
+Cloudflare-to-Cloudflare read alone cannot prove that a newly registered
+workers.dev hostname's TLS certificate is ready for that browser. Network,
+TLS, and temporary HTTP failures leave the page open with an automatic retry.
+Each attempt has a five-second deadline and an 8 KiB response limit; retries
+stop at the existing setup expiry. The answer must identify the expected
+installation and release before the server's independent readiness check and
+handoff proceed. Leaving the page cancels the browser check.
+
+This cross-origin GET omits credentials and referrers, follows no redirects,
+and carries no setup capability or Cloudflare grant. The installer's CSP adds
+only the HTTPS workers.dev status path, and the Worker allows CORS reads only
+from the fixed installer origin. No additional session or grant is retained.
+
 The handoff contains a signed setup permit: the initial plan and ownership
 handoff, eligible domain choices, exact bootstrap callback, and the ownership
 public key read from the deployed Worker. The existing one-time capability
@@ -80,8 +95,9 @@ Worker identity.
 Before promotion, verify the registered confidential client accepts the exact
 combined first-stage scopes through real browser approvals. A fresh account
 with no Workers subdomain or active domain must complete registration, Worker
-deployment, grant revocation, and handoff to the domain guide. An account with
-an active domain must complete the two-approval installation, including reuse
+deployment, grant revocation, and automatic handoff to the domain guide without
+a browser TLS error or manual reload. An account with an active domain must
+complete the two-approval installation, including reuse
 of its Workers subdomain and final domain configuration. Verify cleanup leaves
 the shared account subdomain intact. An isolated API-token registration test or
 live evidence for `workers-scripts.write` alone cannot replace the fresh-account

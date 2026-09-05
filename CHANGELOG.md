@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Wait for the browser to reach a new workers.dev address securely before
+  releasing the one-time setup handoff. The installer retries temporary TLS
+  and connection failures on its progress page, verifies the expected Worker,
+  and continues automatically once ready without requiring a manual reload.
+
 - Allow the first Cloudflare approval to deploy gateway setup without a custom
   domain. Accounts with no active domains see a guide on their setup Worker,
   with example addresses and links to Cloudflare. Final gateway configuration

@@ -5,11 +5,14 @@ const STEP_ROUTES = Object.freeze(['/', '/review', '/deploy', '/result']);
 const CUSTOMER_INSTALL_PATH = '/__ankka/install';
 const HANDOFF_POLL_MS = 3000;
 const HANDOFF_POLL_MAX_MS = 15000;
+const BROWSER_READINESS_TIMEOUT_MS = 5000;
+const BROWSER_READINESS_MAX_BYTES = 8192;
 
 const state = {
   session: null,
   csrf: null,
   now: 0,
+  clockOffset: 0,
   route: ROUTES.has(window.location.pathname) ? window.location.pathname : '/',
   busy: false,
   authorizationUrl: null,
@@ -17,6 +20,7 @@ const state = {
   authorizationKind: null,
   handoffUrl: null,
   handoffTimer: null,
+  handoffController: null,
   handoffFailed: false,
   agentToolsRegistered: false,
   agentToolsController: null,
@@ -125,7 +129,7 @@ function setBusy(value) {
   for (const button of document.querySelectorAll('button')) button.disabled = value;
 }
 
-async function api(path, { method = 'GET', body } = {}) {
+async function api(path, { method = 'GET', body, signal } = {}) {
   const headers = { accept: 'application/json' };
   if (method !== 'GET') {
     if (!state.csrf) throw new ApiError(401, { code: 'session_invalid' });
@@ -134,13 +138,17 @@ async function api(path, { method = 'GET', body } = {}) {
   if (body !== undefined) headers['content-type'] = 'application/json';
   const request = { method, headers, credentials: 'same-origin', redirect: 'error' };
   if (body !== undefined) request.body = JSON.stringify(body);
+  if (signal) request.signal = signal;
   const response = await fetch(path, request);
   let payload = null;
   try { payload = await response.json(); } catch { /* The fixed UI error is enough. */ }
   if (!response.ok) throw new ApiError(response.status, payload);
   if (!payload || payload.schemaVersion !== 1) throw new ApiError(502, null);
   if (isText(payload.csrfToken)) state.csrf = payload.csrfToken;
-  if (Number.isSafeInteger(payload.now)) state.now = payload.now;
+  if (Number.isSafeInteger(payload.now)) {
+    state.now = payload.now;
+    state.clockOffset = payload.now - Date.now();
+  }
   if (payload.session && isText(payload.session.phase)) state.session = payload.session;
   return payload;
 }
@@ -287,36 +295,121 @@ function stopHandoffPolling() {
     window.clearTimeout(state.handoffTimer);
     state.handoffTimer = null;
   }
+  state.handoffController?.abort();
+  state.handoffController = null;
+}
+
+function checkHandoffExpiry(provision) {
+  if (!Number.isSafeInteger(provision?.capabilityExpiresAt) ||
+      Date.now() + state.clockOffset >= provision.capabilityExpiresAt) {
+    throw new ApiError(410, { code: 'session_expired' });
+  }
+}
+
+function browserReadinessUrl(provision) {
+  try {
+    const url = new URL(provision.bootstrapOrigin);
+    const labels = url.hostname.split('.');
+    if (url.protocol !== 'https:' || url.username || url.password || url.port ||
+        url.pathname !== '/' || url.search || url.hash || labels.length !== 4 ||
+        labels[0] !== provision.workerName || !/^[a-z0-9-]{1,63}$/u.test(labels[1]) ||
+        labels.slice(2).join('.') !== 'workers.dev') return null;
+    return new URL(CUSTOMER_INSTALL_PATH + '/status', url).href;
+  } catch {
+    return null;
+  }
+}
+
+// A Cloudflare-to-Cloudflare read can succeed before this browser can establish
+// TLS. Probe the exact public Worker first, while the one-time handoff is still
+// safely retained by the installer. No cookie, grant, or fragment goes here.
+async function checkBrowserReadiness(provision, releaseId, signal) {
+  const url = browserReadinessUrl(provision);
+  if (!url || !isText(releaseId)) throw new ApiError(502, { code: 'internal_error' });
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener('abort', abort, { once: true });
+  if (signal.aborted) abort();
+  const timer = window.setTimeout(abort, BROWSER_READINESS_TIMEOUT_MS);
+  let reader;
+  try {
+    const response = await fetch(url, {
+      method: 'GET', mode: 'cors', credentials: 'omit', redirect: 'error',
+      cache: 'no-store', referrerPolicy: 'no-referrer', signal: controller.signal,
+    });
+    if (response.status !== 200 || !response.body) throw new ApiError(503, { code: 'bootstrap_not_ready' });
+    reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let body = '', size = 0;
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > BROWSER_READINESS_MAX_BYTES) throw new ApiError(502, { code: 'bootstrap_failed' });
+      body += decoder.decode(chunk.value, { stream: true });
+    }
+    body += decoder.decode();
+    let value;
+    try { value = JSON.parse(body); } catch { throw new ApiError(503, { code: 'bootstrap_not_ready' }); }
+    if (value?.schemaVersion !== 1 || value.role !== 'customer-gateway-bootstrap' ||
+        value.status !== 'INCOMPLETE' || value.installId !== provision.installId ||
+        value.release !== releaseId || !/^[A-Za-z0-9_-]{43}$/u.test(text(value.ownershipPublicKey)) ||
+        (value.failure !== undefined && value.failure !== null)) {
+      throw new ApiError(502, { code: 'bootstrap_failed' });
+    }
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError(503, { code: 'bootstrap_not_ready' });
+  } finally {
+    window.clearTimeout(timer);
+    signal.removeEventListener('abort', abort);
+    controller.abort();
+    await reader?.cancel().catch(() => { /* The response may already be closed. */ });
+  }
 }
 
 async function pollHandoff(delayMs = 0) {
+  if (state.handoffController !== null) return;
   stopHandoffPolling();
-  if (phase() !== 'provisioned' || state.route !== '/result') return;
+  if (phase() !== 'provisioned' || state.route !== '/result' || !state.agentPageActive) return;
   state.handoffTimer = window.setTimeout(async () => {
     state.handoffTimer = null;
+    const controller = new AbortController();
+    state.handoffController = controller;
+    let retryAfter = null;
     try {
-      const result = await api('/api/bootstrap/handoff');
-      const bootstrapOrigin = text(provisionSummary()?.bootstrapOrigin);
-      const handoff = validHandoffUrl(result.handoffUrl, bootstrapOrigin);
+      const provision = provisionSummary();
+      checkHandoffExpiry(provision);
+      await checkBrowserReadiness(provision, planSummary()?.releaseId, controller.signal);
+      if (controller.signal.aborted) return;
+      checkHandoffExpiry(provision);
+      const result = await api('/api/bootstrap/handoff', { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      const handoff = validHandoffUrl(result.handoffUrl, provision.bootstrapOrigin);
       if (!handoff) throw new ApiError(502, { code: 'internal_error' });
       state.handoffUrl = handoff;
       await loadSession().catch(() => { /* The handoff itself succeeded. */ });
+      if (controller.signal.aborted) return;
       render();
       window.location.assign(handoff);
     } catch (error) {
+      if (controller.signal.aborted) return;
       if (error instanceof ApiError && error.code === 'bootstrap_not_ready') {
-        const retryAfter = Number.isSafeInteger(error.payload?.retryAfterMs)
+        retryAfter = Number.isSafeInteger(error.payload?.retryAfterMs)
           ? Math.min(HANDOFF_POLL_MAX_MS, Math.max(HANDOFF_POLL_MS, error.payload.retryAfterMs))
           : HANDOFF_POLL_MS;
         renderResult();
-        await pollHandoff(retryAfter);
-        return;
+      } else {
+        await loadSession().catch(() => { /* The failure below is still shown. */ });
+        if (controller.signal.aborted) return;
+        state.handoffFailed = true;
+        showNotice(apiErrorMessage(error, 'Finishing secure setup did not complete.'), 'error');
+        render();
       }
-      await loadSession().catch(() => { /* The failure below is still shown. */ });
-      state.handoffFailed = true;
-      showNotice(apiErrorMessage(error, 'Finishing secure setup did not complete.'), 'error');
-      render();
+    } finally {
+      if (state.handoffController === controller) state.handoffController = null;
     }
+    if (retryAfter !== null) await pollHandoff(retryAfter);
   }, delayMs);
 }
 
@@ -410,10 +503,10 @@ function renderResult() {
       title.textContent = 'Ankka Gateway installed';
       intro.textContent = 'The first temporary permission was revoked. Your Gateway is starting inside your Cloudflare account.';
       stage.hidden = false;
-      byId('operation-title').textContent = state.handoffUrl ? 'Ready to finish secure setup' : 'Waiting for your Gateway to answer';
+      byId('operation-title').textContent = state.handoffUrl ? 'Ready to finish secure setup' : 'Waiting for your secure Gateway address';
       byId('operation-detail').textContent = state.handoffUrl
         ? 'Continue to your Gateway. It will ask Cloudflare for the second temporary approval so it can finish its own setup.'
-        : `This page checks every few seconds without any Cloudflare permission. The one-time handoff stays valid until ${formatWhen(provision?.capabilityExpiresAt)}.`;
+        : `Cloudflare is preparing your new address. This browser checks its secure connection every few seconds and continues automatically when it is ready. Your setup link stays valid until ${formatWhen(provision?.capabilityExpiresAt)}.`;
       detail.textContent = 'Keep this browser open. The handoff is released only to this browser, and only once.';
       if (state.handoffUrl) {
         finish.hidden = false;
@@ -736,7 +829,10 @@ window.addEventListener('pagehide', () => {
 });
 for (const event of ['pageshow', 'focus']) {
   window.addEventListener(event, () => {
-    if (event === 'pageshow') state.agentPageActive = true;
+    if (event === 'pageshow') {
+      state.agentPageActive = true;
+      render();
+    }
     if (state.session) void registerAgentTools().catch(() => { /* The existing UI remains available. */ });
   });
 }
