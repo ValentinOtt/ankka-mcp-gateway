@@ -127,7 +127,7 @@ describe('TeamPage', () => {
     expect(within(tools).getByText('search')).toBeInTheDocument()
     expect(within(tools).queryByRole('checkbox')).not.toBeInTheDocument()
     expect(screen.getByText(/Existing cached sessions may remain valid/)).toBeInTheDocument()
-    expect(screen.getByText('After the first permission-policy change, automatic teardown is unavailable until a compatible gateway release supports it.')).toBeInTheDocument()
+    expect(screen.getByText('Finish any active permission change before removing your gateway. Removal checks the saved ownership receipts and current policies.')).toBeInTheDocument()
   })
 
   it('keeps existing-source permission controls usable while source addition is paused', async () => {

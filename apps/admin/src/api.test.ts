@@ -396,6 +396,8 @@ describe('HttpGatewayAdminApi', () => {
   it('accepts only this gateway’s own operation handoff shape', () => {
     const expected = 'https://manage.example.com'
     expect(validHandoffUrl(`${expected}/__ankka/operation#${'a'.repeat(40)}`, expected)).toContain('/__ankka/operation#')
+    expect(validHandoffUrl(`${expected}/__ankka/operation/teardown#${'a'.repeat(40)}`, expected)).toContain('/operation/teardown#')
+    expect(validHandoffUrl(`${expected}/__ankka/operation/teardown/start#${'a'.repeat(40)}`, expected)).toBeNull()
     expect(validHandoffUrl(`https://evil.example/__ankka/operation#${'a'.repeat(40)}`, expected)).toBeNull()
     expect(validHandoffUrl(`https://user:password@manage.example.com/__ankka/operation#${'a'.repeat(40)}`, expected)).toBeNull()
     expect(validHandoffUrl(`${expected}/__ankka/operation?token=secret`, expected)).toBeNull()

@@ -70,6 +70,8 @@ import {
   type TwoStageDeploySessionNamespace,
 } from './two-stage-deploy-session';
 import { parseVerifiedReleaseBundle } from './verified-release-bundle';
+import { createGatewayTeardownRouter, GATEWAY_TEARDOWN_COOKIE, GATEWAY_TEARDOWN_ROUTES } from './gateway-teardown-router';
+import { sha256 } from './crypto';
 
 /**
  * Clean hosted two-stage HTTP runtime for deploy.ankka.ai.
@@ -109,6 +111,7 @@ export const TWO_STAGE_API_ROUTES = Object.freeze([
   WORKER_SETUP_CERTIFY_PATH,
   '/api/cleanup',
   CALLBACK_PATH,
+  ...GATEWAY_TEARDOWN_ROUTES,
 ] as const);
 
 const envSchema = v.object({
@@ -856,6 +859,38 @@ export function createTwoStageDeployRuntime(
     const path = url.pathname;
     if (request.method === 'GET' && path === '/health') {
       return json({ ok: true, mutationsEnabled: true });
+    }
+    const teardownPath = GATEWAY_TEARDOWN_ROUTES.some((candidate) => candidate === path);
+    if (teardownPath || (path === CALLBACK_PATH && parseCookies(request.headers.get('cookie')).has(GATEWAY_TEARDOWN_COOKIE))) {
+      const ctx = context(env);
+      const teardown = createGatewayTeardownRouter({
+        encryptionKey: ctx.config.DEPLOY_SESSION_ENCRYPTION_KEY, oauth: oauthConfig(ctx), release: pin,
+        namespace: env.TWO_STAGE_DEPLOY_SESSION,
+        trust: { pinnedIssuerPublicKey: ctx.config.CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY,
+          expectedKeyId: ctx.config.CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID,
+          expectedPublicClientId: ctx.config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID },
+      }, {
+        now, transport,
+        loadBundle: async (identity) => {
+          if (identity.release === pin.release && identity.artifactSha256 === pin.artifactSha256) {
+            const bundle = (await loadSnapshot(env)).bundle;
+            assertExactReleaseBundleIdentity(bundle, identity);
+            return bundle;
+          }
+          // Identity comes only from an immutable accepted job, never a browser
+          // request. Recovery retains its original signed retirement release.
+          const bundle = await new PinnedR2ReleaseBundleProvider(identity).loadVerifiedReleaseBundle(releaseBucket(env));
+          assertExactReleaseBundleIdentity(bundle, identity);
+          return bundle;
+        },
+        rateLimit: async (input, jobId) => {
+          if (policy !== 'required') return;
+          if (jobId === null) await enforceAnonymousSessionRateLimit(input, env);
+          else if (input.method === 'GET') await enforceSessionReadRateLimit(env, await sha256(jobId));
+          else await enforceSessionMutationRateLimit(input, env, await sha256(jobId));
+        },
+      });
+      if (teardownPath || await teardown.claimsCallback(request)) return teardown.fetch(request);
     }
     const isApi = TWO_STAGE_API_ROUTES.some((candidate) => candidate === path) || path === '/api' || path.startsWith('/api/');
     if (!isApi) {

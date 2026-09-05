@@ -29,6 +29,7 @@ export const FIXED_CLOUDFLARE_OPERATIONS = Object.freeze([
   'source-remove',
   'uninstall',
   'uninstall-finalize',
+  'gateway-root-finalize',
 ] as const);
 
 export type FixedCloudflareOperation = (typeof FIXED_CLOUDFLARE_OPERATIONS)[number];
@@ -362,6 +363,18 @@ const OPERATION_AUTHORITY: Readonly<Record<FixedCloudflareOperation, FixedCloudf
         'workers-durable-object-namespaces', 'workers-deployments'],
       ['receipt-owned'],
       ['delete-root-worker', 'delete-admin-state-namespace'],
+      ['receipt-resources-absent', 'foreign-resources-unchanged'],
+    ),
+    'gateway-root-finalize': authority(
+      'gateway-root-finalize',
+      'ankka-installer',
+      frozen([CLOUDFLARE_OAUTH_SCOPE.workersScriptsWrite, CLOUDFLARE_OAUTH_SCOPE.accessAppsAndPoliciesWrite]),
+      DIRECT_WORKER_RELEASE,
+      ['accounts-list', 'workers-container', 'workers-scripts', 'workers-versions',
+        'workers-durable-object-namespaces', 'workers-deployments', 'workers-custom-domains',
+        'access-applications', 'access-policies'],
+      ['receipt-owned'],
+      ['publish-inert-worker-release', 'delete-receipt-resource', 'delete-root-worker', 'delete-admin-state-namespace'],
       ['receipt-resources-absent', 'foreign-resources-unchanged'],
     ),
   });

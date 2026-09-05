@@ -244,10 +244,11 @@ export function validCustomerBootstrapRelayAuthorization(
   publicClientId: string,
   challenge: string,
   operation: CustomerCloudflareOperation = 'install',
+  receiptResourceKinds?: readonly import('./cloudflare-operation-authority').ReceiptOwnedCloudflareResourceKind[],
 ): boolean {
   try {
     const url = new URL(value.authorizationUrl);
-    const expectedScopes = exactOperationScopes(operation).join(' ');
+    const expectedScopes = exactOperationScopes(operation, receiptResourceKinds).join(' ');
     const expectedKeys = [
       'response_type', 'client_id', 'redirect_uri', 'scope', 'state',
       'code_challenge', 'code_challenge_method',

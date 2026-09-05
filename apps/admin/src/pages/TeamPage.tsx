@@ -281,7 +281,7 @@ export function TeamPage() {
               {!recorded && changed ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving} onClick={() => setDraft(effectiveMembers)}>Discard unsaved changes</Button> : null}
               <p className="max-w-[65ch] text-xs leading-5 text-kumo-subtle">Access is not confirmed until Cloudflare applies and verifies the change. Existing cached sessions may remain valid until they expire or are revoked in Cloudflare Access.</p>
             </div>
-            <p className="mt-3 max-w-[75ch] text-xs leading-5 text-kumo-subtle">After the first permission-policy change, automatic teardown is unavailable until a compatible gateway release supports it.</p>
+            <p className="mt-3 max-w-[75ch] text-xs leading-5 text-kumo-subtle">Finish any active permission change before removing your gateway. Removal checks the saved ownership receipts and current policies.</p>
 
             <details className="mt-5 border-t border-kumo-line pt-4">
               <summary className="cursor-pointer text-sm font-medium text-subheading">Saved access configuration <span className="ml-2 text-xs font-normal text-kumo-subtle">Revision {team.revision}</span></summary>

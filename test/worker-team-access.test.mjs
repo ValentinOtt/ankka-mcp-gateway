@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import test from 'node:test';
 
-import worker, { AdminState, planTeamAccessChange } from '../payload/worker/index.js';
+import worker, { AdminState, planTeamAccessChange, prepareCurrentGatewayTeardown } from '../payload/worker/index.js';
 import { addHistoricalInstalledSource } from './historical-source-fixture.mjs';
 import {
   ACCOUNT_ID,
@@ -104,12 +104,13 @@ async function fixture(run, claimInput) {
       'content-type': 'application/json', origin: MANAGEMENT_ORIGIN,
     };
   }
-  async function api(path, { method = 'GET', body, email = ADMIN, extraHeaders = {} } = {}) {
+  async function api(path, { method = 'GET', body, email = ADMIN, extraHeaders = {}, currentTeardown = false } = {}) {
     const init = {
       method, headers: { ...await headers(email), ...extraHeaders },
     };
     if (body !== undefined) init.body = canonicalJson(body);
-    return worker.fetch(new Request(`${MANAGEMENT_ORIGIN}${path}`, init), gateway.env);
+    const request = new Request(`${MANAGEMENT_ORIGIN}${path}`, init);
+    return currentTeardown ? prepareCurrentGatewayTeardown(request, gateway.env) : worker.fetch(request, gateway.env);
   }
   async function view() {
     const response = await api('/api/team');
@@ -157,6 +158,36 @@ async function fixture(run, claimInput) {
       }), gateway.env);
     };
   }
+  async function currentTeardown(seed = 4) {
+    const actionKey = Buffer.alloc(32, seed).toString('base64url');
+    const issuedAt = Date.now();
+    const input = {
+      schemaVersion: 1, actionId: `action_${String.fromCharCode(65 + seed).repeat(32)}`,
+      actionKeyHash: await prefixedSha256(actionKey), actorEmail: ADMIN,
+      installationId: gateway.readyReceipt.installationId,
+      issuedAt, expiresAt: issuedAt + 600_000,
+    };
+    const stub = gateway.env.ADMIN_STATE.get(gateway.env.ADMIN_STATE.idFromName('v1:management'));
+    const prepared = await stub.fetch(new Request('https://admin-state.invalid/teardown-actions/prepare-current', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: canonicalJson(input),
+    }));
+    return {
+      prepared,
+      async send(command, requestId = 'F'.repeat(22), legacy = false) {
+        const claim = {
+          schemaVersion: 1, command, actionId: input.actionId, actionKey,
+          actorEmail: ADMIN, accountId: ACCOUNT_ID, installationId: input.installationId,
+          issuedAt: Date.now(), expiresAt: input.expiresAt,
+        };
+        if (command === 'apply') Object.assign(claim, { requestId, cloudflareAccessToken: SYNTHETIC_GRANT });
+        const body = canonicalJson(claim);
+        const signature = `sha256=${createHmac('sha256', Buffer.from(actionKey, 'base64url')).update(body).digest('hex')}`;
+        return stub.fetch(new Request(`https://admin-state.invalid/teardown-actions/${command}${legacy ? '' : '-current'}`, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'x-ankka-teardown-action-signature': signature }, body,
+        }));
+      },
+    };
+  }
   const managementStorage = gateway.objects.get('v1:management').storage;
   let sourceRequestHook;
   const network = async (request) => {
@@ -177,7 +208,7 @@ async function fixture(run, claimInput) {
     }
     return provider.fetch(request);
   };
-  return withProviderFetch(network, () => run({ ...gateway, api, view, draft, apply, teardown,
+  return withProviderFetch(network, () => run({ ...gateway, api, view, draft, apply, teardown, currentTeardown,
     headers, managementStorage,
     onSourceRequest(hook) { sourceRequestHook = hook; },
     reloadManagement() { instances.delete('v1:management'); },
@@ -1319,4 +1350,187 @@ test('a retained v16 proposal remains inspectable but cannot resume through the 
   assert.deepEqual(await applied.json(), { schemaVersion: 1, error: 'team_editing_managed_in_cloudflare' });
   assert.equal(canonicalJson(gateway.managementStorage.snapshot(TEAM_KEY)), before);
   assert.equal(gateway.provider.puts().length, 0);
+}));
+
+for (const assignment of ['deny', 'members']) {
+  test(`current teardown removes a native source with ${assignment} while retaining its immutable ownership receipt`, async () => fixture(async (gateway) => {
+    const prepared = await prepareNewSource(gateway);
+    assert.equal((await gateway.apply(prepared, {}, null)).status, 200);
+    const original = structuredClone(gateway.readyReceipt);
+    const ownership = gateway.managementStorage.snapshot('ankka-mcp-gateway/management-control/v1').sourceOwnership
+      .find((entry) => entry.sourceId === prepared.source.id);
+    const policy = gateway.provider.state.policies.get(ownership.resources[1].provider.id)[0];
+    if (assignment === 'members') Object.assign(policy, {
+      decision: 'allow', include: [{ email: { email: MEMBER } }],
+    });
+    const teardown = await gateway.currentTeardown();
+    assert.equal(teardown.prepared.status, 200, await teardown.prepared.clone().text());
+    assert.equal((await teardown.send('prove', undefined, true)).status, 409, 'old routes cannot widen their matcher');
+    const proof = await teardown.send('prove');
+    assert.equal(proof.status, 200, await proof.clone().text());
+    const result = await teardown.send('apply');
+    assert.equal(result.status, 200, await result.clone().text());
+    const completion = await result.json();
+    assert.equal(completion.removedResourceCount, 7);
+    assert.equal(completion.readyReceiptChecksum, original.checksum);
+    assert.equal(completion.dependencyResourcesHash, gateway.storage.snapshot().teardown.resourcesHash);
+    assert.deepEqual((await proof.json()).receiptResourceKinds, ['access_application', 'access_policy', 'dns_record', 'mcp_portal', 'mcp_server']);
+    assert.equal(gateway.provider.liveResourceCount(), 0);
+    assert.deepEqual(gateway.storage.snapshot().receipt, original);
+    const order = gateway.provider.deletes().map(({ pathname }) => pathname);
+    assert.ok(order.findIndex((path) => path.includes('/mcp/portals/')) < order.findIndex((path) => path.includes('/mcp/servers/')));
+    const deletes = order.length;
+    assert.equal((await teardown.send('apply', 'G'.repeat(22))).status, 200);
+    assert.equal(gateway.provider.deletes().length, deletes);
+    assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease, gateway.env.ANKKA_GATEWAY_RELEASE);
+    assert.doesNotMatch(JSON.stringify(gateway.managementStorage.writes), /synthetic-legacy-installer-grant-never-store/);
+  }, await portalOnlyClaim()));
+}
+
+for (const change of ['foreign policy', 'renamed policy', 'different destination', 'different receipt hash', 'shared server']) {
+  test(`current teardown rejects ${change} before deleting any resource`, async () => fixture(async (gateway) => {
+    const prepared = await prepareNewSource(gateway);
+    assert.equal((await gateway.apply(prepared, {}, null)).status, 200);
+    const key = 'ankka-mcp-gateway/management-control/v1';
+    const control = gateway.managementStorage.snapshot(key);
+    const ownership = control.sourceOwnership.find((entry) => entry.sourceId === prepared.source.id);
+    const application = gateway.provider.state.apps.get(ownership.resources[1].provider.id);
+    const policies = gateway.provider.state.policies.get(application.id);
+    const teardown = await gateway.currentTeardown();
+    assert.equal(teardown.prepared.status, 200);
+    assert.equal((await teardown.send('prove')).status, 200);
+    if (change === 'foreign policy') policies.push({ ...policies[0], id: 'foreign-policy', name: 'Unrelated policy' });
+    if (change === 'renamed policy') policies[0].name = 'Unrelated policy';
+    if (change === 'different destination') application.destinations[0].mcp_server_id = 'foreign-server';
+    if (change === 'shared server') {
+      gateway.provider.hook(({ record, state }) => {
+        if (record.method !== 'GET') return undefined;
+        if (record.pathname.endsWith('/mcp/portals')) return envelope([state.portal, { id: 'foreign-portal' }]);
+        if (record.pathname.endsWith('/mcp/portals/foreign-portal')) return envelope({
+          id: 'foreign-portal', servers: [{ id: ownership.resources[0].provider.id }],
+        });
+        return undefined;
+      });
+    }
+    if (change === 'different receipt hash') {
+      ownership.resources[0].desiredHash = `sha256:${'0'.repeat(64)}`;
+      await gateway.managementStorage.put(key, control);
+    }
+    assert.equal((await teardown.send('apply')).status, 409);
+    assert.equal(gateway.provider.deletes().length, 0);
+  }, await portalOnlyClaim()));
+}
+
+
+for (let lostDelete = 0; lostDelete < 7; lostDelete += 1) {
+  test(`current teardown renews consent and resumes after losing deletion ${lostDelete + 1}'s response`, async (context) => fixture(async (gateway) => {
+    const prepared = await prepareNewSource(gateway);
+    assert.equal((await gateway.apply(prepared, {}, null)).status, 200);
+    const first = await gateway.currentTeardown();
+    assert.equal(first.prepared.status, 200);
+    assert.equal((await first.send('prove')).status, 200);
+    let deletes = 0;
+    gateway.provider.hook(({ record, state }) => {
+      if (record.method !== 'DELETE' || deletes++ !== lostDelete) return undefined;
+      const path = record.pathname;
+      const id = path.split('/').at(-1);
+      if (path.includes('/dns_records/')) state.dns = null;
+      else if (path.includes('/mcp/portals/')) state.portal = null;
+      else if (path.includes('/mcp/servers/')) { state.servers.delete(id); state.server = null; }
+      else if (path.includes('/policies/')) {
+        const applicationId = path.split('/').at(-3);
+        state.policies.set(applicationId, state.policies.get(applicationId).filter((policy) => policy.id !== id));
+      } else { state.apps.delete(id); state.policies.delete(id); }
+      return envelope(null, 503);
+    });
+    assert.equal((await first.send('apply')).status, 409);
+    assert.equal(gateway.storage.snapshot().teardown.pending.phase, 'send_armed');
+    const later = Date.now() + 600_001;
+    context.mock.method(Date, 'now', () => later);
+    gateway.provider.hook(undefined);
+    const second = await gateway.currentTeardown(6);
+    assert.equal(second.prepared.status, 200, await second.prepared.clone().text());
+    assert.equal((await first.send('apply')).status, 409, 'the old action key cannot resume a renewed action');
+    assert.equal((await second.send('prove')).status, 200);
+    const result = await second.send('apply', 'H'.repeat(22));
+    assert.equal(result.status, 200, await result.clone().text());
+    assert.equal(gateway.provider.liveResourceCount(), 0);
+    const deletedPaths = gateway.provider.deletes().map(({ pathname }) => pathname);
+    assert.equal(deletedPaths.length, 7);
+    assert.equal(new Set(deletedPaths).size, 7, 'verified absence must not resend the lost delete');
+  }, await portalOnlyClaim()));
+}
+
+
+test('current teardown routes have no public HTTP entry point', async () => fixture(async (gateway) => {
+  const baseline = gateway.provider.requests.length;
+  for (const path of ['/teardown-actions/prepare-current', '/teardown-actions/prove-current',
+    '/teardown-actions/apply-current', '/teardown-actions/settle-current', '/teardown-root/apply-current', '/teardown-root/status-current']) {
+    const response = await worker.fetch(new Request(`${MANAGEMENT_ORIGIN}${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }), gateway.env);
+    assert.equal(response.status, 404);
+  }
+  assert.equal(gateway.provider.requests.length, baseline);
+}));
+
+
+test('the final gateway prepare export verifies Access and hands off to its own removal review', async () => fixture(async (gateway) => {
+  const baseline = gateway.provider.deletes().length;
+  const denied = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 }, email: NEW_PERSON, currentTeardown: true });
+  assert.equal(denied.status, 401);
+  const foreign = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 }, extraHeaders: { origin: 'https://foreign.example' }, currentTeardown: true });
+  assert.equal(foreign.status, 403);
+  const prepared = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 }, currentTeardown: true });
+  assert.equal(prepared.status, 200, await prepared.clone().text());
+  const target = new URL((await prepared.json()).handoffUrl);
+  assert.equal(target.origin, MANAGEMENT_ORIGIN);
+  assert.equal(target.pathname, '/__ankka/operation/teardown');
+  assert.equal(target.search, '');
+  assert.equal(gateway.provider.deletes().length, baseline);
+}));
+
+test('settling an interrupted current teardown permits immediate fresh consent without erasing progress', async () => fixture(async (gateway) => {
+  const first = await gateway.currentTeardown();
+  assert.equal((await first.send('prove')).status, 200);
+  gateway.provider.hook(({ record }) => record.method === 'DELETE' ? envelope(null, 503) : undefined);
+  assert.equal((await first.send('apply')).status, 409);
+  const pending = structuredClone(gateway.storage.snapshot().teardown);
+  assert.equal((await first.send('settle')).status, 200);
+  assert.equal((await first.send('apply')).status, 409);
+  const second = await gateway.currentTeardown(6);
+  assert.equal(second.prepared.status, 200, await second.prepared.clone().text());
+  assert.deepEqual(gateway.storage.snapshot().teardown, pending);
+  gateway.provider.hook(undefined);
+  assert.equal((await second.send('prove')).status, 200);
+  assert.equal((await second.send('apply', 'H'.repeat(22))).status, 200);
+  assert.equal(gateway.provider.liveResourceCount(), 0);
+}));
+
+
+test('declining current teardown before deletion releases lifecycle locks without changing resources', async () => fixture(async (gateway) => {
+  const first = await gateway.currentTeardown();
+  assert.equal((await first.send('prove')).status, 200);
+  assert.notEqual((await (await gateway.api('/api/source-actions')).json()).blockingAction, null);
+  const before = structuredClone(gateway.storage.snapshot());
+  const settled = await first.send('settle');
+  assert.equal(settled.status, 200);
+  assert.equal((await settled.json()).status, 'failed');
+  assert.equal((await (await gateway.api('/api/source-actions')).json()).blockingAction, null);
+  assert.deepEqual(gateway.storage.snapshot(), before);
+  assert.equal(gateway.provider.deletes().length, 0);
+  assert.equal((await first.send('apply')).status, 409);
+}));
+
+
+test('abandoning current consent expires its unstarted lifecycle lock without changing the root', async (context) => fixture(async (gateway) => {
+  const first = await gateway.currentTeardown();
+  const before = structuredClone(gateway.storage.snapshot());
+  assert.equal((await first.send('prove')).status, 200);
+  const later = Date.now() + 600_001;
+  context.mock.method(Date, 'now', () => later);
+  assert.equal((await (await gateway.api('/api/source-actions')).json()).blockingAction, null);
+  assert.deepEqual(gateway.storage.snapshot(), before);
+  assert.equal((await first.send('apply')).status, 409);
+  assert.equal(gateway.provider.deletes().length, 0);
 }));

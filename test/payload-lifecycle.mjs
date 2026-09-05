@@ -532,6 +532,8 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
       }
     }
 
+    if (pathname === PORTALS && method === 'GET') return envelope(state.portal === null ? [] : [state.portal]);
+
     // Exercise both published request shapes: the guide uses `id`, while
     // the API schema requires `server_id`. They must name the same server.
     const portalWrite = (pathname === PORTALS && method === 'POST') ||

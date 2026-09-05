@@ -255,7 +255,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       <GatewayEndpoint />
 
       {!installationEnabled ? <p role="status" className="notice-banner notice-warning mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
-      {installationEnabled ? <p className="notice-banner notice-warning mt-6">Before authorizing: once source provisioning starts, automatic gateway removal and rollback below this runtime release are unavailable. Saving a draft does not activate this restriction.</p> : null}
+      {installationEnabled ? <p className="notice-banner notice-warning mt-6">Before authorizing: once source provisioning starts, rollback below this runtime release is unavailable. Finish or recover any source action before removing your gateway. Saving a draft does not activate this restriction.</p> : null}
 
       {sourceNotice ? (
         <div role="status" className={`notice-banner mt-6 notice-${sourceNotice.tone}`}>

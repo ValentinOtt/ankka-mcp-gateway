@@ -11,6 +11,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const OAUTH_COOKIE_AAD = encoder.encode('ankka-gateway-deploy-oauth-cookie-v2');
 const BOOTSTRAP_COOKIE_AAD = encoder.encode('ankka-gateway-deploy-bootstrap-cookie-v1');
+const TEARDOWN_COOKIE_AAD = encoder.encode('ankka-gateway-teardown-cookie-v1');
 const BASE64_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const HOSTED_STAGE1_SESSION_ID = /^s1s_[A-Za-z0-9_-]{24}$/u;
 const HOSTED_STAGE1_ATTEMPT_ID = /^attempt_[A-Za-z0-9_-]{24}$/u;
@@ -592,4 +593,46 @@ export async function deriveCsrfToken(encodedKey: string, sessionId: string): Pr
     encoder.encode(`ankka-gateway-deploy-csrf-v1:${sessionId}`),
   );
   return base64UrlEncode(new Uint8Array(signature));
+}
+
+const teardownCookieSchema = v.strictObject({
+  purpose: v.literal('gateway_teardown'), schemaVersion: v.literal(1),
+  jobId: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+  expiresAt: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+  attempt: v.nullable(v.strictObject({
+    id: v.pipe(v.string(), v.regex(HOSTED_STAGE1_ATTEMPT_ID)),
+    state: v.pipe(v.string(), v.regex(BASE64_TOKEN)), verifier: v.pipe(v.string(), v.regex(BASE64_TOKEN)),
+    expiresAt: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+  })),
+});
+export type GatewayTeardownCookie = v.InferOutput<typeof teardownCookieSchema>;
+export async function sealGatewayTeardownCookie(encodedKey: string, value: GatewayTeardownCookie): Promise<string> {
+  const parsed = v.safeParse(teardownCookieSchema, value);
+  if (!parsed.success) throw new DeployError(400, 'session_invalid');
+  return sealSerialized(encodedKey, TEARDOWN_COOKIE_AAD, JSON.stringify(parsed.output));
+}
+export async function openGatewayTeardownCookie(encodedKey: string, sealed: string, now: number): Promise<GatewayTeardownCookie> {
+  try {
+    const cookie = v.parse(teardownCookieSchema, JSON.parse(await openSerialized(encodedKey, TEARDOWN_COOKIE_AAD, sealed)));
+    if (cookie.expiresAt <= now || cookie.expiresAt > now + 24 * 60 * 60 * 1000) throw new Error();
+    return cookie;
+  } catch { throw new DeployError(400, 'session_invalid'); }
+}
+
+const CUSTOMER_TEARDOWN_COOKIE_AAD = new TextEncoder().encode('ankka-customer-teardown-cookie-v1');
+const customerTeardownCookieSchema = v.strictObject({
+  purpose: v.literal('customer_teardown'), schemaVersion: v.literal(1),
+  attemptId: v.pipe(v.string(), v.regex(HOSTED_STAGE1_ATTEMPT_ID)),
+  expiresAt: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+  verifier: v.pipe(v.string(), v.regex(BASE64_TOKEN)),
+  actionKey: v.pipe(v.string(), v.regex(BASE64_TOKEN)),
+});
+export type CustomerTeardownCookie = v.InferOutput<typeof customerTeardownCookieSchema>;
+export async function sealCustomerTeardownCookie(key: string, value: CustomerTeardownCookie): Promise<string> {
+  return sealSerialized(key, CUSTOMER_TEARDOWN_COOKIE_AAD, JSON.stringify(v.parse(customerTeardownCookieSchema, value)));
+}
+export async function openCustomerTeardownCookie(key: string, sealed: string, now: number): Promise<CustomerTeardownCookie> {
+  const cookie = v.parse(customerTeardownCookieSchema, JSON.parse(await openSerialized(key, CUSTOMER_TEARDOWN_COOKIE_AAD, sealed)));
+  if (cookie.expiresAt <= now || cookie.expiresAt > now + 10 * 60 * 1000) throw new Error('teardown_cookie_invalid');
+  return cookie;
 }

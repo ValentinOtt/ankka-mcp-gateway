@@ -394,7 +394,7 @@ export function validHandoffUrl(value: string, expectedOrigin: string): string |
   try {
     const url = new URL(value)
     return url.origin === expectedOrigin && !url.username && !url.password &&
-      url.pathname === OPERATION_HANDOFF_PATH &&
+      [OPERATION_HANDOFF_PATH, `${OPERATION_HANDOFF_PATH}/teardown`].includes(url.pathname) &&
       url.search === '' && /^#[A-Za-z0-9_-]{40,8192}$/u.test(url.hash) ? url.href : null
   } catch {
     return null

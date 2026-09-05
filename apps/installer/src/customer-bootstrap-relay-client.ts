@@ -9,6 +9,7 @@ import {
   exactOperationScopes,
   isCustomerCloudflareOperation,
   type CustomerCloudflareOperation,
+  type ReceiptOwnedCloudflareResourceKind,
 } from './cloudflare-operation-authority';
 import { DeployError } from './errors';
 import { type BoundedRead, fetchBoundedText } from './http';
@@ -46,6 +47,7 @@ function validAuthorizationUrl(
   expectedClientId: string,
   expectedChallenge: string,
   operation: CustomerCloudflareOperation,
+  receiptResourceKinds?: readonly ReceiptOwnedCloudflareResourceKind[],
 ): boolean {
   try {
     const url = new URL(value);
@@ -60,7 +62,7 @@ function validAuthorizationUrl(
       url.searchParams.get('response_type') === 'code' &&
       url.searchParams.get('client_id') === expectedClientId &&
       url.searchParams.get('redirect_uri') === CLOUDFLARE_CODE_RELAY_CALLBACK &&
-      url.searchParams.get('scope') === exactOperationScopes(operation).join(' ') &&
+      url.searchParams.get('scope') === exactOperationScopes(operation, receiptResourceKinds).join(' ') &&
       url.searchParams.get('code_challenge') === expectedChallenge &&
       url.searchParams.get('code_challenge_method') === 'S256' &&
       state.length <= 8_192 && SEALED_RELAY_STATE.test(state);
@@ -83,6 +85,7 @@ export async function beginCustomerBootstrapRelay(input: {
   readonly gatewayCallback: string;
   readonly transport: CustomerCloudflareTransport;
   readonly operation?: CustomerCloudflareOperation;
+  readonly receiptResourceKinds?: readonly ReceiptOwnedCloudflareResourceKind[];
 }): Promise<CustomerBootstrapRelayStart> {
   const operation = input.operation ?? 'install';
   if (!CLIENT_ID.test(input.publicClientId) || input.relayTicket.length < 40 ||
@@ -132,7 +135,7 @@ export async function beginCustomerBootstrapRelay(input: {
   } catch {
     throw new Error('relay_rejected');
   }
-  if (!validAuthorizationUrl(parsed.authorizationUrl, input.publicClientId, input.pkceChallenge, operation)) {
+  if (!validAuthorizationUrl(parsed.authorizationUrl, input.publicClientId, input.pkceChallenge, operation, input.receiptResourceKinds)) {
     throw new Error('relay_rejected');
   }
   return Object.freeze({ authorizationUrl: parsed.authorizationUrl });
