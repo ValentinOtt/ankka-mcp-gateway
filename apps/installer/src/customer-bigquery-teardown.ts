@@ -3,7 +3,7 @@ import { boundaryValueSchema } from './boundary';
 import { canonicalJson } from './canonical-json';
 import { BIGQUERY_SETUP_TOOLS, bigQueryHex, bigQueryRecordSchema, bigQuerySourceNames,
   readBigQueryText, type BigQueryRecord } from './customer-bigquery-contract';
-import type { BigQueryDeploymentContext } from './customer-bigquery-deployment';
+import { bigQueryCloudflareUrl, type BigQueryDeploymentContext } from './customer-bigquery-deployment';
 
 const PREFIX = 'ankka-mcp-gateway/bigquery-source/v1/';
 const JOURNAL = 'ankka-mcp-gateway/bigquery-teardown/v1';
@@ -116,7 +116,7 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
     }
     async function apiResponse(path: string, grant: Grant, method = 'GET', allowAbsent = false) {
       active(grant);
-      const response = await port.fetch(`https://api.cloudflare.com/client/v4/accounts/${context.accountId}${path}`, {
+      const response = await port.fetch(bigQueryCloudflareUrl(context, path), {
         method, redirect: 'manual', signal: AbortSignal.timeout(15_000),
         headers: { Authorization: `Bearer ${grant.accessToken}`, Accept: 'application/json' },
       });

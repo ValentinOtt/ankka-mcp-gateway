@@ -11,7 +11,7 @@ const CF_TOKEN = 'synthetic-operation-grant';
 const context = { accountId: 'a'.repeat(32), zoneId: 'b'.repeat(32), installationId: `acg-${'c'.repeat(24)}`,
   accessIssuer: 'https://example.cloudflareaccess.com' };
 const configuration = { queryProjectId: 'query-project', allowedDatasets: [{ projectId: 'data-project', datasetId: 'reporting' }] };
-async function fixture(options: { collision?: boolean; lostUpload?: boolean; googleFailure?: boolean; changedVersion?: boolean } = {}) {
+async function fixture(options: { collision?: boolean; lostUpload?: boolean; googleFailure?: boolean; changedVersion?: boolean; applicationStatus?: number } = {}) {
   const names = await bigQuerySourceNames(context.installationId, 'example.com', configuration);
   let record: BigQueryRecord = { schemaVersion: 1, sourceId: names.sourceId, actionId: `action_${'d'.repeat(32)}`,
     configuration, workerName: names.workerName, hostname: names.hostname, operatorEmail: 'admin@example.com',
@@ -38,12 +38,19 @@ async function fixture(options: { collision?: boolean; lostUpload?: boolean; goo
       expect(init?.body).not.toContain(CF_TOKEN);
       return Response.json({ result: { content: [{ type: 'text', text: JSON.stringify({ jobComplete: !options.googleFailure }) }] } });
     }
-    expect(url.startsWith(`https://api.cloudflare.com/client/v4/accounts/${context.accountId}/`)).toBe(true);
+    const account = `https://api.cloudflare.com/client/v4/accounts/${context.accountId}`;
+    const zone = `https://api.cloudflare.com/client/v4/zones/${context.zoneId}`;
+    expect(url.startsWith(account + '/') || url.startsWith(zone + '/')).toBe(true);
     expect(headers.get('Authorization')).toBe(`Bearer ${CF_TOKEN}`);
-    const path = url.split(context.accountId)[1];
+    const path = url.slice((url.startsWith(zone + '/') ? zone : account).length);
+    // Model the actual zone-access.write grant instead of an unrestricted
+    // account token, so an account-path Access request cannot pass this fixture.
+    if (path.startsWith('/access/apps') && !url.startsWith(zone + '/')) return new Response(null, { status: 403 });
+    if (!path.startsWith('/access/apps')) expect(url.startsWith(account + '/')).toBe(true);
     let result: BoundaryValue = null;
     if (path?.startsWith('/access/apps?')) result = options.collision ? [{ name: 'foreign', domain: names.hostname }] : [];
     else if (path === '/access/apps' && method === 'POST') {
+      if (options.applicationStatus) return Response.json({ errors: [{ message: 'private-provider-detail' }] }, { status: options.applicationStatus });
       const body = v.parse(boundaryObjectSchema, JSON.parse(v.parse(v.string(), init?.body)));
       application = { ...body, id: 'app-id', aud: 'f'.repeat(64) };
       result = application;
@@ -109,13 +116,28 @@ describe('gateway-owned BigQuery deployment', () => {
   });
   it('keeps an unacknowledged upload uncertain and never adopts or uploads it again', async () => {
     const test = await fixture({ lostUpload: true });
-    await expect(test.run()).rejects.toThrow('lost upload acknowledgement');
+    await expect(test.run()).rejects.toThrow('bigquery_deployment_failed');
     expect(test.record().pending).toBe('worker');
+    expect(test.record().failure).toEqual({ stage: 'worker', httpStatus: null });
     const count = test.requests.length;
     await expect(test.run()).rejects.toThrow('bigquery_resource_uncertain');
     expect(test.requests).toHaveLength(count);
     expect(test.uploads()).toBe(1);
     expect(test.writes.join('\n')).not.toContain(GOOGLE_KEY);
+  });
+  it('retains only the stage and HTTP status after an Access refusal, without retrying an uncertain create', async () => {
+    const test = await fixture({ applicationStatus: 403 });
+    await expect(test.run()).rejects.toThrow('bigquery_deployment_failed');
+    expect(test.record()).toMatchObject({ pending: 'application', application: null, workerVersion: null,
+      failure: { stage: 'application', httpStatus: 403 } });
+    expect(test.requests.at(-1)).toEqual({ method: 'POST', url: `https://api.cloudflare.com/client/v4/zones/${context.zoneId}/access/apps` });
+    expect(test.uploads()).toBe(0);
+    expect(test.writes.join('\n')).not.toContain('private-provider-detail');
+    expect(test.writes.join('\n')).not.toContain(CF_TOKEN);
+    expect(test.writes.join('\n')).not.toContain(GOOGLE_KEY);
+    const count = test.requests.length;
+    await expect(test.run()).rejects.toThrow('bigquery_resource_uncertain');
+    expect(test.requests).toHaveLength(count);
   });
   it('refuses a Worker version changed outside the retained receipt', async () => {
     const test = await fixture({ changedVersion: true });

@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Use the selected zone's Access API for managed BigQuery setup and removal,
+  matching the approved permission. Show the pending resource and bounded
+  HTTP failure details while keeping uncertain creates blocked for review.
+
 - Reopen the saved setup review after a final approval expires before token
   exchange. Request fresh consent within the original setup window, keep
   configuration edits locked, and preserve active or potentially applied work.

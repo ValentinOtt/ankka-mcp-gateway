@@ -48,6 +48,9 @@ The initial BigQuery operation uses `bigquery-add`: `zone-access.write`,
 `mcp-portals.write`, `workers-scripts.write`, and `workers-routes.read`. Ordinary
 source installation retains its existing two scopes. The final connection
 resume uses ordinary source consent once the bridge is ready.
+Bridge Access application checks, creation, and removal use the selected zone's
+Access API, matching `zone-access.write`. Worker operations and MCP catalogue
+sharing checks use the selected account.
 
 The gateway exchanges the Cloudflare authorization code only after the
 same-origin key upload. The grant remains in that callback's request memory,
@@ -75,6 +78,12 @@ resource based only on its name. Review the exact account resources before
 reconciliation. An unknown create cannot be automatically resumed or removed;
 keep the gateway's recovery state until the resources have been reconciled.
 Rollback below the setup runtime remains blocked to preserve its receipts.
+
+The source card identifies the pending resource when that detail is available.
+Cloudflare request failures retain only the resource stage and HTTP status, or
+an indication that no response was confirmed. Provider response bodies, request
+URLs, and exception text are not retained in these diagnostics. This detail
+does not clear an uncertain create or permit another attempt.
 
 ## Remove the gateway and its bridges
 

@@ -49,6 +49,13 @@ export interface BigQueryDeploymentPort {
 
 function failure(): never { throw new Error('bigquery_deployment_failed'); }
 
+/** Access applications use the selected zone's grant; Workers and MCP catalogues remain account-scoped. */
+export function bigQueryCloudflareUrl(context: Pick<BigQueryDeploymentContext, 'accountId' | 'zoneId'>, path: string) {
+  const scope = path === '/access/apps' || path.startsWith('/access/apps/') || path.startsWith('/access/apps?')
+    ? `zones/${context.zoneId}` : `accounts/${context.accountId}`;
+  return `https://api.cloudflare.com/client/v4/${scope}${path}`;
+}
+
 async function serverKey(installationId: string, sourceId: string): Promise<string> {
   const prefix = 'mcp';
   const digest = await bigQueryHex(canonicalJson({ installationId, prefix, logicalId: sourceId }));
@@ -62,7 +69,6 @@ export async function deployBigQueryBridge(
   serviceAccountJson: string, port: BigQueryDeploymentPort,
 ): Promise<BigQueryRecord> {
   let record = initial;
-  const base = `https://api.cloudflare.com/client/v4/accounts/${context.accountId}`;
   const workerPath = `/workers/scripts/${record.workerName}`;
   const callback = `https://dash.cloudflare.com/${context.accountId}/one/access-controls/ai-controls/mcp-server/oauth-callback/${await serverKey(context.installationId, record.sourceId)}`;
   const applicationName = `acg:v1:${context.installationId}:bigquery-${record.sourceId}`;
@@ -77,10 +83,21 @@ export async function deployBigQueryBridge(
     if (body !== undefined && !(body instanceof FormData)) headers.set('Content-Type', 'application/json');
     const init: RequestInit = { method, headers, redirect: 'manual', signal: AbortSignal.timeout(15_000) };
     if (body !== undefined) init.body = body;
-    const response = await port.fetch(base + path, init);
-    if (allowAbsent && response.status === 404) { await response.body?.cancel(); return null; }
-    if (!response.ok) { await response.body?.cancel(); failure(); }
-    return v.parse(envelopeSchema, JSON.parse(await readBigQueryText(response.body, 256 * 1024))).result;
+    let httpStatus: number | null = null;
+    try {
+      const response = await port.fetch(bigQueryCloudflareUrl(context, path), init);
+      httpStatus = response.status;
+      if (allowAbsent && response.status === 404) { await response.body?.cancel(); return null; }
+      if (!response.ok) { await response.body?.cancel(); failure(); }
+      return v.parse(envelopeSchema, JSON.parse(await readBigQueryText(response.body, 256 * 1024))).result;
+    } catch {
+      // Only fixed resource words and the HTTP status survive. Never retain a
+      // provider body, URL, exception, grant, or Google credential in diagnostics.
+      const stage = path.startsWith('/access/apps') ? 'application'
+        : path.startsWith('/workers/scripts/') ? 'worker' : 'domain';
+      await save({ ...record, failure: { stage, httpStatus } });
+      failure();
+    }
   }
   async function save(next: BigQueryRecord) { await port.assertActive(); await port.save(next); record = next; }
   async function arm(pending: BigQueryRecord['pending']) {
@@ -181,6 +198,7 @@ export async function deployBigQueryBridge(
   const domains = v.parse(v.array(domainSchema), await api('/workers/domains'));
   if (!domains.some((domain) => domain.id === record.domainId && domain.hostname === record.hostname &&
       domain.service === record.workerName && domain.zone_id === context.zoneId && domain.environment === 'production')) failure();
-  await save({ ...record, ready: true });
+  const { failure: _failure, ...completed } = record;
+  await save({ ...completed, ready: true });
   return record;
 }
