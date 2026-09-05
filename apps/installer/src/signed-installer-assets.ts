@@ -48,7 +48,7 @@ const APPROVED_ROUTE_SET = new Set<string>(APPROVED_INSTALLER_HTML_ROUTES);
 const CSP = [
   "default-src 'none'",
   "base-uri 'none'",
-  "connect-src 'self'",
+  "connect-src 'self' https://*.workers.dev/__ankka/install/status",
   "font-src 'self'",
   "form-action 'none'",
   "frame-ancestors 'none'",

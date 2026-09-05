@@ -14,6 +14,9 @@ const flush = async () => {
 const NOW = 1_800_000_000_000;
 const AUTHORIZATION_URL = 'https://dash.cloudflare.com/oauth2/auth?client_id=x&state=' + 'S'.repeat(43);
 const HANDOFF_URL = `https://ankka-gateway-example-acg-${'a'.repeat(24)}.tenant.workers.dev/__ankka/install#${'A'.repeat(64)}`;
+const READINESS_URL = new URL('__ankka/install/status', new URL(HANDOFF_URL).origin + '/').href;
+const READY_STATUS = { schemaVersion: 1, role: 'customer-gateway-bootstrap', status: 'INCOMPLETE',
+  installId: `acg-${'a'.repeat(24)}`, release: 'gateway-v1.2.3', ownershipPublicKey: 'k'.repeat(43), failure: null };
 const syntheticPrivate = 'SYNTHETIC_PRIVATE_VALUE_MUST_NOT_ESCAPE';
 const expectedNames = [
   'get_installer_status', 'prepare_deployment', 'begin_authorization', 'finish_secure_setup', 'begin_cleanup',
@@ -67,6 +70,8 @@ async function browser(t, options = {}) {
   const navigations = [];
   const timers = new Map();
   let nextTimer = 0;
+  let clock = NOW;
+  class BrowserDate extends Date { static now() { return clock; } }
   let failure = options.registrationFailure ?? null;
   const retained = { response: options.session ?? sessionFixture() };
   const modelContext = {
@@ -96,12 +101,13 @@ async function browser(t, options = {}) {
     clearTimeout: (id) => timers.delete(id),
   });
   const context = createContext({
-    window, document, URL, AbortController, structuredClone, Number, Math, JSON, Object, Array, Date, Error, Infinity,
+    window, document, URL, AbortController, structuredClone, Number, Math, JSON, Object, Array, Date: BrowserDate, Error, Infinity, TextDecoder,
     fetch: async (url, init = {}) => {
       requests.push(structuredClone({ url, ...init }));
       const custom = await options.request?.(url, init, retained);
       if (custom !== undefined) return custom;
-      if (url === '/api/session') return Response.json(retained.response);
+      if (url === '/api/session') return Response.json({ ...retained.response, now: clock });
+      if (url === READINESS_URL) return Response.json(READY_STATUS);
       if (url === '/api/selection') {
         retained.response.session.selection = JSON.parse(init.body);
         return Response.json(retained.response);
@@ -140,7 +146,7 @@ async function browser(t, options = {}) {
     await flush();
     return JSON.parse(result);
   };
-  return { document, window, tools, registered, requests, navigations, timers, retained, invoke, runTimers };
+  return { document, window, tools, registered, requests, navigations, timers, retained, invoke, runTimers, advance: (ms) => { clock += ms; } };
 }
 
 test('registers the five two-stage installer tools once with an abort signal and no duplicates', async (t) => {
@@ -346,4 +352,148 @@ test('registration failures abort cleanly, unsupported browsers register nothing
   const unsupported = await browser(t, { unsupported: true });
   assert.deepEqual(unsupported.registered, []);
   assert.equal(unsupported.document.querySelector('[data-route="/"]').hidden, false);
+});
+
+
+test('a browser TLS failure retains the handoff until the secure address answers', async (t) => {
+  let reads = 0;
+  const b = await browser(t, {
+    pathname: '/result',
+    session: sessionFixture({ phase: 'provisioned', plan: PLAN, provision: PROVISION }),
+    request: (url) => {
+      if (url === READINESS_URL && ++reads <= 2) throw new TypeError(syntheticPrivate);
+    },
+  });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await b.runTimers();
+    assert.deepEqual(b.navigations, []);
+    assert.equal(b.requests.some(r => r.url === '/api/bootstrap/handoff'), false);
+    assert.equal(b.document.getElementById('finish-setup').hidden, true);
+    assert.match(b.document.getElementById('operation-detail').textContent, /secure connection/u);
+    assert.equal(b.document.body.textContent.includes(syntheticPrivate), false);
+    assert.equal(b.timers.size, 1);
+  }
+  await b.runTimers();
+  assert.deepEqual(b.navigations, [HANDOFF_URL]);
+  assert.equal(b.requests.filter(r => r.url === '/api/bootstrap/handoff').length, 1);
+  for (const request of b.requests.filter(r => r.url === READINESS_URL)) {
+    assert.equal(request.method, 'GET');
+    assert.equal(request.mode, 'cors');
+    assert.equal(request.credentials, 'omit');
+    assert.equal(request.redirect, 'error');
+    assert.equal(request.cache, 'no-store');
+    assert.equal(request.referrerPolicy, 'no-referrer');
+    assert.equal(request.headers, undefined);
+    assert.equal(request.body, undefined);
+    assert.equal(new URL(request.url).hash, '');
+    assert.equal(new URL(request.url).search, '');
+  }
+});
+
+test('browser readiness retries HTTP and malformed responses but rejects wrong identity and oversized bodies', async (t) => {
+  for (const response of [
+    () => new Response('still propagating', { status: 503 }),
+    () => new Response('<html>not ready</html>'),
+    () => new Response(null, { status: 302, headers: { location: 'https://other.example/' } }),
+  ]) {
+    const b = await browser(t, { pathname: '/result',
+      session: sessionFixture({ phase: 'provisioned', plan: PLAN, provision: PROVISION }),
+      request: url => url === READINESS_URL ? response() : undefined,
+    });
+    await b.runTimers();
+    assert.equal(b.timers.size, 1);
+    assert.equal(b.requests.some(r => r.url === '/api/bootstrap/handoff'), false);
+    assert.deepEqual(b.navigations, []);
+  }
+  for (const response of [
+    () => Response.json({ ...READY_STATUS, installId: `acg-${'f'.repeat(24)}` }),
+    () => Response.json({ ...READY_STATUS, release: 'gateway-v9.9.9' }),
+    () => Response.json({ ...READY_STATUS, status: 'READY' }),
+    () => Response.json({ ...READY_STATUS, role: 'customer-gateway' }),
+    () => new Response('x'.repeat(8193)),
+  ]) {
+    const b = await browser(t, { pathname: '/result',
+      session: sessionFixture({ phase: 'provisioned', plan: PLAN, provision: PROVISION }),
+      request: url => url === READINESS_URL ? response() : undefined,
+    });
+    await b.runTimers();
+    assert.equal(b.timers.size, 0);
+    assert.equal(b.requests.some(r => r.url === '/api/bootstrap/handoff'), false);
+    assert.deepEqual(b.navigations, []);
+    assert.equal(b.document.getElementById('live-notice').classList.contains('notice-error'), true);
+  }
+});
+
+test('readiness expiry prevents endless retries and consuming an expired handoff', async (t) => {
+  const b = await browser(t, { pathname: '/result',
+    session: sessionFixture({ phase: 'provisioned', plan: PLAN, provision: PROVISION }),
+    request: url => { if (url === READINESS_URL) throw new TypeError('network'); },
+  });
+  await b.runTimers();
+  b.advance(600_001);
+  await b.runTimers();
+  assert.equal(b.timers.size, 0);
+  assert.deepEqual(b.navigations, []);
+  assert.equal(b.requests.some(r => r.url === '/api/bootstrap/handoff'), false);
+  assert.match(b.document.getElementById('live-notice').textContent, /expired/u);
+});
+
+test('readiness validates the target before any external request', async (t) => {
+  for (const bootstrapOrigin of [
+    'https://other.example/', PROVISION.bootstrapOrigin + '?secret=synthetic',
+    PROVISION.bootstrapOrigin.replace('https:', 'http:'),
+    PROVISION.bootstrapOrigin.replace('.tenant.', '.other.tenant.'),
+    PROVISION.bootstrapOrigin.replace('https://', 'https://user@'),
+  ]) {
+    const b = await browser(t, { pathname: '/result',
+      session: sessionFixture({ phase: 'provisioned', plan: PLAN, provision: { ...PROVISION, bootstrapOrigin } }),
+    });
+    await b.runTimers();
+    assert.equal(b.requests.some(r => r.url !== '/api/session'), false);
+    assert.deepEqual(b.navigations, []);
+    assert.equal(b.timers.size, 0);
+  }
+});
+
+test('an in-flight browser check is single-flight and cancelled when the page leaves', async (t) => {
+  let signal;
+  const b = await browser(t, { pathname: '/result',
+    session: sessionFixture({ phase: 'provisioned', plan: PLAN, provision: PROVISION }),
+    request: (url, init) => {
+      if (url !== READINESS_URL) return undefined;
+      signal = init.signal;
+      return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new TypeError('aborted')), { once: true }));
+    },
+  });
+  const pending = b.runTimers();
+  await flush();
+  assert.ok(signal);
+  await b.invoke('finish_secure_setup', {});
+  assert.equal(b.requests.filter(r => r.url === READINESS_URL).length, 1);
+  b.window.dispatchEvent(new Event('pagehide'));
+  await pending;
+  assert.equal(signal.aborted, true);
+  assert.equal(b.timers.size, 0);
+  assert.equal(b.requests.some(r => r.url === '/api/bootstrap/handoff'), false);
+  assert.deepEqual(b.navigations, []);
+});
+
+test('a browser connection timeout retries without releasing the handoff', async (t) => {
+  let signal;
+  const b = await browser(t, { pathname: '/result',
+    session: sessionFixture({ phase: 'provisioned', plan: PLAN, provision: PROVISION }),
+    request: (url, init) => {
+      if (url !== READINESS_URL) return undefined;
+      signal = init.signal;
+      return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new TypeError('timeout')), { once: true }));
+    },
+  });
+  const pending = b.runTimers();
+  await flush();
+  await b.runTimers();
+  await pending;
+  assert.equal(signal.aborted, true);
+  assert.equal(b.timers.size, 1);
+  assert.equal(b.requests.some(r => r.url === '/api/bootstrap/handoff'), false);
+  assert.deepEqual(b.navigations, []);
 });
