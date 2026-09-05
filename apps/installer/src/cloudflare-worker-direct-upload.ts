@@ -8,6 +8,7 @@ import {
 } from './boundary';
 import { canonicalJson } from './canonical-json';
 import { CLOUDFLARE_API_ORIGIN } from './constants';
+import { decodeWorkerModuleBase64 } from './worker-module-base64';
 
 const ACCOUNT_ID_PATTERN = /^[a-f0-9]{32}$/u;
 const WORKER_ID_PATTERN = /^[a-f0-9]{32}$/u;
@@ -965,18 +966,12 @@ function strictBase64Bytes<Value>(value: Value, expectedByteLength: number): Uin
   const candidate = v.safeParse(v.pipe(
     v.string(),
     v.length(4 * Math.ceil(expectedByteLength / 3)),
-    v.regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u),
   ), value);
   if (!candidate.success) return null;
-  let binary: string;
-  try {
-    binary = atob(candidate.output);
-  } catch {
-    return null;
-  }
-  if (binary.length !== expectedByteLength) return null;
-  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-  return bytesToBase64(bytes) === candidate.output ? bytes : null;
+  const bytes = decodeWorkerModuleBase64(candidate.output, expectedByteLength);
+  if (bytes === null || bytes.byteLength === expectedByteLength) return bytes;
+  bytes.fill(0);
+  return null;
 }
 
 function bytesToHex(bytes: Uint8Array): string {

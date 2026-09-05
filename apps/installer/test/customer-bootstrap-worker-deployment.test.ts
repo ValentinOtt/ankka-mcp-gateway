@@ -32,7 +32,11 @@ function absent(): Response {
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes));
+  let binary = '';
+  for (let offset = 0; offset < bytes.byteLength; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
 }
 
 async function sha256(bytes: Uint8Array): Promise<string> {
@@ -66,8 +70,8 @@ function bindings(): CustomerBootstrapPlainBindings {
   });
 }
 
-async function release(): Promise<VerifiedCustomerBootstrapWorkerRelease> {
-  const source = new TextEncoder().encode('export class AdminState{};export default{fetch(){return new Response("ok")}};');
+async function release(moduleBytes?: Uint8Array): Promise<VerifiedCustomerBootstrapWorkerRelease> {
+  const source = moduleBytes ?? new TextEncoder().encode('export class AdminState{};export default{fetch(){return new Response("ok")}};');
   const index = new TextEncoder().encode('<!doctype html><title>Ankka</title>');
   return Object.freeze({
     verification: 'ed25519',
@@ -107,6 +111,7 @@ async function release(): Promise<VerifiedCustomerBootstrapWorkerRelease> {
 interface ProviderOptions {
   readonly initial?: 'absent' | 'foreign-version' | 'foreign-tags';
   readonly uploadThrowsAfterApply?: boolean;
+  readonly moduleBytes?: Uint8Array;
 }
 
 const fixtureBindingSchema = v.looseObject({
@@ -127,7 +132,7 @@ const fixtureMetadataSchema = v.looseObject({
 type FixtureMetadata = v.InferOutput<typeof fixtureMetadataSchema>;
 
 async function providerFixture(options: ProviderOptions = {}) {
-  const verifiedRelease = await release();
+  const verifiedRelease = await release(options.moduleBytes);
   let workerExists = options.initial !== 'absent' && options.initial !== undefined;
   let active = options.initial === 'foreign-version';
   let metadata: FixtureMetadata | null = null;
@@ -280,6 +285,19 @@ describe('restricted customer bootstrap Worker deployment', () => {
     expect(JSON.stringify(result)).not.toContain(ACCESS_TOKEN);
     expect(JSON.stringify(result)).not.toContain(BOOTSTRAP_NONCE);
     expect(JSON.stringify(result)).not.toContain(OWNERSHIP_WRAP_KEY);
+  });
+
+  it('reads back a 4 MiB bootstrap module after upload and on callback recovery', async () => {
+    const fixture = await providerFixture({ moduleBytes: new Uint8Array(4 * 1024 * 1024).fill(97) });
+    const deployInput = await input(fixture);
+    await expect(deployCustomerBootstrapWorker(deployInput)).resolves.toMatchObject({
+      versionId: VERSION_ID, recovery: 'created',
+    });
+    fixture.writes.splice(0);
+    await expect(deployCustomerBootstrapWorker(deployInput)).resolves.toMatchObject({
+      versionId: VERSION_ID, recovery: 'recovered',
+    });
+    expect(fixture.writes).toEqual([]);
   });
 
   it('recovers an upload whose provider response was lost without a duplicate mutation', async () => {

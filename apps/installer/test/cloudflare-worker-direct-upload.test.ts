@@ -969,8 +969,8 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     }
   });
 
-  it('accepts a realistic 349 KiB module without requiring POST or GET to echo module content', async () => {
-    const moduleBytes = new Uint8Array(349 * 1024);
+  it.each([349 * 1024, 4 * 1024 * 1024])('accepts a %i-byte module without requiring POST or GET to echo module content', async (size) => {
+    const moduleBytes = new Uint8Array(size);
     moduleBytes.fill(97);
     const fixture = await releaseFixture(moduleBytes);
     let tags: readonly string[] = [];

@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Verify large Worker modules during installation and updates without overflowing
+  the base64 validator stack. Keep canonical encoding, byte bounds, and exact
+  content hashes; allow self-update readback to fit the accepted source size.
+
 - Show the saved, bounded failure reference when hosted setup stops. Do not
   claim that a failed provisioning attempt left no Cloudflare resources.
 

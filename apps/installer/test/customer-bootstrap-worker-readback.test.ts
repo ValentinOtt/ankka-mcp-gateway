@@ -6,9 +6,10 @@ import { issueCloudflareBootstrapOwnershipHandoff } from
   '../src/cloudflare-bootstrap-ownership-handoff';
 import {
   CUSTOMER_BOOTSTRAP_PLAIN_BINDINGS,
+  exactCustomerBootstrapModule,
   readCustomerBootstrapWorkerOwnership,
 } from '../src/customer-bootstrap-worker-readback';
-import { base64UrlEncode } from '../src/crypto';
+import { base64UrlEncode, sha256Hex } from '../src/crypto';
 
 const NOW = 1_800_000_000_000;
 const ACCOUNT_ID = 'a'.repeat(32);
@@ -211,5 +212,19 @@ describe('customer Stage 1 Worker ownership readback', () => {
       transport: provider(badBindings),
       now: () => NOW + 1,
     })).rejects.toMatchObject({ code: 'identity_mismatch' });
+  });
+});
+
+describe('bootstrap module content readback', () => {
+  it('verifies a 4 MiB canonical module and rejects a whole-quartet truncation', async () => {
+    const source = 'a'.repeat(4 * 1024 * 1024);
+    const module = {
+      name: 'index.js', content_type: 'application/javascript+module', content_base64: btoa(source),
+    };
+    const digest = await sha256Hex(source);
+    await expect(exactCustomerBootstrapModule([module], digest)).resolves.toBe(true);
+    await expect(exactCustomerBootstrapModule([{
+      ...module, content_base64: module.content_base64.slice(0, -4),
+    }], digest)).resolves.toBe(false);
   });
 });
