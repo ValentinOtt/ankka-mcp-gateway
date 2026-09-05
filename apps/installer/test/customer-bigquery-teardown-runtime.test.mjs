@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { AdminState } from '../../../payload/worker/index.js';
 import { ACCOUNT_ID, ZONE_ID, canonicalJson, installReadyGateway, portalOnlyClaim, prefixedSha256, withProviderFetch } from '../../../test/payload-lifecycle.mjs';
+import accessDeleteEvidence from '../../../test/fixtures/cloudflare-access-delete-accepted.json' with { type: 'json' };
 import { createBigQuerySetup } from '../src/customer-bigquery-setup';
 import { createBigQueryTeardown } from '../src/customer-bigquery-teardown';
 import { fixture as bridgeFixture, grant } from './bigquery-teardown-fixture.mjs';
@@ -8,16 +9,29 @@ import { fixture as bridgeFixture, grant } from './bigquery-teardown-fixture.mjs
 const ACTIONS = 'ankka-mcp-gateway/source-actions/v1';
 const SOURCES = 'ankka-mcp-gateway/management-sources/v1';
 const TEARDOWNS = 'ankka-mcp-gateway/teardown-actions/v1';
-const ROOT_STATE = 'ankka-mcp-gateway/uninstall-state/v1';
 const origin = 'https://admin-state.invalid';
 
-async function fixture(run, { stopAfter, knownPending = false, portalPending = false, lostDelete = -1, count = 1,
-  portalAccessMode = 'independent' } = {}) {
+function acceptedAccessDelete(pathname) {
+  const observed = accessDeleteEvidence[pathname.includes('/policies/') ? 'accessPolicy' : 'accessApplication'].delete;
+  const body = structuredClone(observed.body);
+  body.result.id = decodeURIComponent(pathname.split('/').at(-1));
+  return Response.json(body, { status: observed.status });
+}
+
+async function fixture(run, { stopAfter, knownPending = false, portalPending = false, lostDelete = -1, count = 1 } = {}) {
   const gateway = await installReadyGateway({ claimInput: await portalOnlyClaim() });
-  const portalId = gateway.readyReceipt.resources.find((resource) => resource.kind === 'portal').provider.id;
   const portalApplicationId = gateway.readyReceipt.resources.find((resource) => resource.kind === 'portal_access_application').provider.id;
-  const portalPath = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals/${portalId}`;
-  const portalFailures = [];
+  const accessDeleteResponses = [];
+  async function accessDeletionResponse(request, response) {
+    const pathname = new URL(request.url).pathname;
+    if (request.method !== 'DELETE' || !pathname.includes('/access/apps/') || response.status !== 200) return response;
+    await response.body?.cancel();
+    // The disposable live provider probe returned this 202 envelope for
+    // Access policy and application DELETE, followed by GET 404.
+    const accepted = acceptedAccessDelete(pathname);
+    accessDeleteResponses.push({ status: accepted.status, kind: pathname.includes('/policies/') ? 'policy' : 'application' });
+    return accepted;
+  }
   const storage = gateway.objects.get('v1:management').storage;
   const context = { accountId: ACCOUNT_ID, zoneId: ZONE_ID, installationId: gateway.readyReceipt.installationId,
     accessIssuer: gateway.env.CF_ACCESS_ISSUER, zoneName: 'example.com' };
@@ -55,23 +69,10 @@ async function fixture(run, { stopAfter, knownPending = false, portalPending = f
         if (url.pathname.endsWith(`/workers/domains/${target.record.domainId}`)) confirmed.add('domain');
         if (url.pathname.endsWith(`/workers/scripts/${target.record.workerName}/settings`)) confirmed.add('worker');
       }
-      return response;
-    }
-    // Synthetic dependency behavior: this is a candidate explanation for the
-    // reported broken Portal, not a captured Cloudflare API response.
-    if (portalAccessMode !== 'independent' && url.pathname === portalPath &&
-        gateway.provider.state.portal && !gateway.provider.state.apps.has(portalApplicationId) &&
-        ['GET', 'DELETE'].includes(request.method)) {
-      portalFailures.push(request.method);
-      return Response.json({ success: false, result: null }, { status: 409 });
+      return accessDeletionResponse(request, response);
     }
     const response = await gateway.provider.fetch(request);
-    if (portalAccessMode === 'cascade' && request.method === 'DELETE' && url.pathname === portalPath &&
-        gateway.provider.state.portal === null) {
-      gateway.provider.state.apps.delete(portalApplicationId);
-      gateway.provider.state.policies.delete(portalApplicationId);
-    }
-    return response;
+    return accessDeletionResponse(request, response);
   };
   gateway.env.ADMIN_STATE = { idFromName: (name) => name, get(name) {
     if (!instances.has(name)) {
@@ -161,39 +162,12 @@ async function fixture(run, { stopAfter, knownPending = false, portalPending = f
     if (action.status === 'succeeded') expect(applied.status).toBe(200);
     }
     await run({ ...gateway, storage, bridge, bridges, runtime, teardown, invocationCounts, sourceAction: action,
-      portalApplicationId, portalPath, portalFailures });
+      portalApplicationId, accessDeleteResponses });
   });
 }
 
-async function legacyTeardown(test, action) {
-  const proof = await action.send('prove');
-  expect(proof.status).toBe(200);
-  const { authority } = await proof.json();
-  const resources = [...authority.root.receipt.resources].reverse().concat(
-    authority.control.sourceOwnership.toSorted((left, right) => left.sourceId < right.sourceId ? -1 : 1)
-      .flatMap((source) => source.resources).reverse(),
-  );
-  const removed = resources.slice(0, 3);
-  expect(removed.map((resource) => resource.kind)).toEqual(['dns_record', 'portal_access_policy', 'portal_access_application']);
-  const root = { schemaVersion: 1, status: 'tearing_down', installationId: test.readyReceipt.installationId,
-    receipt: authority.root.receipt, teardown: {
-      schemaVersion: 1, installationId: test.readyReceipt.installationId,
-      resourcesHash: await prefixedSha256({ schemaVersion: 1, resources, control: authority.control,
-        sources: authority.sources, policyMode: 'receipt_owned' }),
-      status: 'applying', removedKeys: removed.map((resource) =>
-        `${resource.kind}\u0000${resource.provider.parentId ?? ''}\u0000${resource.provider.id}`),
-      pending: null, removedAt: null,
-    } };
-  const storage = test.objects.get(`v1:${test.readyReceipt.installationId}`).storage;
-  await storage.put(ROOT_STATE, root);
-  test.provider.state.dns = null;
-  test.provider.state.policies.delete(test.portalApplicationId);
-  test.provider.state.apps.delete(test.portalApplicationId);
-  return { root, storage };
-}
-
 describe('BigQuery cleanup in the gateway dependency-removal phase', () => {
-  for (const portalAccessMode of ['required', 'cascade']) it(`removes a Portal that requires its Access app (${portalAccessMode})`, async () => fixture(async (test) => {
+  it('accepts observed Access DELETE 202 responses only after verifying every resource is absent', async () => fixture(async (test) => {
     const sourceApplication = [...test.provider.state.apps.values()].find((app) => app.type === 'mcp');
     const sourcePolicy = test.provider.state.policies.get(sourceApplication.id)[0];
     Object.assign(sourcePolicy, { decision: 'allow', include: [{ email: { email: 'admin@example.com' } }], exclude: [], require: [] });
@@ -206,51 +180,18 @@ describe('BigQuery cleanup in the gateway dependency-removal phase', () => {
     const response = await action.send('apply');
     expect(response.status, await response.clone().text()).toBe(200);
     expect(await response.json()).toMatchObject({ status: 'gateway_removed', removedResourceCount: 10 });
-    expect(test.portalFailures).toEqual([]);
-    const deletions = test.provider.deletes();
-    const portalIndex = deletions.findIndex(({ pathname }) => pathname === test.portalPath);
-    const applicationIndex = deletions.findIndex(({ pathname }) => pathname.endsWith(`/access/apps/${test.portalApplicationId}`));
-    expect(portalIndex).toBeGreaterThanOrEqual(0);
-    if (portalAccessMode === 'required') expect(applicationIndex).toBeGreaterThan(portalIndex);
-    else expect(applicationIndex).toBe(-1);
+    expect(test.accessDeleteResponses).toHaveLength(5);
+    expect(test.accessDeleteResponses.filter(({ kind }) => kind === 'policy')).toHaveLength(2);
+    expect(test.accessDeleteResponses.every(({ status }) => status === 202)).toBe(true);
     expect(test.provider.liveResourceCount()).toBe(2);
     expect(test.provider.state.apps.get(foreignApplication.id)).toEqual(foreignApplication);
     expect(test.provider.state.policies.get(foreignApplication.id)).toEqual(foreignPolicies);
     expect(test.bridge.deletions).toEqual(['domain', 'settings', 'app']);
-  }, { portalAccessMode }));
-  for (const applied of [false, true]) it(`resumes with fresh consent after a ${applied ? 'completed' : 'unapplied'} Portal cascade response is lost`, async () => fixture(async (test) => {
-    let interrupted = false;
-    test.provider.intercept(({ record, state }) => {
-      if (record.method !== 'DELETE' || record.pathname !== test.portalPath || interrupted) return;
-      interrupted = true;
-      if (applied) state.portal = null;
-      return Response.json({ success: false, result: null }, { status: 503 });
-    });
-    const first = await test.teardown();
-    expect(first.prepared.status).toBe(200);
-    const interruptedResponse = await first.send('apply');
-    expect(interruptedResponse.status).toBe(409);
-    expect(await interruptedResponse.json()).toMatchObject({ failure: {
-      phase: 'root_remove', resourceKind: 'portal', category: 'provider_unavailable',
-    } });
-    expect(test.bridge.deletions).toEqual([]);
-    expect(test.bridge.provider.app).not.toBeNull();
-    expect((await first.send('settle')).status).toBe(200);
-    test.provider.intercept(undefined);
-    const fresh = await test.teardown('v');
-    expect(fresh.prepared.status).toBe(200);
-    const response = await fresh.send('apply', 'w'.repeat(22));
-    expect(response.status, await response.clone().text()).toBe(200);
-    expect(await response.json()).toMatchObject({ status: 'gateway_removed', removedResourceCount: 10 });
-    expect(test.portalFailures).toEqual([]);
-    expect(test.provider.liveResourceCount()).toBe(0);
-    expect(test.bridge.deletions).toEqual(['domain', 'settings', 'app']);
-  }, { portalAccessMode: 'cascade' }));
-  it('rechecks cascading Access absence when only Portal deletion has been confirmed', async () => fixture(async (test) => {
-    test.provider.intercept(({ record, state }) => {
-      if (record.method === 'GET' && state.portal === null &&
-          record.pathname.includes(`/access/apps/${test.portalApplicationId}/policies/`)) {
-        return Response.json({ success: false, result: null }, { status: 503 });
+  }));
+  it('requires confirmed absence after Access DELETE 202 and fresh consent before retrying a still-present policy', async () => fixture(async (test) => {
+    test.provider.intercept(({ record }) => {
+      if (record.method === 'DELETE' && record.pathname.includes(`/access/apps/${test.portalApplicationId}/policies/`)) {
+        return acceptedAccessDelete(record.pathname);
       }
     });
     const first = await test.teardown();
@@ -258,14 +199,16 @@ describe('BigQuery cleanup in the gateway dependency-removal phase', () => {
     const interrupted = await first.send('apply');
     expect(interrupted.status).toBe(409);
     expect(await interrupted.json()).toMatchObject({ failure: {
-      phase: 'root_remove', resourceKind: 'portal_access_policy', category: 'provider_unavailable',
+      phase: 'root_verify', resourceKind: 'portal_access_policy', category: 'absence_unconfirmed',
     } });
     const root = test.objects.get(`v1:${test.readyReceipt.installationId}`).storage.snapshot();
-    expect(root.teardown.removedKeys.some((key) => key.startsWith('portal\u0000'))).toBe(true);
-    expect(root.teardown.removedKeys).toHaveLength(2);
-    expect(test.provider.state.portal).toBeNull();
-    expect(test.provider.state.apps.has(test.portalApplicationId)).toBe(false);
+    expect(root.teardown.pending).toMatchObject({ phase: 'submitted' });
+    expect(test.provider.state.policies.get(test.portalApplicationId)).toHaveLength(1);
     expect(test.bridge.deletions).toEqual([]);
+    const before = test.provider.deletes().length;
+    const repeated = await first.send('apply');
+    expect(repeated.status).toBe(409);
+    expect(test.provider.deletes()).toHaveLength(before);
     expect((await first.send('settle')).status).toBe(200);
     test.provider.intercept(undefined);
     const fresh = await test.teardown('v');
@@ -274,7 +217,48 @@ describe('BigQuery cleanup in the gateway dependency-removal phase', () => {
     expect(response.status, await response.clone().text()).toBe(200);
     expect(test.provider.liveResourceCount()).toBe(0);
     expect(test.bridge.deletions).toEqual(['domain', 'settings', 'app']);
-  }, { portalAccessMode: 'cascade' }));
+  }));
+  it('resumes the v0.1.59 journal after two accepted Access deletions were classified as not applied', async () => fixture(async (test) => {
+    const previous = await test.teardown();
+    expect(previous.prepared.status).toBe(200);
+    const proof = await previous.send('prove');
+    expect(proof.status).toBe(200);
+    const { authority } = await proof.json();
+    const resources = [...authority.root.receipt.resources].reverse().concat(
+      [...authority.control.sourceOwnership[0].resources].reverse(),
+    );
+    expect(resources.slice(0, 4).map((resource) => resource.kind)).toEqual([
+      'dns_record', 'portal_access_policy', 'portal_access_application', 'portal',
+    ]);
+    const resourceKey = (resource) => `${resource.kind}\u0000${resource.provider.parentId ?? ''}\u0000${resource.provider.id}`;
+    const resourcesHash = await prefixedSha256({ schemaVersion: 1, resources, control: authority.control,
+      sources: authority.sources, policyMode: 'receipt_owned' });
+    const rootStorage = test.objects.get(`v1:${test.readyReceipt.installationId}`).storage;
+    // v0.1.59 durably called each 202 "not_applied" despite completed provider
+    // deletion. The second consent recorded policy absence, then stopped at app.
+    await rootStorage.put('ankka-mcp-gateway/uninstall-state/v1', {
+      schemaVersion: 1, status: 'tearing_down', installationId: test.readyReceipt.installationId,
+      receipt: authority.root.receipt, teardown: {
+        schemaVersion: 1, installationId: test.readyReceipt.installationId, resourcesHash,
+        status: 'applying', removedKeys: resources.slice(0, 2).map(resourceKey),
+        pending: { key: resourceKey(resources[2]), requestId: 'u'.repeat(22), phase: 'not_applied' }, removedAt: null,
+      },
+    });
+    test.provider.state.dns = null;
+    test.provider.state.policies.delete(test.portalApplicationId);
+    test.provider.state.apps.delete(test.portalApplicationId);
+    expect(test.provider.state.portal).not.toBeNull();
+    expect(test.provider.state.servers.size).toBe(1);
+    expect(test.bridge.provider.app).not.toBeNull();
+    expect((await previous.send('settle')).status).toBe(200);
+    const fresh = await test.teardown('v');
+    expect(fresh.prepared.status).toBe(200);
+    const response = await fresh.send('apply', 'w'.repeat(22));
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(rootStorage.snapshot().teardown.resourcesHash).toBe(resourcesHash);
+    expect(test.provider.liveResourceCount()).toBe(0);
+    expect(test.bridge.deletions).toEqual(['domain', 'settings', 'app']);
+  }));
   it('preserves the Portal and its Access app when an unrelated attached policy appears after preflight', async () => fixture(async (test) => {
     const foreignPolicy = { id: 'unrelated-policy', name: 'Unrelated policy', decision: 'allow', include: [{ everyone: {} }] };
     test.provider.intercept(({ record, state }) => {
@@ -287,52 +271,12 @@ describe('BigQuery cleanup in the gateway dependency-removal phase', () => {
     const response = await action.send('apply');
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ failure: {
-      phase: 'root_remove', resourceKind: 'portal', category: 'ownership_mismatch',
+      phase: 'root_remove', resourceKind: 'portal_access_application', category: 'ownership_mismatch',
     } });
-    expect(test.provider.deletes()).toHaveLength(1);
+    expect(test.provider.deletes()).toHaveLength(2);
     expect(test.provider.state.portal).not.toBeNull();
     expect(test.provider.state.apps.has(test.portalApplicationId)).toBe(true);
     expect(test.provider.state.policies.get(test.portalApplicationId)).toContainEqual(foreignPolicy);
-    expect(test.bridge.deletions).toEqual([]);
-  }, { portalAccessMode: 'cascade' }));
-  it('retains the legacy deletion prefix and graph hash across fresh-consent recovery', async () => fixture(async (test) => {
-    const first = await test.teardown();
-    expect(first.prepared.status).toBe(200);
-    const legacy = await legacyTeardown(test, first);
-    test.provider.intercept(({ record }) => {
-      if (record.method === 'GET' && record.pathname === test.portalPath) {
-        return Response.json({ success: false, result: null }, { status: 503 });
-      }
-    });
-    const interrupted = await first.send('apply');
-    expect(interrupted.status).toBe(409);
-    expect(await interrupted.json()).toMatchObject({ failure: {
-      phase: 'root_preflight', resourceKind: 'portal', category: 'provider_unavailable',
-    } });
-    expect(test.provider.deletes()).toEqual([]);
-    expect((await first.send('settle')).status).toBe(200);
-    test.provider.intercept(undefined);
-    const fresh = await test.teardown('v');
-    expect(fresh.prepared.status).toBe(200);
-    const response = await fresh.send('apply', 'w'.repeat(22));
-    expect(response.status, await response.clone().text()).toBe(200);
-    expect(test.provider.liveResourceCount()).toBe(0);
-    expect(test.bridge.deletions).toEqual(['domain', 'settings', 'app']);
-    const completed = legacy.storage.snapshot().teardown;
-    expect(completed.resourcesHash).toBe(legacy.root.teardown.resourcesHash);
-    expect(completed.removedKeys.slice(0, 3)).toEqual(legacy.root.teardown.removedKeys);
-    expect(completed).not.toHaveProperty('removalOrder');
-  }));
-  for (const corruption of ['changed_order', 'unknown_order', 'hash']) it(`refuses a legacy journal with ${corruption}`, async () => fixture(async (test) => {
-    const action = await test.teardown();
-    expect(action.prepared.status).toBe(200);
-    const legacy = await legacyTeardown(test, action);
-    if (corruption === 'hash') legacy.root.teardown.resourcesHash = `sha256:${'0'.repeat(64)}`;
-    else legacy.root.teardown.removalOrder = corruption === 'changed_order' ? 'portal_first' : 'unrecognized';
-    await legacy.storage.put(ROOT_STATE, legacy.root);
-    expect((await action.send('apply')).status).toBe(409);
-    expect(test.provider.deletes()).toEqual([]);
-    expect(test.provider.state.portal).not.toBeNull();
     expect(test.bridge.deletions).toEqual([]);
   }));
   for (const count of [2, 32]) it(`removes ${count} bridges and their ordinary sources within each invocation budget`, async () => {
@@ -411,8 +355,7 @@ describe('BigQuery cleanup in the gateway dependency-removal phase', () => {
       expect(test.provider.liveResourceCount()).toBe(0);
       expect(test.provider.deletes()).toHaveLength(applied ? 7 : 8);
       expect(test.bridge.deletions).toEqual(['domain', 'settings', 'app']);
-      expect(test.portalFailures).toEqual([]);
-    }, { portalAccessMode: 'required' }));
+    }));
   }
   for (const stopAfter of [undefined, 0, 1, 2, 3]) it(`removes the bridge and ${stopAfter ?? 'all installed'} ordinary source receipts`, async () => {
     await fixture(async (test) => {

@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "observedOn": "2026-09-05",
+  "scope": "disposable_empty_portal",
+  "accessPolicy": {
+    "delete": {
+      "status": 202,
+      "body": {
+        "errors": [],
+        "messages": [],
+        "result": {
+          "id": "synthetic-access-policy"
+        },
+        "success": true
+      }
+    },
+    "readAfterDelete": {
+      "status": 404
+    }
+  },
+  "accessApplication": {
+    "delete": {
+      "status": 202,
+      "body": {
+        "errors": [],
+        "messages": [],
+        "result": {
+          "id": "synthetic-access-application"
+        },
+        "success": true
+      }
+    },
+    "readAfterDelete": {
+      "status": 404
+    }
+  },
+  "portal": {
+    "readAfterAccessDeletion": {
+      "status": 200,
+      "staticResult": {
+        "id": "synthetic-mcp-portal",
+        "name": "Synthetic removal experiment",
+        "hostname": "mcp-removal.example.com",
+        "description": "ankka:synthetic-removal",
+        "code_mode": "default_on",
+        "allow_code_mode": true,
+        "secure_web_gateway": false,
+        "servers": []
+      }
+    },
+    "changedStaticFieldsAfterAccessDeletion": [],
+    "deleteAfterAccessDeletion": {
+      "status": 200
+    },
+    "readAfterDelete": {
+      "status": 404
+    },
+    "accessApplicationReadAfterPortalFirstDeletion": {
+      "status": 200
+    },
+    "accessPolicyReadAfterPortalFirstDeletion": {
+      "status": 200
+    }
+  }
+}

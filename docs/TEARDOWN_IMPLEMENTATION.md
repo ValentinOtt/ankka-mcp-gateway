@@ -22,32 +22,25 @@ application policies and server sharing are checked again before the relevant
 delete. These reads cannot provide an atomic lock against simultaneous manual
 changes in Cloudflare.
 
-New removals delete the Portal before its Access policy and application, and
-finish the Portal graph before deleting source servers. The Portal's Access
-application and all of its policy children are checked again immediately
-before deleting the Portal, because that deletion may also remove its Access
-resources. This avoids leaving a Portal whose Access application is missing
-and avoids depending on mappings that Cloudflare may remove when a server
-disappears. Each deletion is armed durably first. A lost response is
+The removal order deletes the Portal graph before its source servers. Within
+the Portal graph, the order remains DNS record, Access policy, Access
+application, and Portal. This avoids depending on mappings that Cloudflare may
+remove when a server disappears. Each deletion is armed durably first. A lost response is
 resolved by reading the exact resource on a new authorization; proven absence
 advances the journal without another delete. Unfinished source or runtime work
 blocks preparation. A current teardown action blocks runtime updates, and the
 existing source lifecycle checks block source changes. Compatibility floors
 remain unchanged.
 
-The optional root-journal field `removalOrder: "portal_first"` pins this order
-for new removals. An existing journal without the field retains its original
-resource order, graph hash, and deletion prefix; upgrading code does not
-reinterpret earlier deletion receipts. This preserves journal compatibility,
-but does not establish that a legacy removal blocked by provider behavior can
-finish. No legacy receipt is rewritten to claim the new order.
-
-Fresh consent rechecks the complete graph. Missing Portal Access resources
-are accepted as a possible cascade only for the new order, after the exact
-owned Portal's deletion was durably armed or recorded complete, and after a
-fresh read confirms that Portal is still absent. A missing Access resource
-before this boundary remains a conflict. Changed identities, destinations,
-ownership markers, policies, and unowned dependencies still block removal.
+A successful Access `DELETE` can return HTTP `202 Accepted`. This records a
+submitted deletion, not confirmed removal. The executor advances only after
+reading the exact owned resource and confirming absence. If absence cannot be
+confirmed, it retains the pending deletion and requires fresh consent; that
+same callback cannot send the deletion again. A fresh consent rechecks the
+complete graph and resolves the pending operation from its recorded locator.
+The resource order, graph hashes, and existing journal format remain unchanged.
+No deletion prefix is rewritten and no new cascade exception changes the
+ownership checks.
 
 Managed BigQuery bridge removal follows the Portal and source graph. It
 detaches the owned custom domain, deletes the credential-bearing Worker, and
@@ -158,14 +151,13 @@ expiry, revocation, and signing only after verified completion. Hosted tests use
 real SQLite, recreated Durable Objects, complete fixed-root removal, failed
 revocation, rejected authority, and each uncertain provider mutation.
 
-Additional synthetic cases model a Portal whose read/delete requests are
-rejected after its Access application disappears, and a Portal deletion that
-cascades to its owned Access application and policy. The original order
-returns HTTP 409 in this regression harness; the new order completes. Lost
-Portal-delete responses before and after the deletion takes effect, recovery
-with fresh consent, and a foreign policy introduced before Portal deletion are
-covered. These fixtures model plausible provider behavior; they are not
-captured Cloudflare responses and do not confirm the production root cause.
+The
+[`cloudflare-access-delete-accepted.json`](../test/fixtures/cloudflare-access-delete-accepted.json)
+fixture records observed HTTP statuses and a synthetic version of the Access
+deletion envelope. Regression coverage models HTTP 202 followed by exact
+absence, an accepted deletion whose absence remains unconfirmed, and recovery
+with fresh consent. The original runtime treated HTTP 202 as a rejected
+provider request even when Cloudflare had completed the deletion.
 
 ## Qualification still required
 
@@ -182,12 +174,36 @@ Worker, and gateway Worker remained, and the second phase had not started.
 Manual cleanup subsequently succeeded and resource absence was verified.
 
 The exact failing provider request, HTTP status, and internal stage were not
-captured. The deployment's state and journal are no longer available. The
-root cause remains unconfirmed, and no actual partial-deletion response schema
-has been captured. Cloudflare documents
-[automatic Portal Access application creation and Portal deletion](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/),
-but does not specify the Portal API's behavior after that application is
-deleted. Passing synthetic tests does not satisfy live qualification.
+captured. The deployment's state and journal are no longer available, so its
+precise failure cannot be conclusively reconstructed.
+
+On 2026-09-05, a separate live API probe created two fresh disposable empty
+Portals with the installer's Access application shape and a deny-everyone
+policy. It exercised both deletion orders without a source registration,
+Google key, DNS record, or Worker:
+
+- Access policy deletion returned HTTP 202 with `success: true`, empty
+  `errors` and `messages`, and `result: { id }`; the exact policy read then
+  returned HTTP 404. Access application deletion behaved the same way.
+- After both Access resources were deleted, the Portal remained listed and
+  its detail read returned HTTP 200. Its identity, marker, hostname, Code Mode,
+  secure-web-gateway setting, and empty server list were unchanged. Portal
+  deletion returned HTTP 200 and its exact read then returned HTTP 404.
+- Deleting the other Portal first returned HTTP 200 and left its Access
+  application and policy present. No automatic Access creation or deletion
+  cascade was observed through the Portal API in these probes; the Access
+  resources were created and removed explicitly.
+- Every created Portal, application, and policy was independently verified
+  absent by exact reads and relevant inventories after cleanup. The
+  preexisting Portal and Access inventories remained unchanged.
+
+This confirms a provider-status handling defect: the original runtime accepted
+only HTTP 200, 201, or 204 and rejected a successful Access deletion returning
+202. Stopping after policy deletion on one consent and application deletion on
+the next is consistent with the reported state. It remains an explanation of
+the historical report, not a recovered trace of that installation. The narrow
+probe does not qualify managed BigQuery removal, the browser callback, or the
+hosted finalizer, and does not establish every Portal's partial-state behavior.
 
 Use fresh disposable installations for this bounded checklist. No active
 shared gateway is a disposable test fixture. Keep all private locators,
@@ -208,7 +224,8 @@ receipts, and provider evidence outside this public repository.
 4. Repeat on another fresh installation with an interrupted deletion and fresh
    consent. Verify that retained receipts resolve the uncertain operation,
    already confirmed deletions are not resent, and both phases finish.
-   Include interruptions at Portal deletion and bridge domain/Worker deletion.
+   Include an accepted Access deletion whose response or absence confirmation
+   is interrupted, and interruptions at bridge domain/Worker deletion.
 5. During bridge cleanup, independently verify that Access protection remains
    until its exact custom domain and credential-bearing Worker are confirmed
    absent. Recreated or changed resources must block further deletion.

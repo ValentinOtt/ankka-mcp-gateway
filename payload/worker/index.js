@@ -3938,15 +3938,6 @@ function teardownResources(root, sourceOwnership, currentPolicies = false) {
     ? [...root.receipt.resources].filter((resource) => !SOURCE_ACTION_RESOURCE_ORDER.includes(resource.kind)).reverse()
       .concat([...extras].reverse(), [...receiptSources].reverse())
     : [...extras].reverse().concat([...root.receipt.resources].reverse());
-  // Keep the Portal's Access application intact while the Portal exists.
-  // Existing journals retain their original order and graph hash; a code
-  // update must not reinterpret their already recorded deletion prefix.
-  if (currentPolicies && (!root.teardown || root.teardown.removalOrder === 'portal_first')) {
-    const portalIndex = removal.findIndex((resource) => resource.kind === 'portal');
-    const accessIndex = removal.findIndex((resource) => resource.kind === 'portal_access_policy');
-    if (portalIndex < 0 || accessIndex < 0) return null;
-    removal.splice(accessIndex, 0, ...removal.splice(portalIndex, 1));
-  }
   for (const resource of removal) {
     const locatorKey = teardownProviderLocatorKey(resource);
     if (seenProviderLocators.has(locatorKey)) return null;
@@ -4254,44 +4245,19 @@ async function teardownApplicationChildrenRead(root, resource, authority, token)
   return 'present';
 }
 
-async function teardownDeletionDependenciesRead(root, resource, authority, token) {
-  if (resource.kind !== 'portal' || root.teardown?.removalOrder !== 'portal_first') {
-    return teardownApplicationChildrenRead(root, resource, authority, token);
-  }
-  // Portal deletion may also remove its Access application. Recheck that
-  // exact application and all its policy children immediately before DELETE.
-  const application = authority.resources.find((entry) => entry.kind === 'portal_access_application');
-  if (!application) return 'conflict';
-  const observed = await teardownResourceRead(root, application, authority, token, true);
-  if (observed !== 'present') return observed;
-  return teardownApplicationChildrenRead(root, application, authority, token);
-}
-
-async function teardownPortalCascadeAbsent(root, teardown, resource, authority, token) {
-  if (teardown.removalOrder !== 'portal_first' ||
-      !['portal_access_policy', 'portal_access_application'].includes(resource.kind)) return false;
-  const portal = authority.resources.find((entry) => entry.kind === 'portal');
-  if (!portal) return false;
-  const key = teardownResourceKey(portal);
-  // Absence alone is not deletion authority. It must follow the exact
-  // receipt-owned Portal's journaled DELETE, and the Portal must still be gone.
-  if (!teardown.removedKeys.includes(key) && !(teardown.pending?.key === key &&
-      ['send_armed', 'submitted'].includes(teardown.pending.phase))) return false;
-  return await teardownResourceRead(root, portal, authority, token, true) === 'absent';
-}
-
 async function teardownResourceDelete(root, resource, token) {
   const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token, { method: 'DELETE' });
-  if (response.status === 'ok') return 'submitted';
+  // Cloudflare Access DELETE returns 202 even when its next GET is already
+  // 404. Accepted is a submitted deletion, never proof of absence. Keep this
+  // interpretation local to teardown: creates and updates still fail closed.
+  if (response.status === 'ok' || (response.status === 'blocked' && response.httpStatus === 202)) return 'submitted';
   return response.status;
 }
 
 function safeRootTeardown(value, root, resources, resourcesHash) {
   if (!isRecord(value) || !exactKeys(value, [
     'schemaVersion', 'installationId', 'resourcesHash', 'status', 'removedKeys', 'pending', 'removedAt',
-    ...(Object.hasOwn(value ?? {}, 'removalOrder') ? ['removalOrder'] : []),
   ]) || value.schemaVersion !== 1 || value.installationId !== root.installationId ||
-      (Object.hasOwn(value, 'removalOrder') && value.removalOrder !== 'portal_first') ||
       value.resourcesHash !== resourcesHash || !['applying', 'removed'].includes(value.status) ||
       !Array.isArray(value.removedKeys) || value.removedKeys.some((key, index) =>
         !isText(key) || key !== teardownResourceKey(resources[index])) ||
@@ -4425,8 +4391,7 @@ async function processBoundedRootTeardown(storage, root, teardown, authority, re
     } else if (progress.checked === teardown.removedKeys.length && teardown.pending !== null) {
       if (!['absent', 'present'].includes(observed)) return fail(resource.kind, teardownReadFailure(observed));
     } else if (observed !== 'present' && !(observed === 'absent' &&
-      (authority.pendingResources.has(teardownResourceKey(resource)) ||
-        await teardownPortalCascadeAbsent(root, teardown, resource, authority, input.cloudflareAccessToken)))) {
+      authority.pendingResources.has(teardownResourceKey(resource)))) {
       return fail(resource.kind, teardownReadFailure(observed));
     }
     const checked = progress.checked + 1;
@@ -4459,7 +4424,7 @@ async function processBoundedRootTeardown(storage, root, teardown, authority, re
     return pause();
   }
   if (observed !== 'present') return fail(resource.kind, teardownReadFailure(observed));
-  const dependencies = await teardownDeletionDependenciesRead(root, resource, authority, input.cloudflareAccessToken);
+  const dependencies = await teardownApplicationChildrenRead(root, resource, authority, input.cloudflareAccessToken);
   if (dependencies !== 'present') return fail(resource.kind, teardownReadFailure(dependencies));
   if (teardown.pending?.requestId === input.requestId && teardown.pending.phase !== 'not_applied') return fail(resource.kind, 'operation_interrupted');
   // The resource and any Access children have just been re-read. Arm before
@@ -4518,7 +4483,6 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
       pending: null,
       removedAt: null,
     };
-    if (currentPolicies) nextTeardown.removalOrder = 'portal_first';
     teardown = Object.freeze(nextTeardown);
     root = { ...root, status: 'tearing_down', teardown };
     await storage.put(STORAGE_KEY, root);
@@ -4548,8 +4512,7 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
       continue;
     }
     if (observed !== 'present' && !(observed === 'absent' &&
-      (authority.pendingResources.has(teardownResourceKey(resources[index])) ||
-        (currentPolicies && await teardownPortalCascadeAbsent(root, teardown, resources[index], authority, input.cloudflareAccessToken))))) return null;
+      authority.pendingResources.has(teardownResourceKey(resources[index])))) return null;
   }
   if (teardown.status === 'removed') return rootRemovalCompletion(root, resources.length, true, resourcesHash, currentPolicies);
   let resumed = teardown.removedKeys.length > 0 || teardown.pending !== null;
@@ -4564,7 +4527,7 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
       continue;
     }
     if (observed !== 'present') return null;
-    if (currentPolicies && await teardownDeletionDependenciesRead(
+    if (currentPolicies && await teardownApplicationChildrenRead(
       root, resource, authority, input.cloudflareAccessToken,
     ) !== 'present') return null;
     if (teardown.pending && teardown.pending.requestId === input.requestId &&
