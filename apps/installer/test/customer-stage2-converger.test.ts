@@ -46,6 +46,7 @@ import {
   selectionInput,
 } from './fixtures';
 import { createGatewayTeardownHandoff, verifyGatewayTeardownHandoff, GATEWAY_TEARDOWN_HANDOFF_TTL_MS } from '../src/gateway-teardown-handoff';
+import { createGatewayTeardownJob, verifyGatewayTeardownJobAuthority } from '../src/gateway-teardown-job';
 import { readyInstallationReceiptFixture } from './provider-neutral-installation-receipt-fixture';
 
 const ACCOUNT_ID = '1'.repeat(32);
@@ -860,5 +861,21 @@ describe('gateway teardown handoff from a real installation journal', () => {
       actions: input.journal.actions.filter((action) => action.name !== 'management_custom_domain') } })).rejects.toThrow();
     const foreign = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']);
     await expect(createGatewayTeardownHandoff({ ...input, privateKey: foreign.privateKey })).rejects.toThrow();
+  });
+
+  it('imports a fresh signed handoff and preserves its exact authority for recovery after expiry', async () => {
+    const { input } = await installed();
+    const handoff = await createGatewayTeardownHandoff(input);
+    const job = await createGatewayTeardownJob({ handoff, trust: input.trust, now: input.now });
+    await expect(createGatewayTeardownJob({ handoff, trust: input.trust,
+      now: input.now + GATEWAY_TEARDOWN_HANDOFF_TTL_MS })).rejects.toThrow();
+    const recovered = { ...job, updatedAt: input.now + GATEWAY_TEARDOWN_HANDOFF_TTL_MS * 2 };
+    const authority = await verifyGatewayTeardownJobAuthority({ job: recovered, trust: input.trust });
+    expect(authority.certificate.statement.worker.providerId).toBe(WORKER_ID);
+    expect(authority.statement.management.applicationId).toBe(APPLICATION_ID);
+    await expect(verifyGatewayTeardownJobAuthority({ job: { ...recovered,
+      handoffSha256: `sha256:${'0'.repeat(64)}` }, trust: input.trust })).rejects.toThrow();
+    await expect(verifyGatewayTeardownJobAuthority({ job: { ...recovered,
+      handoff: handoff.replace(APPLICATION_ID, 'foreign-application') }, trust: input.trust })).rejects.toThrow();
   });
 });

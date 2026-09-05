@@ -17,6 +17,10 @@ Notable public product and repository changes are recorded here.
   session continuity and reconnection. Link the setup guide from the dashboard
   and document bridge updates, rotation, and removal.
 
+- Model resumable hosted gateway removal with one-time OAuth callbacks,
+  retained signed handoff authority, and explicit unresolved grant-revocation
+  outcomes. The replacement teardown flow remains under implementation.
+
 - Add internal receipt-owned teardown checks and a signed management-root handoff. Dashboard automation remains disabled pending finalizer integration and live qualification.
 
 - Fetch an approved update or rollback release by its exact version and artifact

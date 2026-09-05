@@ -38,6 +38,15 @@ key and the verified installation journal. Import checks the pinned ownership
 issuer, signature, purpose, exact management hostname, and ten-minute expiry.
 The handoff contains neither an OAuth grant nor a signing key.
 
+The hosted removal job model consumes each OAuth callback once and records a
+fixed prefix of root-removal steps. An uncertain send stays pending until a
+fresh consent permits exact read-back; the same attempt cannot send it again.
+The accepted handoff is reverified at its original import time, allowing an
+existing job to resume after the handoff's import window closes. A new job
+cannot import an expired handoff. An interrupted token exchange or unconfirmed
+revocation remains an explicit warning even if a later consent finishes removal.
+This state model does not yet have a hosted storage or HTTP entry point.
+
 ## Remaining integration
 
 The dashboard and operation router must use the new internal executor only
@@ -68,6 +77,12 @@ absence before reporting success. A retained hosted job must support a fresh
 consent after an interrupted retirement or Worker deletion, including when the
 customer gateway no longer runs. Provider grants remain request-local and are
 revoked and discarded on every path.
+
+The hosted storage adapter must retain the original accepted handoff and import
+time, enforce revision-checked writes, and prevent a browser from supplying or
+rewinding either value. It must persist every job transition before the next
+provider call. The provider executor must verify absence before advancing a
+pending step; the pure state model is not provider evidence.
 
 ## Qualification still required
 
