@@ -1,4 +1,4 @@
-# Self-hosted read-only connectors (experimental)
+# Self-hosted read-only connectors
 
 Small provider-specific MCP readers deployed **in your Cloudflare account**.
 One Worker connects to one provider using one deployment-owned credential.
@@ -6,11 +6,14 @@ There is no Ankka credential service, background sync, database, or general
 HTTP tool. Prefer a suitable provider-native MCP server when available; see
 the [native setup guides](../../docs/NATIVE_CONNECTOR_SETUP.md).
 
-These are locally implemented readers, **not approved production catalog
-entries**. The gateway does not provision or update this Worker yet. Real
-provider authorization, Cloudflare shared-operator OAuth, and receipt-owned
-deployment/update/removal still need qualification. Do not use production
-support data as a canary.
+The [Google-hosted BigQuery bridge](BIGQUERY_MCP_EXPERIMENT.md) is supported
+through manual self-hosted deployment and the gateway's custom-source flow.
+Its guide records live query, Google IAM, Portal access, and Claude Desktop
+qualification. You manage the bridge Worker and its credentials separately.
+The other readers remain experimental and need provider and deployment
+qualification. None is a production Source Catalog entry, and the gateway does
+not provision or update these Workers. Do not use production support data as a
+canary for an unqualified reader.
 
 ## Implemented readers
 
@@ -23,7 +26,7 @@ support data as a canary.
 | `google-search-console` | Domain property, final web-search performance, sitemap metadata | Named `sc-domain:` properties; service account with `webmasters.readonly` |
 | `google-analytics` | Daily traffic, realtime active users by device | Named GA4 properties; service account with `analytics.readonly` |
 | `bigquery` | Dataset/table listings, table schemas, one budget-capped read-only SQL query | Named projects and datasets; read-only IAM service account; mandatory dry-run statement gate and per-query byte budget |
-| `bigquery-mcp` | Google hosted MCP table listing, table metadata, and a constant connectivity query | Exact project/dataset pairs; customer-owned service-account key; general SQL disabled |
+| `bigquery-mcp` | Google hosted MCP table listing, table metadata, and explicitly enabled read-only SQL | Metadata project/dataset pairs; SQL scoped by Google IAM; service-account key in your Worker |
 
 The ordinary MCP tools work with Portal Code Mode enabled. This is separate
 from the earlier [Search Console Code Mode experiment](../search-console-adapter/README.md),
@@ -38,11 +41,13 @@ Google's REST API with the hosted MCP read tools' names and arguments; it does
 not remove the separate native BigQuery manual-OAuth block, which continues to
 gate Google's hosted endpoint.
 
-The experimental [hosted BigQuery MCP bridge](BIGQUERY_MCP_EXPERIMENT.md) calls
+The [hosted BigQuery MCP bridge](BIGQUERY_MCP_EXPERIMENT.md) calls
 Google's official MCP from a Worker in your Cloudflare account. Its setup guide
-covers the operator OAuth callback, source resume, team access checks, and key
-rotation. It exposes only a constant SQL probe until query cost controls are
-qualified, and does not replace the budget-capped `bigquery` REST reader.
+covers the operator OAuth callback, source resume, team access, key rotation,
+updates, removal, and useful query qualification. Existing deployments retain
+the constant probe until `allowQueries: true` is explicitly configured. Query
+costs are managed in your Google account; a per-query ceiling is optional and
+remains available through the separate `bigquery` REST reader.
 
 The API reference and scope review for Notion, HubSpot, and Zendesk is in
 [the API evidence record](../../docs/READ_CONNECTOR_API_EVIDENCE.md). Gorgias uses
@@ -63,11 +68,13 @@ It does not use the deprecated ticket-message-list endpoint.
 2. Each tool builds one exact provider request. Methods, paths, resources,
    parameters, and read-query bodies are checked before credential forwarding.
    POST is allowed only for the specific authored read operation; there is no
-   arbitrary query, method, URL, or GraphQL input. The single deliberate SQL
-   surface is the BigQuery reader's `execute_sql_readonly`, and it is bounded:
-   a mandatory dry run must report a `SELECT` statement within the configured
-   per-query byte budget before the one budget-capped execution runs, and the
-   identity's dataset-scoped read-only IAM remains the access boundary.
+   arbitrary method, URL, or GraphQL input. The BigQuery adapters deliberately
+   expose bounded SQL through `execute_sql_readonly`. The `bigquery` REST reader
+   requires a dry-run `SELECT` result within its configured byte budget before
+   one budget-capped execution. The `bigquery-mcp` bridge requires explicit
+   query enablement and uses Google's hosted read-only tool without a byte
+   ceiling. Both rely on the dedicated identity's read-only Google IAM as the
+   SQL data-access boundary.
 3. The shared HTTP boundary forbids redirects, private/local hosts, path
    traversal, and forwarding headers. Provider hosts are fixed by code; tenant
    configuration supplies a single validated label, not a URL. It performs no
@@ -111,7 +118,8 @@ both. Wrangler is kept at the repository's reviewed pin, not silently upgraded.
 
 ## Private setup for a reviewed canary
 
-This is a manual experimental deployment path, not the hosted installer flow.
+For the supported BigQuery bridge, use its [deployment guide](BIGQUERY_MCP_EXPERIMENT.md#deploy-in-your-cloudflare-account).
+The steps below cover experimental readers outside the hosted installer flow.
 
 1. Use a disposable provider account or synthetic resources. Create a dedicated
    read-only provider credential with only the needed resource access. For

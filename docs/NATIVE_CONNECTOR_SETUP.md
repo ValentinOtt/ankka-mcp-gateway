@@ -39,7 +39,7 @@ verified through Cloudflare. A documentary tool list is not `enabledTools`.
 | `salesforce` | Dedicated `platform/sobject-reads` server | Enable the server with an appropriate identity and External Client App; shared manual OAuth remains blocked |
 | `google-drive` | `drivemcp.googleapis.com/mcp/v1` | Dedicated read identity and `drive.readonly`; do not substitute write-capable `drive.file` |
 | `google-sheets` | `sheetsmcp.googleapis.com/mcp/v1` | Dedicated read identity, `spreadsheets.readonly`, bounded cell ranges |
-| `bigquery` | Google-hosted read-only SQL tool | Scoped IAM, write-tool deny policy and query budget; existing shared OAuth block stays enforced |
+| `bigquery` | Google-hosted read-only SQL tool | Scoped IAM and write-tool deny policy; query-cost safeguards are optional; existing direct shared OAuth block stays enforced |
 | `slack` | Native public-channel read use case | Registered internal or Marketplace app; selected user read scopes; no broad private-conversation sharing |
 | `hubspot` | Native CRM/property read candidates | MCP auth app with PKCE and proved read-only installation permissions |
 | `notion` | Native search/fetch candidates | A hosted-MCP-specific read-only grant or identity; API integration capabilities are not interchangeable |
@@ -53,8 +53,12 @@ There is no native Zendesk recipe because no first-party remote endpoint was
 verified. Search Console and Google Analytics are not assigned invented hosted
 endpoints. A separately implemented API reader or deployed adapter has its own
 credential and runtime lifecycle; it must not masquerade as a native recipe.
-The [experimental reader workspace](../apps/read-only-connectors/README.md)
-implements six such API-backed providers separately from these native guides.
+The [reader workspace](../apps/read-only-connectors/README.md) implements
+API-backed providers separately from these native guides. The supported
+[self-hosted BigQuery bridge](../apps/read-only-connectors/BIGQUERY_MCP_EXPERIMENT.md)
+has its own manual deployment, Google IAM, and client qualification. The
+dashboard's BigQuery guide links to it; connecting Google's endpoint directly
+still has the shared-authentication block described above.
 
 ## Copyable setup contracts
 

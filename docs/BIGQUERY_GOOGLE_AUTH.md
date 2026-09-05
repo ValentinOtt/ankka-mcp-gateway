@@ -8,18 +8,20 @@ adapter was created. An isolated Cloudflare source was created for a live setup 
 is not attached to a Portal and all six tool overrides are disabled. Existing
 sources and Portal Code Mode were not changed.
 
-The selected follow-up is an experimental
+The supported self-hosted path is a manually deployed
 [bridge to Google's hosted MCP](../apps/read-only-connectors/BIGQUERY_MCP_EXPERIMENT.md)
 running in your Cloudflare account. Direct client connectivity through that
 bridge, Ankka source provisioning, and shared Portal access with a controlled
 second identity are proven. Portal-wide session revocation is qualified;
 selective disconnection is not promised. Claude Desktop has passed sign-in,
 tool discovery, metadata reads, continued operation beyond the initial token
-lifetime, and reconnection. Useful query cost controls and client qualification
-of that query path still gate support; see the bridge's current evidence and support
-gates. The direct-endpoint block below remains enforced.
+lifetime, and reconnection. Useful aggregates, denial for a verified excluded
+table, and rejection of temporary DDL passed on 2026-09-05. The bridge guide
+defines the supported small-result workflow and your separate Worker lifecycle.
+The direct-endpoint block below remains enforced.
 The bridge uses a service-account secret in your Cloudflare account and
-currently restricts SQL to a constant connectivity query.
+retains the constant connectivity query by default. Its explicit `allowQueries`
+setting enables useful read-only SQL with Google IAM enforcing dataset access.
 
 ## Compatibility result
 
@@ -170,12 +172,13 @@ rows; it does not bound bytes scanned. A dry run is an estimate, not a hard
 budget at execution time. Do not retry a timed-out query automatically.
 
 For on-demand billing, Google offers `QueryUsagePerDay` and
-`QueryUsagePerUserPerDay` custom quotas. Configure a small approved quota on a
-dedicated query project before a paid read; do not lower an existing production
-project's quota without reviewing its other workloads. These are daily quotas,
+`QueryUsagePerUserPerDay` custom quotas. These are optional spending safeguards;
+do not lower an existing production project's quota without reviewing its other
+workloads. These are daily quotas,
 not per-query `maximumBytesBilled`, and do not apply to capacity pricing.
 See [custom query quotas](https://docs.cloud.google.com/bigquery/docs/custom-quotas).
-Strict per-request cost/time/row policy remains a gap in the direct hosted path.
+Strict per-query byte limits are not a support requirement. The hosted path
+documents their absence; the separate REST reader is available when you need one.
 
 Do not log arguments, SQL, query results, OAuth codes, headers or provider error
 bodies in application logs. Do not enable Model Armor payload logging or export

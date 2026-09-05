@@ -32,7 +32,24 @@ export function NativeConnectorGuides() {
             <StatusPill tone="attention">{NATIVE_RECIPE_STATUS_LABELS[recipe.status]}</StatusPill>
           </div>
           <p className="mt-2 text-xs leading-5 text-kumo-subtle">{recipe.description}</p>
-          <p className="mt-3 text-xs text-kumo-subtle">Provider endpoint</p>
+          {recipe.id === 'bigquery' ? (
+            <section className="mt-4 rounded-lg border border-kumo-line bg-kumo-tint/55 p-4" aria-label="Self-hosted BigQuery setup">
+              <h4 className="text-xs font-semibold text-subheading">Connect through a self-hosted bridge</h4>
+              <p className="mt-2 text-xs leading-5 text-kumo-subtle">
+                Deploy the BigQuery bridge in your Cloudflare account, then add its /mcp address as a custom source.
+                Your Google key goes directly to the bridge Worker. The direct Google endpoint below has separate authentication requirements.
+              </p>
+              <a
+                href="https://github.com/ankka-ai/ankka-mcp-gateway/blob/main/apps/read-only-connectors/BIGQUERY_MCP_EXPERIMENT.md"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-3 inline-block text-xs text-brand underline underline-offset-2"
+              >
+                Set up the BigQuery bridge
+              </a>
+            </section>
+          ) : null}
+          <p className="mt-3 text-xs text-kumo-subtle">{recipe.id === 'bigquery' ? 'Direct Google endpoint — shared authentication unavailable' : 'Provider endpoint'}</p>
           <code className="mt-1 block select-all break-all text-xs leading-5 text-kumo-default">{recipe.endpoint}</code>
           <div className="mt-4 grid gap-5 lg:grid-cols-2">
             <section aria-label="Required provider controls">
