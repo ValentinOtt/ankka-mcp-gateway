@@ -471,11 +471,17 @@ export function createCustomerBootstrapRouter(
               now: callbackAt,
             });
             await persistTransition(current, rejected);
+            const cookies = [clearPkceCookie()];
+            if (dependencies.callbackResponse !== undefined) {
+              return dependencies.callbackResponse({
+                status: 'INCOMPLETE', failureCode: 'authorization_rejected', failureReason: null,
+              }, cookies);
+            }
             return json({
               schemaVersion: 1,
               status: 'INCOMPLETE',
               failureCode: 'authorization_rejected',
-            }, 200, [clearPkceCookie()]);
+            }, 200, cookies);
           }
           if (sessionSecret === null || !matchingAttempt || oauthError !== null ||
               !AUTHORIZATION_CODE.test(code) ||

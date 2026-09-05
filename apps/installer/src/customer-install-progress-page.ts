@@ -1,5 +1,5 @@
 import type { CustomerBootstrapCallbackOutcome } from './customer-bootstrap-router';
-import { CUSTOMER_INSTALL_STATUS_PATH } from './customer-install-paths';
+import { CUSTOMER_INSTALL_ROOT_PATH, CUSTOMER_INSTALL_STATUS_PATH } from './customer-install-paths';
 
 function secureHeaders(contentType: string): Headers {
   return new Headers({
@@ -32,6 +32,13 @@ export function customerInstallProgressPage(
   const headers = secureHeaders('text/html; charset=utf-8');
   headers.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
   for (const cookie of cookies) headers.append('set-cookie', cookie);
+  if (outcome.status === 'INCOMPLETE' && outcome.failureCode === 'authorization_rejected') {
+    headers.set('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+    return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Cloudflare approval did not complete</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}a{color:#1d4ed8}</style><main><h1>Cloudflare approval did not complete</h1><p>Cloudflare did not authorize this setup attempt. Return to your gateway setup to review the settings and try the approval again.</p><p><a href="${CUSTOMER_INSTALL_ROOT_PATH}">Return to gateway setup</a></p></main></html>`, {
+      status: 200,
+      headers,
+    });
+  }
   const initial = scriptLiteral({
     status: outcome.status,
     failure: outcome.failureCode === null ? null : { code: outcome.failureCode, reason: outcome.failureReason },
@@ -41,4 +48,3 @@ export function customerInstallProgressPage(
     headers,
   });
 }
-
