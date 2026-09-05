@@ -1,7 +1,7 @@
 import * as v from 'valibot';
 
 // @ts-expect-error The payload is validated as a release input, not a TS package.
-import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceiptProviderStateWithReason } from '../../../payload/worker/index.js';
+import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceiptProviderStateWithReason, prepareCurrentGatewayTeardown, gatewayControlPlaneOrigin } from '../../../payload/worker/index.js';
 import { CustomerBootstrapConvergenceDriver } from './customer-bootstrap-convergence-driver';
 import { finalizeCustomerBootstrapHandover } from './customer-bootstrap-handover';
 import { customerInstallProgressPage } from './customer-install-progress-page';
@@ -30,8 +30,13 @@ import {
   CUSTOMER_INSTALL_STATUS_PATH,
   CUSTOMER_OPERATION_ROOT_PATH,
 } from './customer-install-paths';
-import type { CustomerCloudflareOperation } from './cloudflare-operation-authority';
+import type { ReceiptOwnedCloudflareResourceKind, CustomerCloudflareOperation } from './cloudflare-operation-authority';
 import { canonicalJson } from './canonical-json';
+import { randomBase64Url } from './crypto';
+import { verifyStaticDeployPlanIntegrity } from './schema';
+import { createGatewayTeardownHandoff } from './gateway-teardown-handoff';
+import { DurableCustomerTeardownAttemptPort } from './customer-teardown-attempt';
+import { createCustomerTeardownRouter, customerTeardownCookiePresent, CUSTOMER_TEARDOWN_PATH } from './customer-teardown-router';
 import {
   createCustomerOperationRouter,
   customerOperationAttemptSchema,
@@ -357,7 +362,7 @@ export class AdminState extends RuntimeAdminState {
     return ownership;
   }
 
-  private async issueOperationRelayTicket(config: ParsedFinalEnv, operation: CustomerCloudflareOperation) {
+  private async issueOperationRelayTicket(config: ParsedFinalEnv, operation: CustomerCloudflareOperation, receiptResourceKinds?: readonly ReceiptOwnedCloudflareResourceKind[]) {
     const ownership = await this.assertOperational(config);
     if (ownership.ownershipCertificate === null || ownership.certificateSha256 === null ||
         ownership.trust === null) throw new Error('operation_unavailable');
@@ -365,14 +370,16 @@ export class AdminState extends RuntimeAdminState {
       storage: this.finalState.storage,
       wrappingKey: config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY,
     });
-    return requestCustomerGatewayRelayTicket({
+    const input: Parameters<typeof requestCustomerGatewayRelayTicket>[0] = {
       certificate: ownership.ownershipCertificate,
       certificateSha256: ownership.certificateSha256,
       gatewayCallback: ownership.trust.gatewayCallback,
       operation,
       ownershipPrivateKey: privateKey,
       transport: (input, init) => fetch(input, init),
-    });
+    };
+    return receiptResourceKinds === undefined ? requestCustomerGatewayRelayTicket(input)
+      : requestCustomerGatewayRelayTicket({ ...input, receiptResourceKinds });
   }
 
   /** Reads one prepared action through the payload's own internal route. */
@@ -520,6 +527,44 @@ export class AdminState extends RuntimeAdminState {
     }
   }
 
+  private async teardownRouter(config: ParsedFinalEnv, managementOrigin: string) {
+    const ownership = await this.assertOperational(config);
+    if (ownership.trust === null || ownership.ownershipCertificate === null || ownership.serializedPlan === null) {
+      throw new Error('teardown_unavailable');
+    }
+    const trust = ownership.trust;
+    const certificate = ownership.ownershipCertificate;
+    const serializedPlan = ownership.serializedPlan;
+    return createCustomerTeardownRouter({
+      accountId: config.CLOUDFLARE_ACCOUNT_ID, installId: config.ANKKA_INSTALL_ID,
+      managementOrigin, controlPlaneOrigin: gatewayControlPlaneOrigin(),
+      workerName: config.ANKKA_WORKER_NAME, workersSubdomain: config.ANKKA_WORKERS_SUBDOMAIN,
+      publicClientId: trust.publicClientId, encryptionKey: config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY,
+    }, {
+      attempts: new DurableCustomerTeardownAttemptPort(this.finalState.storage),
+      transport: (target, init) => fetch(target, init),
+      assertOperational: () => this.assertOperational(config).then(() => undefined),
+      command: (command, body, signature) => super.fetch(new Request(`https://admin-state.invalid/teardown-actions/${command}-current`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-ankka-teardown-action-signature': signature }, body,
+      })),
+      issueRelayTicket: (kinds) => this.issueOperationRelayTicket(config, 'uninstall', kinds),
+      signHandoff: async (completion, priorGrantRevocationUnconfirmed) => {
+        const journal = await new CustomerStage2DurableStatePort(this.finalState.storage).read();
+        if (journal === null) throw new Error('teardown_unavailable');
+        return createGatewayTeardownHandoff({
+          certificate, privateKey: await openCustomerGatewayOwnershipPrivateKey({ storage: this.finalState.storage,
+            wrappingKey: config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY }),
+          trust: { pinnedIssuerPublicKey: trust.pinnedIssuerPublicKey, expectedKeyId: trust.issuerKeyId,
+            expectedPublicClientId: trust.publicClientId },
+          plan: await verifyStaticDeployPlanIntegrity(JSON.parse(serializedPlan)), journal,
+          actionId: completion.actionId, nonce: randomBase64Url(32),
+          readyReceiptChecksum: completion.readyReceiptChecksum, dependencyResourcesHash: completion.dependencyResourcesHash,
+          customerGrantRevocation: 'confirmed', priorGrantRevocationUnconfirmed, now: Date.now(),
+        });
+      },
+    });
+  }
+
   /** Authorizes and applies a later operation with the public client the trust names. */
   private async operationRouter(config: ParsedFinalEnv, managementOrigin: string) {
     const ownership = await this.assertOperational(config);
@@ -600,6 +645,12 @@ export class AdminState extends RuntimeAdminState {
       now: Date.now,
     });
     if (installation !== null) return installation;
+    const teardownRoute = url.pathname === CUSTOMER_TEARDOWN_PATH || url.pathname.startsWith(`${CUSTOMER_TEARDOWN_PATH}/`) ||
+      (url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH && customerTeardownCookiePresent(request));
+    if (url.origin === managementOrigin && teardownRoute) {
+      try { return await (await this.teardownRouter(config, managementOrigin)).fetch(request); }
+      catch { return unavailable(); }
+    }
     // A later operation owns its page and start route; it also claims the
     // certified callback while the browser carries an operation attempt.
     const operationRoute = url.pathname.startsWith(CUSTOMER_OPERATION_ROOT_PATH) ||
@@ -685,6 +736,9 @@ export default {
           url.pathname.startsWith(CUSTOMER_OPERATION_ROOT_PATH)) {
         if (url.origin !== `https://${config.ANKKA_MANAGEMENT_HOSTNAME}`) return notFound();
         return env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(request);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/teardown-actions') {
+        return prepareCurrentGatewayTeardown(request, env);
       }
       return gatewayRuntime.fetch(request, env, context);
     } catch {

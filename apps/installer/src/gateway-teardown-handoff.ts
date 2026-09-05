@@ -32,6 +32,7 @@ const statementSchema = v.strictObject({
   readyReceiptChecksum: digest,
   dependencyResourcesHash: digest,
   customerGrantRevocation: v.literal('confirmed'),
+  priorGrantRevocationUnconfirmed: v.boolean(),
   dependentResourcesAbsent: v.literal(true),
   management: v.strictObject({
     zoneId: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
@@ -62,6 +63,14 @@ export interface GatewayTeardownTrust {
   readonly pinnedIssuerPublicKey: string;
   readonly expectedKeyId: string;
   readonly expectedPublicClientId: string;
+}
+
+/** A lookup key, never authorization. The caller must still verify the handoff or stored job. */
+export async function gatewayTeardownJobId(handoff: string): Promise<string> {
+  if (handoff.length > 32 * 1024) invalid();
+  const envelope = v.parse(envelopeSchema, JSON.parse(handoff));
+  if (canonicalJson(envelope) !== handoff) invalid();
+  return sha256Hex(envelope.certificate);
 }
 
 function invalid(): never { throw new Error('teardown_handoff_invalid'); }
@@ -102,6 +111,7 @@ export async function createGatewayTeardownHandoff(input: {
   readonly dependencyResourcesHash: string;
   readonly now: number;
   readonly customerGrantRevocation: 'confirmed';
+  readonly priorGrantRevocationUnconfirmed?: boolean;
 }): Promise<string> {
   const certificate = await verifyCloudflareGatewayOwnershipCertificate({ certificate: input.certificate, ...input.trust });
   const owner = certificate.statement;
@@ -136,6 +146,7 @@ export async function createGatewayTeardownHandoff(input: {
     readyReceiptChecksum: input.readyReceiptChecksum,
     dependencyResourcesHash: input.dependencyResourcesHash,
     customerGrantRevocation: input.customerGrantRevocation, dependentResourcesAbsent: true,
+    priorGrantRevocationUnconfirmed: input.priorGrantRevocationUnconfirmed ?? false,
     management: {
       zoneId: journal.identity.zoneId, hostname: plan.gatewayConfiguration.managementHostname,
       applicationId: applicationLocator.applicationId, applicationAud: applicationLocator.aud,

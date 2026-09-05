@@ -23,8 +23,11 @@ function stored(): GatewayTeardownJob {
   return parseGatewayTeardownJob({
     schemaVersion: 1, revision: 1, handoff: 'signed-handoff-fixture',
     handoffSha256: `sha256:${'1'.repeat(64)}`,
+    release: { schemaVersion: 1, channel: 'canary', controlPlaneOrigin: 'https://deploy.ankka.ai',
+      release: 'gateway-v0.1.1', artifactSha256: '1'.repeat(64), keyId: 'test', publicKey: 'A'.repeat(43) },
+    retirementModuleSha256: '2'.repeat(64),
     acceptedAt: NOW, updatedAt: NOW, phase: 'review', attempt: null,
-    verifiedSteps: [], pendingStep: null, pendingAttemptId: null, revocation: 'not_attempted',
+    verifiedSteps: [], pendingStep: null, pendingAttemptId: null, revocation: 'not_attempted', failureReason: null,
   });
 }
 

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import test from 'node:test';
 
-import worker, { AdminState, planTeamAccessChange } from '../payload/worker/index.js';
+import worker, { AdminState, planTeamAccessChange, prepareCurrentGatewayTeardown } from '../payload/worker/index.js';
 import { addHistoricalInstalledSource } from './historical-source-fixture.mjs';
 import {
   ACCOUNT_ID,
@@ -104,12 +104,13 @@ async function fixture(run, claimInput) {
       'content-type': 'application/json', origin: MANAGEMENT_ORIGIN,
     };
   }
-  async function api(path, { method = 'GET', body, email = ADMIN, extraHeaders = {} } = {}) {
+  async function api(path, { method = 'GET', body, email = ADMIN, extraHeaders = {}, currentTeardown = false } = {}) {
     const init = {
       method, headers: { ...await headers(email), ...extraHeaders },
     };
     if (body !== undefined) init.body = canonicalJson(body);
-    return worker.fetch(new Request(`${MANAGEMENT_ORIGIN}${path}`, init), gateway.env);
+    const request = new Request(`${MANAGEMENT_ORIGIN}${path}`, init);
+    return currentTeardown ? prepareCurrentGatewayTeardown(request, gateway.env) : worker.fetch(request, gateway.env);
   }
   async function view() {
     const response = await api('/api/team');
@@ -161,7 +162,7 @@ async function fixture(run, claimInput) {
     const actionKey = Buffer.alloc(32, seed).toString('base64url');
     const issuedAt = Date.now();
     const input = {
-      schemaVersion: 1, actionId: `action_${'E'.repeat(32)}`,
+      schemaVersion: 1, actionId: `action_${String.fromCharCode(65 + seed).repeat(32)}`,
       actionKeyHash: await prefixedSha256(actionKey), actorEmail: ADMIN,
       installationId: gateway.readyReceipt.installationId,
       issuedAt, expiresAt: issuedAt + 600_000,
@@ -1369,7 +1370,11 @@ for (const assignment of ['deny', 'members']) {
     assert.equal(proof.status, 200, await proof.clone().text());
     const result = await teardown.send('apply');
     assert.equal(result.status, 200, await result.clone().text());
-    assert.equal((await result.json()).removedResourceCount, 7);
+    const completion = await result.json();
+    assert.equal(completion.removedResourceCount, 7);
+    assert.equal(completion.readyReceiptChecksum, original.checksum);
+    assert.equal(completion.dependencyResourcesHash, gateway.storage.snapshot().teardown.resourcesHash);
+    assert.deepEqual((await proof.json()).receiptResourceKinds, ['access_application', 'access_policy', 'dns_record', 'mcp_portal', 'mcp_server']);
     assert.equal(gateway.provider.liveResourceCount(), 0);
     assert.deepEqual(gateway.storage.snapshot().receipt, original);
     const order = gateway.provider.deletes().map(({ pathname }) => pathname);
@@ -1460,11 +1465,72 @@ for (let lostDelete = 0; lostDelete < 7; lostDelete += 1) {
 test('current teardown routes have no public HTTP entry point', async () => fixture(async (gateway) => {
   const baseline = gateway.provider.requests.length;
   for (const path of ['/teardown-actions/prepare-current', '/teardown-actions/prove-current',
-    '/teardown-actions/apply-current', '/teardown-root/apply-current']) {
+    '/teardown-actions/apply-current', '/teardown-actions/settle-current', '/teardown-root/apply-current', '/teardown-root/status-current']) {
     const response = await worker.fetch(new Request(`${MANAGEMENT_ORIGIN}${path}`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
     }), gateway.env);
     assert.equal(response.status, 404);
   }
   assert.equal(gateway.provider.requests.length, baseline);
+}));
+
+
+test('the final gateway prepare export verifies Access and hands off to its own removal review', async () => fixture(async (gateway) => {
+  const baseline = gateway.provider.deletes().length;
+  const denied = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 }, email: NEW_PERSON, currentTeardown: true });
+  assert.equal(denied.status, 401);
+  const foreign = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 }, extraHeaders: { origin: 'https://foreign.example' }, currentTeardown: true });
+  assert.equal(foreign.status, 403);
+  const prepared = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 }, currentTeardown: true });
+  assert.equal(prepared.status, 200, await prepared.clone().text());
+  const target = new URL((await prepared.json()).handoffUrl);
+  assert.equal(target.origin, MANAGEMENT_ORIGIN);
+  assert.equal(target.pathname, '/__ankka/operation/teardown');
+  assert.equal(target.search, '');
+  assert.equal(gateway.provider.deletes().length, baseline);
+}));
+
+test('settling an interrupted current teardown permits immediate fresh consent without erasing progress', async () => fixture(async (gateway) => {
+  const first = await gateway.currentTeardown();
+  assert.equal((await first.send('prove')).status, 200);
+  gateway.provider.hook(({ record }) => record.method === 'DELETE' ? envelope(null, 503) : undefined);
+  assert.equal((await first.send('apply')).status, 409);
+  const pending = structuredClone(gateway.storage.snapshot().teardown);
+  assert.equal((await first.send('settle')).status, 200);
+  assert.equal((await first.send('apply')).status, 409);
+  const second = await gateway.currentTeardown(6);
+  assert.equal(second.prepared.status, 200, await second.prepared.clone().text());
+  assert.deepEqual(gateway.storage.snapshot().teardown, pending);
+  gateway.provider.hook(undefined);
+  assert.equal((await second.send('prove')).status, 200);
+  assert.equal((await second.send('apply', 'H'.repeat(22))).status, 200);
+  assert.equal(gateway.provider.liveResourceCount(), 0);
+}));
+
+
+test('declining current teardown before deletion releases lifecycle locks without changing resources', async () => fixture(async (gateway) => {
+  const first = await gateway.currentTeardown();
+  assert.equal((await first.send('prove')).status, 200);
+  assert.notEqual((await (await gateway.api('/api/source-actions')).json()).blockingAction, null);
+  const before = structuredClone(gateway.storage.snapshot());
+  const settled = await first.send('settle');
+  assert.equal(settled.status, 200);
+  assert.equal((await settled.json()).status, 'failed');
+  assert.equal((await (await gateway.api('/api/source-actions')).json()).blockingAction, null);
+  assert.deepEqual(gateway.storage.snapshot(), before);
+  assert.equal(gateway.provider.deletes().length, 0);
+  assert.equal((await first.send('apply')).status, 409);
+}));
+
+
+test('abandoning current consent expires its unstarted lifecycle lock without changing the root', async (context) => fixture(async (gateway) => {
+  const first = await gateway.currentTeardown();
+  const before = structuredClone(gateway.storage.snapshot());
+  assert.equal((await first.send('prove')).status, 200);
+  const later = Date.now() + 600_001;
+  context.mock.method(Date, 'now', () => later);
+  assert.equal((await (await gateway.api('/api/source-actions')).json()).blockingAction, null);
+  assert.deepEqual(gateway.storage.snapshot(), before);
+  assert.equal((await first.send('apply')).status, 409);
+  assert.equal(gateway.provider.deletes().length, 0);
 }));

@@ -3865,13 +3865,12 @@ async function storedTeardownRoot(storage, environment, installationId) {
   return Object.freeze({ ...value, receipt: retainedReceipt });
 }
 
-async function rootTeardownEvidence(storage, environment, installationId) {
+async function rootTeardownEvidence(storage, environment, installationId, currentStatus = false) {
   const root = await storedTeardownRoot(storage, environment, installationId);
-  return root ? Object.freeze({
-    schemaVersion: 1,
-    installationId,
-    root: Object.freeze({ receipt: root.receipt }),
-  }) : null;
+  if (!root) return null;
+  const evidence = { schemaVersion: 1, installationId, root: Object.freeze({ receipt: root.receipt }) };
+  if (currentStatus) evidence.removalStarted = root.status !== 'ready';
+  return Object.freeze(evidence);
 }
 
 function teardownResourceKey(resource) {
@@ -4220,6 +4219,12 @@ function safeRootTeardown(value, root, resources, resourcesHash) {
   return Object.freeze({ ...value, removedKeys: Object.freeze([...value.removedKeys]), pending });
 }
 
+function rootRemovalCompletion(root, removedResourceCount, resumed, resourcesHash, currentPolicies) {
+  const result = { schemaVersion: 1, status: 'removed', installationId: root.installationId, removedResourceCount, resumed };
+  if (currentPolicies) Object.assign(result, { readyReceiptChecksum: root.receipt.checksum, dependencyResourcesHash: resourcesHash });
+  return Object.freeze(result);
+}
+
 async function processRootTeardownApply(storage, environment, input, nowMs = Date.now(), currentPolicies = false) {
   if (!isRecord(input) || !exactKeys(input, [
     'schemaVersion', 'actionId', 'installationId', 'requestId', 'control', 'sources',
@@ -4281,10 +4286,7 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
     }
     if (observed !== 'present') return null;
   }
-  if (teardown.status === 'removed') return Object.freeze({
-    schemaVersion: 1, status: 'removed', installationId: root.installationId,
-    removedResourceCount: resources.length, resumed: true,
-  });
+  if (teardown.status === 'removed') return rootRemovalCompletion(root, resources.length, true, resourcesHash, currentPolicies);
   let resumed = teardown.removedKeys.length > 0 || teardown.pending !== null;
   while (teardown.removedKeys.length < resources.length) {
     const resource = resources[teardown.removedKeys.length];
@@ -4332,10 +4334,7 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
   teardown = { ...teardown, status: 'removed', pending: null, removedAt: nowMs };
   root = { ...root, status: 'removed', teardown };
   await storage.put(STORAGE_KEY, root);
-  return Object.freeze({
-    schemaVersion: 1, status: 'removed', installationId: root.installationId,
-    removedResourceCount: resources.length, resumed,
-  });
+  return rootRemovalCompletion(root, resources.length, resumed, resourcesHash, currentPolicies);
 }
 
 async function rootTeardownAuthority(storage, environment, installationId, env) {
@@ -4442,12 +4441,22 @@ async function processTeardownActionProof(request, env, storage, nowMs = Date.no
   }
   const authority = await rootTeardownAuthority(storage, environment, action.installationId, env);
   if (!authority) return null;
+  const layout = currentPolicies ? teardownResources(authority.root, authority.control.sourceOwnership, true) : null;
+  if (currentPolicies && !layout) return null;
+  const kinds = {
+    mcp_server: 'mcp_server', portal: 'mcp_portal', dns_record: 'dns_record',
+    source_access_application: 'access_application', portal_access_application: 'access_application',
+    source_access_policy: 'access_policy', portal_access_policy: 'access_policy',
+  };
+  const receiptScopeEvidence = currentPolicies ? {
+    receiptResourceKinds: [...new Set(layout.resources.map((resource) => kinds[resource.kind]))].sort(compareText),
+  } : {};
   // The proof response can be lost after the action is durably authorized but
   // before the hosted session imports the receipt. Replaying the exact HMAC
   // action is read-only and returns the same authority until gateway removal
   // begins, so that narrow crash window remains recoverable.
-  if (action.status === 'applying' || action.status === 'gateway_removed') {
-    return Object.freeze({ schemaVersion: 1, actionId: action.actionId, status: 'authorized', authority });
+  if (currentPolicies || action.status === 'applying' || action.status === 'gateway_removed') {
+    return Object.freeze({ schemaVersion: 1, actionId: action.actionId, status: 'authorized', authority, ...receiptScopeEvidence });
   }
   const applying = safeTeardownAction({ ...action, status: 'applying', failureCode: null });
   const next = applying && safeTeardownActions({
@@ -4457,7 +4466,7 @@ async function processTeardownActionProof(request, env, storage, nowMs = Date.no
   });
   if (!applying || !next) return null;
   await storage.put(TEARDOWNS_KEY, next);
-  return Object.freeze({ schemaVersion: 1, actionId: action.actionId, status: 'authorized', authority });
+  return Object.freeze({ schemaVersion: 1, actionId: action.actionId, status: 'authorized', authority, ...receiptScopeEvidence });
 }
 
 async function processTeardownActionApply(request, env, storage, nowMs = Date.now(), currentPolicies = false) {
@@ -4486,7 +4495,7 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
   if (!actions || !action || (action.policyMode === 'receipt_owned') !== currentPolicies ||
-      !control || !sources || !['applying', 'gateway_removed'].includes(action.status) ||
+      !control || !sources || !(currentPolicies ? ['authorization_required', 'applying', 'gateway_removed'] : ['applying', 'gateway_removed']).includes(action.status) ||
       action.actorEmail !== value.actorEmail || action.installationId !== value.installationId ||
       action.expiresAt !== value.expiresAt || control.installationId !== value.installationId ||
       value.issuedAt < action.issuedAt || await sha256(value.actionKey) !== action.actionKeyHash ||
@@ -4495,6 +4504,15 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
   }
   const rootStub = adminStateStub(env, `v1:${action.installationId}`);
   if (!rootStub) return null;
+  if (currentPolicies && action.status === 'authorization_required') {
+    // Receipt proof and consent navigation are read-only. Arm the persistent
+    // lifecycle lock only when an actual apply is about to reach the root.
+    const applying = safeTeardownAction({ ...action, status: 'applying', failureCode: null });
+    const armed = applying && safeTeardownActions({ ...actions, revision: actions.revision + 1,
+      actions: actions.actions.map((candidate) => candidate.actionId === action.actionId ? applying : candidate) });
+    if (!armed) return null;
+    await storage.put(TEARDOWNS_KEY, armed);
+  }
   let removed;
   try {
     const response = await rootStub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWN_ROOT_PATH}/${currentPolicies ? 'apply-current' : 'apply'}`, {
@@ -4515,26 +4533,68 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
     removed = response instanceof Response && response.status === 200 ? await response.json() : null;
   } catch { removed = null; }
   if (!isRecord(removed) || removed.schemaVersion !== 1 || removed.status !== 'removed' ||
-      removed.installationId !== action.installationId || !Number.isSafeInteger(removed.removedResourceCount)) {
+      removed.installationId !== action.installationId || !Number.isSafeInteger(removed.removedResourceCount) ||
+      (currentPolicies && (!HASH.test(removed.readyReceiptChecksum) || !HASH.test(removed.dependencyResourcesHash)))) {
     return null;
   }
   if (action.status !== 'gateway_removed') {
+    const latest = safeTeardownActions(await storage.get(TEARDOWNS_KEY));
+    if (!latest) return null;
     const updated = safeTeardownAction({ ...action, status: 'gateway_removed', failureCode: null });
     const next = updated && safeTeardownActions({
       schemaVersion: 1,
-      revision: actions.revision + 1,
-      actions: actions.actions.map((candidate) => candidate.actionId === action.actionId ? updated : candidate),
+      revision: latest.revision + 1,
+      actions: latest.actions.map((candidate) => candidate.actionId === action.actionId ? updated : candidate),
     });
     if (!updated || !next) return null;
     await storage.put(TEARDOWNS_KEY, next);
   }
-  return Object.freeze({
-    schemaVersion: 1,
-    actionId: action.actionId,
-    status: 'gateway_removed',
-    installationId: action.installationId,
+  const result = {
+    schemaVersion: 1, actionId: action.actionId, status: 'gateway_removed', installationId: action.installationId,
     removedResourceCount: removed.removedResourceCount,
-  });
+  };
+  if (currentPolicies) Object.assign(result, { readyReceiptChecksum: removed.readyReceiptChecksum, dependencyResourcesHash: removed.dependencyResourcesHash });
+  return Object.freeze(result);
+}
+
+/** End a current consent attempt without erasing its receipt or deletion boundary. */
+async function settleCurrentTeardownAction(request, env, storage, nowMs = Date.now()) {
+  if (request.method !== 'POST' || ['authorization', 'cookie', 'referer', 'origin'].some((name) => request.headers.has(name)) ||
+      request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return null;
+  const raw = await readBoundedText(request, REQUEST_LIMIT_BYTES);
+  let value;
+  try { value = raw === null ? null : JSON.parse(raw); } catch { return null; }
+  if (!isPlainData(value) || canonicalJson(value) !== raw || !exactKeys(value, [
+    'schemaVersion', 'command', 'actionId', 'actionKey', 'actorEmail', 'accountId',
+    'installationId', 'issuedAt', 'expiresAt',
+  ]) || value.schemaVersion !== 1 || value.command !== 'settle' || !ACTION_ID.test(value.actionId) ||
+      !NONCE.test(value.actionKey) || !Number.isSafeInteger(value.issuedAt) || value.issuedAt > nowMs + 30_000) return null;
+  const actions = safeTeardownActions(await storage.get(TEARDOWNS_KEY));
+  const action = actions?.actions.find((candidate) => candidate.actionId === value.actionId);
+  if (!actions || !action || action.policyMode !== 'receipt_owned' ||
+      action.actorEmail !== value.actorEmail || action.installationId !== value.installationId ||
+      action.expiresAt !== value.expiresAt || value.issuedAt < action.issuedAt ||
+      await sha256(value.actionKey) !== action.actionKeyHash ||
+      !await verifyHmac(raw, value.actionKey, request.headers.get('x-ankka-teardown-action-signature'))) return null;
+  const environment = parseManagementEnvironment(env);
+  if (!environment || value.accountId !== environment.accountId) return null;
+  let untouched = false;
+  try {
+    const stub = adminStateStub(env, `v1:${action.installationId}`);
+    const response = await stub?.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWN_ROOT_PATH}/status-current`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: canonicalJson({ schemaVersion: 1, installationId: action.installationId }),
+    }));
+    const evidence = response?.status === 200 ? await response.json() : null;
+    untouched = evidence?.schemaVersion === 1 && evidence.installationId === action.installationId && evidence.removalStarted === false;
+  } catch { /* Unknown state keeps the recovery lock. */ }
+  const updated = safeTeardownAction({ ...action, status: untouched ? 'failed' : 'recovery_required',
+    failureCode: 'fresh_authorization_required' });
+  const next = updated && safeTeardownActions({ ...actions, revision: actions.revision + 1,
+    actions: actions.actions.map((candidate) => candidate.actionId === action.actionId ? updated : candidate) });
+  if (!next) return null;
+  await storage.put(TEARDOWNS_KEY, next);
+  return publicTeardownAction(updated);
 }
 
 export class AdminState {
@@ -4590,12 +4650,12 @@ export class AdminState {
         return control ? fixedJson(200, control) :
           fixedJson(503, { schemaVersion: 1, error: 'control_unavailable' });
       }
-      if (url.pathname === INTERNAL_TEARDOWN_ROOT_PATH && request.method === 'POST') {
+      if ([INTERNAL_TEARDOWN_ROOT_PATH, `${INTERNAL_TEARDOWN_ROOT_PATH}/status-current`].includes(url.pathname) && request.method === 'POST') {
         const environment = parseManagementEnvironment(this.env);
         const input = await request.json().catch(() => null);
         const evidence = environment && exactKeys(input, ['schemaVersion', 'installationId']) &&
           input.schemaVersion === 1 && INSTALLATION_ID.test(input.installationId)
-          ? await rootTeardownEvidence(this.state.storage, environment, input.installationId)
+          ? await rootTeardownEvidence(this.state.storage, environment, input.installationId, url.pathname.endsWith('/status-current'))
           : null;
         return evidence ? fixedJson(200, evidence) :
           fixedJson(409, { schemaVersion: 1, error: 'teardown_root_unavailable' });
@@ -4660,6 +4720,10 @@ export class AdminState {
         const proof = await processTeardownActionProof(request, this.env, this.state.storage, Date.now(), true);
         return proof ? fixedJson(200, proof) :
           fixedJson(409, { schemaVersion: 1, error: 'teardown_action_rejected' });
+      }
+      if (url.pathname === `${INTERNAL_TEARDOWNS_PATH}/settle-current` && request.method === 'POST') {
+        const settled = await settleCurrentTeardownAction(request, this.env, this.state.storage);
+        return settled ? fixedJson(200, settled) : fixedJson(409, { schemaVersion: 1, error: 'teardown_action_rejected' });
       }
       if (url.pathname === `${INTERNAL_TEARDOWNS_PATH}/apply-current` && request.method === 'POST') {
         const applied = await processTeardownActionApply(request, this.env, this.state.storage, Date.now(), true);
@@ -5716,7 +5780,7 @@ async function handleRuntimeActionApply(request, env) {
   } catch { return fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' }); }
 }
 
-async function handleTeardownActions(request, env) {
+async function handleTeardownActions(request, env, currentPolicies = false) {
   const actorEmail = await verifyAccess(request, env);
   if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
   const environment = parseManagementEnvironment(env);
@@ -5767,7 +5831,7 @@ async function handleTeardownActions(request, env) {
   const actionKey = randomBase64Url(32);
   let prepared;
   try {
-    prepared = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWNS_PATH}`, {
+    prepared = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWNS_PATH}${currentPolicies ? '/prepare-current' : ''}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: canonicalJson({
@@ -5806,8 +5870,16 @@ async function handleTeardownActions(request, env) {
     actionId,
     status: 'authorization_required',
     expiresAt: new Date(expiresAt).toISOString(),
-    handoffUrl: `${CONTROL_PLANE_ORIGIN}/manage#${fragment}`,
+    handoffUrl: `${currentPolicies ? `https://${environment.managementHostname}/__ankka/operation/teardown` : `${CONTROL_PLANE_ORIGIN}/manage`}#${fragment}`,
   });
+}
+
+/** The release builder substitutes this fixed origin before hashing the Worker. */
+export function gatewayControlPlaneOrigin() { return CONTROL_PLANE_ORIGIN; }
+
+/** Enabled by the certified final gateway entrypoint, never by a browser flag. */
+export function prepareCurrentGatewayTeardown(request, env) {
+  return handleTeardownActions(request, env, true);
 }
 
 async function handleTeardownActionProof(request, env) {

@@ -866,8 +866,11 @@ describe('gateway teardown handoff from a real installation journal', () => {
   it('imports a fresh signed handoff and preserves its exact authority for recovery after expiry', async () => {
     const { input } = await installed();
     const handoff = await createGatewayTeardownHandoff(input);
-    const job = await createGatewayTeardownJob({ handoff, trust: input.trust, now: input.now });
-    await expect(createGatewayTeardownJob({ handoff, trust: input.trust,
+    const release = { schemaVersion: 1 as const, channel: 'stable' as const, controlPlaneOrigin: 'https://deploy.ankka.ai',
+      release: 'gateway-v0.1.1', artifactSha256: '1'.repeat(64), keyId: 'test', publicKey: 'A'.repeat(43) };
+    const retirementModuleSha256 = '2'.repeat(64);
+    const job = await createGatewayTeardownJob({ handoff, trust: input.trust, release, retirementModuleSha256, now: input.now });
+    await expect(createGatewayTeardownJob({ handoff, trust: input.trust, release, retirementModuleSha256,
       now: input.now + GATEWAY_TEARDOWN_HANDOFF_TTL_MS })).rejects.toThrow();
     const recovered = { ...job, updatedAt: input.now + GATEWAY_TEARDOWN_HANDOFF_TTL_MS * 2 };
     const authority = await verifyGatewayTeardownJobAuthority({ job: recovered, trust: input.trust });

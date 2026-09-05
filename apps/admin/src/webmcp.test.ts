@@ -404,7 +404,7 @@ describe('source pause and current state', () => {
     expect(tool('apply_mcp_source').description).toContain('denied to everyone')
     expect(tool('apply_mcp_source').description).toContain('explicit Team grant')
     expect(tool('apply_mcp_source').description).toContain('preparation alone does not')
-    expect(tool('apply_mcp_source').description).toContain('disables automatic teardown')
+    expect(tool('apply_mcp_source').description).toContain('Finish or recover this action before gateway removal')
     expect(tool('apply_mcp_source').description).toContain('blocks older-runtime rollback')
     expectNoApiCalls(api)
   })

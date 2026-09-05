@@ -17,11 +17,12 @@ Notable public product and repository changes are recorded here.
   session continuity and reconnection. Link the setup guide from the dashboard
   and document bridge updates, rotation, and removal.
 
-- Model resumable hosted gateway removal with one-time OAuth callbacks,
-  retained signed handoff authority, and explicit unresolved grant-revocation
-  outcomes. The replacement teardown flow remains under implementation.
-
-- Add internal receipt-owned teardown checks and a signed management-root handoff. Dashboard automation remains disabled pending finalizer integration and live qualification.
+- Connect Settings to automated removal with two temporary Cloudflare approvals.
+  The gateway verifies and removes its receipt-owned Portal and source resources;
+  a signed handoff lets the hosted finalizer remove management resources, storage,
+  and the Worker. Both phases retain progress for fresh-consent recovery after an
+  interrupted request. Foreign dependencies stop deletion and unresolved grant
+  revocation remains visible. Disposable live qualification is still required.
 
 - Fetch an approved update or rollback release by its exact version and artifact
   digest, so moving the release channel no longer makes rollback unavailable.

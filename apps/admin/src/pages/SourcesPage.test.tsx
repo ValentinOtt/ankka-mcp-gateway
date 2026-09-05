@@ -252,7 +252,7 @@ describe('SourcesPage', () => {
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByText('No sources yet')
-    expect(screen.getByText(/once source provisioning starts, automatic gateway removal/)).toBeInTheDocument()
+    expect(screen.getByText(/once source provisioning starts, rollback below this runtime release/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Add source' }))
     expect(screen.getByText(/New sources start with nobody assigned/)).toBeInTheDocument()
     await user.type(screen.getByLabelText('Source name'), 'GA4 example')

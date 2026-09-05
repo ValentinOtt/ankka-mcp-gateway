@@ -1,4 +1,5 @@
 import * as v from 'valibot';
+import { handleGatewayTeardownStore } from './gateway-teardown-store-client';
 
 import { boundaryObjectSchema, type BoundaryObject } from './boundary';
 import type { BootstrapRandomBytes } from './customer-bootstrap-state';
@@ -231,6 +232,7 @@ export class TwoStageDeploySession {
       if (url.origin !== TWO_STAGE_SESSION_INTERNAL_ORIGIN || url.search !== '' || url.hash !== '') {
         throw new DeployError(404, 'bad_request');
       }
+      if (url.pathname.startsWith('/teardown/')) return handleGatewayTeardownStore(request, this.state.storage);
       if (url.pathname === '/session') {
         if (request.method !== 'GET') throw new DeployError(405, 'bad_request');
         return Response.json({ session: await this.port.read() });

@@ -1,6 +1,7 @@
 import * as v from 'valibot';
 
 import { deepFreezePlainData } from './plain-data';
+import { exactReleaseBundleIdentitySchema, type ExactReleaseBundleIdentity } from './exact-release-bundle';
 import {
   verifyGatewayTeardownHandoff,
   type GatewayTeardownTrust,
@@ -27,6 +28,8 @@ const jobSchema = v.strictObject({
   revision: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
   handoff: v.pipe(v.string(), v.minLength(1), v.maxLength(32 * 1024)),
   handoffSha256: v.pipe(v.string(), v.regex(HASH)),
+  release: exactReleaseBundleIdentitySchema,
+  retirementModuleSha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
   acceptedAt: time,
   updatedAt: time,
   phase: v.picklist(['review', 'authorizing', 'exchanging', 'recovery_required', 'removed', 'removed_revocation_unconfirmed']),
@@ -35,6 +38,7 @@ const jobSchema = v.strictObject({
   pendingStep: v.union([v.picklist(GATEWAY_ROOT_REMOVAL_STEPS), v.null()]),
   pendingAttemptId: v.union([v.pipe(v.string(), v.regex(/^attempt_[A-Za-z0-9_-]{24}$/u)), v.null()]),
   revocation: v.picklist(['not_attempted', 'confirmed', 'unconfirmed']),
+  failureReason: v.nullable(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,95}$/u))),
 });
 export type GatewayTeardownJob = v.InferOutput<typeof jobSchema>;
 export type GatewayTeardownAttempt = v.InferOutput<typeof attemptSchema>;
@@ -62,14 +66,18 @@ export function parseGatewayTeardownJob<Input>(value: Input): GatewayTeardownJob
 export async function createGatewayTeardownJob(input: {
   readonly handoff: string;
   readonly trust: GatewayTeardownTrust;
+  readonly release: ExactReleaseBundleIdentity;
+  readonly retirementModuleSha256: string;
   readonly now: number;
 }): Promise<GatewayTeardownJob> {
   const verified = await verifyGatewayTeardownHandoff(input);
   return parseGatewayTeardownJob({
     schemaVersion: 1, revision: 1,
     handoff: input.handoff, handoffSha256: verified.handoffSha256,
+    release: input.release, retirementModuleSha256: input.retirementModuleSha256,
     acceptedAt: input.now, updatedAt: input.now, phase: 'review', attempt: null,
-    verifiedSteps: [], pendingStep: null, pendingAttemptId: null, revocation: 'not_attempted',
+    verifiedSteps: [], pendingStep: null, pendingAttemptId: null,
+    revocation: verified.statement.priorGrantRevocationUnconfirmed ? 'unconfirmed' : 'not_attempted', failureReason: null,
   });
 }
 
@@ -112,7 +120,7 @@ export function authorizeGatewayTeardownJob(input: {
   // cannot establish that the previous request revoked it.
   const revocationUnconfirmed = job.revocation === 'unconfirmed' || job.phase === 'exchanging';
   return next(job, {
-    phase: 'authorizing', revocation: revocationUnconfirmed ? 'unconfirmed' : 'not_attempted',
+    phase: 'authorizing', failureReason: null, revocation: revocationUnconfirmed ? 'unconfirmed' : 'not_attempted',
     attempt: { id: input.attemptId, stateHash: input.stateHash, verifierHash: input.verifierHash,
       issuedAt: now, expiresAt: now + ATTEMPT_TTL_MS },
   }, now);
@@ -166,6 +174,7 @@ export function settleGatewayTeardownAttempt(input: {
   readonly job: GatewayTeardownJob;
   readonly attemptId: string;
   readonly revocation: 'confirmed' | 'unconfirmed';
+  readonly reason?: string | null;
   readonly now: number;
 }): GatewayTeardownJob {
   const { job } = input;
@@ -175,5 +184,11 @@ export function settleGatewayTeardownAttempt(input: {
   const revocation = job.revocation === 'unconfirmed' ? 'unconfirmed' : input.revocation;
   let phase: GatewayTeardownJob['phase'] = 'recovery_required';
   if (complete) phase = revocation === 'confirmed' ? 'removed' : 'removed_revocation_unconfirmed';
-  return next(job, { phase, attempt: null, revocation }, input.now);
+  return next(job, { phase, attempt: null, revocation, failureReason: complete ? null : input.reason ?? null }, input.now);
+}
+
+/** A fresh, equivalent gateway proof may carry an earlier unconfirmed revocation. */
+export function retainGatewayTeardownRevocationWarning(job: GatewayTeardownJob, now: number): GatewayTeardownJob {
+  if (job.phase.startsWith('removed')) conflict();
+  return next(job, { revocation: 'unconfirmed' }, now);
 }

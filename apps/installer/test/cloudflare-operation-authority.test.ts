@@ -41,7 +41,7 @@ describe('fixed Cloudflare OAuth operation authority', () => {
   it('has the exhaustive fixed operation catalogue and no generic authority', () => {
     expect(FIXED_CLOUDFLARE_OPERATIONS).toEqual([
       'bootstrap', 'install', 'upgrade', 'rollback', 'source-add', 'source-update',
-      'source-remove', 'uninstall', 'uninstall-finalize',
+      'source-remove', 'uninstall', 'uninstall-finalize', 'gateway-root-finalize',
     ]);
     expect(isFixedCloudflareOperation('install')).toBe(true);
     expect(isFixedCloudflareOperation('source-remove')).toBe(true);
@@ -148,6 +148,12 @@ describe('fixed Cloudflare OAuth operation authority', () => {
       mutations: ['delete-root-worker', 'delete-admin-state-namespace'],
       postconditions: ['receipt-resources-absent', 'foreign-resources-unchanged'],
     });
+    expect(fixedCloudflareOperationAuthority('gateway-root-finalize')).toMatchObject({
+      executor: 'ankka-installer', scopes: ['workers-scripts.write', 'zone-access.write'],
+      workerRelease: { mutationPath: 'direct-script-upload', versionEndpoint: 'read-only' },
+      mutations: ['publish-inert-worker-release', 'delete-receipt-resource', 'delete-root-worker', 'delete-admin-state-namespace'],
+    });
+    expect(isCustomerCloudflareOperation('gateway-root-finalize')).toBe(false);
   });
 
   it('freezes every authority boundary', () => {
