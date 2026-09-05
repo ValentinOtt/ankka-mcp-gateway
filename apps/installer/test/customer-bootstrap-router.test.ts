@@ -110,6 +110,8 @@ describe('restricted customer bootstrap router', () => {
   it('protects Worker configuration with the consumed session and locks edits during approval', async () => {
     const capability = await createCustomerBootstrapCapability({ now: NOW });
     let stored: CustomerBootstrapState | undefined;
+    let clock = NOW + 1;
+    let relayStarts = 0;
     const accepted: string[] = [];
     const configured: string[] = [];
     const selection = parseDeploySelection({ ...selectionInput, firstSource: null });
@@ -118,7 +120,7 @@ describe('restricted customer bootstrap router', () => {
       accountId: ACCOUNT_ID, installId: INSTALL_ID, bootstrapId: capability.bootstrapId,
       secretCommitment: capability.secretCommitment, capabilityExpiresAt: capability.expiresAt, publicClientId: CLIENT_ID,
     }, {
-      now: () => NOW + 1,
+      now: () => clock,
       state: {
         read: async () => stored,
         compareAndSet: async (revision, next) => {
@@ -132,11 +134,11 @@ describe('restricted customer bootstrap router', () => {
       acceptSetup: async (permit) => { accepted.push(permit); },
       readSetup: async () => publicSetup,
       configureSetup: async (value) => { configured.push(value.basics.gatewayName); return publicSetup; },
-      issueRelayTicket: async () => ({ relayTicket: RELAY_TICKET, expiresAt: NOW + 120_000 }),
+      issueRelayTicket: async () => ({ relayTicket: RELAY_TICKET, expiresAt: clock + 120_000 }),
       beginRelay: async ({ gatewayState, pkceChallenge, gatewayCallback }) => buildFixedRelayAuthorization({
         clientId: CLIENT_ID, relayStateKey: RELAY_KEY,
         gateway: { accountId: ACCOUNT_ID, installId: INSTALL_ID, callback: gatewayCallback }, operation: 'install',
-        gatewayState, pkceChallenge, nonce: base64UrlEncode(new Uint8Array(32).fill(8)), now: NOW + 1,
+        gatewayState, pkceChallenge, nonce: base64UrlEncode(new Uint8Array(32).fill(++relayStarts)), now: clock,
       }),
       startConvergence: async () => { throw new Error('no grant expected'); },
     });
@@ -157,9 +159,45 @@ describe('restricted customer bootstrap router', () => {
     expect(await invalid.json()).toEqual({ error: 'invalid_configuration', reason: 'gateway_hostnames_invalid' });
     expect((await post('configuration')).status).toBe(200);
     expect(configured).toEqual([selection.basics.gatewayName]);
-    expect((await post('oauth/start', ORIGIN, '{}')).status).toBe(200);
+    const first = await post('oauth/start', ORIGIN, '{}');
+    expect(first.status).toBe(200);
+    const readSetup = () => router.fetch(new Request(`${ORIGIN}/__ankka/install/setup`, { headers: { cookie } }));
+    expect((await readSetup()).status).toBe(409);
     expect((await post('configuration')).status).toBe(409);
     expect(configured).toHaveLength(1);
+
+    // Only a definitely unexchanged, expired attempt can reopen its review.
+    const pending = stored;
+    if (!pending?.oauth) throw new Error('pending approval missing');
+    clock = pending.oauth.expiresAt;
+    const expiredApproval = await readSetup();
+    expect(expiredApproval.status).toBe(200);
+    expect(await expiredApproval.json()).toEqual({ ...publicSetup, approvalExpired: true });
+    expect(stored).toEqual(pending);
+    expect((await post('configuration')).status).toBe(409);
+    expect(configured).toHaveLength(1);
+
+    for (const phase of ['exchanging', 'finalizing'] as const) {
+      stored = { ...pending, status: 'CONVERGING', oauth: { ...pending.oauth, phase } };
+      const before = structuredClone(stored);
+      expect((await readSetup()).status).toBe(409);
+      expect((await post('configuration')).status).toBe(409);
+      expect(stored).toEqual(before);
+    }
+    stored = pending;
+    const fresh = await post('oauth/start', ORIGIN, '{}');
+    expect(fresh.status).toBe(200);
+    expect(cookieValue(fresh, PKCE_COOKIE)).not.toBe(cookieValue(first, PKCE_COOKIE));
+    expect(stored?.oauth?.attemptId).not.toBe(pending.oauth.attemptId);
+    expect(relayStarts).toBe(2);
+
+    // A fresh attempt does not extend the original setup/handoff window.
+    clock = capability.expiresAt;
+    const beforeExpiryRead = structuredClone(stored);
+    expect((await readSetup()).status).toBe(410);
+    expect((await post('oauth/start', ORIGIN, '{}')).status).toBe(410);
+    expect(stored).toEqual(beforeExpiryRead);
+    expect(relayStarts).toBe(2);
   });
 
   it('runs code relay -> customer exchange -> verify -> revoke and permanently closes bootstrap', async () => {

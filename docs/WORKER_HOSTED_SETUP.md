@@ -68,6 +68,21 @@ the account, selected zone, and hostname availability, then runs the existing
 installation and revocation flow. Updates and removal retain their existing
 operation-specific scope sets.
 
+If the second approval expires before its callback reaches token exchange, the
+same browser can reopen the setup page and choose **Start a fresh approval**
+for the saved configuration. Reading the page does not clear the old attempt
+or make provider calls. The new approval uses fresh PKCE and keeps configuration
+edits locked. Active approvals and attempts that reached exchange or convergence
+cannot reopen this review; they keep their existing recovery boundaries.
+
+This retry requires the original setup session and signed permit to remain
+valid. It does not extend the ten-minute handoff or adoption window. Once that
+window or the browser session is lost, this page cannot resume the shell. An
+unfinished Worker and namespace may remain in the Cloudflare account; inspect
+the retained installation evidence before starting a fresh deployment. This
+flow does not adopt or delete them automatically, and a later deployment has
+a new identity. Full-expiry renewal of a pre-install shell remains unsupported.
+
 While installation or recovery holds its temporary grant, the customer Worker
 keeps one timer bounded by the existing fifteen-minute convergence deadline.
 This prevents ordinary idle hibernation between alarm passes when the progress

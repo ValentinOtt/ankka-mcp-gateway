@@ -391,6 +391,14 @@ export function createCustomerBootstrapRouter(
           const secret = readSessionCookie(request);
           if (secret === null) return json({ error: 'bootstrap_session_required' }, 403);
           await authenticatedSession(current, secret, now());
+          // A callback that never reached exchange may be replaced by fresh
+          // PKCE within the original setup window. Keep the reviewed plan
+          // locked, and leave any exchanged or converging work to recovery.
+          if (request.method === 'GET' && current.status === 'INCOMPLETE' &&
+              current.oauth?.phase === 'authorizing' && current.oauth.expiresAt <= now() &&
+              dependencies.readSetup !== undefined) {
+            return json({ ...await dependencies.readSetup(), approvalExpired: true });
+          }
           if (current.oauth !== null || current.status !== 'INCOMPLETE') return json({ error: 'setup_locked' }, 409);
           if (request.method === 'GET' && dependencies.readSetup !== undefined) return json(await dependencies.readSetup());
           if (request.method === 'POST' && dependencies.configureSetup !== undefined) {
