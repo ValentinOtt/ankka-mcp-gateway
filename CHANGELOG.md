@@ -17,6 +17,8 @@ Notable public product and repository changes are recorded here.
   session continuity and reconnection. Link the setup guide from the dashboard
   and document bridge updates, rotation, and removal.
 
+- Add internal receipt-owned teardown checks and a signed management-root handoff. Dashboard automation remains disabled pending finalizer integration and live qualification.
+
 - Fetch an approved update or rollback release by its exact version and artifact
   digest, so moving the release channel no longer makes rollback unavailable.
   Serve retained signed releases from the existing bucket without a session or

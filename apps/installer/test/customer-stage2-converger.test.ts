@@ -18,6 +18,8 @@ import {
   acceptCustomerGatewayOwnershipHandoff,
   adoptCustomerGatewayOwnership,
   initializeCustomerGatewayOwnershipState,
+  readCustomerGatewayOwnershipState,
+  openCustomerGatewayOwnershipPrivateKey,
   type CustomerGatewayOwnershipStorage,
 } from '../src/customer-gateway-ownership-state';
 import {
@@ -34,7 +36,7 @@ import {
   type CustomerStage2ActionName,
   type CustomerStage2Journal,
 } from '../src/customer-stage2-journal';
-import { buildStaticDeployPlan, parseDeploySelection, type StaticDeployPlan } from '../src/schema';
+import { buildStaticDeployPlan, parseDeploySelection, verifyStaticDeployPlanIntegrity, type StaticDeployPlan } from '../src/schema';
 import {
   BOOTSTRAP_NONCE_KEY,
   CLIENT_ID,
@@ -43,6 +45,7 @@ import {
   NOW,
   selectionInput,
 } from './fixtures';
+import { createGatewayTeardownHandoff, verifyGatewayTeardownHandoff, GATEWAY_TEARDOWN_HANDOFF_TTL_MS } from '../src/gateway-teardown-handoff';
 import { readyInstallationReceiptFixture } from './provider-neutral-installation-receipt-fixture';
 
 const ACCOUNT_ID = '1'.repeat(32);
@@ -797,5 +800,65 @@ describe('customer Stage 2 convergence', () => {
       domainCreates: 1,
       finalUploads: 1,
     });
+  });
+});
+
+
+describe('gateway teardown handoff from a real installation journal', () => {
+  async function installed(handover = false) {
+    const test = await fixture();
+    const common = { ...test.baseInput, attemptId: `attempt_${'q'.repeat(24)}` };
+    await convergeCustomerStage2(handover ? { ...common, handover: async () => undefined } : common);
+    const owner = await readCustomerGatewayOwnershipState(test.baseInput.storage);
+    if (owner.ownershipCertificate === null || owner.serializedPlan === null || owner.trust === null || test.journal.value === null) {
+      throw new Error('installation fixture incomplete');
+    }
+    const journal = test.journal.value;
+    const resources = v.parse(v.looseObject({ receiptChecksum: v.string() }),
+      journal.actions.find((action) => action.name === 'gateway_resources')?.locator);
+    const trust = {
+      pinnedIssuerPublicKey: owner.trust.pinnedIssuerPublicKey,
+      expectedKeyId: owner.trust.issuerKeyId, expectedPublicClientId: owner.trust.publicClientId,
+    };
+    return {
+      input: {
+        certificate: owner.ownershipCertificate,
+        privateKey: await openCustomerGatewayOwnershipPrivateKey({ storage: test.baseInput.storage, wrappingKey: ENCRYPTION_KEY }),
+        trust, plan: await verifyStaticDeployPlanIntegrity(JSON.parse(owner.serializedPlan)),
+        journal, actionId: `action_${'r'.repeat(32)}`, nonce: 'A'.repeat(43),
+        readyReceiptChecksum: resources.receiptChecksum, dependencyResourcesHash: `sha256:${'8'.repeat(64)}`,
+        now: NOW + 1_000, customerGrantRevocation: 'confirmed' as const,
+      },
+      test,
+    };
+  }
+
+  it.each([false, true])('certifies only the recorded management root, including a self-upload handover (%s)', async (handover) => {
+    const { input } = await installed(handover);
+    const encoded = await createGatewayTeardownHandoff(input);
+    const verified = await verifyGatewayTeardownHandoff({ handoff: encoded, trust: input.trust, now: input.now });
+    expect(verified.certificate.statement.worker.providerId).toBe(WORKER_ID);
+    expect(verified.statement.management).toMatchObject({ applicationId: APPLICATION_ID, policyId: POLICY_ID, domainId: DOMAIN_ID });
+    expect(verified.statement.customerGrantRevocation).toBe('confirmed');
+    expect(encoded).not.toContain(ACCESS_TOKEN);
+    expect(encoded).not.toContain(ENCRYPTION_KEY);
+    await expect(verifyGatewayTeardownHandoff({ handoff: encoded, trust: input.trust,
+      now: input.now + GATEWAY_TEARDOWN_HANDOFF_TTL_MS })).rejects.toThrow();
+    const tampered = JSON.parse(encoded);
+    const statement = JSON.parse(tampered.statement);
+    statement.management.applicationId = 'foreign-application';
+    tampered.statement = canonicalJson(statement);
+    await expect(verifyGatewayTeardownHandoff({ handoff: canonicalJson(tampered), trust: input.trust, now: input.now })).rejects.toThrow();
+  });
+
+  it('refuses an unrelated receipt, incomplete management action, foreign root, or wrong signing key', async () => {
+    const { input } = await installed();
+    await expect(createGatewayTeardownHandoff({ ...input, readyReceiptChecksum: `sha256:${'0'.repeat(64)}` })).rejects.toThrow();
+    await expect(createGatewayTeardownHandoff({ ...input, journal: { ...input.journal,
+      identity: { ...input.journal.identity, workerId: '9'.repeat(32) } } })).rejects.toThrow();
+    await expect(createGatewayTeardownHandoff({ ...input, journal: { ...input.journal,
+      actions: input.journal.actions.filter((action) => action.name !== 'management_custom_domain') } })).rejects.toThrow();
+    const foreign = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']);
+    await expect(createGatewayTeardownHandoff({ ...input, privateKey: foreign.privateKey })).rejects.toThrow();
   });
 });
