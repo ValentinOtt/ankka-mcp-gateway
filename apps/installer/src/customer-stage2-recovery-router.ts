@@ -316,11 +316,17 @@ export function createCustomerStage2RecoveryRouter(
               now: callbackAt,
             });
             await persist(current, rejected);
+            const cookies = [clearCookie(PKCE_COOKIE), clearCookie(SESSION_COOKIE)];
+            if (dependencies.callbackResponse !== undefined) {
+              return dependencies.callbackResponse({
+                status: 'INCOMPLETE', failureCode: 'authorization_rejected', failureReason: null,
+              }, cookies);
+            }
             return json({
               schemaVersion: 1,
               status: 'INCOMPLETE',
               failureCode: 'authorization_rejected',
-            }, 200, [clearCookie(PKCE_COOKIE), clearCookie(SESSION_COOKIE)]);
+            }, 200, cookies);
           }
           if (sessionSecret === null || !matchingAttempt || oauthError !== null ||
               !AUTHORIZATION_CODE.test(code) || !TOKEN.test(oauthState) ||
