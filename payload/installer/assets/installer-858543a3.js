@@ -527,7 +527,11 @@ function renderResult() {
     case 'failed': {
       title.textContent = 'The approval did not complete';
       intro.textContent = FAILURE_MESSAGES[failure?.code] ?? 'The Cloudflare approval did not complete.';
-      detail.textContent = 'Nothing was left running. Start a fresh approval whenever you are ready; the same setup is kept.';
+      const reason = isText(failure?.reason) && /^[a-z][a-z0-9_]{0,159}$/u.test(failure.reason)
+        ? ` Reference: ${failure.reason}.` : '';
+      detail.textContent = (failure?.code === 'provision_failed'
+        ? 'Setup stopped. Review the failure reference and any incomplete gateway in Cloudflare before starting a fresh approval.'
+        : 'The same setup is kept. Start a fresh approval when you are ready.') + reason;
       fresh.hidden = !planSummary();
       describe.hidden = false;
       break;

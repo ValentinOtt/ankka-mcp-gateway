@@ -322,6 +322,33 @@ test('failed and handed-off sessions render a fresh-approval path and never expo
   assert.equal(handedOff.timers.size, 0, 'no handoff polling after the capability was released');
 });
 
+test('failed setup shows its bounded diagnostic without claiming provider resources were removed', async (t) => {
+  const b = await browser(t, {
+    pathname: '/result',
+    session: sessionFixture({
+      phase: 'failed', selection: SELECTION, plan: PLAN,
+      failure: { code: 'provision_failed', reason: 'script_upload_rejected', at: NOW },
+    }),
+  });
+  const detail = b.document.getElementById('result-detail').textContent;
+  assert.match(detail, /Reference: script_upload_rejected/u);
+  assert.doesNotMatch(detail, /Nothing was left running/u);
+  assert.match(detail, /incomplete gateway/u);
+});
+
+test('failed setup does not render malformed or unbounded diagnostic values', async (t) => {
+  for (const reason of ['Bearer synthetic-secret', 'https://example.com/private', 'a'.repeat(161), { message: 'synthetic-private' }]) {
+    const b = await browser(t, {
+      pathname: '/result',
+      session: sessionFixture({
+        phase: 'failed', selection: SELECTION, plan: PLAN,
+        failure: { code: 'provision_failed', reason, at: NOW },
+      }),
+    });
+    assert.doesNotMatch(b.document.getElementById('result-detail').textContent, /Reference:|synthetic|https:|a{161}/u);
+  }
+});
+
 test('starting another deployment replaces the session before opening a fresh approval', async (t) => {
   const b = await browser(t, {
     pathname: '/result',

@@ -12,7 +12,7 @@ const COMPONENTS = Object.freeze({
   admin: null,
   installer: [
     'assets/ankka-85bfe235.svg',
-    'assets/installer-414b8792.js',
+    'assets/installer-858543a3.js',
     'assets/installer-953fc6de.css',
     'index.html',
   ],
@@ -21,7 +21,7 @@ const COMPONENTS = Object.freeze({
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: '1e6579d964d16b077e694ab926ef63959f3e7d4b12bf754b39835309b74507a5',
+  installer: '0bb473820fa8a31286f9aa1a08636c9194f6ebcb25ee23eaec133c9033d6b7fd',
   worker: 'f53ce45e5e3045335bf62115008ad7ae2753515b7e17ab7668af259b8a3dadf8',
   'worker-cleanup': '35b1d075e05285bd7a3cff7dc11afc7ebda258276f3380204a19510b3c1f8a9a',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
