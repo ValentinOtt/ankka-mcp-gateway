@@ -11,6 +11,7 @@ import {
   type GatewayWorkerPlainTextBindings,
 } from './cloudflare-worker-direct-upload';
 import { readBoundedText, withDeadline } from './http';
+import { decodeWorkerModuleBase64 } from './worker-module-base64';
 
 const ACCOUNT_ID = /^[a-f0-9]{32}$/u;
 const WORKER_ID = /^[a-f0-9]{32}$/u;
@@ -19,7 +20,8 @@ const VERSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-
 const TOKEN = /^[A-Za-z0-9._~+/-]+=*$/u;
 const SOURCE_SHA256 = /^[a-f0-9]{64}$/u;
 const MAX_SOURCE_BYTES = 8 * 1024 * 1024;
-const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+// Allow the bounded source as base64 plus version metadata.
+const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const COMPATIBILITY_DATE = '2026-08-08';
 const MAIN_MODULE = 'index.js';
 const INHERITED_BINDINGS = Object.freeze([
@@ -231,14 +233,6 @@ async function activeRelease(input: CustomerWorkerFinalRuntimeInspectionInput): 
   return Object.freeze({ deploymentId: deployment.id, versionId: version.version_id });
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let offset = 0; offset < bytes.byteLength; offset += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x8000, bytes.byteLength)));
-  }
-  return btoa(binary);
-}
-
 async function sha256BytesHex(bytes: Uint8Array): Promise<string> {
   const input = new Uint8Array(bytes.byteLength);
   input.set(bytes);
@@ -247,25 +241,6 @@ async function sha256BytesHex(bytes: Uint8Array): Promise<string> {
     return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   } finally {
     input.fill(0);
-  }
-}
-
-function base64ToBytes(value: string): Uint8Array | null {
-  if (value.length === 0 || value.length > Math.ceil(MAX_SOURCE_BYTES / 3) * 4 + 4 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
-    return null;
-  }
-  try {
-    const binary = atob(value);
-    if (binary.length < 1 || binary.length > MAX_SOURCE_BYTES) return null;
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    if (bytesToBase64(bytes) !== value) {
-      bytes.fill(0);
-      return null;
-    }
-    return bytes;
-  } catch {
-    return null;
   }
 }
 
@@ -312,7 +287,7 @@ async function exactFinalVersion(
   const module = parsed.output.modules[0];
   if (!module || module.name !== MAIN_MODULE ||
       module.content_type !== 'application/javascript+module') return false;
-  const bytes = base64ToBytes(module.content_base64);
+  const bytes = decodeWorkerModuleBase64(module.content_base64, MAX_SOURCE_BYTES);
   if (bytes === null) return false;
   try {
     return await sha256BytesHex(bytes) === input.finalRuntimeSha256;

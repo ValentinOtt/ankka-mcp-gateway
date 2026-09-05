@@ -17,6 +17,7 @@ import {
 } from './cloudflare-worker-direct-upload';
 import type { CustomerCloudflareTransport } from './customer-cloudflare-grant';
 import { readBoundedText, withDeadline } from './http';
+import { decodeWorkerModuleBase64 } from './worker-module-base64';
 
 const VERSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -187,31 +188,6 @@ export function exactCustomerBootstrapVersionBindings(
   return true;
 }
 
-function strictBase64(value: string): Uint8Array | null {
-  if (value.length < 4 || value.length > 4 * Math.ceil((8 * 1024 * 1024) / 3) + 4 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
-    return null;
-  }
-  try {
-    const binary = atob(value);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    let encoded = '';
-    for (let offset = 0; offset < bytes.byteLength; offset += 0x8000) {
-      encoded += String.fromCharCode(...bytes.subarray(
-        offset,
-        Math.min(offset + 0x8000, bytes.byteLength),
-      ));
-    }
-    if (btoa(encoded) !== value) {
-      bytes.fill(0);
-      return null;
-    }
-    return bytes;
-  } catch {
-    return null;
-  }
-}
-
 export interface CustomerBootstrapVersionModule {
   readonly name: string;
   readonly content_type: string;
@@ -227,7 +203,7 @@ export async function exactCustomerBootstrapModule(
   const module = modules[0];
   if (module === undefined || module.name !== 'index.js' ||
       module.content_type !== 'application/javascript+module') return false;
-  const bytes = strictBase64(module.content_base64);
+  const bytes = decodeWorkerModuleBase64(module.content_base64, 8 * 1024 * 1024);
   if (bytes === null || bytes.byteLength < 1) return false;
   const owned = new Uint8Array(new ArrayBuffer(bytes.byteLength));
   owned.set(bytes);

@@ -71,7 +71,7 @@ function finalBindings(overrides: readonly BoundaryObject[] = []): readonly Boun
   return values;
 }
 
-function finalVersion(bindings = finalBindings()): BoundaryObject {
+function finalVersion(bindings = finalBindings(), source = FINAL_SOURCE): BoundaryObject {
   return {
     id: FINAL_VERSION,
     main_module: 'index.js',
@@ -80,7 +80,7 @@ function finalVersion(bindings = finalBindings()): BoundaryObject {
     modules: [{
       name: 'index.js',
       content_type: 'application/javascript+module',
-      content_base64: base64(FINAL_SOURCE),
+      content_base64: base64(source),
     }],
     bindings,
     exports: { AdminState: { type: 'durable-object', storage: 'sqlite' } },
@@ -89,6 +89,7 @@ function finalVersion(bindings = finalBindings()): BoundaryObject {
 
 interface ProviderFixtureOptions {
   readonly activeFinal?: boolean;
+  readonly source?: string;
   readonly workerId?: string;
   readonly finalBindings?: readonly BoundaryObject[];
 }
@@ -121,7 +122,7 @@ function providerFixture(options: ProviderFixtureOptions = {}) {
     }
     if (url.pathname.endsWith(`/workers/workers/${WORKER_ID}/versions/${FINAL_VERSION}`)) {
       expect(url.searchParams.get('include')).toBe('modules');
-      return envelope(finalVersion(options.finalBindings ?? finalBindings()));
+      return envelope(finalVersion(options.finalBindings ?? finalBindings(), options.source));
     }
     if (url.pathname.endsWith(`/workers/scripts/${WORKER_NAME}/secrets/ANKKA_BOOTSTRAP_NONCE`) &&
         request.method === 'DELETE') {
@@ -169,6 +170,18 @@ async function input(transport: (input: RequestInfo | URL, init?: RequestInit) =
 }
 
 describe('customer Worker final self-update', () => {
+  it('uploads and verifies a 4 MiB final runtime with inherited state', async () => {
+    const source = 'a'.repeat(4 * 1024 * 1024);
+    const provider = providerFixture({ source });
+    await expect(publishCustomerWorkerFinalRuntime({
+      ...await input(provider.transport),
+      finalRuntimeSource: source,
+      finalRuntimeSha256: await sha256Hex(source),
+      previousVersionId: OLD_VERSION,
+    })).resolves.toMatchObject({ versionId: FINAL_VERSION });
+    expect(provider.uploadedSource() === source).toBe(true);
+  });
+
   it('strictly inherits only customer-owned state and verifies the exact active result', async () => {
     const provider = providerFixture();
     const result = await publishCustomerWorkerFinalRuntime({
@@ -216,6 +229,24 @@ describe('customer Worker final self-update', () => {
     const result = await inspectCustomerWorkerFinalRuntime(await input(provider.transport));
     expect(result?.versionId).toBe(FINAL_VERSION);
     expect(provider.calls.some((call) => call.startsWith('PUT '))).toBe(false);
+  });
+
+  it.each(['declared', 'streamed'] as const)('bounds %s version responses before parsing', async (kind) => {
+    const provider = providerFixture({ activeFinal: true });
+    const transport = async (target: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = target instanceof Request ? target.url : target.toString();
+      if (url.includes(`/versions/${FINAL_VERSION}`)) {
+        const oversized = 16 * 1024 * 1024 + 1;
+        return kind === 'declared'
+          ? new Response('{}', { headers: { 'content-length': String(oversized) } })
+          : new Response('x'.repeat(oversized));
+      }
+      return provider.transport(target, init);
+    };
+    await expect(inspectCustomerWorkerFinalRuntime(await input(transport))).rejects.toMatchObject({
+      code: 'provider_unknown', stage: 'version_read', outcome: 'unknown',
+    });
+    expect(provider.calls.every((call) => call.startsWith('GET '))).toBe(true);
   });
 
   it('rejects a substituted Worker identity before upload', async () => {

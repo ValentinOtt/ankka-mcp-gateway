@@ -24,6 +24,7 @@ import { CLOUDFLARE_API_ORIGIN } from './constants';
 import { CUSTOMER_BOOTSTRAP_PLAIN_BINDINGS } from './customer-bootstrap-worker-readback';
 import type { CustomerCloudflareTransport } from './customer-cloudflare-grant';
 import { readBoundedText, withDeadline } from './http';
+import { decodeWorkerModuleBase64 } from './worker-module-base64';
 
 const ACCOUNT_ID = /^[a-f0-9]{32}$/u;
 const WORKER_ID = /^[a-f0-9]{32}$/u;
@@ -262,23 +263,6 @@ function bytesToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x8000, bytes.byteLength)));
   }
   return btoa(binary);
-}
-
-function base64ToBytes(value: string, maximum = MAX_FILE_BYTES): Uint8Array | null {
-  if (value.length < 4 || value.length > 4 * Math.ceil(maximum / 3) + 4 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) return null;
-  try {
-    const binary = atob(value);
-    if (binary.length < 1 || binary.length > maximum) return null;
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    if (bytesToBase64(bytes) !== value) {
-      bytes.fill(0);
-      return null;
-    }
-    return bytes;
-  } catch {
-    return null;
-  }
 }
 
 async function sha256BytesHex(value: Uint8Array): Promise<string> {
@@ -561,7 +545,7 @@ async function exactModules(
   for (const module of expected) {
     const returned = byName.get(module.name);
     if (!returned || returned.content_type !== module.contentType) return false;
-    const bytes = base64ToBytes(returned.content_base64);
+    const bytes = decodeWorkerModuleBase64(returned.content_base64, MAX_FILE_BYTES);
     if (bytes === null) return false;
     try {
       if (await sha256BytesHex(bytes) !== await sha256BytesHex(module.bytes)) return false;
