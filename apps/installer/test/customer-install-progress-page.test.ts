@@ -51,7 +51,7 @@ describe('customer install final navigation', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(fetch.mock.calls[0]).toEqual(['/__ankka/install/status', {
-      credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: expect.any(AbortSignal),
+      credentials: 'same-origin', cache: 'no-store', redirect: 'manual', signal: expect.any(AbortSignal),
     }]);
   });
 
@@ -65,6 +65,16 @@ describe('customer install final navigation', () => {
     expect(page.navigate).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(3_000);
     expect(page.navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not treat a redirect response as a ready status or follow its destination', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async () => Response.json(
+      { status: 'READY' }, { status: 302, headers: { location: 'https://other.example.com/' } },
+    ));
+    const page = await openPage(converging, fetch);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(page.navigate).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledExactlyOnceWith('/__ankka/install/status', expect.objectContaining({ redirect: 'manual' }));
   });
 
   it('stops on an explicit setup failure', async () => {

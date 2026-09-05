@@ -83,7 +83,7 @@ export function customerInstallProgressPage(
     controller=new AbortController();
     const timeout=setTimeout(()=>controller.abort(),5000);
     try{
-      const response=await fetch(${scriptLiteral(CUSTOMER_INSTALL_STATUS_PATH)},{credentials:'same-origin',cache:'no-store',redirect:'error',signal:controller.signal});
+      const response=await fetch(${scriptLiteral(CUSTOMER_INSTALL_STATUS_PATH)},{credentials:'same-origin',cache:'no-store',redirect:'manual',signal:controller.signal});
       if(!response.ok)throw new Error();
       const state=await response.json();
       if(!active)return;
