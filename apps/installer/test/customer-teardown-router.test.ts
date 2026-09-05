@@ -22,10 +22,12 @@ const claim = { schemaVersion: 3, actionType: 'gateway_teardown', actionId: `act
   gatewayName: 'Example gateway', portalHostname: 'mcp.example.com', expiresAt: NOW + 600_000 };
 const completion = { schemaVersion: 1, actionId: claim.actionId, installationId: config.installId, status: 'gateway_removed',
   removedResourceCount: 7, readyReceiptChecksum: `sha256:${'e'.repeat(64)}`, dependencyResourcesHash: `sha256:${'f'.repeat(64)}` };
-type Options = { scope?: string; accountRefused?: boolean; refresh?: boolean; revokeFails?: boolean; applyFails?: boolean; wrongCompletion?: boolean; relayFails?: boolean };
+type Options = { scope?: string; accountRefused?: boolean; refresh?: boolean; revokeFails?: boolean; applyFails?: boolean; wrongCompletion?: boolean; relayFails?: boolean;
+  passes?: number; noProgress?: boolean; expireAfterPass?: boolean; lostPass?: boolean };
 function fixture(options: Options = {}) {
   let at = NOW, stored: CustomerTeardownAttempt | null = null, state = '', cookie = '', signatures = 0;
   const events: string[] = [], durableWrites: string[] = [], revoked: string[] = [], warnings: boolean[] = [];
+  const requestIds: string[] = [];
   const port: CustomerTeardownAttemptPort = {
     read: async () => stored,
     compareAndSet: async (revision, value) => {
@@ -67,7 +69,14 @@ function fixture(options: Options = {}) {
       if (kind === 'prove') return Response.json({ schemaVersion: 1, actionId: claim.actionId, status: 'authorized', receiptResourceKinds: KINDS, authority: {} });
       if (kind === 'settle') return Response.json({});
       expect(input.cloudflareAccessToken).toBe(ACCESS_TOKEN); expect(stored?.phase).toBe('exchanging');
+      requestIds.push(v.parse(v.string(), input.requestId));
       if (options.applyFails) return Response.json({}, { status: 409 });
+      if (options.lostPass) throw new Error('synthetic lost pass response');
+      if (requestIds.length <= (options.passes ?? 0)) {
+        if (options.expireAfterPass) at += 600_001;
+        return Response.json({ schemaVersion: 1, actionId: claim.actionId, installationId: config.installId, status: 'removing',
+          progress: `sha256:${(options.noProgress ? 1 : requestIds.length).toString(16).padStart(64, '0')}` });
+      }
       return Response.json(options.wrongCompletion ? { ...completion, installationId: `acg-${'0'.repeat(24)}` } : completion);
     },
     signHandoff: async (result, prior) => {
@@ -83,12 +92,31 @@ function fixture(options: Options = {}) {
     cookie = response.headers.get('set-cookie')?.split(';')[0] ?? ''; return response;
   }
   const callbackRequest = () => new Request(`${ORIGIN}/__ankka/install/oauth/callback?code=synthetic_authorization_code&state=${state}`, { headers: { cookie } });
-  return { router, start, callbackRequest, events, durableWrites, warnings, revoked,
+  return { router, start, callbackRequest, events, durableWrites, warnings, revoked, requestIds,
     callback: () => router.fetch(callbackRequest()), current: () => stored, cookie: () => cookie,
     signatures: () => signatures, later: () => { at += 600_001; }, options };
 }
 
 describe('gateway-local teardown authorization', () => {
+  it('uses bounded signed commands with one request ID, then revokes before handoff', async () => {
+    const f = fixture({ passes: 160 });
+    await f.start(); await f.callback();
+    expect(f.requestIds).toHaveLength(161); expect(new Set(f.requestIds).size).toBe(1);
+    expect(f.signatures()).toBe(1); expect(f.revoked).toEqual([ACCESS_TOKEN]);
+    expect(f.durableWrites.join('')).not.toContain(ACCESS_TOKEN);
+  });
+  for (const options of [{ passes: 4, noProgress: true }, { passes: 4, expireAfterPass: true }, { lostPass: true }, { passes: 1000 }]) {
+    it(`stops, revokes and withholds handoff when a pass cannot continue: ${JSON.stringify(options)}`, async () => {
+      const f = fixture(options); await f.start(); const response = await f.callback();
+      expect(response.headers.get('location')).toContain('result=recovery_required');
+      expect(f.signatures()).toBe(0); expect(f.revoked).toEqual([ACCESS_TOKEN]);
+      expect(f.requestIds.length).toBe(options.noProgress ? 2 : options.passes === 1000 ? 768 : 1);
+      const prior = f.requestIds[0];
+      f.options.passes = 0; f.options.expireAfterPass = false; f.options.lostPass = false;
+      await f.start(); await f.callback();
+      expect(f.signatures()).toBe(1); expect(f.requestIds.at(-1)).not.toBe(prior);
+    });
+  }
   it('reviews without provider work, then proves, removes, revokes, and signs in order', async () => {
     const f = fixture(); const page = await f.router.fetch(new Request(`${ORIGIN}${CUSTOMER_TEARDOWN_PATH}`));
     expect(await page.text()).toContain('Two temporary Cloudflare approvals'); expect(f.events).toEqual([]);

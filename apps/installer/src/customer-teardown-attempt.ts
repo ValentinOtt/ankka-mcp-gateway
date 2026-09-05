@@ -3,8 +3,8 @@ import * as v from 'valibot';
 const token = v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{43}$/u));
 const time = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
 /** Only the dependent-resource families are valid in a gateway's first removal phase. */
-export const CUSTOMER_TEARDOWN_RESOURCE_KINDS = ['mcp_server', 'mcp_portal', 'access_application', 'access_policy', 'dns_record'] as const;
-export const customerTeardownKindsSchema = v.pipe(v.array(v.picklist(CUSTOMER_TEARDOWN_RESOURCE_KINDS)), v.minLength(1), v.maxLength(5));
+export const CUSTOMER_TEARDOWN_RESOURCE_KINDS = ['mcp_server', 'mcp_portal', 'access_application', 'access_policy', 'dns_record', 'worker', 'worker_custom_domain'] as const;
+export const customerTeardownKindsSchema = v.pipe(v.array(v.picklist(CUSTOMER_TEARDOWN_RESOURCE_KINDS)), v.minLength(1), v.maxLength(CUSTOMER_TEARDOWN_RESOURCE_KINDS.length));
 const schema = v.strictObject({
   schemaVersion: v.literal(1), revision: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
   attemptId: v.pipe(v.string(), v.regex(/^attempt_[A-Za-z0-9_-]{24}$/u)),

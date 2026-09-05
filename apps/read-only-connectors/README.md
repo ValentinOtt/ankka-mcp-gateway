@@ -6,13 +6,17 @@ There is no Ankka credential service, background sync, database, or general
 HTTP tool. Prefer a suitable provider-native MCP server when available; see
 the [native setup guides](../../docs/NATIVE_CONNECTOR_SETUP.md).
 
-The [Google-hosted BigQuery bridge](BIGQUERY_MCP_EXPERIMENT.md) is supported
-through manual self-hosted deployment and the gateway's custom-source flow.
-Its guide records live query, Google IAM, Portal access, and Claude Desktop
-qualification. You manage the bridge Worker and its credentials separately.
+The [Google-hosted BigQuery bridge](BIGQUERY_MCP_EXPERIMENT.md) has an
+[Add BigQuery setup flow](../../docs/ADD_BIGQUERY.md) in gateway releases that
+include it. That flow provisions a protected bridge in your Cloudflare account
+and includes its owned resources in compatible gateway removal. Manual
+self-hosted deployment and the custom-source flow remain available; you manage
+manually deployed Workers separately. The bridge guide records live query,
+Google IAM, Portal access, and Claude Desktop qualification.
+
 The other readers remain experimental and need provider and deployment
-qualification. None is a production Source Catalog entry, and the gateway does
-not provision or update these Workers. Do not use production support data as a
+qualification. They are not production Source Catalog entries, and the gateway
+does not provision or update them. Do not use production support data as a
 canary for an unqualified reader.
 
 ## Implemented readers

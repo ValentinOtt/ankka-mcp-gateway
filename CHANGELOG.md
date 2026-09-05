@@ -11,6 +11,14 @@ Notable public product and repository changes are recorded here.
 - Show the saved, bounded failure reference when hosted setup stops. Do not
   claim that a failed provisioning attempt left no Cloudflare resources.
 
+- Include gateway-managed BigQuery bridges in receipt-bound gateway removal.
+  Verify resource identities and sharing before deletion; detach the bridge
+  domain, delete its Worker and key, and remove Access protection last. Resume
+  known partial setup and interrupted deletions with fresh consent, and keep
+  unknown creates blocked for manual reconciliation. Bound bridge and ordinary
+  source cleanup to separate signed invocations with durable progress so
+  multiple sources fit Workers Free request limits without storing the grant.
+
 - Raise the bounded local release publisher from 6 MB to 10 MB to accommodate
   signed gateway packages that embed the BigQuery bridge. Signature, digest,
   per-file, and generated-module checks remain enforced.

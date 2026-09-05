@@ -38,6 +38,13 @@ const completionSchema = v.strictObject({
   readyReceiptChecksum: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
   dependencyResourcesHash: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
 });
+const progressSchema = v.strictObject({ schemaVersion: v.literal(1), actionId, status: v.literal('removing'),
+  installationId: v.pipe(v.string(), v.regex(/^acg-[a-f0-9]{24}$/u)),
+  progress: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
+});
+// Below the callback's 1,000 internal-subrequest allowance, including proof,
+// settlement and ownership reads. Each command has its own external budget.
+const MAX_REMOVAL_PASSES = 768;
 export type CustomerTeardownCompletion = v.InferOutput<typeof completionSchema>;
 export interface CustomerTeardownConfig {
   readonly accountId: string; readonly installId: string; readonly managementOrigin: string;
@@ -77,7 +84,7 @@ function page(failed: boolean): Response {
   const nonce = crypto.randomUUID().replaceAll('-', '');
   const responseHeaders = headers('text/html; charset=utf-8');
   responseHeaders.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Remove your Ankka Gateway</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}button{font:inherit;padding:.75rem 1rem}a{color:inherit}</style><h1>Remove your Ankka Gateway</h1><p>This removes your gateway's Portal, registered MCP servers, and their access policies and DNS record. Your team will lose its gateway connections. Your upstream services and their data stay in their own accounts.</p><p>Two temporary Cloudflare approvals are required. The first removes the gateway's connected resources. The second removes its management page, stored configuration, and Worker. Each phase checks the saved installation receipts before deleting resources.</p><p id="message">${failed ? 'Removal needs fresh authorization. Return to Settings and review removal again. Saved progress will be checked before it continues.' : 'You can cancel before granting access. Once removal begins, deleted resources cannot be restored by cancelling.'}</p><button id="authorize"${failed ? ' hidden' : ''}>Authorize removal in Cloudflare</button><p><a href="/settings">Back to Settings</a></p><script nonce="${nonce}">(()=>{const handoff=location.hash.slice(1);history.replaceState(null,'',location.pathname);const button=document.querySelector('#authorize');const message=document.querySelector('#message');button.addEventListener('click',async()=>{button.disabled=true;try{if(!/^[A-Za-z0-9_-]{40,8192}$/.test(handoff))throw new Error();const response=await fetch('${CUSTOMER_TEARDOWN_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({schemaVersion:1,handoff}),credentials:'same-origin',cache:'no-store'});const result=await response.json();if(!response.ok||typeof result.authorizationUrl!=='string')throw new Error();location.replace(result.authorizationUrl)}catch{message.textContent='Removal could not start. Return to Settings and review removal again.';button.hidden=true}})})();</script></html>`, { headers: responseHeaders });
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Remove your Ankka Gateway</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}button{font:inherit;padding:.75rem 1rem}a{color:inherit}</style><h1>Remove your Ankka Gateway</h1><p>This removes your gateway's Portal, registered MCP servers, and their access policies and DNS record. Managed BigQuery bridges and their stored Google key copies are removed too. Your team will lose its gateway connections. Your upstream services and their data stay in their own accounts.</p><p>Two temporary Cloudflare approvals are required. The first removes the gateway's connected resources. The second removes its management page, stored configuration, and Worker. Each phase checks the saved installation receipts before deleting resources.</p><p id="message">${failed ? 'Removal needs fresh authorization. Return to Settings and review removal again. Saved progress will be checked before it continues.' : 'You can cancel before granting access. Once removal begins, deleted resources cannot be restored by cancelling.'}</p><button id="authorize"${failed ? ' hidden' : ''}>Authorize removal in Cloudflare</button><p><a href="/settings">Back to Settings</a></p><script nonce="${nonce}">(()=>{const handoff=location.hash.slice(1);history.replaceState(null,'',location.pathname);const button=document.querySelector('#authorize');const message=document.querySelector('#message');button.addEventListener('click',async()=>{button.disabled=true;try{if(!/^[A-Za-z0-9_-]{40,8192}$/.test(handoff))throw new Error();const response=await fetch('${CUSTOMER_TEARDOWN_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({schemaVersion:1,handoff}),credentials:'same-origin',cache:'no-store'});const result=await response.json();if(!response.ok||typeof result.authorizationUrl!=='string')throw new Error();location.replace(result.authorizationUrl)}catch{message.textContent='Removal could not start. Return to Settings and review removal again.';button.hidden=true}})})();</script></html>`, { headers: responseHeaders });
 }
 
 /** The gateway removes dependencies; only signed, verified completion can authorize the hosted root phase. */
@@ -166,11 +173,20 @@ export function createCustomerTeardownRouter(config: CustomerTeardownConfig, dep
       completion = await grant.withAccessToken(async (accessToken) => {
         await verifyCustomerCloudflareGrantAccountAccess({ accessToken, expectedAccountId: config.accountId,
           operation: 'uninstall', workerName: config.workerName, transport: dependencies.transport });
-        const response = await command('apply', attempt, cookie.actionKey, { requestId: randomBase64Url(16), cloudflareAccessToken: accessToken });
-        if (response.status !== 200) { await response.body?.cancel(); throw new Error('teardown_apply_failed'); }
-        const result = v.parse(completionSchema, JSON.parse(await readBoundedText(response, 'bad_request', 8192)));
-        if (result.actionId !== attempt.actionId || result.installationId !== config.installId) throw new Error('teardown_apply_invalid');
-        return result;
+        const requestId = randomBase64Url(16);
+        const seen = new Set<string>();
+        for (let pass = 0; pass < MAX_REMOVAL_PASSES; pass++) {
+          grant?.assertUsable();
+          if (now() >= attempt.expiresAt) throw new Error('teardown_expired');
+          const response = await command('apply', attempt, cookie.actionKey, { requestId, cloudflareAccessToken: accessToken });
+          if (response.status !== 200) { await response.body?.cancel(); throw new Error('teardown_apply_failed'); }
+          const result = v.parse(v.union([completionSchema, progressSchema]), JSON.parse(await readBoundedText(response, 'bad_request', 8192)));
+          if (result.actionId !== attempt.actionId || result.installationId !== config.installId) throw new Error('teardown_apply_invalid');
+          if (result.status === 'gateway_removed') return result;
+          if (seen.has(result.progress)) throw new Error('teardown_no_progress');
+          seen.add(result.progress);
+        }
+        throw new Error('teardown_pass_limit');
       });
     } catch { /* A durable pending boundary is resumed only with a fresh grant. */ }
     finally {
