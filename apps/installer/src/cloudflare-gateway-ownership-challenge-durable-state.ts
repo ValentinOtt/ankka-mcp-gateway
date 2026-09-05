@@ -71,7 +71,7 @@ export function initializeCloudflareGatewayOwnershipChallengeSql(
       ),
       operation TEXT NOT NULL CHECK (
         operation IN (
-          'install', 'upgrade', 'rollback', 'source-add', 'source-update',
+          'install', 'upgrade', 'rollback', 'source-add', 'bigquery-add', 'source-update',
           'source-remove', 'uninstall'
         )
       ),

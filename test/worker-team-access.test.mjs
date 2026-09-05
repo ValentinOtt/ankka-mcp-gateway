@@ -1387,6 +1387,19 @@ for (const assignment of ['deny', 'members']) {
   }, await portalOnlyClaim()));
 }
 
+test('current teardown retains a completed BigQuery bridge until its resources have a compatible removal path', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  assert.equal((await gateway.apply(prepared, {}, null)).status, 200);
+  const saved = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+  const action = saved.actions.find((entry) => entry.actionId === prepared.claim.actionId);
+  assert.equal(action.status, 'succeeded');
+  action.bigquerySetupStarted = true;
+  await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, saved);
+  const teardown = await gateway.currentTeardown();
+  assert.equal(teardown.prepared.status, 409);
+  assert.equal(gateway.provider.deletes().length, 0);
+}, await portalOnlyClaim()));
+
 for (const change of ['foreign policy', 'renamed policy', 'different destination', 'different receipt hash', 'shared server']) {
   test(`current teardown rejects ${change} before deleting any resource`, async () => fixture(async (gateway) => {
     const prepared = await prepareNewSource(gateway);

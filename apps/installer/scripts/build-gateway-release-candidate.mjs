@@ -211,6 +211,8 @@ async function assertExactSourceCommit(sourceRoot, sourceCommit) {
     'apps/installer/scripts/build-reviewed-fault-injection-candidate.mjs',
     ...RELEASE_TOOL_PATHS,
     'payload',
+    'apps/read-only-connectors/src',
+    'apps/read-only-connectors/package.json',
   ]);
   if (status.trim().length > 0) fail('source_release_inputs_dirty');
 }
@@ -270,6 +272,17 @@ function customerWorkerOriginPlugin(sourceRoot, controlPlaneOrigin, workerSource
   });
 }
 
+async function bundleBigQueryWorker(sourceRoot) {
+  const result = await esbuildBuild({
+    absWorkingDir: sourceRoot, entryPoints: [path.join(sourceRoot, 'apps/read-only-connectors/src/index.ts')],
+    bundle: true, format: 'esm', platform: 'browser', target: 'es2022', charset: 'utf8',
+    conditions: ['workerd', 'worker', 'browser'], external: ['node:*', 'cloudflare:*'],
+    legalComments: 'none', logLevel: 'silent', minify: true, sourcemap: false, write: false,
+  });
+  if (result.outputFiles.length !== 1 || result.outputFiles[0].contents.byteLength > 4 * 1024 * 1024) fail('bigquery_worker_build_failed');
+  return result.outputFiles[0].text;
+}
+
 async function bundleCustomerWorker(sourceRoot, controlPlaneOrigin, variant, finalRuntimeSource) {
   if (esbuildRuntimeVersion !== EXPECTED_ESBUILD_VERSION) fail('worker_build_tool_invalid');
   const workerSource = await validatedWorkerSource(sourceRoot);
@@ -285,7 +298,7 @@ async function bundleCustomerWorker(sourceRoot, controlPlaneOrigin, variant, fin
       charset: 'utf8',
       define: variant === 'bootstrap'
         ? { __ANKKA_FINAL_RUNTIME_SOURCE__: JSON.stringify(finalRuntimeSource) }
-        : {},
+        : { __ANKKA_BIGQUERY_RUNTIME_SOURCE__: JSON.stringify(await bundleBigQueryWorker(sourceRoot)) },
       entryPoints: [entry],
       format: 'esm',
       legalComments: 'none',

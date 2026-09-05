@@ -1,14 +1,15 @@
 import { Input } from '@cloudflare/kumo'
 import { Button } from '../components/Button'
 import { ArrowRight, Database, GlobeSimple, MagnifyingGlass, Plus, X } from '@phosphor-icons/react'
-import { type FormEvent, useMemo, useState } from 'react'
-import { GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type SourceActionSummary, type SourceDiscovery } from '../api'
+import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type SourceActionSummary, type SourceDiscovery, type BigQuerySetups, validHandoffUrl } from '../api'
 import { SOURCE_CATALOG, type SourceCatalog, type SourceCatalogSource } from '../catalog'
 import { useGateway } from '../GatewayContext'
 import { GatewayEndpoint } from '../components/GatewayEndpoint'
 import { PageHeader } from '../components/PageHeader'
 import { NativeConnectorGuides } from '../components/NativeConnectorGuides'
 import { StatusPill } from '../components/StatusPill'
+import { BigQuerySetupForm } from '../components/BigQuerySetupForm'
 import { SourceList } from '../components/SourceList'
 
 function annotation(tool: SourceDiscovery['tools'][number]): string {
@@ -39,6 +40,7 @@ function sourceDraftLabel(action: SourceActionSummary | undefined): string {
 function actionLabel(action: SourceActionSummary): string {
   if (action.state === 'recovery_required') {
     if (action.failureCode === 'source_connection_required') return 'Connect your source'
+    if (action.failureCode === 'bigquery_setup_required') return 'Resume BigQuery setup'
     if (action.failureCode === 'source_sync_required') return 'Sync source tools'
     if (action.failureCode === 'source_tools_mismatch') return 'Review source tools'
   }
@@ -87,6 +89,8 @@ interface SourcesPageProps {
 
 export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   const {
+    api,
+    externalChangeVersion,
     clearSourceNotice,
     cancelSourceApply,
     discoverSource,
@@ -102,6 +106,15 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     sources,
   } = useGateway()
   const [showForm, setShowForm] = useState(false)
+  const [showBigQuery, setShowBigQuery] = useState(false)
+  const [bigQuery, setBigQuery] = useState<BigQuerySetups | null>(null)
+  const [bigQueryError, setBigQueryError] = useState<string | null>(null)
+  const [resumingBigQuery, setResumingBigQuery] = useState(false)
+  useEffect(() => {
+    let active = true
+    void api.getBigQuerySetups().then((value) => { if (active) setBigQuery(value) }).catch(() => { if (active) setBigQuery(null) })
+    return () => { active = false }
+  }, [api, externalChangeVersion, sourceActions])
   const [sourceMode, setSourceMode] = useState<'catalog' | 'custom'>(catalog.sources.length > 0 ? 'catalog' : 'custom')
   const [catalogSourceId, setCatalogSourceId] = useState<string | null>(null)
   const [label, setLabel] = useState('')
@@ -137,6 +150,21 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     ))
   }, [catalogueFilter, discovery])
 
+  const resumeBigQuery = async (actionId: string) => {
+    if (resumingBigQuery || isBusy) return
+    setResumingBigQuery(true)
+    setBigQueryError(null)
+    try {
+      const prepared = await api.resumeBigQuery(actionId)
+      const destination = validHandoffUrl(prepared.handoffUrl, window.location.origin)
+      if (destination === null) throw new Error('The gateway returned an invalid authorization link.')
+      window.location.assign(destination)
+    } catch (error) {
+      setBigQueryError(error instanceof Error ? error.message : 'BigQuery setup could not resume.')
+      await refreshSourceActions().catch(() => {})
+      setResumingBigQuery(false)
+    }
+  }
   if (!sources) return null
   const installationEnabled = sources.installationEnabled === true
   const applyBlocked = isBusy || isCheckingSourceActions || sourceActions === null || sourceActionsError !== null || sourceActions.blockingAction !== null
@@ -230,6 +258,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   }
 
   const authorize = async (sourceId: string, renewActionId?: string) => {
+    const setup = bigQuery?.setups.find((item) => item.sourceId === sourceId && !item.ready)
+    if (setup) { await resumeBigQuery(setup.actionId); return }
     if (!installationEnabled || isBusy || isCheckingSourceActions || sourceActionsError !== null ||
         (renewActionId === undefined && applyBlocked)) return
     try {
@@ -245,14 +275,19 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       <PageHeader
         title="Sources"
         action={
-          <Button variant="primary" className="pressable" disabled={!installationEnabled} onClick={() => setShowForm((visible) => !visible)}>
+          <div className="flex gap-2">
+          {bigQuery?.available ? <Button variant="secondary" className="pressable" disabled={!installationEnabled || applyBlocked} onClick={() => { setShowBigQuery((visible) => !visible); setShowForm(false) }}>{showBigQuery ? 'Close BigQuery' : 'Add BigQuery'}</Button> : null}
+          <Button variant="primary" className="pressable" disabled={!installationEnabled} onClick={() => { setShowForm((visible) => !visible); setShowBigQuery(false) }}>
             {showForm ? <X size={16} /> : <Plus size={16} weight="bold" />}
             {showForm ? 'Close' : 'Add source'}
           </Button>
+          </div>
         }
       />
 
       <GatewayEndpoint />
+      {bigQueryError ? <p role="alert" className="notice-banner notice-error mt-6">{bigQueryError}</p> : null}
+      {showBigQuery && installationEnabled ? <BigQuerySetupForm disabled={applyBlocked || resumingBigQuery} /> : null}
 
       {!installationEnabled ? <p role="status" className="notice-banner notice-warning mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
       {installationEnabled ? <p className="notice-banner notice-warning mt-6">Before authorizing: once source provisioning starts, rollback below this runtime release is unavailable. Finish or recover any source action before removing your gateway. Saving a draft does not activate this restriction.</p> : null}
@@ -297,7 +332,11 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                 {action.connectionUrl && action.state === 'recovery_required' ? (
                   <a className="mt-3 inline-flex text-sm underline underline-offset-4" href={action.connectionUrl} target="_blank" rel="noopener noreferrer">Open source in Cloudflare</a>
                 ) : null}
-                {action.canRenew === true && action.state === 'recovery_required' ? (
+                {bigQuery?.setups.some((setup) => setup.actionId === action.actionId && !setup.ready && !setup.recoveryRequired) && action.canCancel ? (
+                  <Button variant="secondary" className="pressable mt-3" disabled={isBusy || resumingBigQuery || isCheckingSourceActions} onClick={() => void resumeBigQuery(action.actionId)}>Continue BigQuery setup</Button>
+                ) : null}
+                {bigQuery?.setups.some((setup) => setup.actionId === action.actionId && setup.recoveryRequired) ? <p role="status" className="mt-3 text-sm text-kumo-subtle">A Cloudflare write has an uncertain result. Keep this setup’s receipt and review the resource in Cloudflare before making another attempt.</p> : null}
+                {action.canRenew === true && action.state === 'recovery_required' && !bigQuery?.setups.some((setup) => setup.actionId === action.actionId && setup.recoveryRequired) ? (
                   <div className="mt-3">
                     <Button variant="secondary" className="pressable" disabled={!installationEnabled || isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void authorize(action.sourceId, action.actionId)}>Renew consent and resume</Button>
                   </div>

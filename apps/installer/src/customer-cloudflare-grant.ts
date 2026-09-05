@@ -392,7 +392,7 @@ export async function verifyCustomerCloudflareGrantAccount(input: {
 }
 
 /** Operations whose grant the gateway binds to the account it was installed in. */
-export type CustomerCloudflareGatewayOperation = 'source-add' | 'upgrade' | 'rollback' | 'uninstall';
+export type CustomerCloudflareGatewayOperation = 'source-add' | 'bigquery-add' | 'upgrade' | 'rollback' | 'uninstall';
 
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 
@@ -405,7 +405,7 @@ const accountProbeEnvelopeSchema = v.looseObject({
 
 /** One small read of the expected account that the operation's own scope covers. */
 function accountProbePath(operation: CustomerCloudflareGatewayOperation, workerName: string): string {
-  if (operation === 'source-add' || operation === 'uninstall') return '/access/ai-controls/mcp/portals';
+  if (operation === 'source-add' || operation === 'bigquery-add' || operation === 'uninstall') return '/access/ai-controls/mcp/portals';
   return `/workers/workers/${encodeURIComponent(workerName)}`;
 }
 

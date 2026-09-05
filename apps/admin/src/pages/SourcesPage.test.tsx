@@ -31,6 +31,7 @@ function actionSnapshot(action: SourceActionSummary): SourceActions {
 
 function actionApi(snapshot: SourceActions): GatewayAdminApi {
   return {
+    getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status), getSources: vi.fn(async () => ({ ...sources, sources: [draft] })), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
@@ -206,6 +207,7 @@ describe('SourcesPage', () => {
       ],
     }
     const api: GatewayAdminApi = {
+      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status), getSources: vi.fn(async () => current), getUpdate: vi.fn(async () => update),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
@@ -237,6 +239,7 @@ describe('SourcesPage', () => {
     const user = userEvent.setup()
     const saveSourceDraft = vi.fn()
     const api: GatewayAdminApi = {
+      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(), getSources: vi.fn(async () => sources), getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
@@ -279,6 +282,7 @@ describe('SourcesPage', () => {
     const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 5 }))
     const prepareSourceAction = vi.fn()
     const api: GatewayAdminApi = {
+      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getSources: vi.fn(async () => sources),
@@ -333,6 +337,7 @@ describe('SourcesPage', () => {
     const preset = SYNTHETIC_SOURCE_CATALOG.sources[0]
     const saveSourceDraft = vi.fn()
     const api: GatewayAdminApi = {
+      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getSources: vi.fn(async () => sources),
@@ -366,6 +371,7 @@ describe('SourcesPage', () => {
     const user = userEvent.setup()
     const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 5 }))
     const api: GatewayAdminApi = {
+      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getSources: vi.fn(async () => sources),
@@ -414,6 +420,7 @@ describe('SourcesPage', () => {
       }
     })
     const api: GatewayAdminApi = {
+      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getSources: vi.fn(async () => sources),
@@ -463,6 +470,7 @@ describe('SourcesPage', () => {
       }],
     }))
     const api: GatewayAdminApi = {
+      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getSources: vi.fn(async () => sources),
@@ -529,6 +537,7 @@ describe('SourcesPage', () => {
     const user = userEvent.setup()
     const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 5 }))
     const api: GatewayAdminApi = {
+      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getSources: vi.fn(async () => sources),
@@ -564,5 +573,40 @@ describe('SourcesPage', () => {
       authMode: 'oauth',
       enabledTools: ['company_read'],
     })
+  })
+})
+
+describe('Add BigQuery setup', () => {
+  afterEach(cleanup)
+  it('reviews project and dataset access before Cloudflare approval without collecting a key in the draft', async () => {
+    const user = userEvent.setup()
+    const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
+    api.getSources = vi.fn(async () => sources)
+    api.getBigQuerySetups = vi.fn(async () => ({ schemaVersion: 1 as const, available: true, setups: [] }))
+    api.prepareBigQuery = vi.fn().mockRejectedValue(new GatewayApiError(409, 'bigquery_setup_conflict'))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: 'Add BigQuery' }))
+    expect(screen.getByRole('button', { name: 'Continue to Cloudflare' })).toBeDisabled()
+    expect(screen.queryByLabelText('Google service-account JSON key')).not.toBeInTheDocument()
+    await user.type(screen.getByLabelText('Query project ID'), 'query-project')
+    await user.type(screen.getByLabelText('Datasets to discover'), 'data-project.reporting')
+    await user.click(screen.getByRole('checkbox', { name: /dedicated service account/ }))
+    await user.click(screen.getByRole('button', { name: 'Continue to Cloudflare' }))
+    await waitFor(() => expect(api.prepareBigQuery).toHaveBeenCalledExactlyOnceWith({ revision: 4, label: 'BigQuery',
+      configuration: { queryProjectId: 'query-project', allowedDatasets: [{ projectId: 'data-project', datasetId: 'reporting' }] }, readOnlyConfirmed: true }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('existing BigQuery setup')
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+  it('resumes an unfinished bridge using its recorded BigQuery operation', async () => {
+    const user = userEvent.setup()
+    const action = pendingAction()
+    const api = actionApi(actionSnapshot(action))
+    api.getBigQuerySetups = vi.fn(async () => ({ schemaVersion: 1 as const, available: true, setups: [{ sourceId: draft.id,
+      actionId: action.actionId, ready: false, credentialRequired: true, recoveryRequired: false }] }))
+    api.resumeBigQuery = vi.fn().mockRejectedValue(new GatewayApiError(409, 'bigquery_setup_conflict'))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: 'Continue BigQuery setup' }))
+    await waitFor(() => expect(api.resumeBigQuery).toHaveBeenCalledExactlyOnceWith(action.actionId))
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })
 })

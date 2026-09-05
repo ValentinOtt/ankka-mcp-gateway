@@ -113,6 +113,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     to: { release: 'gateway-v1.0.1', artifactSha256: nextDigest }, expiresAt, failureCode: null,
   }
   const api = {
+    getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status),
     getSources: vi.fn(async () => sources),
     getTeam: vi.fn(async () => team),

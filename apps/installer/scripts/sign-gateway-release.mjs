@@ -500,6 +500,9 @@ function credentialLiteralIdentifier(identifier) {
 function containsCredentialLiteralAssignment(text) {
   const quoted = /\b([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=|:)\s*(["'`])([^"'`\r\n]{16,})\2/gu;
   for (const match of text.matchAll(quoted)) {
+    // The embedded Google authorization module names its fixed public token
+    // endpoint. Only this exact identifier/value pair is protocol metadata.
+    if (match[1] === 'GOOGLE_TOKEN_ENDPOINT' && match[3] === 'https://oauth2.googleapis.com/token') continue;
     if (credentialLiteralIdentifier(match[1])) return true;
   }
   const environment = /(?:^|[\r\n])([A-Z][A-Z0-9_]*)\s*=\s*([^\s#]{16,})(?:\s|$)/gu;

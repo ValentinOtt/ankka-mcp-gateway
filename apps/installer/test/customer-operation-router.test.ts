@@ -172,7 +172,7 @@ function dependencies(input: {
       return input.updateResult ?? 'applied';
     },
     issueRelayTicket: async (operation) => {
-      if (operation !== 'source-add' && operation !== 'upgrade') throw new Error('unexpected operation');
+      if (operation !== 'source-add' && operation !== 'bigquery-add' && operation !== 'upgrade') throw new Error('unexpected operation');
       return { relayTicket: RELAY_TICKET, expiresAt: NOW + 120_000 };
     },
     beginRelay: async ({ operation, gatewayState, pkceChallenge, gatewayCallback }) =>
@@ -567,5 +567,40 @@ describe('gateway-local operation router', () => {
     const unavailable = await closed.fetch(new Request(`${ORIGIN}${CUSTOMER_OPERATION_ROOT_PATH}`));
     expect(unavailable.status).toBe(503);
     expect(applied).toHaveLength(0);
+  });
+});
+
+describe('BigQuery credential custody in the gateway callback', () => {
+  it('holds the OAuth code until a same-origin key upload and consumes the grant exactly once', async () => {
+    const port = attemptPort();
+    const scopes = 'zone-access.write mcp-portals.write workers-scripts.write workers-routes.read';
+    const harness = transport(scopes);
+    const runBigQuerySetup = vi.fn(async () => json(APPLIED_SOURCE_ACTION));
+    const target = router({ ...dependencies({ port: port.port, harness, action: null, applied: [] }),
+      readBigQueryAction: async () => ({ status: 'authorization_required', expiresAt: ACTION_EXPIRES_AT }), runBigQuerySetup });
+    const result = await authorize(target, startRequest(Object.assign({}, baseClaim, { actionType: 'bigquery_setup' })), scopes);
+    const page = await target.fetch(new Request(result.callback, { headers: { cookie: result.cookie } }));
+    expect(page.status).toBe(200);
+    expect(page.headers.get('content-security-policy')).toContain("connect-src 'self'");
+    expect(await page.text()).toContain('Google service-account JSON key');
+    expect(harness.calls).toEqual([]);
+    expect(port.current()?.phase).toBe('authorizing');
+    const body = { code: result.callback.searchParams.get('code'), state: result.callback.searchParams.get('state'), serviceAccountJson: 'synthetic-google-key' };
+    const upload = (origin: string) => new Request(`${ORIGIN}${CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH}`, {
+      method: 'POST', headers: { cookie: result.cookie, origin, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    expect((await target.fetch(upload('https://foreign.example.com'))).status).toBe(400);
+    expect(harness.calls).toEqual([]);
+    const applied = await target.fetch(upload(ORIGIN));
+    expect(applied.status).toBe(200);
+    expect(await applied.json()).toEqual({ redirectUrl: `${ORIGIN}/sources?sourceAction=${ACTION_ID}&sourceActionResult=applied` });
+    expect(runBigQuerySetup).toHaveBeenCalledExactlyOnceWith({ actionId: ACTION_ID, actionKey: ACTION_KEY,
+      actorEmail: 'admin@example.com', accessToken: ACCESS_TOKEN, actionExpiresAt: ACTION_EXPIRES_AT, serviceAccountJson: body.serviceAccountJson });
+    expect(harness.revoked()).toBe(true);
+    expect(port.writes.join('\n')).not.toContain(body.serviceAccountJson);
+    expect(port.writes.join('\n')).not.toContain(ACCESS_TOKEN);
+    expect(result.cookie).not.toContain(body.serviceAccountJson);
+    expect((await target.fetch(upload(ORIGIN))).status).toBe(400);
+    expect(runBigQuerySetup).toHaveBeenCalledTimes(1);
   });
 });

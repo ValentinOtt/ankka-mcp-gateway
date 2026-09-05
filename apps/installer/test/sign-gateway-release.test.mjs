@@ -573,3 +573,27 @@ describe('offline gateway release signing and R2 object plan', () => {
     }
   });
 });
+
+
+describe('embedded Google authorization protocol metadata', () => {
+  it('accepts only the fixed public Google token endpoint assignment', async () => {
+    const input = await releaseFixture();
+    try {
+      await replacePayloadAndRebuildManifest(input, 'payload/worker/index.js',
+        '// ankka-control-plane-origin:https://deploy.ankka.ai\nconst GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"; export default {}');
+      await expect(prepare(input)).resolves.toBeDefined();
+    } finally { await input.cleanup(); }
+  });
+  it.each([
+    'https://oauth2.googleapis.com/token?credential=synthetic-credential',
+    'https://foreign.example.com/token',
+    'synthetic-credential-value',
+  ])('still rejects a credential-like assignment disguised as an endpoint: %s', async (value) => {
+    const input = await releaseFixture();
+    try {
+      await replacePayloadAndRebuildManifest(input, 'payload/worker/index.js',
+        `// ankka-control-plane-origin:https://deploy.ankka.ai\nconst GOOGLE_TOKEN_ENDPOINT = ${JSON.stringify(value)}; export default {}`);
+      await expect(prepare(input)).rejects.toMatchObject({ code: 'release_signing_failed' });
+    } finally { await input.cleanup(); }
+  });
+});

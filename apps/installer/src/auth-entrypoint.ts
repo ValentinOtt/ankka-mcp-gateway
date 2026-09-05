@@ -15,7 +15,7 @@ import type { CustomerCloudflareOperation } from './cloudflare-operation-authori
 const CLIENT_ID = /^[A-Za-z0-9_-]{16,128}$/u;
 const KEY_ID = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
-const OWNERSHIP_ROUTE = /^\/oauth\/relay-ticket\/(?:challenge|issue)\/(install|upgrade|rollback|source-add|source-update|source-remove|uninstall)$/u;
+const OWNERSHIP_ROUTE = /^\/oauth\/relay-ticket\/(?:challenge|issue)\/(install|upgrade|rollback|source-add|bigquery-add|source-update|source-remove|uninstall)$/u;
 
 const authConfigSchema = v.object({
   CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID: v.pipe(v.string(), v.regex(CLIENT_ID)),
@@ -107,7 +107,7 @@ function exactAuthUrl(request: Request): URL | null {
 function ownershipOperation(pathname: string): CustomerCloudflareOperation | null {
   const operation = OWNERSHIP_ROUTE.exec(pathname)?.[1];
   return operation === 'install' || operation === 'upgrade' || operation === 'rollback' ||
-    operation === 'source-add' ||
+    operation === 'source-add' || operation === 'bigquery-add' ||
     operation === 'source-update' || operation === 'source-remove' || operation === 'uninstall'
     ? operation
     : null;

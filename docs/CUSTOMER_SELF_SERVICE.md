@@ -157,6 +157,14 @@ Cloudflare account, and team members authenticate only to the
 Gateway Portal. The current dashboard does not offer per-user upstream
 authentication. Ankka does not receive the upstream token.
 
+## Add BigQuery
+
+Compatible releases provide **Sources → Add BigQuery**. Enter your query project
+and datasets, approve Cloudflare, and upload a dedicated service-account JSON
+key directly to your gateway. It deploys the protected bridge and configures
+its callback before the operator connects the source and grants team access.
+See the [complete flow and recovery instructions](ADD_BIGQUERY.md).
+
 ## Supported MCP sources
 
 Source discovery supports Streamable HTTP responses as JSON or server-sent

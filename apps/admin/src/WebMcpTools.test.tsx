@@ -41,6 +41,7 @@ const update: RuntimeUpdate = {
 
 function fixtureApi(): GatewayAdminApi {
   return {
+    getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status), getSources: vi.fn(async () => sources), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(),
@@ -112,6 +113,7 @@ describe('WebMcpTools', () => {
     }
     const prepareTeardownAction = vi.fn(async () => prepared)
     const api: GatewayAdminApi = {
+      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getSources: vi.fn(async () => sources),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
