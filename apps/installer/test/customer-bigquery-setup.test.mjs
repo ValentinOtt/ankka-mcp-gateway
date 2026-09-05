@@ -37,6 +37,10 @@ describe('BigQuery setup with the production source-action state machine', () =>
     const current = await test.controller.readSourceAction(result.actionId);
     expect(current?.action.status).toBe('authorization_required');
     expect(current?.record).toMatchObject({ application: null, pending: null, ready: false });
+    expect(await (await test.controller.list()).json()).toEqual({ schemaVersion: 1, available: true, setups: [{
+      sourceId: result.sourceId, actionId: result.actionId, ready: false, credentialRequired: true,
+      recoveryRequired: false, pendingResource: null, failure: null,
+    }] });
     const stored = JSON.stringify(test.storage.writes);
     expect(stored).not.toContain(claim.actionKey);
     expect(test.fetch).not.toHaveBeenCalled();
@@ -65,7 +69,7 @@ describe('BigQuery setup with the production source-action state machine', () =>
     expect((await test.controller.readSourceAction(claim.actionId))?.action.status).toBe('authorization_required');
     expect(JSON.stringify(test.storage.writes)).not.toContain('synthetic-invalid-google-key');
   });
-  it('marks bridge provisioning as write evidence and only resumes its retained action', async () => {
+  it.each(['collision', 'access_denied'])('retains provisioning write evidence and guards recovery after %s', async (outcome) => {
     const test = await fixture();
     const prepared = await (await test.prepare()).json();
     const claim = JSON.parse(new TextDecoder().decode(base64UrlDecode(new URL(prepared.handoffUrl).hash.slice(1))));
@@ -74,7 +78,8 @@ describe('BigQuery setup with the production source-action state machine', () =>
       const url = String(input);
       if (url === 'https://oauth2.googleapis.com/token') return Response.json({ access_token: 'synthetic-google-access-token', token_type: 'Bearer', expires_in: 3600 });
       if (url === 'https://bigquery.googleapis.com/mcp') return Response.json({ result: { content: [{ type: 'text', text: '{"jobComplete":true}' }] } });
-      if (url.includes('/access/apps?')) return Response.json({ success: true, result: [{ name: 'foreign', domain: current.record.hostname }] });
+      if (url.includes('/access/apps?')) return Response.json({ success: true, result: outcome === 'collision' ? [{ name: 'foreign', domain: current.record.hostname }] : [] });
+      if (url.endsWith(`/zones/${ZONE_ID}/access/apps`)) return Response.json({ errors: [{ message: 'synthetic-provider-detail' }] }, { status: 403 });
       throw new Error('unexpected synthetic destination');
     });
     const key = JSON.stringify({ type: 'service_account', project_id: 'query-project', private_key_id: 'a'.repeat(40),
@@ -82,14 +87,20 @@ describe('BigQuery setup with the production source-action state machine', () =>
       client_email: 'synthetic-reader@query-project.iam.gserviceaccount.com', token_uri: 'https://oauth2.googleapis.com/token' });
     const result = await test.controller.run({ actionId: claim.actionId, actionKey: claim.actionKey, actorEmail: claim.actorEmail,
       accessToken: 'synthetic-cloudflare-operation-grant', actionExpiresAt: claim.expiresAt, serviceAccountJson: key });
-    expect(await result.json()).toEqual({ error: 'bigquery_resource_collision' });
+    expect(await result.json()).toEqual({ error: outcome === 'collision' ? 'bigquery_resource_collision' : 'bigquery_setup_failed' });
+    expect(await (await test.controller.list()).json()).toEqual({ schemaVersion: 1, available: true, setups: [{
+      sourceId: prepared.sourceId, actionId: claim.actionId, ready: false, credentialRequired: true,
+      recoveryRequired: outcome === 'access_denied', pendingResource: outcome === 'access_denied' ? 'application' : null,
+      failure: outcome === 'access_denied' ? { stage: 'application', httpStatus: 403 } : null,
+    }] });
     const snapshot = await (await test.runtime.fetch(new Request('https://admin-state.invalid/source-actions', { headers: { 'x-ankka-actor-email': claim.actorEmail } }))).json();
     expect(snapshot.actions[0]).toMatchObject({ state: 'recovery_required', failureCode: 'bigquery_setup_required', canCancel: false, canRenew: true });
     const resumed = await test.controller.prepare(new Request('https://manage.example.com/api/bigquery/resume', { method: 'POST',
       body: JSON.stringify({ schemaVersion: 1, actionId: claim.actionId }) }), claim.actorEmail, true);
-    expect(resumed.status).toBe(200);
-    expect((await resumed.json()).actionId).toBe(claim.actionId);
+    expect(resumed.status).toBe(outcome === 'collision' ? 200 : 409);
+    if (outcome === 'collision') expect((await resumed.json()).actionId).toBe(claim.actionId);
     expect(JSON.stringify(test.storage.writes)).not.toContain(JSON.parse(key).private_key);
+    expect(JSON.stringify(test.storage.writes)).not.toContain('synthetic-provider-detail');
   });
   it('normalizes dataset order so retries name the same bridge and source', async () => {
     const datasets = [...body.configuration.allowedDatasets, { projectId: 'other-project', datasetId: 'reports' }];

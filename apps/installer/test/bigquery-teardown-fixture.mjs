@@ -54,9 +54,13 @@ export async function fixture({ partial = false, lostDelete = -1, applied = true
   const fetch = async (input, init) => {
     const url = new URL(input);
     expect(url.origin).toBe('https://api.cloudflare.com');
-    expect(url.pathname.startsWith(`/client/v4/accounts/${context.accountId}/`)).toBe(true);
+    const account = `/client/v4/accounts/${context.accountId}`;
+    const zone = `/client/v4/zones/${context.zoneId}`;
+    const base = url.pathname.startsWith(zone + '/') ? zone : account;
+    expect(url.pathname.startsWith(base + '/')).toBe(true);
     expect(new Headers(init.headers).get('Authorization')).toBe(`Bearer ${GRANT}`);
-    const path = url.pathname.slice(`/client/v4/accounts/${context.accountId}`.length);
+    const path = url.pathname.slice(base.length);
+    expect(base).toBe(path.startsWith('/access/apps/') ? zone : account);
     const method = init.method;
     requests.push({ path, method });
     const property = path === `/workers/domains/${domainId}` ? 'domain' :

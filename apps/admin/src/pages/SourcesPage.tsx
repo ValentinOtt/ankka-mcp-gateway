@@ -12,6 +12,19 @@ import { StatusPill } from '../components/StatusPill'
 import { BigQuerySetupForm } from '../components/BigQuerySetupForm'
 import { SourceList } from '../components/SourceList'
 
+const bigQueryResourceNames = { application: 'Access application', worker: 'BigQuery Worker', domain: 'custom domain' }
+
+function BigQueryFailure({ setup }: { setup: BigQuerySetups['setups'][number] | undefined }) {
+  if (!setup || (!setup.recoveryRequired && !setup.failure)) return null
+  return <div role="status" className="mt-3 text-sm text-kumo-subtle">
+    {setup.recoveryRequired ? <p>{setup.pendingResource
+      ? `Cloudflare did not confirm creation of the ${bigQueryResourceNames[setup.pendingResource]}.`
+      : 'A Cloudflare write has an uncertain result.'} Keep this setup’s receipt and review the resource in Cloudflare before making another attempt.</p> : null}
+    {setup.failure ? <p className="mt-1">{bigQueryResourceNames[setup.failure.stage]} request failed{setup.failure.httpStatus === null
+      ? ' before a response was confirmed.' : ` (HTTP ${setup.failure.httpStatus}).`}</p> : null}
+  </div>
+}
+
 function annotation(tool: SourceDiscovery['tools'][number]): string {
   const flags = []
   if (tool.readOnlyHint === true) flags.push('read-only hint')
@@ -335,7 +348,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                 {bigQuery?.setups.some((setup) => setup.actionId === action.actionId && !setup.ready && !setup.recoveryRequired) && action.canCancel ? (
                   <Button variant="secondary" className="pressable mt-3" disabled={isBusy || resumingBigQuery || isCheckingSourceActions} onClick={() => void resumeBigQuery(action.actionId)}>Continue BigQuery setup</Button>
                 ) : null}
-                {bigQuery?.setups.some((setup) => setup.actionId === action.actionId && setup.recoveryRequired) ? <p role="status" className="mt-3 text-sm text-kumo-subtle">A Cloudflare write has an uncertain result. Keep this setup’s receipt and review the resource in Cloudflare before making another attempt.</p> : null}
+                <BigQueryFailure setup={bigQuery?.setups.find((setup) => setup.actionId === action.actionId)} />
                 {action.canRenew === true && action.state === 'recovery_required' && !bigQuery?.setups.some((setup) => setup.actionId === action.actionId && setup.recoveryRequired) ? (
                   <div className="mt-3">
                     <Button variant="secondary" className="pressable" disabled={!installationEnabled || isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void authorize(action.sourceId, action.actionId)}>Renew consent and resume</Button>

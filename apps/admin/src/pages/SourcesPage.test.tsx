@@ -578,6 +578,19 @@ describe('SourcesPage', () => {
 
 describe('Add BigQuery setup', () => {
   afterEach(cleanup)
+  it('shows bounded Access failure details and keeps an uncertain creation blocked', async () => {
+    const action = { ...pendingAction(), state: 'recovery_required' as const, canCancel: false, canRenew: true,
+      failureCode: 'bigquery_setup_required' }
+    const api = actionApi(actionSnapshot(action))
+    api.getBigQuerySetups = vi.fn(async () => ({ schemaVersion: 1 as const, available: true, setups: [{ sourceId: draft.id,
+      actionId: action.actionId, ready: false, credentialRequired: true, recoveryRequired: true,
+      pendingResource: 'application' as const, failure: { stage: 'application' as const, httpStatus: 403 } }] }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    expect(await screen.findByText(/Cloudflare did not confirm creation of the Access application/)).toBeInTheDocument()
+    expect(screen.getByText('Access application request failed (HTTP 403).')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Continue BigQuery setup' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Renew consent and resume' })).not.toBeInTheDocument()
+  })
   it('reviews project and dataset access before Cloudflare approval without collecting a key in the draft', async () => {
     const user = userEvent.setup()
     const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })

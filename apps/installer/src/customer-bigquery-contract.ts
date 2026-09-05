@@ -37,6 +37,10 @@ export const bigQueryRecordSchema = v.strictObject({
   workerVersion: v.nullable(identifier),
   domainId: v.nullable(identifier),
   pending: v.nullable(v.picklist(['application', 'worker', 'domain'])),
+  failure: v.optional(v.strictObject({
+    stage: v.picklist(['application', 'worker', 'domain']),
+    httpStatus: v.nullable(v.pipe(v.number(), v.safeInteger(), v.minValue(100), v.maxValue(599))),
+  })),
   ready: v.boolean(),
 });
 export type BigQueryRecord = v.InferOutput<typeof bigQueryRecordSchema>;

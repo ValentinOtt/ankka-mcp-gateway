@@ -177,6 +177,7 @@ export function createBigQuerySetup(context: BigQuerySetupContext, port: BigQuer
     const setups = [...entries.values()].map((raw) => v.parse(bigQueryRecordSchema, raw)).map((record) => ({
       sourceId: record.sourceId, actionId: record.actionId, ready: record.ready,
       credentialRequired: record.workerVersion === null, recoveryRequired: record.pending !== null,
+      pendingResource: record.pending, failure: record.failure ?? null,
     }));
     return json({ schemaVersion: 1, available: true, setups });
   }

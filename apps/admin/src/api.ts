@@ -85,6 +85,10 @@ const sourceDiscoverySchema = v.strictObject({
 const bigQuerySetupsSchema = v.strictObject({
   schemaVersion: v.literal(1), available: v.boolean(), setups: v.array(v.strictObject({
     sourceId: v.string(), actionId: v.string(), ready: v.boolean(), credentialRequired: v.boolean(), recoveryRequired: v.boolean(),
+    pendingResource: v.optional(v.nullable(v.picklist(['application', 'worker', 'domain']))),
+    failure: v.optional(v.nullable(v.strictObject({ stage: v.picklist(['application', 'worker', 'domain']),
+      httpStatus: v.nullable(v.pipe(v.number(), v.safeInteger(), v.minValue(100), v.maxValue(599))),
+    }))),
   })),
 })
 const bigQueryPreparedSchema = v.strictObject({
