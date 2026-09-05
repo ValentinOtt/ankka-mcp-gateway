@@ -31,7 +31,7 @@ const SCOPE_ID = /^[a-z][a-z0-9-]*\.(?:read|write)$/u;
 const relayStateSchema = v.strictObject({
   schemaVersion: v.literal(1),
   operation: v.picklist([
-    'install', 'upgrade', 'rollback', 'source-add', 'source-update', 'source-remove', 'uninstall',
+    'install', 'upgrade', 'rollback', 'source-add', 'bigquery-add', 'source-update', 'source-remove', 'uninstall',
   ]),
   accountId: v.pipe(v.string(), v.regex(ACCOUNT_ID)),
   installId: v.pipe(v.string(), v.regex(INSTALLATION_ID)),

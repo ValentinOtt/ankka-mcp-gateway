@@ -40,7 +40,7 @@ describe('fixed Cloudflare OAuth operation authority', () => {
 
   it('has the exhaustive fixed operation catalogue and no generic authority', () => {
     expect(FIXED_CLOUDFLARE_OPERATIONS).toEqual([
-      'bootstrap', 'install', 'upgrade', 'rollback', 'source-add', 'source-update',
+      'bootstrap', 'install', 'upgrade', 'rollback', 'source-add', 'bigquery-add', 'source-update',
       'source-remove', 'uninstall', 'uninstall-finalize', 'gateway-root-finalize',
     ]);
     expect(isFixedCloudflareOperation('install')).toBe(true);

@@ -1,7 +1,9 @@
 import * as v from 'valibot';
+import { createBigQuerySetup } from './customer-bigquery-setup';
+import { bigQuerySetupAvailable } from './customer-bigquery-deployment';
 
 // @ts-expect-error The payload is validated as a release input, not a TS package.
-import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceiptProviderStateWithReason, prepareCurrentGatewayTeardown, gatewayControlPlaneOrigin } from '../../../payload/worker/index.js';
+import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceiptProviderStateWithReason, prepareCurrentGatewayTeardown, gatewayControlPlaneOrigin, verifyAccess } from '../../../payload/worker/index.js';
 import { CustomerBootstrapConvergenceDriver } from './customer-bootstrap-convergence-driver';
 import { finalizeCustomerBootstrapHandover } from './customer-bootstrap-handover';
 import { customerInstallProgressPage } from './customer-install-progress-page';
@@ -565,6 +567,22 @@ export class AdminState extends RuntimeAdminState {
     });
   }
 
+  private bigQuerySetup(config: ParsedFinalEnv) {
+    return createBigQuerySetup({
+      accountId: config.CLOUDFLARE_ACCOUNT_ID, zoneId: config.CLOUDFLARE_ZONE_ID,
+      zoneName: config.CLOUDFLARE_ZONE_NAME, installationId: config.ANKKA_INSTALL_ID,
+      accessIssuer: new URL(config.CF_ACCESS_ISSUER).origin,
+      managementOrigin: `https://${config.ANKKA_MANAGEMENT_HOSTNAME}`,
+      workerName: config.ANKKA_WORKER_NAME, workersSubdomain: config.ANKKA_WORKERS_SUBDOMAIN,
+      controlPlaneOrigin: v.parse(v.string(), gatewayControlPlaneOrigin()),
+      releaseIdentity: { schemaVersion: 1, channel: config.ANKKA_UPDATE_CHANNEL,
+        controlPlaneOrigin: v.parse(v.string(), gatewayControlPlaneOrigin()), release: config.ANKKA_GATEWAY_RELEASE, keyId: config.ANKKA_UPDATE_KEY_ID,
+        publicKey: config.ANKKA_UPDATE_PUBLIC_KEY, artifactSha256: config.ANKKA_GATEWAY_RELEASE_SHA256.slice('sha256:'.length) },
+    }, { storage: this.finalState.storage, runtime: (request) => super.fetch(request),
+      fetch: (input, init) => fetch(input, init) });
+
+  }
+
   /** Authorizes and applies a later operation with the public client the trust names. */
   private async operationRouter(config: ParsedFinalEnv, managementOrigin: string) {
     const ownership = await this.assertOperational(config);
@@ -584,6 +602,12 @@ export class AdminState extends RuntimeAdminState {
       transport: (target, init) => fetch(target, init),
       assertOperational: () => this.assertOperational(config).then(() => undefined),
       readSourceAction: (actionId) => this.readSourceAction(actionId),
+      readBigQueryAction: async (actionId) => {
+        if (!bigQuerySetupAvailable()) return null;
+        const current = await this.bigQuerySetup(config).readSourceAction(actionId);
+        return current === null ? null : { status: current.action.status, expiresAt: Date.parse(current.action.expiresAt) };
+      },
+      runBigQuerySetup: (input) => this.bigQuerySetup(config).run(input),
       readRuntimeAction: (actionId) => this.readRuntimeAction(actionId),
       runRuntimeUpdate: (input) => this.runRuntimeUpdate(config, input),
       issueRelayTicket: (operation) => this.issueOperationRelayTicket(config, operation),
@@ -650,6 +674,22 @@ export class AdminState extends RuntimeAdminState {
     if (url.origin === managementOrigin && teardownRoute) {
       try { return await (await this.teardownRouter(config, managementOrigin)).fetch(request); }
       catch { return unavailable(); }
+    }
+    if (url.origin === managementOrigin && ['/api/bigquery', '/api/bigquery/resume'].includes(url.pathname) && url.search === '') {
+      const actor = v.safeParse(v.string(), await verifyAccess(request, this.finalEnv));
+      if (!actor.success) return new Response(null, { status: 401, headers: secureHeaders('application/json') });
+      if (!bigQuerySetupAvailable()) return new Response(JSON.stringify({ schemaVersion: 1, available: false, setups: [] }), {
+        status: request.method === 'GET' ? 200 : 409, headers: secureHeaders('application/json'),
+      });
+      const setup = this.bigQuerySetup(config);
+      try {
+        await this.assertOperational(config);
+        if (request.method === 'GET' && url.pathname === '/api/bigquery') return setup.list();
+        if (request.method !== 'POST' || request.headers.get('origin') !== managementOrigin ||
+            request.headers.get('content-type')?.split(';')[0]?.trim() !== 'application/json' ||
+            ![null, 'same-origin'].includes(request.headers.get('sec-fetch-site'))) return notFound();
+        return await setup.prepare(request, actor.output, url.pathname.endsWith('/resume'));
+      } catch { return new Response(JSON.stringify({ error: 'bigquery_setup_invalid' }), { status: 400, headers: secureHeaders('application/json') }); }
     }
     // A later operation owns its page and start route; it also claims the
     // certified callback while the browser carries an operation attempt.
@@ -733,7 +773,8 @@ export default {
       const url = new URL(request.url);
       if (url.pathname === CUSTOMER_INSTALL_CONTINUE_PATH) return notFound();
       if (url.pathname.startsWith(CUSTOMER_INSTALL_ROOT_PATH) ||
-          url.pathname.startsWith(CUSTOMER_OPERATION_ROOT_PATH)) {
+          url.pathname.startsWith(CUSTOMER_OPERATION_ROOT_PATH) ||
+          ['/api/bigquery', '/api/bigquery/resume'].includes(url.pathname)) {
         if (url.origin !== `https://${config.ANKKA_MANAGEMENT_HOSTNAME}`) return notFound();
         return env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(request);
       }

@@ -228,6 +228,14 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     }
   }
 
+  async getBigQuerySetups() { return { schemaVersion: 1 as const, available: true, setups: [] } }
+  async prepareBigQuery(_input: import('./api').BigQuerySetupInput): Promise<import('./api').BigQueryPrepared> {
+    throw new GatewayApiError(409, 'preview_only')
+  }
+  async resumeBigQuery(_actionId: string): Promise<import('./api').BigQueryPrepared> {
+    throw new GatewayApiError(409, 'preview_only')
+  }
+
   async saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources> {
     if (!this.#sources.installationEnabled) throw new GatewayApiError(409, 'source_addition_paused')
     if (revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_conflict')

@@ -34,6 +34,7 @@ const installedSources: ManagedSources = {
 
 function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
   return {
+    getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status),
     getSources: vi.fn(async () => sources),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
@@ -161,7 +162,8 @@ describe('GatewayProvider', () => {
     const prepareTeamAction = vi.fn(async (): Promise<TeamActionResult> => ({ schemaVersion: 1, action: {
       schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, status: 'succeeded', expiresAt: '2030-01-01T00:00:00.000Z', failureCode: null, canCancel: false,
     } }))
-    const client = api({ getStatus: vi.fn().mockRejectedValue(new Error('Status unavailable')), prepareTeamAction })
+    const client = api({ getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+    getStatus: vi.fn().mockRejectedValue(new Error('Status unavailable')), prepareTeamAction })
     render(<GatewayProvider api={client}><Probe /><TeamSaveProbe /></GatewayProvider>)
     await screen.findByText('settled')
     await user.click(screen.getByRole('button', { name: 'Save Team' }))

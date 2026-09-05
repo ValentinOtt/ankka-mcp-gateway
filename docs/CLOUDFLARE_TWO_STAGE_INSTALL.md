@@ -532,6 +532,7 @@ follows the status route behind Access.
 | `install` | customer Gateway | the seven exact Stage 2 scopes above |
 | `upgrade` / `rollback` | customer Gateway | `workers-scripts.write` |
 | `source-add` / `source-update` / `source-remove` | customer Gateway | `zone-access.write`, `mcp-portals.write` |
+| `bigquery-add` | customer Gateway | `zone-access.write`, `mcp-portals.write`, `workers-scripts.write`, `workers-routes.read` |
 | `uninstall` | customer Gateway | union derived only from checksum-valid receipt resource kinds |
 | `uninstall-finalize` | hosted installer | `workers-scripts.write` |
 

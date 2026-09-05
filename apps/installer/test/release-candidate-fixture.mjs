@@ -86,6 +86,10 @@ export async function releaseCandidateCheckout(files = FIXTURE_PAYLOAD) {
     };
   `);
 
+  const bridgeRoot = path.join(source, 'apps', 'read-only-connectors', 'src');
+  await mkdir(bridgeRoot, { recursive: true });
+  await writeFile(path.join(bridgeRoot, 'index.ts'), 'export default { fetch() { return new Response("synthetic BigQuery bridge"); } };\n');
+
   const adminRoot = path.join(source, 'apps', 'admin');
   await mkdir(adminRoot, { recursive: true });
   await writeFile(path.join(source, 'package.json'), JSON.stringify({

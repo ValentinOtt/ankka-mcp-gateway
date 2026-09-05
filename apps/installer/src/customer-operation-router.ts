@@ -1,4 +1,7 @@
 import * as v from 'valibot';
+import { bigQueryCredentialPage } from './customer-bigquery-credential-page';
+import { readBigQueryText } from './customer-bigquery-contract';
+import type { BigQueryOperationInput } from './customer-bigquery-setup';
 
 import { canonicalJson } from './canonical-json';
 import type { CustomerCloudflareOperation } from './cloudflare-operation-authority';
@@ -107,6 +110,15 @@ const sourceActionClaimSchema = v.strictObject({
   releaseIdentity: releaseIdentitySchema,
 });
 
+const bigQueryActionClaimSchema = v.strictObject({
+  ...sourceActionClaimSchema.entries, actionType: v.literal('bigquery_setup'),
+});
+const bigQueryCallbackSchema = v.strictObject({
+  code: v.pipe(v.string(), v.regex(AUTHORIZATION_CODE)),
+  state: v.pipe(v.string(), v.regex(TOKEN)),
+  serviceAccountJson: v.pipe(v.string(), v.minLength(1), v.maxLength(16_384)),
+});
+
 const runtimeVersionSchema = v.strictObject({
   release: v.pipe(v.string(), v.regex(RELEASE)),
   artifactSha256: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
@@ -145,8 +157,8 @@ const targetSchema = v.strictObject({
 export const customerOperationAttemptSchema = v.strictObject({
   schemaVersion: v.literal(1),
   attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
-  kind: v.picklist(['source', 'runtime']),
-  operation: v.picklist(['source-add', 'upgrade', 'rollback']),
+  kind: v.picklist(['source', 'bigquery', 'runtime']),
+  operation: v.picklist(['source-add', 'bigquery-add', 'upgrade', 'rollback']),
   actionId: v.pipe(v.string(), v.regex(ACTION_ID)),
   actorEmail: v.pipe(v.string(), v.maxLength(256), v.regex(EMAIL)),
   actionExpiresAt: v.pipe(v.number(), v.safeInteger()),
@@ -164,6 +176,7 @@ type SourceActionClaim = v.InferOutput<typeof sourceActionClaimSchema>;
 type RuntimeActionClaim = v.InferOutput<typeof runtimeActionClaimSchema>;
 type DecodedClaim =
   | { readonly kind: 'source'; readonly claim: SourceActionClaim }
+  | { readonly kind: 'bigquery'; readonly claim: v.InferOutput<typeof bigQueryActionClaimSchema> }
   | { readonly kind: 'runtime'; readonly claim: RuntimeActionClaim };
 
 /** One attempt per gateway, durable so the callback can refuse replays. */
@@ -209,6 +222,8 @@ export interface CustomerOperationRouterDependencies {
   /** Throws unless the install is complete and the ownership trust names the callback. */
   readonly assertOperational: () => Promise<void>;
   readonly readSourceAction: (actionId: string) => Promise<CustomerOperationActionView | null>;
+  readonly readBigQueryAction?: (actionId: string) => Promise<CustomerOperationActionView | null>;
+  readonly runBigQuerySetup?: (input: BigQueryOperationInput) => Promise<Response>;
   readonly readRuntimeAction: (actionId: string) => Promise<CustomerOperationActionView | null>;
   readonly issueRelayTicket: (operation: CustomerCloudflareOperation) => Promise<{
     readonly relayTicket: string;
@@ -308,9 +323,8 @@ function sameOriginJsonMutation(request: Request, expectedOrigin: string): boole
 async function startBody(request: Request): Promise<v.InferOutput<typeof startBodySchema> | null> {
   const declared = request.headers.get('content-length');
   if (declared !== null && (!/^\d{1,6}$/u.test(declared) || Number(declared) > MAX_BODY_BYTES)) return null;
-  const body = await request.text();
-  if (body.length > MAX_BODY_BYTES) return null;
   try {
+    const body = await readBigQueryText(request.body, MAX_BODY_BYTES);
     const parsed = v.safeParse(startBodySchema, JSON.parse(body));
     return parsed.success ? parsed.output : null;
   } catch {
@@ -327,6 +341,8 @@ function decodeClaim(handoff: string): DecodedClaim | null {
   }
   const source = v.safeParse(sourceActionClaimSchema, decoded);
   if (source.success) return { kind: 'source', claim: source.output };
+  const bigquery = v.safeParse(bigQueryActionClaimSchema, decoded);
+  if (bigquery.success) return { kind: 'bigquery', claim: bigquery.output };
   const runtime = v.safeParse(runtimeActionClaimSchema, decoded);
   if (runtime.success) return { kind: 'runtime', claim: runtime.output };
   return null;
@@ -338,7 +354,7 @@ function claimMatches(
   now: number,
 ): boolean {
   const { claim } = decoded;
-  const identity = decoded.kind === 'source'
+  const identity = decoded.kind !== 'runtime'
     ? decoded.claim.releaseIdentity.release === config.release &&
       decoded.claim.releaseIdentity.artifactSha256 === config.artifactSha256
     : decoded.claim.from.release === config.release &&
@@ -349,8 +365,9 @@ function claimMatches(
     claim.expiresAt > now && claim.expiresAt <= now + MAX_ACTION_LIFETIME_MS + CLOCK_SKEW_MS;
 }
 
-function relayOperation(decoded: DecodedClaim): 'source-add' | 'upgrade' | 'rollback' {
+function relayOperation(decoded: DecodedClaim): 'source-add' | 'bigquery-add' | 'upgrade' | 'rollback' {
   if (decoded.kind === 'source') return 'source-add';
+  if (decoded.kind === 'bigquery') return 'bigquery-add';
   return decoded.claim.operation === 'rollback' ? 'rollback' : 'upgrade';
 }
 
@@ -426,10 +443,10 @@ function redirectToDashboard(
   outcome: OperationOutcome,
   cookies: readonly string[],
 ): Response {
-  const location = attempt.kind === 'source'
+  const location = attempt.kind !== 'runtime'
     ? new URL('/sources', managementOrigin)
     : new URL('/settings', managementOrigin);
-  const parameter = attempt.kind === 'source' ? 'sourceAction' : 'runtimeAction';
+  const parameter = attempt.kind !== 'runtime' ? 'sourceAction' : 'runtimeAction';
   location.searchParams.set(parameter, attempt.actionId);
   location.searchParams.set(`${parameter}Result`, outcome.result);
   if (outcome.reason !== null && REASON.test(outcome.reason)) {
@@ -469,13 +486,24 @@ export function createCustomerOperationRouter(
     const { claim } = decoded;
     const action = decoded.kind === 'source'
       ? await dependencies.readSourceAction(claim.actionId)
-      : await dependencies.readRuntimeAction(claim.actionId);
+      : decoded.kind === 'bigquery'
+        ? await dependencies.readBigQueryAction?.(claim.actionId) ?? null
+        : await dependencies.readRuntimeAction(claim.actionId);
     if (action === null || action.status !== 'authorization_required' || action.expiresAt !== claim.expiresAt) {
       return json({ schemaVersion: 1, error: 'operation_conflict' }, 409);
     }
     const existing = await dependencies.attempts.read();
-    if (existing !== null && existing.expiresAt > startedAt && existing.actionId !== claim.actionId) {
+    if (existing !== null && existing.expiresAt > startedAt && existing.phase === 'exchanging') {
       return json({ schemaVersion: 1, error: 'operation_pending' }, 409);
+    }
+    if (existing !== null && existing.expiresAt > startedAt && existing.actionId !== claim.actionId) {
+      const previousAction = existing.kind === 'runtime'
+        ? await dependencies.readRuntimeAction(existing.actionId)
+        : await dependencies.readSourceAction(existing.actionId);
+      // A cancelled action invalidates its handoff and may be replaced immediately.
+      if (previousAction?.status !== 'failed') {
+        return json({ schemaVersion: 1, error: 'operation_pending' }, 409);
+      }
     }
     const operation = relayOperation(decoded);
     const verifier = randomBase64Url(32);
@@ -548,26 +576,34 @@ export function createCustomerOperationRouter(
   };
 
   const callback = async (request: Request, url: URL): Promise<Response> => {
+    let uploaded: v.InferOutput<typeof bigQueryCallbackSchema> | null = null;
+    if (request.method === 'POST') {
+      if (!sameOriginJsonMutation(request, config.managementOrigin) || url.search !== '') return json({ error: 'oauth_callback_rejected' }, 400);
+      try { uploaded = v.parse(bigQueryCallbackSchema, JSON.parse(await readBigQueryText(request.body))); }
+      catch { return json({ error: 'oauth_callback_rejected' }, 400); }
+    }
     const callbackAt = now();
     const cookies = [clearCookie()];
     const cookie = readOperationCookie(request, callbackAt);
     const attempt = await dependencies.attempts.read();
-    const oauthState = url.searchParams.get('state') ?? '';
+    const oauthState = uploaded?.state ?? url.searchParams.get('state') ?? '';
     if (cookie === null || attempt === null || attempt.attemptId !== cookie.attemptId ||
         attempt.expiresAt !== cookie.expiresAt || attempt.expiresAt <= callbackAt ||
         attempt.phase !== 'authorizing' || !TOKEN.test(oauthState) ||
         !constantTimeEqual(await sha256(oauthState), attempt.stateHash)) {
       return json({ schemaVersion: 1, error: 'oauth_callback_rejected' }, 400, cookies);
     }
-    const code = url.searchParams.get('code') ?? '';
+    if (uploaded !== null && attempt.kind !== 'bigquery') return json({ error: 'oauth_callback_rejected' }, 400, cookies);
+    const code = uploaded?.code ?? url.searchParams.get('code') ?? '';
     const oauthError = url.searchParams.get('error');
     if (oauthError === 'authorization_rejected' && code === '' && url.searchParams.size === 2) {
       await dependencies.attempts.clear();
       return redirectToDashboard(config.managementOrigin, attempt, { result: 'denied', reason: null }, cookies);
     }
-    if (oauthError !== null || !AUTHORIZATION_CODE.test(code) || url.searchParams.size !== 2) {
+    if (oauthError !== null || !AUTHORIZATION_CODE.test(code) || (uploaded === null && url.searchParams.size !== 2)) {
       return json({ schemaVersion: 1, error: 'oauth_callback_rejected' }, 400, cookies);
     }
+    if (attempt.kind === 'bigquery' && uploaded === null) return bigQueryCredentialPage(code, oauthState);
     // The attempt is spent before the exchange: a replayed callback cannot exchange twice.
     await dependencies.attempts.write({ ...attempt, phase: 'exchanging' });
     let grant: EphemeralCustomerCloudflareGrant | null = null;
@@ -590,6 +626,12 @@ export function createCustomerOperationRouter(
           transport: dependencies.transport,
         });
         if (attempt.kind === 'source') return applySource(attempt, cookie.actionKey, accessToken, callbackAt);
+        if (attempt.kind === 'bigquery') {
+          if (uploaded === null || dependencies.runBigQuerySetup === undefined) return { result: 'failed', reason: 'bigquery_setup_unavailable' };
+          return appliedOutcome(await dependencies.runBigQuerySetup({ actionId: attempt.actionId, actionKey: cookie.actionKey,
+            actorEmail: attempt.actorEmail, accessToken, actionExpiresAt: attempt.actionExpiresAt, serviceAccountJson: uploaded.serviceAccountJson,
+          }), attempt.actionId);
+        }
         if (attempt.target === null || attempt.operation === 'source-add') {
           return { result: 'failed', reason: 'attempt_invalid' };
         }
@@ -627,7 +669,8 @@ export function createCustomerOperationRouter(
     } catch {
       // The attempt record expires on its own; the new version finishes the journal.
     }
-    return redirectToDashboard(config.managementOrigin, attempt, outcome, cookies);
+    const redirect = redirectToDashboard(config.managementOrigin, attempt, outcome, cookies);
+    return uploaded === null ? redirect : json({ redirectUrl: redirect.headers.get('location') }, 200, cookies);
   };
 
   return Object.freeze({
@@ -640,7 +683,7 @@ export function createCustomerOperationRouter(
       }
       if (url.origin !== config.managementOrigin || url.username !== '' || url.password !== '' ||
           url.port !== '' || url.hash !== '') return notFound();
-      const isCallback = request.method === 'GET' && url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH;
+      const isCallback = ['GET', 'POST'].includes(request.method) && url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH;
       try {
         await dependencies.assertOperational();
       } catch {

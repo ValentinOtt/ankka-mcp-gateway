@@ -29,7 +29,7 @@ const relayTicketSchema = v.strictObject({
   gatewayCallback: v.pipe(v.string(), v.url()),
   publicClientId: v.pipe(v.string(), v.regex(CLIENT_ID)),
   operation: v.picklist([
-    'install', 'upgrade', 'rollback', 'source-add', 'source-update', 'source-remove', 'uninstall',
+    'install', 'upgrade', 'rollback', 'source-add', 'bigquery-add', 'source-update', 'source-remove', 'uninstall',
   ]),
   receiptResourceKinds: v.union([
     v.array(v.picklist(RECEIPT_OWNED_CLOUDFLARE_RESOURCE_KINDS)),

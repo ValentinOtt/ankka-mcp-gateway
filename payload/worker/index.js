@@ -2807,7 +2807,9 @@ function safeSourceAction(value) {
     'expiresAt', 'status', 'actionKeyHash', 'sourceHash', 'resources', 'pending', 'portalUpdate', 'failureCode',
     ...(Object.hasOwn(value ?? {}, 'initialPolicyVersion') ? ['initialPolicyVersion'] : []),
     ...(Object.hasOwn(value ?? {}, 'renewedAt') ? ['renewedAt'] : []),
+    ...(Object.hasOwn(value ?? {}, 'bigquerySetupStarted') ? ['bigquerySetupStarted'] : []),
   ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) || !SOURCE_ID.test(value.sourceId) ||
+      (Object.hasOwn(value, 'bigquerySetupStarted') && value.bigquerySetupStarted !== true) ||
       (Object.hasOwn(value, 'initialPolicyVersion') && value.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION) ||
       !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
       !normalizedEmail(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
@@ -2858,7 +2860,7 @@ function publicSourceAction(action) {
 }
 
 function sourceActionHasWriteEvidence(action) {
-  return action.resources.length > 0 || action.pending !== null || action.portalUpdate !== null;
+  return action.bigquerySetupStarted === true || action.resources.length > 0 || action.pending !== null || action.portalUpdate !== null;
 }
 
 function sourceActionState(action, now) {
@@ -2883,7 +2885,8 @@ function sourceActionCanRenew(action, actorEmail, now) {
   // An unacknowledged hostname-less app creation has no authoritative locator:
   // the zone listing cannot prove it absent, so it still needs manual review.
   return action.actorEmail === normalizedEmail(actorEmail) && now >= action.issuedAt &&
-    (action.expiresAt <= now || sourceActionConnectionPaused(action)) &&
+    (action.expiresAt <= now || sourceActionConnectionPaused(action) ||
+      (action.bigquerySetupStarted === true && action.failureCode === 'bigquery_setup_required')) &&
     action.initialPolicyVersion === SOURCE_INITIAL_POLICY_VERSION &&
     sourceActionState(action, now) === 'recovery_required' &&
     !(action.pending?.kind === 'source_access_application' && action.pending.provider === null);
@@ -3160,7 +3163,8 @@ function sourceActionClaim(value, environment, action, nowMs) {
   if (!exactKeys(value, [
     'schemaVersion', 'actionId', 'actionKey', 'actorEmail', 'accountId',
     'issuedAt', 'expiresAt', 'cloudflareAccessToken',
-  ]) || value.schemaVersion !== 1 || value.actionId !== action.actionId ||
+    ...(Object.hasOwn(value ?? {}, 'bigqueryPhase') ? ['bigqueryPhase'] : []),
+  ]) || (Object.hasOwn(value ?? {}, 'bigqueryPhase') && !['start', 'failed'].includes(value.bigqueryPhase)) || value.schemaVersion !== 1 || value.actionId !== action.actionId ||
       !isText(value.actionKey) || !NONCE.test(value.actionKey) ||
       normalizedEmail(value.actorEmail) !== action.actorEmail || value.accountId !== environment.accountId ||
       !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
@@ -3182,7 +3186,8 @@ async function parseSourceActionRequest(request, env, storage, nowMs) {
   try { parsed = JSON.parse(rawBody); } catch { return null; }
   if (!isPlainData(parsed) || canonicalJson(parsed) !== rawBody || !ACTION_ID.test(parsed.actionId)) return null;
   const context = await storedSourceActionContext(storage, parsed.actionId);
-  if (!context || context.action.status !== 'authorization_required') return null;
+  if (!context || (context.action.status !== 'authorization_required' &&
+      !(context.action.bigquerySetupStarted === true && context.action.status === 'applying'))) return null;
   const claim = sourceActionClaim(parsed, environment, context.action, nowMs);
   if (!claim || await sha256(claim.actionKey) !== context.action.actionKeyHash ||
       !await verifyHmac(rawBody, claim.actionKey, request.headers.get('x-ankka-source-action-signature'))) return null;
@@ -3327,6 +3332,7 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   if (!parsed) return fixedJson(400, { schemaVersion: 1, error: 'source_action_rejected', retryable: false });
   // A release gate is enforced here as well as in the authenticated API.
   if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
+  if (parsed.claim.bigqueryPhase !== undefined) return actionRecovery('source_action_rejected');
   let { action } = parsed;
   if (action.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION) {
     return fixedJson(409, { schemaVersion: 1, error: 'source_action_legacy_policy', retryable: false });
@@ -4683,6 +4689,20 @@ export class AdminState {
         const action = await renewSourceAction(this.state.storage, input, this.env);
         return action instanceof Response ? action : fixedJson(200, publicSourceAction(action));
       }
+      if (url.pathname === `${INTERNAL_ACTIONS_PATH}/bigquery` && request.method === 'POST') {
+        const parsed = await parseSourceActionRequest(request, this.env, this.state.storage, Date.now());
+        if (!parsed || !['start', 'failed'].includes(parsed.claim.bigqueryPhase)) return actionRecovery('source_action_rejected');
+        if (await otherLifecycleBlocksSource(this.state.storage, Date.now(), parsed.action.actionId)) return sourceActionConflict();
+        if (parsed.claim.bigqueryPhase === 'start' && !await armSourceCompatibility(this.state.storage, this.env)) {
+          return actionRecovery('source_action_state_unavailable');
+        }
+        const action = await persistSourceAction(this.state.storage, {
+          ...parsed.action, bigquerySetupStarted: true,
+          status: parsed.claim.bigqueryPhase === 'start' ? 'applying' : 'recovery_required',
+          failureCode: parsed.claim.bigqueryPhase === 'start' ? null : 'bigquery_setup_required',
+        });
+        return action ? fixedJson(200, publicSourceAction(action)) : actionRecovery('source_action_state_unavailable');
+      }
       if (url.pathname === `${INTERNAL_ACTIONS_PATH}/apply` && request.method === 'POST') {
         const raw = await readBoundedText(request.clone(), REQUEST_LIMIT_BYTES);
         let value;
@@ -4907,7 +4927,7 @@ function accessConfiguration(env) {
   return Object.freeze({ aud: env.CF_ACCESS_AUD, issuer: issuer.origin, emails: Object.freeze(emails) });
 }
 
-async function verifyAccess(request, env, nowMs = Date.now()) {
+export async function verifyAccess(request, env, nowMs = Date.now()) {
   const configuration = accessConfiguration(env);
   const assertion = request.headers.get('cf-access-jwt-assertion');
   const claimedEmail = normalizedEmail(request.headers.get('cf-access-authenticated-user-email'));
@@ -5348,8 +5368,7 @@ async function otherLifecycleBlocksSource(storage, now, currentActionId) {
       if (action.actionId === currentActionId || action.status === 'succeeded') return false;
       // An expired grant is not evidence that its provider mutation never ran.
       // Retain source journals even if a historical status says unstarted/failed.
-      if (key === ACTIONS_KEY && (action.resources.length > 0 || action.pending !== null ||
-        action.portalUpdate !== null)) return true;
+      if (key === ACTIONS_KEY && sourceActionHasWriteEvidence(action)) return true;
       if (action.status === 'failed') return false;
       if (action.status !== 'authorization_required' || action.expiresAt > now) return true;
       return key === UPDATES_KEY && action.stage !== null;
@@ -5392,6 +5411,8 @@ async function currentTeardownBlocked(storage, env) {
     const raw = await storage.get(key);
     if (raw === undefined) continue;
     const state = parse(raw);
+    // The current teardown receipts cover sources, but not their BigQuery bridge Workers.
+    if (key === ACTIONS_KEY && state?.actions.some((action) => action.bigquerySetupStarted === true)) return true;
     if (!state || state.actions.some((action) => action.status !== 'succeeded' &&
       (action.status !== 'failed' || (key === ACTIONS_KEY && sourceActionHasWriteEvidence(action)) ||
         (key === UPDATES_KEY && action.stage !== null)))) return true;

@@ -82,11 +82,28 @@ const sourceDiscoverySchema = v.strictObject({
   tools: v.array(discoveredToolSchema),
   connectionBlock: v.optional(v.literal('source_google_shared_oauth_unsupported')),
 })
+const bigQuerySetupsSchema = v.strictObject({
+  schemaVersion: v.literal(1), available: v.boolean(), setups: v.array(v.strictObject({
+    sourceId: v.string(), actionId: v.string(), ready: v.boolean(), credentialRequired: v.boolean(), recoveryRequired: v.boolean(),
+  })),
+})
+const bigQueryPreparedSchema = v.strictObject({
+  schemaVersion: v.literal(1), actionId: v.string(), sourceId: v.string(), expiresAt: v.string(), handoffUrl: v.string(),
+})
+export type BigQuerySetups = v.InferOutput<typeof bigQuerySetupsSchema>
+export type BigQueryPrepared = v.InferOutput<typeof bigQueryPreparedSchema>
+export interface BigQuerySetupInput {
+  revision: number
+  label: string
+  configuration: { queryProjectId: string; allowedDatasets: { projectId: string; datasetId: string }[] }
+  readOnlyConfirmed: true
+}
+
 const sourceActionFailureCodes = new Set([
   'source_action_denied', 'source_action_recovery_required', 'source_action_state_unavailable',
   'source_action_conflict', 'source_action_drift', 'source_discovery_failed', 'source_action_invalid',
   'source_action_authorization_failed', 'source_resource_collision', 'source_action_legacy_policy',
-  'source_connection_required', 'source_sync_required', 'source_tools_mismatch',
+  'source_connection_required', 'source_sync_required', 'source_tools_mismatch', 'bigquery_setup_required',
 ])
 const sourceActionSchema = v.strictObject({
   schemaVersion: v.literal(1),
@@ -255,6 +272,9 @@ export type TeamActionResult = v.InferOutput<typeof teamActionResultSchema>
 
 export interface GatewayAdminApi {
   getStatus(): Promise<GatewayStatus>
+  getBigQuerySetups(): Promise<BigQuerySetups>
+  prepareBigQuery(input: BigQuerySetupInput): Promise<BigQueryPrepared>
+  resumeBigQuery(actionId: string): Promise<BigQueryPrepared>
   getSources(): Promise<ManagedSources>
   getTeam(): Promise<Team>
   prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult>
@@ -277,6 +297,14 @@ export const SOURCE_ADDITION_PAUSED_MESSAGE = 'New-source installation is tempor
 export const GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE = 'BigQuery requires a manually registered Google OAuth client. Cloudflare currently documents manual OAuth without an admin credential flow, so one operator connection for your team is not supported. No credentials have been requested. Keep Require user auth off; see the BigQuery setup guide.'
 
 const ERROR_MESSAGES = new Map([
+  ['bigquery_setup_invalid', 'Review the query project and dataset names before continuing.'],
+  ['preview_only', 'This is a local preview. Open your deployed gateway to connect BigQuery.'],
+  ['bigquery_setup_conflict', 'Check the existing BigQuery setup before starting another attempt.'],
+  ['bigquery_setup_required', 'Your BigQuery bridge setup needs to resume before its source can connect.'],
+  ['bigquery_setup_failed', 'BigQuery setup could not be confirmed. Check its recorded status before trying again.'],
+  ['bigquery_google_connection_failed', 'The Google identity could not run the connection check. Review its key and project permissions, then retry setup.'],
+  ['bigquery_resource_collision', 'A Cloudflare resource already uses the bridge address or name. Review it before continuing.'],
+  ['bigquery_resource_uncertain', 'Cloudflare did not confirm a resource creation. Keep this setup record and review the resource in Cloudflare before recovery.'],
   ['webmcp_input_invalid', 'The tool arguments do not match the declared schema. Review the tool inputs before retrying.'],
   ['webmcp_call_cancelled', 'The call was canceled before the operation started.'],
   ['webmcp_handoff_invalid', 'The authorization handoff could not be verified. Check the recorded action before retrying.'],
@@ -404,6 +432,19 @@ export function validHandoffUrl(value: string, expectedOrigin: string): string |
 /** Typed same-origin boundary for the gateway management Worker. */
 export class HttpGatewayAdminApi implements GatewayAdminApi {
   getStatus(): Promise<GatewayStatus> { return this.#request('/api/status', gatewayStatusSchema) }
+  async getBigQuerySetups(): Promise<BigQuerySetups> {
+    try { return await this.#request('/api/bigquery', bigQuerySetupsSchema) }
+    catch (error) {
+      if (error instanceof GatewayApiError && error.status === 404) return { schemaVersion: 1, available: false, setups: [] }
+      throw error
+    }
+  }
+  prepareBigQuery(input: BigQuerySetupInput): Promise<BigQueryPrepared> {
+    return this.#request('/api/bigquery', bigQueryPreparedSchema, { method: 'POST', body: JSON.stringify({ schemaVersion: 1, ...input }) })
+  }
+  resumeBigQuery(actionId: string): Promise<BigQueryPrepared> {
+    return this.#request('/api/bigquery/resume', bigQueryPreparedSchema, { method: 'POST', body: JSON.stringify({ schemaVersion: 1, actionId }) })
+  }
   getSources(): Promise<ManagedSources> { return this.#request('/api/sources', managedSourcesSchema) }
   getTeam(): Promise<Team> { return this.#request('/api/team', teamSchema) }
 

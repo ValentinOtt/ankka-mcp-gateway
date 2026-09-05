@@ -14,6 +14,12 @@ Notable public product and repository changes are recorded here.
   with example addresses and links to Cloudflare. Final gateway configuration
   still requires an active domain from the approved account.
 
+- Add a gateway-hosted BigQuery setup flow: review project and datasets, approve
+  Cloudflare, upload a dedicated Google key directly to your gateway, deploy the
+  protected bridge, and resume its recorded Portal connection. The key becomes
+  a Worker secret; drafts and recovery receipts contain no credentials.
+
+
 - Support the Google-hosted BigQuery MCP bridge as a manually deployed,
   self-hosted source. Explicit `allowQueries: true` enables bounded read-only
   SQL with Google IAM controlling data access; existing deployments keep the
